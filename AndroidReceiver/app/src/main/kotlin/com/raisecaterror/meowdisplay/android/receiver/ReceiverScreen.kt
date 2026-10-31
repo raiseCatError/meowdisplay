@@ -265,7 +265,13 @@ fun ReceiverScreen(
             Modifier.fillMaxSize()
         }
         val videoView = remember { mutableStateOf<SurfaceView?>(null) }
-        if (picture != null) picture(videoModifier) else if (pipeline != null) AndroidView(factory = { ctx -> videoSurface(ctx, pipeline).also { videoView.value = it } }, modifier = videoModifier)
+        // The screen stays on only while the picture is what's being watched, as on iOS
+        // (ScreenAwakePolicy): with Home over it the device sleeps as usual.
+        if (picture != null) picture(videoModifier) else if (pipeline != null) AndroidView(
+            factory = { ctx -> videoSurface(ctx, pipeline).also { videoView.value = it } },
+            update = { it.keepScreenOn = immersive },
+            modifier = videoModifier,
+        )
         // Window mode: a pinch shows at once as a local zoom of the pane, until the Mac's sharp frame arrives.
         if (workspace != null && !shownFrame.isEmpty) WorkspaceZoomPreviewLayer(workspace, shownFrame, videoView.value)
         // Video off: the last frame is discarded from view (PROTOCOL.md 6.2) and the mapped surface shown.
@@ -533,7 +539,6 @@ private fun hingeFor(folds: List<CGRect>, t: RemoteViewportTransform): WHinge? {
 
 /** The Mac's frames on a SurfaceView; the decoder renders straight into it. */
 private fun videoSurface(context: android.content.Context, pipeline: MediaPipeline): SurfaceView = SurfaceView(context).apply {
-    keepScreenOn = true
     importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO   // the input view over it is "Mac screen"
     holder.addCallback(object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {

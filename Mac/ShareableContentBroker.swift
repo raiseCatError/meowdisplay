@@ -21,8 +21,13 @@ enum ShareableContent {
         }
     }()
 
+    /// How long a caller waits for the capture service unless it says otherwise. replayd has
+    /// been seen taking 14 s behind other apps' requests; a wait with no bound at all left a
+    /// session start hanging for as long as replayd did.
+    static let defaultTimeout: Duration = .seconds(30)
+
     static func content(_ freshness: Freshness = .cachedWithin(.seconds(2)),
-                        timeout: Duration? = nil) async throws -> SCShareableContent {
+                        timeout: Duration? = defaultTimeout) async throws -> SCShareableContent {
         try await broker.value(freshness, timeout: timeout).value.content
     }
 

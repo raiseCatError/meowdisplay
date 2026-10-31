@@ -69,7 +69,7 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
 
     /// A whole display (Full Desktop in a tile). MeowDisplay's own windows are left out.
     func start(display: SCDisplay, size: CGSize, fps: Int) async throws {
-        let own = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true))?
+        let own = (try? await ShareableContent.content())?
             .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
         try await start(filter: SCContentFilter(display: display, excludingApplications: own, exceptingWindows: []),
                         size: size, fps: fps)

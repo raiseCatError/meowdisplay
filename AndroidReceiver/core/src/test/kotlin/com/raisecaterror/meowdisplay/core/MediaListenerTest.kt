@@ -232,6 +232,17 @@ class MediaListenerTest {
         }
     }
 
+    /** Audit C6: stopping the listener (the app going to the background) still says goodbye. */
+    @Test
+    fun closingTheListenerStillDeliversSleepingBeforeTheSocketCloses() {
+        Mac(macA).use { mac ->
+            mac.admit()
+            listener.close(sleeping = true)
+            mac.expect("sleeping")
+            assertTrue(mac.closedByReceiver())
+        }
+    }
+
     @Test
     fun aNewConnectionReplacesTheOldOne() {
         Mac(macA).use { first ->
@@ -295,7 +306,35 @@ class MediaListenerTest {
             assertTrue("over the bound: closed at once", endsWithoutTls(over))
         }
         idle.forEach { socket -> socket.use { assertTrue("handshake deadline", endsWithoutTls(it)) } }
+        // The listener frees a slot just after it closes the socket, on its worker thread.
+        eventually("the stalled handshakes' slots are free") { listener.pendingHandshakes == 0 }
         Mac(macA).use { it.admit() }
+    }
+
+    /** Audit F-3: one address can't hold every handshake slot. */
+    @Test
+    fun oneHostCannotTakeEveryHandshakeSlot() {
+        val wide = MediaListener(
+            PinnedTls.context(receiver.keyManager) { pins.values.toList() }, { pins.toMap() }, session,
+            port = 0, handshakeTimeoutMs = 5_000, maxPendingHandshakes = 4, maxPendingPerHost = 2,
+        ).apply { start() }
+        try {
+            val one = InetAddress.getByName("127.0.0.1")
+            val other = InetAddress.getByName("127.0.0.2")
+            fun from(local: InetAddress) = Socket(InetAddress.getLoopbackAddress(), wide.localPort, local, 0)
+            val held = (1..2).map { from(one) }
+            eventually("both held") { wide.pendingHandshakes == 2 }
+            from(one).use { third ->
+                third.soTimeout = 5_000
+                assertTrue("a third from the same address is closed at once", endsWithoutTls(third))
+            }
+            from(other).use { elsewhere ->
+                eventually("another address still gets a slot") { wide.pendingHandshakes == 3 }
+            }
+            held.forEach { it.close() }
+        } finally {
+            wide.close()
+        }
     }
 
     private companion object {
