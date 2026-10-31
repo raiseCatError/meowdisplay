@@ -491,6 +491,16 @@ Human-written translations only, please — no AI or machine-generated
 localization. See [Translations in CONTRIBUTING.md](CONTRIBUTING.md#translations)
 for how to get started.
 
+## Support development
+
+MeowDisplay stays free and open source. If it helps you, supporting its
+continued development is appreciated, but entirely optional:
+[Ko-fi](https://ko-fi.com/raisecaterror) ·
+[GitHub Sponsors](https://github.com/sponsors/raiseCatError).
+
+Sharing the project, reporting issues and helping others also make a difference.
+Thank you for every bit of support. ♥️
+
 ## Built on OpenDisplay
 
 MeowDisplay started as a fork of
