@@ -113,7 +113,7 @@ actor ReceiverPipelineActor {
     /// pinned TLS handshake can't pile up.
     private var pendingConnections: [NWConnection] = []
     static let maxPendingConnections = 8
-    static let pendingDeadline: Duration = .seconds(15)
+    static let pendingDeadline: TimeInterval = 15
     private(set) var sessionState = ReceiverSessionState()
     private var reconnectTimer: DispatchSourceTimer?
     private var pingTimer: DispatchSourceTimer?
@@ -606,7 +606,7 @@ actor ReceiverPipelineActor {
         }
         pendingConnections.append(newcomer)
         Task { [weak self] in
-            try? await Task.sleep(for: Self.pendingDeadline)
+            try? await Task.sleep(nanoseconds: UInt64(Self.pendingDeadline * 1_000_000_000))
             await self?.expirePending(newcomer)
         }
     }
