@@ -6,8 +6,9 @@
 
 **Mac Everywhere, On Whatever Display**
 
-Use your iPhone or iPad as another display for your Mac — and control the Mac
-right from it.
+Turn your iPhone or iPad into a free, open-source second display for your Mac.
+Mirror or extend the desktop over USB or local Wi-Fi, then control the Mac
+with touch, trackpad-style input, gestures and a keyboard.
 
 [Website](https://meowdisplay.app) ·
 [Features](https://meowdisplay.app/features.html) ·
@@ -102,9 +103,13 @@ That shapes where the effort goes:
 - **Quick access, not administration.** It's for using your own Mac from a
   nearby screen, not for managing fleets of machines.
 
-Many good tools cover neighboring ground — Sidecar, Luna, Astropad,
-RustDesk, AnyDesk and others — each with different strengths. MeowDisplay is
-simply focused on this one experience.
+Looking for a **Sidecar alternative for iPhone**, or comparing Mac display
+apps like **Duet Display**, **Luna Display** and **Astropad**? MeowDisplay is
+free and open source, supports both mirroring and a true extended desktop,
+and doesn't require an account or a MeowDisplay-hosted relay. Unlike
+account-based remote desktop tools such as **Jump Desktop**, remote access
+requires a network route you set up yourself. These products serve different
+needs; see the [setup FAQ](https://meowdisplay.app/docs#faq) for details.
 
 ## Display: Mirror & Extend
 
