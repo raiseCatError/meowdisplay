@@ -459,6 +459,29 @@ More in [SECURITY.md](SECURITY.md) and the
 Remote control of the Mac needs Accessibility permission; capturing a
 display needs Screen Recording.
 
+## Install
+
+**Mac, with Homebrew (optional):** signed and notarized, macOS 14 or later.
+
+```sh
+brew install --cask raiseCatError/tap/meowdisplay
+```
+
+That one command adds the [tap](https://github.com/raiseCatError/homebrew-tap)
+and installs MeowDisplay into `/Applications`. Update with
+`brew upgrade --cask meowdisplay`; remove with `brew uninstall --cask meowdisplay`
+(add `--zap` to also delete preferences and caches). To use a spare Mac
+(macOS 12 or later) only as a display, install the receiver:
+`brew install --cask raiseCatError/tap/meowdisplay-receiver`.
+
+**Mac, direct download:** get `MeowDisplay.dmg` (or `MeowDisplayReceiver.dmg`)
+from the [latest release](https://github.com/raiseCatError/meowdisplay/releases/latest)
+and drag the app to Applications.
+
+**iPhone and iPad:** install MeowDisplay from the
+[App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) (iOS or
+iPadOS 16.4 or later).
+
 ## Getting started
 
 1. [Download MeowDisplay for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg), open the DMG, drag MeowDisplay to
