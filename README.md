@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/Github Readme Icon.png" alt="MeowDisplay icon" width="128">
+<img src="assets/readme/website/mark.png" alt="MeowDisplay logo used on the website" width="128">
 
 # MeowDisplay
 
@@ -13,13 +13,14 @@ your Mac — with controls designed for each receiver.
 [Features](https://meowdisplay.app/features.html) ·
 [Setup](https://meowdisplay.app/docs.html) ·
 [Support](https://meowdisplay.app/support.html) ·
-[Privacy](https://meowdisplay.app/privacy.html)
+[Privacy](https://meowdisplay.app/privacy.html) ·
+[Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
 **[Download for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
 
 <br>
 
-<img src="assets/readme/hero.webp" alt="The MeowDisplay Mac app open to Overview, beside the MeowDisplay receiver on iPhone" width="760">
+<img src="assets/readme/website/social-preview-v3.jpg" alt="Latest MeowDisplay website preview showing Mac settings beside iPhone and iPad receivers" width="760">
 
 </div>
 
@@ -39,6 +40,35 @@ or server in the middle.
 notarized, from [GitHub Releases](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0)) and
 [MeowDisplay for iPhone and iPad on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) (iOS/iPadOS 16.4 or
 later). Both are free.
+
+**Release status:** The downloads above are the public **1.20.0** apps. This
+`dev` branch also includes **MeowDisplay 2.0** work, including new Window
+view, Stage Peek, Natural Touch, per-device Mirror/Extend, and an Android
+receiver. These upcoming features are documented below but should **not be
+assumed to be in the public 1.20.0 downloads**. Android is currently offered
+to a limited testing group. Check [downloads](https://meowdisplay.app/downloads)
+for each platform's current availability.
+
+## What's new in MeowDisplay 2.0 (in development)
+
+The **2.0** work is a major expansion of the Mac sender and receiver
+experience, with an emphasis on making a Mac practical to use from a phone:
+
+- **Window view:** choose and arrange individual Mac windows as tiles on the
+  receiver, rather than always viewing an entire desktop.
+- **Stage Peek:** quickly switch between Mac windows from a receiver's edge.
+- **Natural Touch:** phone-friendly tapping, scrolling, dragging and
+  long-press interactions, alongside the existing Classic and Trackpad modes.
+- **Per-device display modes:** let different receivers choose Mirror, Extend
+  or Window view according to what makes sense for them.
+- **Android receiver:** Android joins the iPhone, iPad and Mac receiver
+  implementations, currently available through limited testing.
+- **Remote connection improvements:** easier remote access and authenticated
+  Tailscale route handling, without claiming unrestricted Internet discovery.
+
+These are **development features**, not a statement that the coordinated 2.0
+release is publicly available. See the [downloads page](https://meowdisplay.app/downloads)
+for the current Mac, iPhone/iPad and Android availability.
 
 ## At a glance
 
@@ -80,7 +110,8 @@ simply focused on this one experience.
 ## Display: Mirror & Extend
 
 <p align="center">
-<img src="assets/readme/display-modes.webp" alt="Mirror shows the same Mac display on iPhone; Extend moves Whiskers’ Treat List onto a separate receiver workspace" width="760">
+<img src="assets/readme/website/mac-mirror.webp" alt="MeowDisplay Mac Mirror settings, as shown on the website" width="360">
+<img src="assets/readme/website/mac-extend.webp" alt="MeowDisplay Mac Extend settings, as shown on the website" width="360">
 </p>
 
 - **Mirror** shows an existing Mac display on the receiver. With multiple
@@ -139,7 +170,7 @@ Choose an input mode in the receiver's Settings:
 ### Allow Input & control requests
 
 <p align="center">
-<img src="assets/readme/allow-input.webp" alt="Allow Input off on the Mac: iPhone and iPad still show the display, with only Settings reachable; control requires a session request" width="760">
+<img src="assets/readme/website/mac-input.webp" alt="MeowDisplay Mac input settings, as shown on the website" width="720">
 </p>
 
 **Allow Input is the Mac-wide master switch.** Receivers can stay connected
@@ -326,7 +357,7 @@ be turned off.
 ## Devices
 
 <p align="center">
-<img src="assets/readme/devices.webp" alt="Mac Devices settings with Active Display, Known Devices and Nearby, alongside the iPhone and iPad receivers" width="720">
+<img src="assets/readme/website/mac-devices.webp" alt="MeowDisplay Mac devices settings, as shown on the website" width="720">
 </p>
 
 Pair a receiver once, then manage it in **Devices** on the Mac:
@@ -509,12 +540,13 @@ for how to get started.
 
 ## Support development
 
-MeowDisplay is free, open source, and built with care. If the app helps you,
-you're welcome to support continued work through
-[Ko-fi](https://ko-fi.com/raisecaterror) or
+MeowDisplay stays free and open source. If it helps you, supporting its
+continued development is appreciated, but entirely optional:
+[Ko-fi](https://ko-fi.com/raisecaterror) ·
 [GitHub Sponsors](https://github.com/sponsors/raiseCatError).
-Donations are entirely optional—using and sharing the project helps too.
-Every contribution is genuinely appreciated. ♥️
+
+Sharing the project, reporting issues and helping others also make a difference.
+Thank you for every bit of support. ♥️
 
 ## Built on OpenDisplay
 
@@ -557,5 +589,7 @@ Independent open-source software, not affiliated with Apple.
 <div align="center">
 
 <sub>Made by raiseCatError</sub>
+
+<sub>Made with love, meows &amp; purrs.</sub>
 
 </div>
