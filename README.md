@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mark.png" alt="MeowDisplay logo used on the website" width="128">
+<img src="assets/readme/website/mark.png" alt="MeowDisplay logo used on the website" width="128">
 
 # MeowDisplay
 
@@ -20,7 +20,7 @@ right from it.
 
 <br>
 
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/social-preview-v3.jpg" alt="Latest MeowDisplay website preview showing Mac settings beside iPhone and iPad receivers" width="760">
+<img src="assets/readme/website/social-preview-v3.jpg" alt="Latest MeowDisplay website preview showing Mac settings beside iPhone and iPad receivers" width="760">
 
 </div>
 
@@ -109,8 +109,8 @@ simply focused on this one experience.
 ## Display: Mirror & Extend
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mac-mirror.webp" alt="MeowDisplay Mac Mirror settings, as shown on the website" width="360">
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mac-extend.webp" alt="MeowDisplay Mac Extend settings, as shown on the website" width="360">
+<img src="assets/readme/website/mac-mirror.webp" alt="MeowDisplay Mac Mirror settings, as shown on the website" width="360">
+<img src="assets/readme/website/mac-extend.webp" alt="MeowDisplay Mac Extend settings, as shown on the website" width="360">
 </p>
 
 - **Mirror** shows an existing Mac display on the receiver. With multiple
@@ -169,7 +169,7 @@ Choose an input mode in the receiver's Settings:
 ### Allow Input & control requests
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mac-input.webp" alt="MeowDisplay Mac input settings, as shown on the website" width="720">
+<img src="assets/readme/website/mac-input.webp" alt="MeowDisplay Mac input settings, as shown on the website" width="720">
 </p>
 
 **Allow Input is the Mac-wide master switch.** Receivers can stay connected
@@ -356,7 +356,7 @@ be turned off.
 ## Devices
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/raiseCatError/MeowDisplayWebsite/main/assets/mac-devices.webp" alt="MeowDisplay Mac devices settings, as shown on the website" width="720">
+<img src="assets/readme/website/mac-devices.webp" alt="MeowDisplay Mac devices settings, as shown on the website" width="720">
 </p>
 
 Pair a receiver once, then manage it in **Devices** on the Mac:
