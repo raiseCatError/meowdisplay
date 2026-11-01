@@ -1,0 +1,81 @@
+name: Device testing / compatibility
+description: Share verified results for real devices, emulators or unusual display/network setups.
+title: "[Compatibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Testing results help with hardware compatibility, even when they aren't bugs. Mark **physical**, **emulator/simulator**, or **automated-only** accurately. For an actionable defect, please use the **Bug report** form.
+
+        Do not attach identifying device names, private addresses, Tailscale identities, pairing codes, notifications, personal desktop content or unredacted logs.
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Confirm
+      options:
+        - label: I reviewed the information for privacy and this is not a security vulnerability.
+          required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Test environment
+      options:
+        - Real physical device(s)
+        - Simulator or emulator
+        - Automated / unit tests only
+        - Not verified yet; seeking testers
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MeowDisplay version/build or commit
+      placeholder: "2.0.0 (build) or commit hash"
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and operating systems
+      description: Include Mac sender, receiver model/OS, relevant display/keyboard/mouse hardware; generic names are fine.
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Connection
+      options:
+        - USB
+        - Wi-Fi
+        - Remote / private network
+        - Multiple routes
+        - Not relevant / not tested
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Display mode
+      options:
+        - Mirror
+        - Extend
+        - Window view
+        - Mixed / multiple
+        - Not relevant / not tested
+  - type: textarea
+    id: procedure
+    attributes:
+      label: What did you test and how?
+      description: Reproducible steps, scope and duration.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results (passed, failed, skipped, unknown)
+      description: Report measured numbers only if they were actually measured, and distinguish observations from assumptions.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: What wasn't tested? (optional)
+      description: Known limitations, unverified edge cases, optional privacy-safe evidence.

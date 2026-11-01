@@ -51,5 +51,16 @@ unfolds mid-session).
 
 Secure pairing, the authenticated media session, H.264/HEVC decoding, audio,
 the receiver controls and the adaptive phone/tablet/foldable UI are
-implemented. RECEIVER_CONTROLS.md has the iOS parity matrix with the
-remaining gaps and the physical QA checklist.
+implemented. This is **a receiver for a Mac sender**, not an Android
+screen-sharing/sender or an enterprise remote-desktop client.
+
+See [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) and
+[../PARITY.md](../PARITY.md) for differences from iOS and the physical
+QA checklist. Earlier real-device testing was reported; **additional
+Android physical QA for the 2.0 release-candidate process was waived by
+the maintainer**. This does not imply every device or advanced function
+was verified. Android USB is not implemented.
+
+Google Play internal/closed-testing submission and *public production*
+availability are distinct milestones. Consult the actual Play Console
+for the release status, not this source-build README.

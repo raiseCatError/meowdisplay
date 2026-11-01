@@ -1,29 +1,54 @@
 name: Feature request
-description: Suggest an idea or improvement for MeowDisplay.
+description: Propose a specific improvement to an existing supported MeowDisplay platform.
+title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Security or privacy vulnerabilities must not be filed as issues — use the **Security** tab → **Report a vulnerability**.
-  - type: textarea
-    id: problem
+        Search existing issues first. For early-stage possibilities or **Windows/Linux** support, use the **Idea / exploration** form instead. A request is not a release commitment.
+
+        Never report a security vulnerability publicly; use **Security → Report a vulnerability**.
+  - type: dropdown
+    id: platform
     attributes:
-      label: Problem or use case
-      description: What are you trying to do, and what gets in the way?
+      label: Which currently supported app?
+      options:
+        - Mac app (sender)
+        - iPhone / iPad receiver
+        - Android receiver
+        - Mac Receiver
+        - Multiple existing platforms
+        - Not sure
     validations:
       required: true
   - type: textarea
-    id: proposal
+    id: use-case
     attributes:
-      label: Proposed behaviour
+      label: What problem are you trying to solve?
+      description: Describe a real workflow, limitation or accessibility need rather than just a proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What would you like MeowDisplay to do?
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives or workarounds
+      label: How do you handle this today?
+      description: Optional existing workflow or workaround.
   - type: textarea
     id: context
     attributes:
-      label: Additional context
+      label: Additional context (optional)
+      description: Avoid screenshots or logs with private device names, addresses, secrets or personal content.
+  - type: checkboxes
+    id: acknowledgment
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for existing requests and understand this is a suggestion, not a committed roadmap item.
+          required: true

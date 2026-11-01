@@ -1,0 +1,55 @@
+name: Idea / exploration
+description: Share a speculative concept, new platform or direction without assuming it will be built.
+title: "[Idea]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is for **possibilities, not a roadmap**. Sharing an idea does not mean that it will be accepted, prioritized or implemented. Please search existing topics first:
+        - [Windows sender / receiver — not planned](https://github.com/raiseCatError/meowdisplay/issues/84)
+        - [Linux sender / receiver — not planned](https://github.com/raiseCatError/meowdisplay/issues/85)
+        - [Enterprise remote desktop / administration scope — not planned](https://github.com/raiseCatError/meowdisplay/issues/86)
+        - [Hosted accounts / relay services — not planned](https://github.com/raiseCatError/meowdisplay/issues/87)
+
+        MeowDisplay focuses on personal-first Mac display/control workflows; **commercial use is welcome**. It is not currently building an enterprise administration suite.
+
+        Never report security vulnerabilities in public; use **Security → Report a vulnerability**. Do not attach sensitive device or network information.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What is the idea?
+      description: Give a short plain-language explanation without assuming it is already planned.
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: What would you use it for?
+      description: Explain the actual scenario and why existing MeowDisplay features do not cover it.
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Supported-platform improvement
+        - New platform (Windows / Linux / other)
+        - New connection or service model
+        - New product direction
+        - Accessibility or user experience
+        - Other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Tradeoffs or concerns (optional)
+      description: Compatibility, privacy, maintenance or alternative tools worth considering.
+  - type: checkboxes
+    id: acknowledge
+    attributes:
+      label: Acknowledgment
+      options:
+        - label: I checked for a matching issue and understand ideas are for discussion only, with no guarantee of consideration or implementation.
+          required: true

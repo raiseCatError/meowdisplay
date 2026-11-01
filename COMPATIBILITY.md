@@ -1,11 +1,20 @@
-# Mac ↔ iOS compatibility
+# Mac ↔ receiver compatibility (iOS-origin policy)
 
-How the two OpenDisplay apps stay compatible when they update on **different
-schedules**, who is responsible for detecting a mismatch, and what pairings we
-support. This is the spec for issues
-[#132](https://github.com/peetzweg/opendisplay/issues/132) (release
-orchestration), [#135](https://github.com/peetzweg/opendisplay/issues/135)
-(force update), and the wire-protocol handshake.
+How the Mac sender and receiving apps remain compatible while the apps
+update on **different schedules**. This design originally came from
+OpenDisplay's iOS/Mac compatibility work
+([upstream #132](https://github.com/peetzweg/opendisplay/issues/132),
+[upstream #135](https://github.com/peetzweg/opendisplay/issues/135)).
+It is a historical protocol-evolution and planning reference, **not an
+up-to-date platform availability matrix or a store-release status report**.
+
+MeowDisplay now has receiving apps on iPhone, iPad, Android and Mac.
+Android and Mac Receiver negotiate the same shared wire protocol but have
+different platforms, release channels and capability limits. Read
+[PARITY.md](PARITY.md) for current receiver features and
+[PROTOCOL.md](PROTOCOL.md) / [SECURITY.md](SECURITY.md) for live wire-security
+guarantees. The iOS-specific proposed remote configuration and update
+flow below is not a blanket claim that it ships on every receiver.
 
 The wire protocol itself — framing, discovery, the video format, and the
 full control-message catalog — is specified in [PROTOCOL.md](PROTOCOL.md).
@@ -19,35 +28,39 @@ This document is the companion policy for *evolving* it.
 
 ## 1. The problem
 
-We cut Mac and iOS from one release tag, but distribution is not simultaneous:
+MeowDisplay coordinates a Mac and mobile release, but distribution
+is not simultaneous:
 
 | | Update channel | Time to reach a user |
 |---|---|---|
 | **Mac** | Sparkle appcast (`meowdisplay.app/appcast.xml`, `appcast-receiver.xml`) | within a day once the user allows automatic checks (Sparkle asks); installs when the user accepts, unless they opted into automatic installs |
 | **iOS** | App Store (review + user tapping Update) | days → weeks, with a **long tail** |
+| **Android** | Google Play (testing/review tracks and user updates) | review, eligibility and rollout can differ from iOS |
 
 So at any moment the field holds many version pairings. The dominant one is
 **new Mac + old iPhone** (Mac raced ahead via Sparkle). But the reverse also
 happens: iOS auto-update is on for most users, so a phone can jump to a build
 whose Mac counterpart the user hasn't installed yet — **new iPhone + old Mac**.
 
-Concretely, roughly half the iOS base sat on an _older_ release than the latest
-at the time of writing (~2.5k users per version). We cannot assume the two ends
-are in lockstep, ever.
+We cannot assume every receiver updates in lockstep with the Mac.
+An old upstream example of version-adoption statistics was removed here
+because it is **not verified MeowDisplay usage data**.
 
 ## 2. Two different versions
 
 Keep these separate — conflating them is the trap:
 
-- **App version** (`MARKETING_VERSION`, e.g. `0.11.0`) — what users see, tied to
+- **App version** (`MARKETING_VERSION`, e.g. `2.0.0`) — what users see, tied to
   the App Store / Sparkle release. Bumped every release.
 - **Protocol version** (`pv`, an integer) — the wire contract between the apps.
   Bumped **only when the wire changes**, not every release. A release that only
   touches UI leaves `pv` untouched, so it never triggers a compatibility event.
 
-**Absent `pv` = protocol `1`.** Every install in the field today predates the
-handshake and sends no version, so it is defined as protocol 1. New builds send
-`pv ≥ 2`.
+**Absent `pv` = protocol `1`** for legacy compatibility. This is
+a rule for older peers, **not** a claim that current MeowDisplay releases
+predate the handshake. Newer builds announce their negotiated protocol
+version; consult [PROTOCOL.md](PROTOCOL.md) for the current integer and
+capabilities.
 
 Each side also declares **`minPeer`** — the oldest peer `pv` it still supports.
 Both start at `1` (support everything). We only raise a `minPeer` as the second

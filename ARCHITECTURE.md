@@ -10,8 +10,12 @@ and wake) in [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md).
 
 ## System overview
 
-MeowDisplay turns an iPhone or iPad into a display and touch controller for a
-Mac. A second receiver app lets another Mac act as a display too.
+MeowDisplay turns an iPhone, iPad, Android device, or another Mac into
+a display for a sending Mac. Mobile receivers can also control the sending
+Mac with touch and other input; Mac Receiver keyboard and trackpad input
+is implemented but still awaiting physical verification on two Macs (issue #12).
+A Mac is the only supported sender: Windows and Linux sender/receiver
+applications are not planned (issues #84 and #85).
 
 ```text
                  video (H.264/HEVC) + optional system audio (AAC)
@@ -22,11 +26,12 @@ Mac. A second receiver app lets another Mac act as a display too.
  └────────────┘   input: touch, pointer, scroll, gestures,     └──────────────────────┘
        │          keyboard, Pencil + receiver hello/panel info
        │
-       │  video (+ optional audio) + control
-       ▼
- ┌──────────────┐
- │ Mac Receiver │   its keyboard/trackpad drive the sender once control is granted
- └──────────────┘
+       ├────────────▶ Android receiver (Kotlin; touch, controls, media)
+       │
+       └────────────▶ Mac Receiver (keyboard/trackpad forwarding with grant)
+
+ The receiver-to-sender control path is authenticated and consent-gated.
+ USB is available for iPhone/iPad; Android currently uses network routes.
 ```
 
 - The **Mac is always the sender**. Receivers listen (Bonjour-advertised TLS
@@ -45,12 +50,16 @@ tracked — edit `project.yml`, never the generated project.
 | --- | --- | --- |
 | `OpenSidecarMac` | `Mac/`, `Shared/`, `MacReceiver/` (minus its entry point and resources) | MeowDisplay: the sender, plus Use This Mac as a Display ([UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md)) |
 | `OpenSidecariOS` | `iOS/`, `Shared/` (bundles `iOS/PrivacyInfo.xcprivacy`) | iPhone/iPad Receiver app |
+| Android Gradle app (`AndroidReceiver/`) | `AndroidReceiver/app/`, `AndroidReceiver/core/` | Android phone/tablet/foldable receiver, built with Gradle/JDK 17 (not XcodeGen) |
 | `OpenSidecarMacReceiver` | `MacReceiver/`, `Shared/`, a few `Mac/` utilities | Standalone Mac Receiver app, for macOS 12–13 and existing users |
 | `OpenSidecarMacTests` | `MacTests/` plus selected pure-logic files | Hostless unit tests (run by `.github/workflows/tests.yml`) |
 
 The `OpenSidecar*` names are inherited from OpenDisplay and are kept for
 compatibility; the product name is MeowDisplay. `src/`, `public/` and
 `tools/` are the project website, not app code.
+
+Android's Kotlin/Compose app is built separately from the Xcode targets;
+see [AndroidReceiver/README.md](AndroidReceiver/README.md).
 
 ## Application roles
 
@@ -91,6 +100,22 @@ The iOS app is mostly a UIKit/SwiftUI shell around the shared
 - Viewport zoom/pan of the remote display: `Shared/RemoteViewport.swift`.
 - Pairing and Remote Access UI: `iOS/PairingConfirmationSheet.swift`,
   `iOS/RemotePairingView.swift`, `iOS/RemoteAccessSettingsView.swift`.
+
+### Android Receiver (`AndroidReceiver/`)
+
+The Android receiver is a separate Kotlin/Jetpack Compose implementation.
+Its `core/` contains pairing, mutual TLS, framing, media and control
+logic; the `app/` module integrates Android Keystore, DNS-SD discovery,
+MediaCodec rendering, input and device-adaptive UI. It interoperates with
+the same Mac sender through the shared protocol, with Swift/Kotlin fixture
+tests and Android unit/emulator coverage.
+
+Android is **receiver-only** and does not support sending an Android desktop.
+Mirror, Extend, Window view, audio, touch controls and Remote Access are
+implemented. Android USB transport and certain advanced iOS customization
+controls are not implemented; see [PARITY.md](PARITY.md). Additional
+Android physical QA was explicitly waived for the current 2.0 release
+preparation, **not reported as passed**.
 
 ### Mac Receiver (`MacReceiver/`)
 
@@ -402,9 +427,10 @@ hints and an in-memory cooldown. USB never uses QUIC.
 - [SECURITY.md](SECURITY.md) — security model and vulnerability reporting
 - [SUPPORT.md](SUPPORT.md) — where to get help
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — platform constraints behind the design
-- [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend and its physical test checklist
-- [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, and its physical test checklist
+- [MULTI_DEVICE.md](MULTI_DEVICE.md) — per-device Mirror/Extend (maintainer reports multi-device functionality physically verified)
+- [RECEIVER_INPUT.md](RECEIVER_INPUT.md) — Mac Receiver keyboard and trackpad input, with two-Mac physical verification still outstanding (#12)
 - [WINDOW_MODE.md](WINDOW_MODE.md) — Window mode: tiles, switching, how the sender builds it
 - [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) / [PARITY.md](PARITY.md) — what each receiver can do, and where its settings live
 - [TERMINOLOGY.md](TERMINOLOGY.md) — names and copy rules for the apps and docs
 - [UNIFIED_MAC_APP.md](UNIFIED_MAC_APP.md) — one Mac app for both roles: design, migration and its physical test checklist
+- [AndroidReceiver/README.md](AndroidReceiver/README.md) — Android build, architecture and tests

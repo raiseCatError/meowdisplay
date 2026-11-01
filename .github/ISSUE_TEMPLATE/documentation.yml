@@ -1,0 +1,41 @@
+name: Documentation correction
+description: Report a missing, confusing or outdated explanation, website guide or README section.
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for publicly documented behavior only. For security vulnerabilities, report privately via **Security → Report a vulnerability**.
+        Please don't post private logs, local file paths, screenshots of personal files or network/device identifiers.
+  - type: input
+    id: location
+    attributes:
+      label: Where is the problem?
+      description: URL or repository file path / heading.
+      placeholder: "For example: SETUP.md → Remote Access; or meowdisplay.app/docs.html"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's incorrect or missing?
+    validations:
+      required: true
+  - type: textarea
+    id: suggested
+    attributes:
+      label: What would be clearer? (optional)
+      description: Suggested wording or links to actual app behavior.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform or topic
+      options:
+        - Mac
+        - iPhone / iPad
+        - Android
+        - Mac Receiver
+        - Multiple platforms / general
+    validations:
+      required: true
