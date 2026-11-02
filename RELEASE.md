@@ -309,6 +309,13 @@ environment's protection (`check-environment.sh`) before using a secret,
 because a job naming a missing environment silently gets an unprotected one.
 `Release dry run` reports what is missing, by name only.
 
+`scripts/release/release-secrets.rb status` lists, from the workflows themselves,
+which secret and variable each environment needs and whether GitHub has it
+(names only). The owner sets a secret with `release-secrets.rb set NAME`,
+reading from a hidden prompt, stdin or `--file PATH`. The value goes into
+exactly the environments whose jobs use it, through `gh`'s stdin; it's never
+printed or put on a command line.
+
 `scripts/release/apply-environments.sh` creates and protects the eight
 environments below (branch patterns, owner approval where marked, no admin
 bypass) and then checks each one; it never touches secrets. It prints the plan

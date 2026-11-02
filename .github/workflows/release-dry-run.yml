@@ -166,10 +166,21 @@ jobs:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+      # Not restricted to this repository (owner, no repositories), metadata only: lists
+      # every repository the installation can reach, which must be exactly this one.
+      - name: Installation scope token (metadata only)
+        id: scope-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-metadata: read
       - name: Only the release App writes release-state
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
+          INSTALLATION_SCOPE_TOKEN: ${{ steps.scope-token.outputs.token }}
         run: scripts/release/check-release-state-access.sh
 
   ios-upload:
