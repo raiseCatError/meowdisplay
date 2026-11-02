@@ -5,8 +5,8 @@ desktop), a device can choose **Windows**: Mac windows you pick, shown side by
 side on that device. Each device chooses on its own; nothing changes for the
 others.
 
-- iPhone and compact Android phones: up to **3** windows.
-- iPad, unfolded foldables and large Mac Receiver windows: up to **9**.
+- Every receiver, including iPhone and compact Android phones: up to **9** panes.
+- Minimum pane size and the space available decide which arrangements fit.
 - One window is the default.
 
 The limit follows the space the app actually has (split screen, a folded

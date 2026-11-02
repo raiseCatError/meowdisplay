@@ -5,13 +5,14 @@ Mac Receiver. [PARITY.md](PARITY.md) covers whole-app parity (pairing,
 transports, diagnostics); this page covers **controls**: input, gestures, trays,
 keyboard, Window mode, display modes, audio and where each setting lives.
 
-Derived from the code on `feature/android-secure-core` (2026-10-29), not from
-memory. Sources: `iOS/ReceiverSettings.swift`, `Shared/ControlProfile.swift`
+Implementation rows reconciled with `dev` on 2026-11-02. Existing device-test
+notes remain the October 29 record; no physical QA was repeated for this
+publication. Sources: `iOS/ReceiverSettings.swift`, `Shared/ControlProfile.swift`
 (`ReceiverControlPreferences`), `Shared/PointerGestureEngine.swift`,
 `Shared/StagePeek.swift`, `Shared/WorkspaceViews.swift`;
 `AndroidReceiver/app/.../receiver/ReceiverSettings.kt`,
 `AndroidReceiver/core/.../controls/*`; `MacReceiver/*`. Both mobile apps persist
-the same `ReceiverControlPreferences` blob (schema 20). Names follow
+the same `ReceiverControlPreferences` blob (schema 21). Names follow
 [TERMINOLOGY.md](TERMINOLOGY.md); labels quoted below are what the
 apps show today.
 
@@ -45,8 +46,8 @@ and tablet differences are in the note.
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
-| Input Mode: Direct Touch / Trackpad | Yes. Direct Touch default | Yes | Yes | n/a. Mac keyboard and trackpad drive the Mac after Request Control |
-| Touch Style: Natural Touch (default) / Classic | Yes, Direct Touch only | Yes | Yes, Direct Touch only | n/a |
+| Input Mode: Direct Touch / Trackpad | Yes. Trackpad initially | Yes. Direct Touch initially | Yes. Phones Trackpad, tablets Direct Touch initially | n/a. Mac keyboard and trackpad drive the Mac after Request Control |
+| Touch Style: Natural Touch / Classic (default) | Yes, Direct Touch only | Yes | Yes, Direct Touch only | n/a |
 | Smart Touch (Experimental) | Yes, Classic only. Haptics toggle follows Haptics | Yes | Yes, Classic only | n/a |
 | Trackpad Sensitivity (0.5 to 2.0×) | Yes, Trackpad only | Yes | Yes | n/a |
 | Scroll direction per axis | Yes. **Natural** Vertical/Horizontal Scrolling (on = natural) | Yes | Yes. Same names, same preference | Follows this Mac's own setting |
@@ -79,7 +80,7 @@ ignore Touch Style.
 | Pinch target: Viewport / App / Disabled | Yes. Default Viewport | Yes | Yes | n/a. Pinch goes to the Mac as a native gesture |
 | Rotation target | Yes. Viewport / App / Disabled. Default Disabled | Yes | Partial. App / Disabled only (SurfaceView can't rotate) | n/a. Rotate goes to the Mac as a native gesture |
 | Snap Rotation | Yes | Yes | No (kept in preferences, no control) | n/a |
-| App Gesture Commands (Zoom In/Out, Rotate Left/Right) | Yes, editable | Yes | Partial. Shown with Reset to Defaults, not editable | n/a |
+| App Gesture Commands (Zoom In/Out, Rotate Left/Right) | Yes, editable | Yes | Yes, editable | n/a |
 | Three-finger swipe: Mission Control, App Exposé, Spaces | Yes | Yes | Yes | No. macOS keeps these on this Mac |
 | Three-finger tap: Spotlight | Yes | Yes | Yes | No |
 | Four / five-finger pinch or spread: Launchpad, Show Desktop | Yes | Yes | Yes | No |
@@ -94,14 +95,14 @@ ignore Touch Style.
 | --- | --- | --- | --- | --- |
 | Control tray (⌘ ⌥ ⌃ ⇧ esc tab Dock Keyboard Settings) | Yes. Shown only while input is allowed | Yes, as **Main Controls** | Yes. **Control Tray** | n/a |
 | Show / collapse / auto-hide | Yes | Yes. The Strip never hides | Yes. **Show Control Tray**, **Collapse Control Tray**, **Auto-hide Control Trays** | n/a |
-| Profiles (Default, Profile 1, Profile 2) and tray item order | Yes. Full editor | Yes | Partial. Show/hide and Up only | n/a |
+| Profiles (Default, Profile 1, Profile 2) and tray item order | Yes. Full editor | Yes | Yes. Editor implemented | n/a |
 | Chord palettes (hold a modifier for shortcuts) | Yes. Editable | Yes | Yes. Not editable | n/a |
 | Function tray (Zoom In/Out, Undo, Redo by default) | Yes | Yes, as **Function Controls** | Yes | n/a |
-| Function tray editor (add, rename, sequences, faces) | Yes | Yes | No. Show/hide and Up only | n/a |
+| Function tray editor (add, rename, sequences, faces) | Yes | Yes | Yes | n/a |
 | Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Tray Side**, **Function Tray Position**, **Avoid Cutouts** | n/a |
 | Layouts: Strip / Overlay / Custom | n/a | Yes | Yes on large windows (tablet, unfolded) | n/a |
 | Edges, Palette Style (Keys / Wheel), Control Size, Control Hints, Standard Controls | n/a | Yes | Yes (Tablet Layout page) | n/a |
-| Custom layout editor (up to 5, landscape and portrait, Two-Hand Assist) | n/a | Yes | No. **New Radial Layout** only | n/a |
+| Custom layout editor (up to 5, landscape and portrait, Two-Hand Assist) | n/a | Yes | Yes | n/a |
 | Custom layout share code | n/a | Yes | Yes. Copy and paste a code | n/a |
 | Show Surface Grid while Video is off | Yes | Yes | Yes | No |
 
@@ -110,7 +111,7 @@ ignore Touch Style.
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | On-screen keyboard (tray Keyboard button) | Yes. **Show Keyboard Button** | Yes | Yes. **Show Keyboard Button** | n/a |
-| Zoom While Typing (follows the Mac's text caret, see Typing) | Yes, setting | Yes | Partial. Always on, no setting | n/a |
+| Zoom While Typing (follows the Mac's text caret, see Typing) | Yes, setting | Yes | Yes, setting | n/a |
 | Hardware keyboard | Partial. Not verified with a real keyboard | Partial | Partial. Same | Yes, after Request Control |
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
@@ -123,7 +124,7 @@ Two things keep what you type visible. Both work only after the Mac has granted 
 
 **The typing strip.** When the on-screen keyboard is up, a slim strip sits on top of it. It shows the end of what you have typed in this keyboard session on one right-aligned line, with **Done** at the trailing edge. It mirrors what the Mac received: deletes and autocorrect replacements show as they land, and the word you are still composing is underlined (it is not sent until it is finished). Empty, it reads "Typing to" and your Mac's name. The strip clears when the keyboard closes, and when an arrow, Tab, Escape or a shortcut makes the position unknown. It is a mirror of the keys sent, so text pasted or changed on the Mac by other means never appears. Taps on the strip never reach the Mac.
 
-**Caret follow.** With the keyboard up, the picture follows the text caret on the Mac instead of your last touch, so the line you are typing into stays above the keyboard wherever the display is focused. With **Zoom While Typing** on (always on for Android) it uses the usual keyboard zoom and also pans sideways; with it off, it only pans. It moves only when the caret leaves the middle of the visible area, so it does not shake while you type along a line. If the Mac reports no caret, the last touch steers as before.
+**Caret follow.** With the keyboard up, the picture follows the text caret on the Mac instead of your last touch, so the line you are typing into stays above the keyboard wherever the display is focused. With **Zoom While Typing** on (also configurable on Android) it uses the usual keyboard zoom and also pans sideways; with it off, it only pans. It moves only when the caret leaves the middle of the visible area, so it does not shake while you type along a line. If the Mac reports no caret, the last touch steers as before.
 
 | | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
@@ -139,7 +140,7 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | Windows as a display mode | Yes | Yes | Yes. A **Windows** chip beside Mirror and Extend | Yes, from the **Windows** button |
-| Tiles | Yes. Up to 3 | Yes. Up to 9 | Yes. 3 on phones, 9 on large windows | Yes. Up to 9 |
+| Tiles | Yes. Up to 9 | Yes. Up to 9 | Yes. Up to 9 | Yes. Up to 9 |
 | Window overview | Yes | Yes | Yes | Yes |
 | Open the overview | Three-finger hold; Settings → Display | Same | Three-finger hold; Settings → Display; rail | **Windows** button, ⌃⌥W |
 | Stage Peek (default quick switch) | Yes. Hold the left or right edge | Yes | Yes | No |
@@ -160,10 +161,10 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | Mirror / Extend | Yes. **Display Mode** picker | Yes | Yes. Chips under **Display Mode** | Yes. **Display Mode** control |
-| Mirror Display (Auto or pick a display) | Yes | Yes | No | Yes |
-| Extend Shape, Use Full Display | Yes | Yes | No | Yes |
-| Video on / off | Yes | Yes | No | Yes |
-| Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | No | Yes (Streaming) |
+| Mirror Display (Auto or pick a display) | Yes | Yes | Yes | Yes |
+| Extend Shape, Use Full Display | Yes | Yes | Yes | Yes |
+| Video on / off | Yes | Yes | Yes | Yes |
+| Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | Yes (Display) | Yes (Streaming) |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
@@ -174,7 +175,7 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | --- | --- | --- | --- | --- |
 | Audio (Mac system audio; off by default) | Yes. **Audio** | Yes | Yes. **Audio** | Yes. **Audio** |
 | A/V Sync (−1000 to +1000 ms, 25 ms steps) | Yes | Yes | Yes | Yes |
-| Resync | Yes | Yes | No | Yes |
+| Resync | Yes | Yes | Yes (Audio) | Yes |
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
 | Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
 | Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
@@ -182,12 +183,9 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 ## Gaps
 
 **Android compared with iOS**
-- No Video on/off, Streaming Profile, Priority or Maximum FPS, Mirror Display picker, Extend Shape, or Resync.
 - Rotation can't target the viewport, and there is no Snap Rotation control (the picture is on a SurfaceView).
-- Function tray and control tray editors only show/hide and reorder. No add, rename, sequences or faces. No custom layout editor (only New Radial Layout, select, share, import, delete).
-- App Gesture Commands are read-only.
 - **Prefer MeowDisplay Gestures** is saved but nothing in the app reads it.
-- Zoom While Typing is always on. The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
+- The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
 - Hardware keyboard, mouse and stylus input are written but not verified on a physical device (iOS keyboard and mouse are also unverified).
 - No settings search; Haptics sits under Scrolling on the Input page.
 

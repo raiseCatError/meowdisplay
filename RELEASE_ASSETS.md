@@ -1,5 +1,12 @@
 # Release screenshots and assets checklist
 
+**Historical asset plan.** This checklist records the original repository
+and 1.20.0 submission preparation. Its outstanding capture notes are not the
+current App Store submission status: iPhone/iPad **2.0.0 is publicly released**
+as of November 2, 2026. Check App Store Connect before replacing store assets;
+see [README.md](README.md#platform-availability--november-2-2026) for current availability.
+
+
 What's already in place, and what still needs physical capture. Two
 separate tracks: public repository/website presentation (mockups are
 acceptable, and now exist) and App Store submission screenshots (real

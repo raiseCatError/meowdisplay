@@ -1,5 +1,18 @@
 # MeowDisplay for Android (receiver)
 
+## Availability and requirements
+
+Android 2.0 is in **Google Play closed testing**, not a public production release.
+[Request early access](https://meowdisplay.app/android/early-access).
+It requires **Android 10 or later** and [MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)
+(macOS 14+). The main Mac app shares and receives; use its sharing role to
+connect an Android receiver.
+
+Connect over local Wi-Fi or a reachable private network such as Tailscale.
+There is no Android USB transport. iPhone/iPad 2.0 is separately available
+on the [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864).
+
+
 A native Android receiver for MeowDisplay: it speaks MeowDisplay's own secure
 protocol (PROTOCOL.md, pv 22) to the Mac sender, exactly as the iPhone, iPad
 and Mac receivers do. It is not a port of another project's Android app and
@@ -52,4 +65,8 @@ unfolds mid-session).
 Secure pairing, the authenticated media session, H.264/HEVC decoding, audio,
 the receiver controls and the adaptive phone/tablet/foldable UI are
 implemented. RECEIVER_CONTROLS.md has the iOS parity matrix with the
-remaining gaps and the physical QA checklist.
+remaining gaps and the physical QA checklist. [PARITY.md](../PARITY.md)
+separates implemented features from the recorded physical-device coverage.
+Window mode supports up to nine panes, subject to minimum pane size. Phones
+initially use Trackpad; tablets use Direct Touch, with Classic as the default
+Touch Style. Natural Touch is optional.

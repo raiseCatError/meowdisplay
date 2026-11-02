@@ -1,7 +1,17 @@
 # App Store Connect listing — reference
 
-Canonical copy for the iOS app's App Store Connect text fields, kept in version
-control so we know what's live and can edit deliberately. Metadata and
+## Release status — November 2, 2026
+
+MeowDisplay **2.0.0 is released on the App Store** for iPhone and iPad.
+The existing field copy and first-submission checklist below are reference
+material from the 1.20.0 launch, not a verified export of today's live 2.0
+metadata. Preserve legal/export and contact details in App Store Connect;
+do not infer new answers from this documentation update. Current downloads
+and platform requirements are in [README.md](../README.md#platform-availability--november-2-2026).
+
+
+Stored reference copy for the iOS app's App Store Connect text fields.
+Reconcile it with App Store Connect before reusing it for a later submission. Metadata and
 screenshots are entered by hand in App Store Connect for now — `fastlane ios
 release` uploads the binary only (`skip_metadata`, `skip_screenshots`).
 
@@ -149,7 +159,7 @@ Work through this before pressing **Submit for Review**.
 | Build | Select the processed build — uploaded by `fastlane ios release`, or from a local Release archive via Xcode Organizer → Distribute App → App Store Connect → Upload |
 | Version release | Choose **Manually release this version** |
 
-### Before the first submission
+### Historical first-submission checklist (1.20.0)
 
 - [x] **`AppStore.iOSAppID`** in `Shared/AppStore.swift` is this app's Apple
       ID, `6817552864`, so the iOS update screen and the Mac's

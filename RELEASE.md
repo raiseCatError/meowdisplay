@@ -1,5 +1,25 @@
 # Release process
 
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
+| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+The main Mac app includes both sharing and receiving: share this Mac's display,
+or use this Mac as another Mac's display. The separate Receiver-only app is
+also available for Macs running macOS 12 or later. Android 2.0 requires the
+Mac 2.0 app.
+
+
+MeowDisplay 2.0 is the stable release. The main Mac app includes sender and
+receiver roles; the separate Receiver-only app remains available. The
+publication gate and historical release process are documented below.
+
+
 How MeowDisplay releases are built, reviewed and published, as implemented
 in `.github/workflows/release-*.yml`, `scripts/release/` and
 `fastlane/Fastfile`. Branches and the repository migration are in

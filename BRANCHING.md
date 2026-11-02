@@ -20,7 +20,11 @@ stay exactly as they are.
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).
 
-## The repository today (2026-10-30)
+## Historical repository migration snapshot (2026-10-30)
+
+This section records the migration checkpoint, not current branch or release
+availability. `dev` is now the development/default branch; the current
+platform release channels are in [README.md](README.md#platform-availability--november-2-2026).
 
 - `raiseCatError/meowdisplay` is public and a GitHub **network fork** of `peetzweg/opendisplay`.
 - **Default branch: `legacy/dev-opendisplay-next`** (`3f24b51`), the former `dev/opendisplay-next`, renamed so `dev` could exist (Git can't hold `dev` beside `dev/…`). It becomes `dev` once the release workflows' resume and store-safety fixes are on `dev` and the scheduled workflows are confirmed inert.
