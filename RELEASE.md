@@ -331,8 +331,8 @@ unless given `--apply`, and is safe to re-run.
 
 | Environment (branches) | Secrets | Variables | Who creates them |
 | --- | --- | --- | --- |
-| `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization), `SPARKLE_PRIVATE_KEY` | — | Owner; a Developer ID certificate in match via `fastlane match developer_id` (Account Holder) |
-| `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect API key, App Manager role) |
+| `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization; the .p8 base64-encoded, which `release-secrets.rb set` does for a raw key), `SPARKLE_PRIVATE_KEY` | — | Owner; the Developer ID identity imported into match (`match import`; Apple doesn't let an API key create Developer ID certificates), then `match developer_id` for the profiles |
+| `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect team API key, App Manager role, never Admin; `match appstore` made the Apple Distribution certificate with it) |
 | `android-upload` (`release/*`) | `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | `ANDROID_UPLOAD_CERT_SHA256` (the upload certificate registered with Play App Signing) | Owner (Play Console service account with release permissions; the upload key) |
 | `release-stores` (`main`, `release/*`; owner approval) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON`, `RELEASE_APP_PRIVATE_KEY` | — | Owner |
 | `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
