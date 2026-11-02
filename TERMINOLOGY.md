@@ -82,7 +82,7 @@ sentences where one is shown. Where an app differs today, the
 | **Input Mode** | the setting: **Direct Touch** or **Trackpad**. "Input" names input-mode settings and the Input settings page only; asking the Mac for permission is "control" | Touch Mode, Pointer Mode |
 | **Direct Touch** | touch where you want the pointer | absolute mode, touchscreen mode |
 | **Trackpad** | the pointer moves relative to your finger, like a laptop trackpad. "trackpad" lowercase is the physical one | Mouse mode, Relative mode |
-| **Touch Style** | the Direct Touch setting: **Natural Touch** (default) or **Classic**. Not shown in Trackpad | Touch Mode |
+| **Touch Style** | the Direct Touch setting: **Natural Touch** or **Classic** (default). Not shown in Trackpad | Touch Mode |
 | **Natural Touch** | tap to click, swipe to scroll, press then move to drag, touch and hold to right-click | Natural (alone), macOS mode |
 | **Classic** | the original Direct Touch: the finger is the pointer, tap then hold to drag | Legacy, Old |
 | **Smart Touch** (Experimental) | Classic only. Scroll with one finger where the Mac says the area scrolls; hold a title bar to move its window. Brand name; never translated | Smart Scroll |

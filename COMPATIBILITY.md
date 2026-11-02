@@ -1,20 +1,28 @@
-# Mac ↔ receiver compatibility (iOS-origin policy)
+# Mac ↔ receiver compatibility
 
 How the Mac sender and receiving apps remain compatible while the apps
-update on **different schedules**. This design originally came from
-OpenDisplay's iOS/Mac compatibility work
-([upstream #132](https://github.com/peetzweg/opendisplay/issues/132),
-[upstream #135](https://github.com/peetzweg/opendisplay/issues/135)).
-It is a historical protocol-evolution and planning reference, **not an
-up-to-date platform availability matrix or a store-release status report**.
+update on **different schedules**, who detects a mismatch, and what pairings
+we support. This design originally came from OpenDisplay's iOS/Mac
+compatibility work
+([upstream #132](https://github.com/peetzweg/opendisplay/issues/132) release
+orchestration, [upstream #135](https://github.com/peetzweg/opendisplay/issues/135)
+force update, and the wire-protocol handshake). It is a protocol-evolution
+and planning reference, **not a store-release status report**: current
+versions and download links are in
+[README.md](README.md#platform-availability--november-2-2026).
 
-MeowDisplay now has receiving apps on iPhone, iPad, Android and Mac.
-Android and Mac Receiver negotiate the same shared wire protocol but have
-different platforms, release channels and capability limits. Read
-[PARITY.md](PARITY.md) for current receiver features and
-[PROTOCOL.md](PROTOCOL.md) / [SECURITY.md](SECURITY.md) for live wire-security
-guarantees. The iOS-specific proposed remote configuration and update
-flow below is not a blanket claim that it ships on every receiver.
+MeowDisplay has receiving apps on iPhone, iPad, Android and Mac. The main Mac
+app both shares and receives; the separate Receiver-only app runs on macOS 12
+or later. Android 2.0 (closed testing) requires the Mac 2.0 app. All
+receivers negotiate the same shared wire protocol but have different
+platforms, release channels and capability limits.
+
+New Window mode, Stage Peek, Files and Clipboard capabilities require peers
+that implement them. Protocol version alone is not a promise of identical UI
+or transport support. Read [PARITY.md](PARITY.md) for current receiver
+features and [PROTOCOL.md](PROTOCOL.md) / [SECURITY.md](SECURITY.md) for live
+wire-security guarantees. The iOS-specific proposed remote configuration and
+update flow below is not a blanket claim that it ships on every receiver.
 
 The wire protocol itself — framing, discovery, the video format, and the
 full control-message catalog — is specified in [PROTOCOL.md](PROTOCOL.md).
@@ -70,14 +78,14 @@ half of a deliberate two-phase breaking change (§6).
 
 Protocol 11 requires prior pairing and pinned mutual TLS 1.3 for LAN/AWDL
 media. Pairing, TLS negotiation, and pin failures never fall back to the
-historical plaintext Bonjour transport. Older peers can remain usable over
-the loopback-only iOS USB binding, but require an update for wireless use.
+historical plaintext Bonjour transport. Current MeowDisplay also requires
+paired, pinned mutual TLS over iOS USB; there is no plaintext USB exception.
 Bonjour names, addresses, interfaces, and TXT records are discovery hints,
 not identities.
 
 Mac system audio (`pv` 12, PROTOCOL.md section 5A) is media on this same
 single connection: it inherits whatever transport security that connection
-already has — pinned mutual TLS over LAN/AWDL, the usbmux tunnel over USB —
+already has — pinned mutual TLS over LAN/AWDL and over the usbmux USB tunnel —
 with no separate channel, no separate Bonjour service, and no
 authentication of its own to get wrong. There is deliberately no wire path
 for unauthenticated or unencrypted audio at any protocol version.

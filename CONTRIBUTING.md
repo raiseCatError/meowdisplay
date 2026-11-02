@@ -2,6 +2,12 @@
 
 Thanks for helping make MeowDisplay better. Bug reports, carefully described ideas, documentation, physical-device testing, translations, and focused code changes are welcome. You do not need to write code to contribute.
 
+The current platform versions and download channels are in
+[README.md](README.md#platform-availability--november-2-2026): Mac and
+iPhone/iPad 2.0 are stable releases, and Android 2.0 is in closed testing.
+Keep documentation clear about that distinction, and record source
+inspection, automated tests and physical-device tests separately.
+
 MeowDisplay is currently **Mac-first**: a Mac sends its screen to iPhone, iPad, Android, or another Mac. Mac-to-Mac input is implemented, though **two-Mac physical testing is still outstanding** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
 
 **Personal-first doesn't mean non-commercial.** You're welcome to use MeowDisplay for your own work, professionally or commercially. We're not currently building an enterprise remote-desktop or IT administration suite. That is a **separate, unplanned product direction** ([#86](https://github.com/raiseCatError/meowdisplay/issues/86)), not a restriction on your use.
@@ -53,7 +59,7 @@ GitHub Discussions is not enabled in this repository. For now, the linked **issu
 2. Fork the repository and base your branch on **`dev`**, the active development branch. Use a short descriptive name such as `fix/...`, `feature/...` or `infra/...`. See [BRANCHING.md](BRANCHING.md).
 3. Keep the change focused. Do not alter protocol identifiers, bundle IDs, Keychain names, signing, release workflows or public compatibility guarantees casually. Follow the [terminology guide](TERMINOLOGY.md).
 4. Read [SETUP.md](SETUP.md) and the relevant platform documentation. Run appropriate automated checks and, if possible, test the behavior on physical hardware. Tell us explicitly which platforms you **did not** test.
-5. Open a PR against `dev` with a **Conventional Commit-style title** such as `fix(android): restore video after reconnect`, `docs: clarify pairing` or `feat(ios): improve window switching`. Use the PR template's testing, compatibility and privacy sections.
+5. Open a PR against `dev` with a **Conventional Commit-style title** such as `fix(android): restore video after reconnect`, `docs: clarify pairing` or `feat(ios): improve window switching`. Use the PR template's testing, compatibility and privacy sections. The title is required by CI (the `conventional` check) because it becomes the merge commit and changelog entry.
 
 Maintainers coordinate `release/<version>` branches; **please don't open routine contributions against release branches** or edit version numbers, tags, release manifests or `CHANGELOG.md` for an ordinary PR. [RELEASE.md](RELEASE.md) describes the separate signed-build and publication gates.
 

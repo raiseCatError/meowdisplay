@@ -1,5 +1,18 @@
 # MeowDisplay for Android (receiver)
 
+## Availability and requirements
+
+Android 2.0 is in **Google Play closed testing**, not a public production release.
+[Request early access](https://meowdisplay.app/android/early-access).
+It requires **Android 10 or later** and [MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)
+(macOS 14+). The main Mac app shares and receives; use its sharing role to
+connect an Android receiver.
+
+Connect over local Wi-Fi or a reachable private network such as Tailscale.
+There is no Android USB transport. iPhone/iPad 2.0 is separately available
+on the [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864).
+
+
 A native Android receiver for MeowDisplay: it speaks MeowDisplay's own secure
 protocol (PROTOCOL.md, pv 22) to the Mac sender, exactly as the iPhone, iPad
 and Mac receivers do. It is not a port of another project's Android app and
@@ -54,13 +67,18 @@ the receiver controls and the adaptive phone/tablet/foldable UI are
 implemented. This is **a receiver for a Mac sender**, not an Android
 screen-sharing/sender or an enterprise remote-desktop client.
 
-See [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) and
-[../PARITY.md](../PARITY.md) for differences from iOS and the physical
-QA checklist. Earlier real-device testing was reported; **additional
-Android physical QA for the 2.0 release-candidate process was waived by
-the maintainer**. This does not imply every device or advanced function
-was verified. Android USB is not implemented.
+[RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) has the iOS parity matrix with
+the remaining gaps and the physical QA checklist. [PARITY.md](../PARITY.md)
+separates implemented features from the recorded physical-device coverage.
+Window mode supports up to nine panes, subject to minimum pane size. Phones
+initially use Trackpad; tablets use Direct Touch, with Classic as the default
+Touch Style. Natural Touch is optional. Android USB is not implemented.
 
-Google Play internal/closed-testing submission and *public production*
-availability are distinct milestones. Consult the actual Play Console
-for the release status, not this source-build README.
+Earlier real-device testing was reported; **additional Android physical QA
+for the 2.0 release-candidate process was waived by the maintainer**. This
+does not imply every device or advanced function was verified.
+
+Android 2.0 is in **Google Play closed testing**
+([request early access](https://meowdisplay.app/android/early-access)). It is
+not in public production on Google Play; closed testing and production are
+separate milestones.

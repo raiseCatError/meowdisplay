@@ -1,5 +1,21 @@
 # MeowDisplay setup guide
 
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
+| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+The main Mac app includes both sharing and receiving: share this Mac's display,
+or use this Mac as another Mac's display. The separate Receiver-only app is
+also available for Macs running macOS 12 or later. Android 2.0 requires the
+Mac 2.0 app.
+
+
+
 This covers building MeowDisplay from source, connecting your devices, and
 day-to-day use. Supported receivers are iPhone, iPad, Android and Mac; the
 sending computer must be a Mac. See the [README](README.md) for what the
@@ -64,7 +80,7 @@ are relevant (Android builds separately with Gradle):
 
 | Scheme | Builds | Platform |
 |---|---|---|
-| `OpenSidecarMac` | the Mac sender app (MeowDisplay) | macOS 14+ |
+| `OpenSidecarMac` | the main MeowDisplay Mac app (sharing and receiving) | macOS 14+ |
 | `OpenSidecarMacReceiver` | the standalone receiver app (MeowDisplay Receiver — use a spare Mac as a display) | macOS 12+ |
 | `OpenSidecariOS` | the iPhone/iPad receiver app | iOS/iPadOS 16.4+ |
 
@@ -151,7 +167,10 @@ authentication code (SAS). Confirm it matches on both ends before accepting
 — this is what pins the encrypted session to that specific peer going
 forward. See [PROTOCOL.md](PROTOCOL.md) for the underlying handshake.
 
-## USB setup
+## USB setup (iPhone and iPad)
+
+Android has no USB transport. Use local Wi-Fi or a reachable private network.
+A Mac Receiver uses network routes, including supported cable networking.
 
 Use a cable that supports data (a charge-only cable will not work). Plug in,
 unlock the device, and accept the **Trust This Computer** prompt if it
@@ -236,22 +255,22 @@ between Window view and the whole screen, and its limits are in
 ### Audio
 
 Audio is off by default and started from the receiving device: turn on
-**Audio** in the receiver's settings (iPhone/iPad app or Mac Receiver) and
+**Audio** in the receiver's settings (iPhone/iPad, Android or Mac Receiver) and
 the Mac's system audio plays there too, while the Mac keeps playing it
 locally. The Mac app has no audio toggle of its own. **A/V Sync** and
 **Resync** sit next to that toggle.
 
 ### Input
 
-On iPhone and iPad, touch, pointer, keyboard and supported gestures can
+On iPhone, iPad and Android, touch, pointer, keyboard and supported gestures can
 control the Mac. This requires Accessibility permission, the Mac's
 **Allow Input** master switch, and permission for the current session.
 Connecting alone never grants control: use **Request Control** in receiver
 Settings. **Always Allow Requests** skips the Mac prompt but still requires
 that request each session. See [Allow Input & control requests](README.md#allow-input--control-requests).
 
-Receivers can still view the Mac with input off. The standalone Mac Receiver
-uses the same request: once the sending Mac allows it, the receiving Mac's own
+Receivers can still view the Mac with input off. The main Mac app's receiver
+role and the separate Mac Receiver use the same request: once the sending Mac allows it, the receiving Mac's own
 keyboard and trackpad control it while the video window is in front. See
 [RECEIVER_INPUT.md](RECEIVER_INPUT.md).
 

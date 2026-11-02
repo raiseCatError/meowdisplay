@@ -1,5 +1,11 @@
 # Android receiver controls (C3)
 
+Implementation rows updated for 2.0 on 2026-11-02 against `dev`. The
+Verification section below preserves its earlier test-run record; this edit
+does not claim new device testing. Android 2.0 is in closed testing, requires
+Android 10+ and Mac 2.0, and has no USB transport. See [PARITY.md](../PARITY.md).
+
+
 The Android receiver's controls, input and adaptive layout are a port of the
 iOS/iPadOS receiver, not an Android remote-desktop UI. The iOS Swift is the
 authority: `Shared/*.swift` logic is translated type for type into
@@ -68,17 +74,17 @@ other means, or a documented platform difference. **Gap** = not on Android yet.
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Control profiles (3 slots), tray items, chord palettes, persistence in the iOS JSON format with schema 1–18 migrations | Ported | |
+| Control profiles (3 slots), tray items, chord palettes, persistence in the iOS JSON format with schema 1–21 migrations | Ported | |
 | iPhone Main Tray: chips, latch, 350 ms hold palette, slide-to-select, collapsed gear, HUD | Ported | Emulator-verified on phone and folded foldable |
 | Function Tray clusters incl. Return, visibility and order | Ported | Order/visibility edited in Settings |
-| Function Tray custom actions (shortcut recorder, sequences, faces, rename) | Gap | Model, validation and plan are ported; editor UI is not |
-| Chord palette editor (add, remove, reorder palette actions) | Gap | Model ported; Settings edits tray items only |
-| App Gesture Commands | Adapted | Shown and reset in Settings; per-key editor not built |
+| Function Tray custom actions (shortcut recorder, sequences, faces, rename) | Ported | Editor implemented; source-inspected |
+| Chord palette editor (add, remove, reorder palette actions) | Ported | Editor implemented; source-inspected |
+| App Gesture Commands | Ported | Editable in Settings; source-inspected |
 | Keyboard: committed text, IME composition never sent, chord typing (⌘ then C = ⌘C), Backspace/Return presses, held Esc/Tab/Delete-Forward/arrows, release on focus loss | Ported | Emulator-verified (typing, arrow) |
 | Keyboard accessory bar | Ported | |
 | Typing strip (tail of what was typed, Done) | Ported | Compose strip on the IME's top edge; unit-tested model, needs device QA |
 | Hardware keyboard | Adapted | Same forwarding rules; Android also forwards ⌘/Ctrl shortcuts as one press (iOS lets UIKit swallow them) |
-| Zoom While Typing | Adapted | Always on, no setting. Follows the Mac's text caret on both axes (the touch anchor is not tracked); needs Accessibility on the Mac |
+| Zoom While Typing | Adapted | Configurable in Input. Follows the Mac's text caret on both axes (the touch anchor is not tracked); needs Accessibility on the Mac |
 | Direct Touch, Trackpad (sensitivity), clicks, double/triple, drag, right-click chord, two-finger scroll, momentum, per-axis direction | Ported | Emulator-verified click; rest unit-tested |
 | Smart Touch (probe, scroll, title-bar window drag) | Ported | Title-bar build-up haptic is a single tick (no Core Haptics ramp) |
 | Three-finger swipe/tap, four/five-finger pinch/spread | Ported | Unit-tested; multi-touch needs physical QA |
@@ -89,18 +95,18 @@ other means, or a documented platform difference. **Gap** = not on Android yet.
 | Mouse | Adapted | Clicks drive the pointer engine like iPad pointer input; wheel scrolls (Android addition) |
 | iPad Strip, Overlay, Custom radial, wheel palette, Two-Hand Assist, hints, size, edges, standard controls | Ported | Radial default emulator-verified on tablet and unfolded foldable |
 | Custom layouts: create, select, delete, share code export/import | Ported | Share codes interchangeable with iOS (verified against Swift) |
-| Custom Layout editor (drag placements, corners, preview) | Gap | |
+| Custom Layout editor (drag placements, corners, preview) | Ported | Compose editor implemented; source-inspected |
 | Auto-hide (9 s), reveal on any touch | Ported | Emulator-verified |
 | Input consent: View Only start, Request/Turn Off, on-surface prompt, blocked attempts | Ported | Emulator-verified grant and revoke |
-| Per-Mac "Request Control Automatically" | Gap | Store and UI not ported |
+| Per-Mac "Request Control Automatically" | Ported | Per-Mac home menu; source-inspected |
 | Prefer MeowDisplay Gestures (claim screen edges) | Gap | Stored; Android system-gesture exclusion not applied |
 | Accessibility: TalkBack labels, roles, states; multi-finger gestures step aside for TalkBack; Remove animations = Reduce Motion | Adapted | Needs a TalkBack pass on hardware |
 | Haptics | Adapted | Android feedback constants |
 | Cursor sprite and position under zoom; video-off surface and grid | Ported | |
 | Audio: AAC/PCM, iOS continuous scheduling, preroll, re-anchor, overflow, Delay Audio | Ported | Planner unit-tested; audible playback not verified (physical QA) |
-| Negative A/V offset (delay video) | Gap | |
-| Picture in Picture | Gap | |
-| Display controls (Mirror/Extend request, video on/off, Mirror display, Extend shape, max FPS, streaming profile) | Gap | Not part of this milestone |
+| Negative A/V offset (delay video) | Ported | Existing physical-device verification recorded in PARITY.md |
+| Picture in Picture | Adapted | Android system PiP; existing physical-device verification recorded in PARITY.md |
+| Display controls (Mirror/Extend request, video on/off, Mirror display, Extend shape, max FPS, streaming profile) | Ported | Capability-gated controls in Display; Audio Resync is also implemented. Source-inspected |
 | Localization | Gap | English only |
 
 ## Verification
