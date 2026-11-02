@@ -341,6 +341,13 @@ unless given `--apply`, and is safe to re-run.
 | `release-state-check` (`main`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Only the release state access check |
 | `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY`, `RELEASE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
 
+The release monitor asks for the `release-stores` approval only while a release
+is unfinished (a candidate exists and isn't published): its read-only `pending`
+job, with no environment or secret, checks the release state first, so a
+scheduled run with nothing in flight ends without an approval request. While a
+release is in flight every monitor run still needs the approval, because it can
+submit to App Store review and move the Play release between tracks.
+
 Repository variables that switch automation on, each off until set:
 `RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
 (auto publication, with the config), `RELEASE_AUTO_PROMOTE=enabled` (merge

@@ -415,6 +415,16 @@ if (doc = load("release-monitor.yml"))
       err("release-monitor.yml", "job #{id} publishes; the monitor only dispatches release-publish.yml") if run_text(s).match?(PUBLISHING)
     end
   end
+  # The pre-check that spares an approval when nothing is in flight holds no credential.
+  pending = doc.dig("jobs", "pending")
+  if pending.nil? || env_name(pending) || uses_secrets?(pending) || pending["permissions"] != { "contents" => "read" } ||
+     pending.to_s.include?("create-github-app-token") || pending.to_s.include?("RELEASE_STATE_TOKEN")
+    err("release-monitor.yml", "its pending job must be read-only: no environment, secret, App token or write permission")
+  end
+  monitor = doc.dig("jobs", "monitor") || {}
+  unless needs(monitor).include?("pending") && monitor["if"].to_s.include?("needs.pending.outputs.versions != ''")
+    err("release-monitor.yml", "the monitor job must run only when the pending job found an unfinished release")
+  end
 end
 
 # MARK: - Release state is written only with the release App's token
