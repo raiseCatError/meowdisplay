@@ -348,6 +348,40 @@ scheduled run with nothing in flight ends without an approval request. While a
 release is in flight every monitor run still needs the approval, because it can
 submit to App Store review and move the Play release between tracks.
 
+### Preflight from the default branch
+
+`release-dry-run.yml` needs a `release/X.Y.Z` branch, and pushing one starts a
+real candidate. `release-preflight.yml` (dispatch from the default branch) is
+the check to run first. It holds **no credential**: no environment, no secret,
+no App token, `contents: read` only, which `check-release-workflows.rb`
+enforces. It checks the release tooling and workflow rules, that every release
+environment is protected as its jobs expect, that bundle ids agree across
+`project.yml`, Fastfile and Matchfile, and that the published baseline apps
+and `project.yml` ship the same Sparkle public key.
+
+| Check | Preflight (main) | Needs a release context |
+| --- | --- | --- |
+| Tooling, workflow rules, environment protection, signing config, Sparkle **public** key | yes | |
+| release-state is App-only | `release-state-access.yml` | |
+| match decrypt (`MATCH_PASSWORD`), Sparkle **private** key, App Store Connect, Google Play | | `release-dry-run.yml` on `release/*` |
+
+Not done, on purpose. Any of these changes who can reach a credential and
+needs a reviewed decision:
+
+- *Adding `main` (or a new branch pattern) to `release-build`, `ios-upload` or
+  `android-upload`.* Every default-branch workflow, and anyone able to change
+  one through a merged PR, could then read the match password, which decrypts
+  the signing keys, and the Sparkle private key.
+- *A `release-preflight` environment holding copies of those secrets.* A second
+  place to protect, rotate and audit the same keys; the reviewer gate would be
+  the only barrier.
+- *Separate read-only credentials* for such an environment (an App Store
+  Connect key with a read-only role, a Play service account with view
+  permission only) are the acceptable variant if API reachability must be
+  proven before a candidate. They still can't prove the match password or the
+  Sparkle private key, which only the release-branch dry run (or the candidate)
+  can.
+
 Repository variables that switch automation on, each off until set:
 `RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
 (auto publication, with the config), `RELEASE_AUTO_PROMOTE=enabled` (merge
