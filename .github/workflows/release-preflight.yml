@@ -1,0 +1,77 @@
+name: Release preflight
+
+# What can be checked from the default branch WITHOUT a release branch and
+# WITHOUT any credential: no environment, no secret, a read-only token.
+# Pushing release/X.Y.Z starts a real candidate (release-candidate.yml), so
+# this is the safe check to run before choosing to do that:
+#  - release tooling and the fail-closed workflow rules;
+#  - every release environment is protected exactly as the release jobs
+#    expect (branch policies, required reviewers);
+#  - signing configuration agrees across project.yml, Fastfile and Matchfile,
+#    and ships the Sparkle public key the published baseline trusts;
+#  - the published baseline apps are the pinned, validly signed release.
+# Checks that need credentials (match decryption, the Sparkle private key,
+# App Store Connect, Google Play) stay in release-dry-run.yml on a release
+# branch; release-state-access.yml covers the release-state authorization.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Only from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::Run this from $DEFAULT_BRANCH (got $GITHUB_REF)"
+            exit 1
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Release workflows are fail-closed
+        run: ruby scripts/release/check-release-workflows.rb
+      - name: Release tooling tests
+        run: ruby -Iscripts/release/lib -e 'Dir["scripts/release/test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
+      - name: Signing configuration
+        run: ruby scripts/release/check-signing-config.rb
+      - name: Release environments are protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          for env in release-build ios-upload android-upload release-pr release-state website-update; do
+            scripts/release/check-environment.sh "$env"
+          done
+          scripts/release/check-environment.sh release-publish --require-reviewers
+          scripts/release/check-environment.sh release-stores --require-reviewers --branches "$DEFAULT_BRANCH,release/*"
+          scripts/release/check-environment.sh release-state-check --branches "$DEFAULT_BRANCH"
+
+  published-baseline:
+    needs: tooling
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Published apps are the pinned, signed baseline
+        run: scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
+      - name: project.yml keeps the key installed copies trust
+        run: |
+          set -euo pipefail
+          published=$(sort -u "$RUNNER_TEMP/baseline/sender.key" "$RUNNER_TEMP/baseline/receiver.key")
+          project=$(sed -n 's/^ *SUPublicEDKey: *//p' project.yml | sort -u)
+          [ "$project" = "$published" ] || { echo "::error::project.yml's SUPublicEDKey is not the published apps' key"; exit 1; }
+          echo "Sparkle public key continuity holds (private-key match is checked by release-dry-run.yml)"

@@ -8,7 +8,7 @@ name: Release dry run
 #  - which of its expected secrets and variables are missing (by name only;
 #    no value is ever printed);
 #  - read-only credential checks: Sparkle-key continuity with the PUBLISHED
-#    v1.20.0 apps, the Developer ID certificate in match, App Store Connect
+#    baseline apps (baseline.env), the Developer ID certificate in match, App Store Connect
 #    and Google Play API access.
 # Manual only, from release/<version>. GitHub can dispatch it once this file
 # is on the default branch.
