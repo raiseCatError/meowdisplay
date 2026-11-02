@@ -14,6 +14,25 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 **Yes** works · **Partial** works with a gap noted · **No** not built yet · **—** not applicable.
 "Verified" says where it was last seen working: physical device, simulator/emulator, or unit tests only.
 
+## Verification and scope
+
+- **Per-device Mirror/Extend with multiple receivers** is implemented
+  and has been physically verified according to the maintainer
+  ([#20](https://github.com/raiseCatError/meowdisplay/issues/20)).
+  This does not establish that every edge case in `MULTI_DEVICE.md` was individually retested.
+- **Mac-to-Mac keyboard/trackpad input** is implemented with automated
+  coverage but **has not been physically verified with two Macs**
+  ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
+- Android had earlier real-device testing, but **additional Android
+  physical QA for the current 2.0 release was waived by the owner**.
+  That decision is not evidence of a new Android hardware test.
+- **No Windows or Linux receiver/sender is implemented or planned**
+  ([Windows #84](https://github.com/raiseCatError/meowdisplay/issues/84),
+  [Linux #85](https://github.com/raiseCatError/meowdisplay/issues/85)).
+  Professional/commercial use is welcome, but an enterprise remote-desktop
+  service or hosted account/relay infrastructure is not a current product
+  target (#86, #87).
+
 ## Connecting
 
 | Feature | iOS | Android | Mac Receiver | Notes |
@@ -22,7 +41,7 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Connect from the device (Mac dials in) | Yes | Yes | Yes | Android: Connect, Connect with Extend/Mirror |
 | Same Wi-Fi discovery | Yes | Yes | Yes | |
 | USB cable | Yes | No | — | Android has no USB transport yet; Help says so. Mac Receiver connects over the network |
-| Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android seen on a phone over LTE + Tailscale. Every platform uses a typed address (Tailscale IP or MagicDNS name); none lists tailnet peers by itself |
+| Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android physically tested over LTE + Tailscale. Typed addresses are supported. Automatic sharing of a paired peer's reported Tailscale address is implemented (#77/#82); **automatic dialing of reported addresses is currently enabled only for verified Android ↔ Mac IPv4 routes** (#81), not for every receiver or address family. No automatic tailnet-wide peer directory is implemented. |
 | Add Remote Mac: Pair over Remote, and an address for a paired Mac | Yes | Yes | Yes | Android: one Address field; the Mac must have Pair over Remote open for new pairs |
 | Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac |
 | Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; seen working on a phone over LTE + Tailscale. A local Wi-Fi session that drops also falls back to Remote when the Mac has a saved address (knocks only once Bonjour no longer shows the Mac; unit-tested, not yet seen on a phone) |
@@ -101,7 +120,10 @@ Remaining gaps include Switched Out, a full Update Required screen, viewport
 rotation/Snap Rotation, and USB transport. Android has no usbmux; an Android
 Open Accessory transport is not implemented. Hardware keyboard, mouse and
 stylus coverage remains incomplete on physical devices. Automatic tailnet
-peer listing is not implemented on any platform.
+peer listing (a tailnet-wide peer directory) is not implemented on any
+platform; automatically exchanging addresses with an **already-paired**
+device is a different, implemented feature, limited to the verified routes
+described above.
 
 Video/streaming controls, Audio Resync, Custom Layout, Function Tray, chord
 palette and App Gesture Commands editors are implemented; the earlier
