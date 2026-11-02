@@ -574,6 +574,10 @@ setups and networks. Our [contribution guide](CONTRIBUTING.md) has separate
 forms for bugs, feature requests, exploratory ideas, documentation, and
 hardware compatibility reports.
 
+**Base branches and pull requests on `dev`**, where development happens.
+`main` is the source of the latest published release and changes only when
+a release is promoted ([BRANCHING.md](BRANCHING.md)).
+
 MeowDisplay is **personal-first, not non-commercial**: using it for your own
 professional or commercial work is welcome. We are **not currently planning an
 enterprise remote-desktop/IT administration suite** ([discussion #86](https://github.com/raiseCatError/meowdisplay/issues/86)).
