@@ -88,11 +88,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         with:
           ruby-version: '3.3'
       - name: Store approvals, observed live
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha }}
@@ -140,8 +148,16 @@ jobs:
           else
             scripts/release/check-environment.sh release-publish --require-reviewers
           fi
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - name: Gate and start (every required platform approved for this commit)
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha }}
@@ -263,6 +279,7 @@ jobs:
       - name: Record the Mac release
         if: always()
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           JOB_STATUS: ${{ job.status }}
@@ -416,12 +433,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: scripts/release/check-environment.sh release-stores --branches "$DEFAULT_BRANCH,release/*"
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
         with:
           ruby-version: '3.3'
       - name: Release the approved store versions
         id: stores
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -450,8 +475,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release/check-environment.sh website-update
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - name: Release manifest (only what is live)
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: scripts/release/release-state.sh "$VERSION" publish website-manifest STATE --config .github/release-config.json --out "$RUNNER_TEMP/release.json"
@@ -472,6 +505,7 @@ jobs:
       - name: Record what the live site serves
         if: always()
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -530,15 +564,28 @@ jobs:
     needs: [guard, stores, website, promote]
     if: always() && needs.guard.result == 'success'
     runs-on: ubuntu-latest
+    environment: release-state
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-state
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
       - name: Published, or what is still pending
         env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           SHA: ${{ inputs.sha }}

@@ -10,7 +10,11 @@
 # Usage: release-state.sh <version> <meow-release command and args...>
 #   e.g. release-state.sh 2.0.0 record STATE --platform mac --stage built --sha "$GITHUB_SHA"
 # Read-only commands (gate, summary) never push.
-# Needs GH_TOKEN (contents: write) and GITHUB_REPOSITORY.
+# Needs GITHUB_REPOSITORY and a token: RELEASE_STATE_TOKEN, the release App's
+# installation token (contents: write), for anything that writes. The
+# release-state ruleset lets only that App update the branch, so a write with
+# GH_TOKEN (GITHUB_TOKEN) is refused there and fails after five attempts.
+# GH_TOKEN alone is enough for read-only commands.
 set -euo pipefail
 version=${1:?usage: release-state.sh <version> <command> ...}
 shift
@@ -23,7 +27,8 @@ if [ -n "${RELEASE_STATE_REMOTE:-}" ]; then
   remote=$RELEASE_STATE_REMOTE
   git_() { git -C "$work/repo" "$@"; }
 else
-  auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN:?GH_TOKEN is required}" | base64 | tr -d '\n')"
+  token=${RELEASE_STATE_TOKEN:-${GH_TOKEN:?RELEASE_STATE_TOKEN or GH_TOKEN is required}}
+  auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
   remote="https://github.com/${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}.git"
   git_() { git -C "$work/repo" -c "http.https://github.com/.extraheader=$auth" "$@"; }
 fi
@@ -54,5 +59,9 @@ for attempt in 1 2 3 4 5; do
   echo "release-state: the branch moved; retrying ($attempt)"
   sleep $(( attempt * 3 ))
 done
-echo "::error::couldn't update release-state after 5 attempts"
+if [ -z "${RELEASE_STATE_TOKEN:-}" ]; then
+  echo "::error::couldn't update release-state after 5 attempts: no RELEASE_STATE_TOKEN (only the release App may write the branch; RELEASE.md)"
+else
+  echo "::error::couldn't update release-state after 5 attempts (is the release App the release-state ruleset's bypass actor? RELEASE.md)"
+fi
 exit 1

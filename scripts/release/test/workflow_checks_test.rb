@@ -39,6 +39,18 @@ class WorkflowChecksTest < Minitest::Test
     assert ok, out
   end
 
+  def test_release_state_writes_need_the_release_apps_contents_only_token
+    assert_caught("release-candidate.yml: job plan writes the release state without the release App's contents-only token",
+                  "release-candidate.yml" => ["permission-contents: write", "permission-contents: write\n          permission-pull-requests: write"])
+    assert_caught("writes the release state without RELEASE_STATE_TOKEN",
+                  "release-ios.yml" => ["RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}", "NOT_THE_TOKEN: x"])
+    assert_caught("release-mac.yml: job record uses secrets outside an allowed environment",
+                  "release-mac.yml" => ["environment: release-state", "environment: release-elsewhere"])
+    assert_caught("publish-mac must not use secrets other than the release App key",
+                  "release-publish.yml" => ["private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n          permission-contents: write\n      - name: Gate and start",
+                                            "private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}\n          permission-contents: write\n      - name: Gate and start"])
+  end
+
   def test_secrets_outside_the_release_workflows_are_caught
     assert_caught("pr-title.yml: uses secrets; only release workflows may",
                   "pr-title.yml" => ["secrets.GITHUB_TOKEN", "secrets.SPARKLE_PRIVATE_KEY"])

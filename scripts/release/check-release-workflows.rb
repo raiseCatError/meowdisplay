@@ -220,7 +220,8 @@ if (doc = load("release-candidate.yml"))
   no_publishing(name, doc)
 end
 
-{ "release-mac.yml" => %w[release-build], "release-ios.yml" => %w[ios-upload], "release-android.yml" => %w[android-upload] }.each do |name, envs|
+{ "release-mac.yml" => %w[release-build release-state], "release-ios.yml" => %w[ios-upload release-state],
+  "release-android.yml" => %w[android-upload release-state] }.each do |name, envs|
   next unless (doc = load(name))
 
   common(name, doc)
@@ -262,7 +263,7 @@ if (doc = load("release-publish.yml"))
   name = "release-publish.yml"
   common(name, doc)
   only_trigger(name, doc, "workflow_dispatch")
-  secrets_behind_environments(name, doc, %w[release-stores website-update release-pr])
+  secrets_behind_environments(name, doc, %w[release-stores website-update release-pr release-publish release-state])
   jobs = doc["jobs"]
   guard = jobs["guard"]
   if guard.nil?
@@ -285,7 +286,14 @@ if (doc = load("release-publish.yml"))
   else
     s = steps(pm)
     err(name, "publish-mac must use the release-publish environment") unless env_name(pm) == "release-publish"
-    err(name, "publish-mac must not use secrets") if uses_secrets?(pm)
+    # Its only secret is the release App key, for the release-state token:
+    # contents-only, the same power publish-mac's GITHUB_TOKEN already has.
+    s.each do |x|
+      next unless uses_secrets?(x)
+      next if x["id"] == "state-token" && x.to_s.scan(/secrets\.(\w+)/).flatten.uniq == ["RELEASE_APP_PRIVATE_KEY"]
+
+      err(name, "publish-mac must not use secrets other than the release App key for the release-state token")
+    end
     check = s.index { |x| run_text(x).include?("check-environment.sh release-publish --require-reviewers") }
     gate = s.index { |x| run_text(x).include?("publish start STATE") }
     first_publish = s.index { |x| run_text(x).match?(PUBLISHING) }
@@ -371,6 +379,39 @@ if (doc = load("release-monitor.yml"))
   doc["jobs"].each do |id, job|
     steps(job).each do |s|
       err("release-monitor.yml", "job #{id} publishes; the monitor only dispatches release-publish.yml") if run_text(s).match?(PUBLISHING)
+    end
+  end
+end
+
+# MARK: - Release state is written only with the release App's token
+
+# Only the release App may update the release-state branch (its ruleset), so
+# every job that changes the state mints that App's token, limited to
+# contents, and hands it to release-state.sh as RELEASE_STATE_TOKEN.
+STATE_WRITE = /\b(init|candidate|record|monitor|publish [a-z-]+) STATE\b/
+if (doc = load("release-candidate.yml"))
+  secrets_behind_environments("release-candidate.yml", doc, %w[release-state])
+end
+RELEASE_WORKFLOWS.each do |name|
+  next unless (doc = load(name))
+
+  doc.fetch("jobs", {}).each do |id, job|
+    writes = steps(job).select { |s| run_text(s).match?(STATE_WRITE) }
+    next if writes.empty?
+
+    token = steps(job).find { |s| s["id"] == "state-token" }
+    unless token && token["uses"].to_s.start_with?("actions/create-github-app-token@") &&
+           token.dig("with", "permission-contents") == "write" &&
+           token.dig("with", "client-id") == "${{ vars.RELEASE_APP_CLIENT_ID }}" &&
+           token.dig("with", "private-key") == "${{ secrets.RELEASE_APP_PRIVATE_KEY }}" &&
+           (token["with"].keys - %w[client-id private-key permission-contents]).empty?
+      err(name, "job #{id} writes the release state without the release App's contents-only token (state-token)")
+      next
+    end
+    writes.each do |s|
+      next if s.dig("env", "RELEASE_STATE_TOKEN") == "${{ steps.state-token.outputs.token }}"
+
+      err(name, "job #{id}: step #{s['name'].inspect} writes the release state without RELEASE_STATE_TOKEN")
     end
   end
 end
