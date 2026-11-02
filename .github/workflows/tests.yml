@@ -57,7 +57,7 @@ jobs:
 
           raw = pathlib.Path(sys.argv[1]).read_bytes()
           paths = [part.decode("utf-8") for part in raw.split(b"\0") if part]
-          # Any ambiguity, deletion outside docs or CI config change runs the suite.
+          # Only narrow, explicit file sets may skip expensive jobs.
           docs_only = bool(paths) and all(
               ("/" not in path and path.endswith(".md"))
               or (path.startswith("docs/") and path.endswith(".md"))
