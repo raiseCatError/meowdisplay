@@ -90,6 +90,22 @@ class ReleaseStateTest < Minitest::Test
     assert_empty state.publication_blockers(branch_head: SHA_A), "an unfinished Android app doesn't hold the release"
   end
 
+  def test_android_cannot_be_required_on_a_testing_track
+    %w[internal alpha beta].each do |track|
+      android = { "package" => "com.raisecaterror.meowdisplay.android", "reviewTrack" => track }
+      error = assert_raises(MeowRelease::Error) do
+        config("crossPlatformReady" => true, "android" => android).check_publishable!
+      end
+      assert_match(/testing track/, error.message)
+      config("crossPlatformReady" => false, "android" => android).check_publishable!
+    end
+    config.check_publishable! # production, authorized by both switches
+  end
+
+  def test_the_release_config_on_this_branch_can_publish
+    MeowRelease::Config.load(File.expand_path("../../../.github/release-config.json", __dir__)).check_publishable!
+  end
+
   def test_a_published_release_cannot_take_a_new_candidate
     state = state_for
     state.set_publication("published", now: NOW)

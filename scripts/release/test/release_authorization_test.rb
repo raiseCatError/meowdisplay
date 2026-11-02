@@ -194,6 +194,18 @@ class AndroidTrackSafetyTest < Minitest::Test
                  android_config("production", production_release: "2.0.0", operator: "2.0.0").android_review_track!(version: "2.0.0")
   end
 
+  def test_the_website_never_lists_an_android_testing_release
+    cfg = config("crossPlatformReady" => false,
+                 "android" => { "package" => "com.raisecaterror.meowdisplay.android", "reviewTrack" => "alpha",
+                                "storeUrl" => "https://play.google.com/store/apps/details?id=com.raisecaterror.meowdisplay.android" })
+    state = uploaded_state(cfg)
+    state.advance("mac", "published", sha: SHA_A, now: NOW)
+    %w[submitted in_review approved published].each { |s| state.advance("android", s, sha: SHA_A, now: NOW) }
+    manifest = Publisher.new(state: state, config: cfg, now: NOW).website_manifest
+    assert manifest["platforms"].key?("mac")
+    refute manifest["platforms"].key?("android"), "testers only, not public"
+  end
+
   def test_a_missing_or_unknown_track_is_refused
     assert_raises(Error) { android_config(nil).android_review_track!(version: "2.0.0") }
     assert_raises(Error) { android_config("open-testing").android_review_track!(version: "2.0.0") }
