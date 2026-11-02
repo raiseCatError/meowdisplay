@@ -94,9 +94,42 @@ blockers and what is waiting on a person.
 - `auto-publish-after-approval` (future opt-in): needs **both** that config value on the release branch **and** the repository variable `RELEASE_PUBLISH_MODE=auto-publish-after-approval`; then the monitor starts publication once every required platform is approved for the branch head. Either switch alone keeps the approval.
 
 **What the release requires** (`requiredPlatforms`, `crossPlatformReady`):
-Mac and iOS always; Android once `crossPlatformReady` is `true`. Until then
-an Android candidate is built, uploaded and reported, but doesn't hold the
-release.
+Mac and iOS always; Android only when `crossPlatformReady` is `true`.
+Otherwise an Android candidate is built, uploaded and reported, but doesn't
+hold the release. A required platform must be able to go public. An Android
+build on a testing track never counts as public (`verify-live` refuses it),
+so `meow-release init`/`candidate` refuse to start a release that requires
+Android on a testing track. 2.0.0's configuration did exactly that, and its
+gate could never have opened.
+
+| Release | `.github/release-config.json` on `release/<version>` | What happens |
+| --- | --- | --- |
+| Mac and iOS stable, Android testing (the default on `dev`) | `crossPlatformReady: false`, `android.reviewTrack: alpha` | Mac and iOS pass the gate and publish. The Android candidate is built, signed and uploaded to internal testing and appears in the readiness report. It doesn't hold the release. Promote it to closed testing in Play Console. |
+| Android production, released with Mac and iOS | `crossPlatformReady: true`, `android.reviewTrack: production`, `android.productionRelease: "<version>"`, plus the operator's `ANDROID_PRODUCTION_AUTHORIZED=<version>` | Android must be approved for the same commit before anything publishes. No workflow sets `ANDROID_PRODUCTION_AUTHORIZED` yet, so Android's first production release needs its own reviewed workflow change. |
+| Android required on a testing track | `crossPlatformReady: true` with `internal`/`alpha`/`beta` | Refused when the release or candidate starts |
+
+### Before the next release: what the pipeline still lacks
+
+The CI pipeline has not completed a release yet. Every `release/2.0.0`
+candidate stopped in `plan` with "couldn't update release-state after 5
+attempts" ([run](https://github.com/raiseCatError/meowdisplay/actions/runs/41196833601)).
+The `release-state` ruleset stays closed until the release App exists
+(BRANCHING.md), and no environment holds its secrets yet. 2.0.0 was built
+locally and published by two one-time workflows, `mac-stable-launch.yml` and
+`mac-stable-finalize.yml`, which ran only on their own `release/mac-2.0.0-*`
+branches and are now disabled in Actions. Before CI can release, the owner:
+
+1. Creates the release GitHub App (table under [Credentials](#credentials))
+   and makes it the only bypass actor of the `release-state` ruleset. Then
+   sets `RELEASE_APP_CLIENT_ID` and the `release-pr` environment's
+   `RELEASE_APP_PRIVATE_KEY`.
+2. Moves the signing and store secrets into their environments and deletes
+   the repository-level copies ([Credentials](#credentials)).
+3. Cuts `release/<version>` from `dev` and runs **Release dry run** on it
+   (`gh workflow run release-dry-run.yml --ref release/<version>`). It names
+   anything still missing without building or publishing.
+
+Until all three are done, use the [manual path](#manual-path-without-ci-credentials).
 
 **Scheduled workflows** (`release-monitor`, `repository-guard`, `reference-sync`)
 run only from the default branch, `main`, and only while their repository
@@ -267,9 +300,11 @@ edited copy.
 `release-pr.yml` (manual, from `release/<version>`) runs release-please
 with the release App's token and `skip-github-release`: it opens or updates
 the release PR (CHANGELOG, `version.txt`, `.release-please-manifest.json`)
-and never tags or releases. `release-please-config.json`'s `release-as:
-2.0.0` makes the next PR propose 2.0.0; delete it in the follow-up, or every
-later PR proposes 2.0.0 again. The repository inherited the OpenDisplay
+and never tags or releases. Release-please proposes the next version from
+the Conventional Commit titles since `v2.0.0`. To force a version, set
+`"release-as"` under `packages["."]` in `release-please-config.json` on the
+release branch only, and remove it after that release. The `release-as:
+2.0.0` used for 2.0.0 was removed afterwards. The repository inherited the OpenDisplay
 reference's old tags (`v0.1.0`–`v1.19.0`); MeowDisplay's own releases start
 at `v1.20.0`, the candidate refuses a version whose tag exists, and the
 reference sync never imports tags.

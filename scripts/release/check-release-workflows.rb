@@ -436,6 +436,9 @@ Dir[File.join(DIR, "*.yml")].sort.each do |path|
   doc = YAML.safe_load(File.read(path), aliases: false)
   common(name, doc, pin: false)
   no_publishing(name, doc)
+  # Signing and store secrets live behind the release environments; a
+  # workflow outside the release set (an inherited one included) gets none.
+  err(name, "uses secrets; only release workflows may, behind their environments") if uses_secrets?(doc)
   err(name, "release-please runs only in release-pr.yml") if File.read(path).include?("googleapis/release-please-action")
 end
 
