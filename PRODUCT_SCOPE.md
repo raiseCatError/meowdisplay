@@ -64,7 +64,8 @@ released build. See the [README](README.md), [receiver parity](PARITY.md)
 and actual [releases](https://github.com/raiseCatError/meowdisplay/releases)
 for implemented behavior and distribution status.
 
-MeowDisplay 2.0 release preparation is handled separately under
-[RELEASE.md](RELEASE.md). Store review, upload, approval and publication
-are different states: no document should say a platform is available to the
-public until the corresponding store/release actually confirms that.
+Releases follow [RELEASE.md](RELEASE.md). Store upload, review, approval,
+testing tracks and public production are different states: no document
+should say a platform is available to the public until the corresponding
+store or GitHub Release actually confirms it. As of 2.0.0, Mac and
+iPhone/iPad are stable releases and Android is in Google Play closed testing.

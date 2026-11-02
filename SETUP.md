@@ -308,8 +308,8 @@ Per-device Mirror/Extend is implemented and has been confirmed working
 on real multi-device setups by the maintainer ([#20](https://github.com/raiseCatError/meowdisplay/issues/20)).
 Mac-to-Mac input forwarding is implemented with automated tests, but has
 **not yet had physical two-Mac verification** ([#12](https://github.com/raiseCatError/meowdisplay/issues/12)).
-The Android 2.0 release preparation proceeds with additional physical QA
-waived by the maintainer; this is not a claim of unperformed tests.
+Additional Android physical QA was waived by the maintainer for the 2.0
+closed-testing release; that is recorded as waived, never as passed.
 
 MeowDisplay is designed primarily for using your own Mac on another display,
 including for professional or commercial work. An enterprise IT administration

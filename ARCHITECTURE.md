@@ -114,8 +114,8 @@ Android is **receiver-only** and does not support sending an Android desktop.
 Mirror, Extend, Window view, audio, touch controls and Remote Access are
 implemented. Android USB transport and certain advanced iOS customization
 controls are not implemented; see [PARITY.md](PARITY.md). Additional
-Android physical QA was explicitly waived for the current 2.0 release
-preparation, **not reported as passed**.
+Android physical QA was explicitly waived for the 2.0 closed-testing
+release, **not reported as passed**.
 
 ### Mac Receiver (`MacReceiver/`)
 
