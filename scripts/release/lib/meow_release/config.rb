@@ -96,6 +96,13 @@ module MeowRelease
       android["rollout"]
     end
 
+    # Android takes part as a testing release: its candidate is uploaded,
+    # sent to its testing review track and followed, but never holds the
+    # release and is never presented as public.
+    def android_testing_release?
+      !required_platforms.include?("android") && TESTING_TRACKS.include?(android["reviewTrack"])
+    end
+
     # A platform the release requires must be able to reach the public.
     # Android on a testing track reaches testers only, and publication
     # refuses it (Coordinator#live_approval_blockers), so requiring Android

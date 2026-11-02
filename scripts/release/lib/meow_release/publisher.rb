@@ -86,7 +86,9 @@ module MeowRelease
       if live.include?("ios") && @config.ios["storeUrl"]
         manifest["platforms"]["ios"] = { "store" => @config.ios["storeUrl"] }
       end
-      if live.include?("android") && @config.android["storeUrl"]
+      # Android on a testing track reaches testers only: listed only when the
+      # release required it (production, Config#check_publishable!).
+      if live.include?("android") && @state.required_platforms.include?("android") && @config.android["storeUrl"]
         manifest["platforms"]["android"] = { "store" => @config.android["storeUrl"] }
       end
       manifest

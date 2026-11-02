@@ -104,7 +104,7 @@ gate could never have opened.
 
 | Release | `.github/release-config.json` on `release/<version>` | What happens |
 | --- | --- | --- |
-| Mac and iOS stable, Android testing (the default on `dev`) | `crossPlatformReady: false`, `android.reviewTrack: alpha` | Mac and iOS pass the gate and publish. The Android candidate is built, signed and uploaded to internal testing and appears in the readiness report. It doesn't hold the release. Promote it to closed testing in Play Console. |
+| Mac and iOS stable, Android testing (the default on `dev`) | `crossPlatformReady: false`, `android.reviewTrack: alpha` | Mac and iOS pass the gate and publish. The Android candidate is built, signed and uploaded to internal testing. The monitor sends it to the `alpha` (closed testing) review track and follows Play review. It never holds Mac/iOS publication and never appears on the website as public. Missing Play credentials or a Play error is reported and doesn't stop the pass. |
 | Android production, released with Mac and iOS | `crossPlatformReady: true`, `android.reviewTrack: production`, `android.productionRelease: "<version>"`, plus the operator's `ANDROID_PRODUCTION_AUTHORIZED=<version>` | Android must be approved for the same commit before anything publishes. No workflow sets `ANDROID_PRODUCTION_AUTHORIZED` yet, so Android's first production release needs its own reviewed workflow change. |
 | Android required on a testing track | `crossPlatformReady: true` with `internal`/`alpha`/`beta` | Refused when the release or candidate starts |
 
