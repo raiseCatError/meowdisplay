@@ -331,8 +331,8 @@ unless given `--apply`, and is safe to re-run.
 
 | Environment (branches) | Secrets | Variables | Who creates them |
 | --- | --- | --- | --- |
-| `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization), `SPARKLE_PRIVATE_KEY` | — | Owner; a Developer ID certificate in match via `fastlane match developer_id` (Account Holder) |
-| `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect API key, App Manager role) |
+| `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization; the .p8 base64-encoded, which `release-secrets.rb set` does for a raw key), `SPARKLE_PRIVATE_KEY` | — | Owner; the Developer ID identity imported into match (`match import`; Apple doesn't let an API key create Developer ID certificates), then `match developer_id` for the profiles |
+| `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect team API key, App Manager role, never Admin; `match appstore` made the Apple Distribution certificate with it) |
 | `android-upload` (`release/*`) | `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | `ANDROID_UPLOAD_CERT_SHA256` (the upload certificate registered with Play App Signing) | Owner (Play Console service account with release permissions; the upload key) |
 | `release-stores` (`main`, `release/*`; owner approval) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON`, `RELEASE_APP_PRIVATE_KEY` | — | Owner |
 | `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
@@ -347,6 +347,40 @@ job, with no environment or secret, checks the release state first, so a
 scheduled run with nothing in flight ends without an approval request. While a
 release is in flight every monitor run still needs the approval, because it can
 submit to App Store review and move the Play release between tracks.
+
+### Preflight from the default branch
+
+`release-dry-run.yml` needs a `release/X.Y.Z` branch, and pushing one starts a
+real candidate. `release-preflight.yml` (dispatch from the default branch) is
+the check to run first. It holds **no credential**: no environment, no secret,
+no App token, `contents: read` only, which `check-release-workflows.rb`
+enforces. It checks the release tooling and workflow rules, that every release
+environment is protected as its jobs expect, that bundle ids agree across
+`project.yml`, Fastfile and Matchfile, and that the published baseline apps
+and `project.yml` ship the same Sparkle public key.
+
+| Check | Preflight (main) | Needs a release context |
+| --- | --- | --- |
+| Tooling, workflow rules, environment protection, signing config, Sparkle **public** key | yes | |
+| release-state is App-only | `release-state-access.yml` | |
+| match decrypt (`MATCH_PASSWORD`), Sparkle **private** key, App Store Connect, Google Play | | `release-dry-run.yml` on `release/*` |
+
+Not done, on purpose. Any of these changes who can reach a credential and
+needs a reviewed decision:
+
+- *Adding `main` (or a new branch pattern) to `release-build`, `ios-upload` or
+  `android-upload`.* Every default-branch workflow, and anyone able to change
+  one through a merged PR, could then read the match password, which decrypts
+  the signing keys, and the Sparkle private key.
+- *A `release-preflight` environment holding copies of those secrets.* A second
+  place to protect, rotate and audit the same keys; the reviewer gate would be
+  the only barrier.
+- *Separate read-only credentials* for such an environment (an App Store
+  Connect key with a read-only role, a Play service account with view
+  permission only) are the acceptable variant if API reachability must be
+  proven before a candidate. They still can't prove the match password or the
+  Sparkle private key, which only the release-branch dry run (or the candidate)
+  can.
 
 Repository variables that switch automation on, each off until set:
 `RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
@@ -512,7 +546,7 @@ for MeowDisplay only.
   `generate_keys --account meowdisplay -f <file>` imports it.
 - To confirm which public key the Keychain holds:
   `generate_keys --account meowdisplay -p`. Every release checks the secret
-  against the key the PUBLISHED v1.20.0 apps ship (`check-sparkle-key.sh`).
+  against the key the PUBLISHED baseline apps ship (`baseline.env`, `check-sparkle-key.sh`).
 
 **Feed hosting.** Each release's signed feeds are assets of its GitHub
 Release, with enclosures at that tag's immutable

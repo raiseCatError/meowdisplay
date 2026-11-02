@@ -38,6 +38,17 @@ def required
   need
 end
 
+# Secrets the release code reads as base64 (fastlane's `is_key_content_base64`,
+# MeowRelease::AppStoreConnect): a raw .p8 given for one is encoded before it is
+# stored, so pasting the key file as-is still works in CI.
+BASE64_SECRETS = %w[APP_STORE_CONNECT_KEY_CONTENT].freeze
+
+def stored_value(name, value)
+  return value unless BASE64_SECRETS.include?(name) && value.lstrip.start_with?("-----BEGIN")
+
+  [value].pack("m0")
+end
+
 def gh(*args, stdin: nil)
   out, err, status = Open3.capture3("gh", *args, stdin_data: stdin)
   raise "gh #{args.first(3).join(' ')} failed: #{err.strip}" unless status.success?
@@ -50,6 +61,8 @@ def names(path, key)
 rescue RuntimeError
   []
 end
+
+return unless $PROGRAM_NAME == __FILE__
 
 case ARGV.shift
 when "status"
@@ -97,6 +110,9 @@ when "set"
       $stdin.read
     end
   abort "#{name}: empty value, nothing set" if value.strip.empty?
+  encoded = stored_value(name, value)
+  warn "#{name}: a PEM key; storing it base64-encoded, as the release code reads it" unless encoded.equal?(value)
+  value = encoded
   envs.each do |env|
     gh("secret", "set", name, "-R", REPO, "--env", env, stdin: value)
     puts "set #{name} in #{env}"

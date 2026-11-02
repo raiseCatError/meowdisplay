@@ -82,6 +82,17 @@ class WorkflowChecksTest < Minitest::Test
                   "release-monitor.yml" => ["    needs: pending\n", ""])
   end
 
+  def test_the_main_branch_preflight_holds_no_credential
+    msg = "must hold no credential"
+    f = "release-preflight.yml"
+    assert_caught(msg, f => ["  tooling:\n    runs-on: ubuntu-latest\n", "  tooling:\n    runs-on: ubuntu-latest\n    environment: release-build\n"])
+    assert_caught(msg, f => ["          GH_TOKEN: ${{ github.token }}\n          DEFAULT_BRANCH",
+                             "          GH_TOKEN: ${{ secrets.MATCH_PASSWORD }}\n          DEFAULT_BRANCH"])
+    assert_caught(msg, f => ["  published-baseline:\n    needs: tooling\n    runs-on: xcode-27\n    permissions:\n      contents: read\n",
+                             "  published-baseline:\n    needs: tooling\n    runs-on: xcode-27\n    permissions:\n      contents: write\n"])
+    assert_caught("must be workflow_dispatch only", f => ["on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"])
+  end
+
   def test_secrets_outside_the_release_workflows_are_caught
     assert_caught("pr-title.yml: uses secrets; only release workflows may",
                   "pr-title.yml" => ["secrets.GITHUB_TOKEN", "secrets.SPARKLE_PRIVATE_KEY"])
