@@ -15,7 +15,7 @@ stay exactly as they are.
 | `release/<version>` | One release's candidate for every platform (RELEASE.md). Created from an approved `dev` baseline; takes release fixes, QA findings and distribution preparation; fixes are forward-ported to `dev`. Every push builds a candidate; nothing publishes without approval. | Only admins create one (its own ruleset, so the admin bypass covers creation only); PR, required checks, no deletion or force-push. The signing environments allow `release/*` only, so this decides who can reach the signing keys |
 | `feature/*`, `fix/*`, `infra/*` | Short-lived work, by draft PR into `dev` (or a release branch for a release fix). | — |
 | `reference/opendisplay` | Read-only copy of the external project's `main`, moved only by `reference-sync.yml` (fast-forward, no tags). Never a base for features or releases. | Fast-forward only, never deleted, no bypass (temporary, until a dedicated App writes it) |
-| `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | **Closed**: no creation, update, deletion or force-push, no bypass, until the owner's dedicated release App exists and becomes its only bypass (release automation is off until then) |
+| `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | No creation, update, deletion or force-push by anyone except its only bypass, the owner's dedicated release App (`meowdisplay-release`, App ID 5582030), whose token the release workflows use |
 
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).

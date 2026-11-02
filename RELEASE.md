@@ -113,14 +113,16 @@ gate could never have opened.
 The CI pipeline has not completed a release yet. Every `release/2.0.0`
 candidate stopped in `plan` with "couldn't update release-state after 5
 attempts" ([run](https://github.com/raiseCatError/meowdisplay/actions/runs/41196833601)).
-The `release-state` ruleset stays closed until the release App exists
-(BRANCHING.md), and no environment holds its secrets yet. 2.0.0 was built
+At that time the `release-state` ruleset was closed to every writer; the
+release App now exists and is its only bypass (2026-11-02), but the signing and
+store secrets are not yet in their environments. 2.0.0 was built
 locally and published by two one-time workflows, `mac-stable-launch.yml` and
 `mac-stable-finalize.yml`, which ran only on their own `release/mac-2.0.0-*`
 branches and are now disabled in Actions. Before CI can release, the owner:
 
-1. Creates the [release GitHub App](#the-release-github-app) and makes it the
-   only bypass actor of the `release-state` ruleset.
+1. ~~Creates the [release GitHub App](#the-release-github-app) and makes it the
+   only bypass actor of the `release-state` ruleset.~~ Done 2026-11-02; prove
+   it with **Release state access check**.
 2. Moves the signing and store secrets into their environments and deletes
    the repository-level copies ([Credentials](#credentials)).
 3. Cuts `release/<version>` from `dev` and runs **Release dry run** on it
@@ -275,11 +277,11 @@ access as well.
 
 | Setting | Value |
 | --- | --- |
-| Type | Private GitHub App owned by `raiseCatError`, installed on `meowdisplay` only ("Only select repositories") |
+| Type | Private GitHub App `meowdisplay-release` (App ID 5582030, created 2026-11-02) owned by `raiseCatError`, installed on `meowdisplay` only ("Only select repositories") |
 | Repository permissions | Contents: read & write · Pull requests: read & write · Issues: read & write (release-please labels) · Metadata: read. Nothing else |
 | Webhook / events | Off / none |
 | Repository variables | `RELEASE_APP_ID`, `RELEASE_APP_CLIENT_ID` (identifiers, not secrets) |
-| Secret `RELEASE_APP_PRIVATE_KEY` | In `release-state`, `release-pr`, `release-stores`, `release-publish` and `website-update`, the environments whose jobs mint its token. Never at repository level |
+| Secret `RELEASE_APP_PRIVATE_KEY` | In `release-state`, `release-state-check`, `release-pr`, `release-stores`, `release-publish` and `website-update`, the environments whose jobs mint its token. Never at repository level |
 | Rulesets | The only bypass actor of `release-state` (`.github/rulesets/release-state.json`). No bypass on `main`, `dev`, `release/*` or tags |
 
 Create it with `scripts/release/create-release-app.sh`. `start` opens
@@ -301,6 +303,12 @@ inputs ask for, so the state token can't open PRs even though the App can.
   repository only, a `GITHUB_TOKEN` push is refused, and an App push is
   accepted. The App push updates `dry-run.json` at the branch root
   (`scripts/release/check-release-state-access.sh`).
+- **Release state access check** (`release-state-access.yml`) runs the same
+  script from `main`, on demand, without a `release/<version>` branch (pushing
+  one starts a real candidate). Its own environment, `release-state-check`,
+  allows `main` only and holds nothing but the App key. Run it after changing
+  the App, its installation or the ruleset:
+  `gh workflow run release-state-access.yml --ref main`.
 
 ## Credentials
 
@@ -330,6 +338,7 @@ unless given `--apply`, and is safe to re-run.
 | `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
 | `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | [The release App](#the-release-github-app) |
 | `release-state` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Jobs with no other environment that write the release state |
+| `release-state-check` (`main`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Only the release state access check |
 | `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY`, `RELEASE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
 
 Repository variables that switch automation on, each off until set:

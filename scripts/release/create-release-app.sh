@@ -21,7 +21,7 @@
 set -euo pipefail
 repo=${REPOSITORY:-raiseCatError/meowdisplay}
 # Every environment with a job that mints RELEASE_APP's token (check-release-workflows.rb).
-envs=(release-pr release-state release-stores release-publish website-update)
+envs=(release-pr release-state release-state-check release-stores release-publish website-update)
 
 case "${1:-}" in
 start)

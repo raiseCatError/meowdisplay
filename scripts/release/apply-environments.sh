@@ -25,6 +25,7 @@ environments=(
   "release-pr|release/*|no"
   "website-update|release/*|no"
   "release-state|release/*|no"
+  "release-state-check|main|no"
 )
 for entry in "${environments[@]}"; do
   IFS='|' read -r name branches approval <<< "$entry"

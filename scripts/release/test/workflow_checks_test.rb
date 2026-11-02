@@ -56,6 +56,22 @@ class WorkflowChecksTest < Minitest::Test
                   "release-dry-run.yml" => ["run: scripts/release/check-release-state-access.sh", "run: true"])
   end
 
+  def test_the_access_check_stays_narrow
+    f = "release-state-access.yml"
+    assert_caught("#{f}: must run only on workflow_dispatch",
+                  f => ["on:\n  workflow_dispatch:\n", "on:\n  workflow_dispatch:\n  push:\n"])
+    assert_caught("#{f}: its job must use the release-state-check environment",
+                  f => ["environment: release-state-check", "environment: release-state"])
+    assert_caught("#{f}: its first step must reject any ref but the default branch",
+                  f => ['if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then', "if false; then"])
+    assert_caught("#{f}: must check that release-state-check allows main only",
+                  f => ["release-state-check --branches main", "release-state-check --branches 'release/*'"])
+    assert_caught("#{f}: its only secret is the release App key",
+                  f => ["RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}", "RELEASE_APP_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}"])
+    assert_caught("#{f}: must only run check-release-state-access.sh",
+                  f => ["run: scripts/release/check-release-state-access.sh", "run: scripts/release/check-release-state-access.sh && scripts/release/release-state.sh 9.9.9 init STATE"])
+  end
+
   def test_secrets_outside_the_release_workflows_are_caught
     assert_caught("pr-title.yml: uses secrets; only release workflows may",
                   "pr-title.yml" => ["secrets.GITHUB_TOKEN", "secrets.SPARKLE_PRIVATE_KEY"])

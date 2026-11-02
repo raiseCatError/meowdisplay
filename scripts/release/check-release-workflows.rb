@@ -106,7 +106,7 @@ REPO_ADMIN = %r{gh api[^\n]*-X\s*(PUT|PATCH|POST|DELETE)[^\n]*(rulesets|environm
 REFERENCE_MERGE = %r{(git (merge|cherry-pick|rebase)[^\n]*reference)|(gh pr (create|merge)[^\n]*reference/opendisplay)}.freeze
 
 RELEASE_WORKFLOWS = %w[release-candidate.yml release-mac.yml release-ios.yml release-android.yml release-publish.yml
-                       release-pr.yml release-dry-run.yml release-monitor.yml].freeze
+                       release-pr.yml release-dry-run.yml release-monitor.yml release-state-access.yml].freeze
 SCHEDULE_SWITCHES = { "release-monitor.yml" => "RELEASE_AUTOMATION", "reference-sync.yml" => "REFERENCE_SYNC",
                       "repository-guard.yml" => "REPOSITORY_GUARD" }.freeze
 
@@ -367,6 +367,35 @@ if (doc = load("release-dry-run.yml"))
   rs = doc.dig("jobs", "release-state")
   unless rs && env_name(rs) == "release-state" && steps(rs).any? { |s| run_text(s).include?("check-release-state-access.sh") }
     err(name, "must prove in a release-state job that only the release App writes release-state")
+  end
+end
+
+# The access check runs one job, from the default branch, in its own environment, whose
+# only secret is the release App key; it writes nothing but the access check's record.
+if (doc = load("release-state-access.yml"))
+  name = "release-state-access.yml"
+  common(name, doc)
+  only_trigger(name, doc, "workflow_dispatch")
+  secrets_behind_environments(name, doc, %w[release-state-check])
+  no_publishing(name, doc)
+  jobs = doc.fetch("jobs", {})
+  job = jobs.values.first || {}
+  err(name, "must have exactly one job") unless jobs.length == 1
+  err(name, "its job must use the release-state-check environment") unless env_name(job) == "release-state-check"
+  first = run_text(steps(job).first || {})
+  unless first.include?("exit 1") && first.include?('"refs/heads/$DEFAULT_BRANCH"')
+    err(name, "its first step must reject any ref but the default branch")
+  end
+  unless steps(job).any? { |s| run_text(s).include?("check-environment.sh release-state-check --branches main") }
+    err(name, "must check that release-state-check allows main only")
+  end
+  unless job.to_s.scan(/secrets\.(\w+)/).flatten.uniq == ["RELEASE_APP_PRIVATE_KEY"]
+    err(name, "its only secret is the release App key")
+  end
+  runs = steps(job).map { |s| run_text(s) }.reject(&:empty?)
+  unless runs.any? { |t| t.include?("check-release-state-access.sh") } &&
+         runs.none? { |t| t.match?(/release-state\.sh|meow-release|fastlane|xcodebuild|gradle/) }
+    err(name, "must only run check-release-state-access.sh")
   end
 end
 
