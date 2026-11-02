@@ -101,6 +101,7 @@ begin
     path = ARGV.shift
     o = parse(ARGV, :config, :version)
     config = Config.load(o.fetch(:config))
+    config.check_publishable!
     if File.exist?(path)
       puts "release state exists: #{path}"
     else
@@ -112,7 +113,7 @@ begin
     path = ARGV.shift
     o = parse(ARGV, :sha, :run_id, :config)
     state = load_state(path)
-    platforms = o[:config] && Config.load(o[:config]).required_platforms
+    platforms = o[:config] && Config.load(o[:config]).tap(&:check_publishable!).required_platforms
     changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i, required_platforms: platforms)
     save(state, path)
     puts changed ? "candidate #{o[:sha][0, 12]}" : "candidate unchanged (re-run of #{o[:sha][0, 12]})"

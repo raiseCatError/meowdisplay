@@ -1,6 +1,6 @@
 {
   "publishMode": "manual-final-approval",
-  "crossPlatformReady": true,
+  "crossPlatformReady": false,
   "requiredPlatforms": ["mac", "ios", "android"],
   "mac": {
     "products": ["sender", "receiver"]

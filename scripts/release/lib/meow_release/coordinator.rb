@@ -26,8 +26,22 @@ module MeowRelease
 
     def tick
       monitor_ios if @state.required_platforms.include?("ios")
-      monitor_android if @state.required_platforms.include?("android")
+      if @state.required_platforms.include?("android")
+        monitor_android
+      elsif @config.android_testing_release?
+        follow_android_testing
+      end
       @actions
+    end
+
+    # An Android testing release never holds Mac and iOS: missing Play
+    # credentials or a Play failure is reported, and the pass carries on.
+    def follow_android_testing
+      return note("android: testing release not followed (Google Play credentials are not configured)") unless @play
+
+      monitor_android
+    rescue Error => e
+      note("android: testing release: #{e.message}")
     end
 
     # MARK: - iOS (App Store Connect)

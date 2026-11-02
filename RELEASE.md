@@ -94,9 +94,42 @@ blockers and what is waiting on a person.
 - `auto-publish-after-approval` (future opt-in): needs **both** that config value on the release branch **and** the repository variable `RELEASE_PUBLISH_MODE=auto-publish-after-approval`; then the monitor starts publication once every required platform is approved for the branch head. Either switch alone keeps the approval.
 
 **What the release requires** (`requiredPlatforms`, `crossPlatformReady`):
-Mac and iOS always; Android once `crossPlatformReady` is `true`. Until then
-an Android candidate is built, uploaded and reported, but doesn't hold the
-release.
+Mac and iOS always; Android only when `crossPlatformReady` is `true`.
+Otherwise an Android candidate is built, uploaded and reported, but doesn't
+hold the release. A required platform must be able to go public. An Android
+build on a testing track never counts as public (`verify-live` refuses it),
+so `meow-release init`/`candidate` refuse to start a release that requires
+Android on a testing track. 2.0.0's configuration did exactly that, and its
+gate could never have opened.
+
+| Release | `.github/release-config.json` on `release/<version>` | What happens |
+| --- | --- | --- |
+| Mac and iOS stable, Android testing (the default on `dev`) | `crossPlatformReady: false`, `android.reviewTrack: alpha` | Mac and iOS pass the gate and publish. The Android candidate is built, signed and uploaded to internal testing. The monitor sends it to the `alpha` (closed testing) review track and follows Play review. It never holds Mac/iOS publication and never appears on the website as public. Missing Play credentials or a Play error is reported and doesn't stop the pass. |
+| Android production, released with Mac and iOS | `crossPlatformReady: true`, `android.reviewTrack: production`, `android.productionRelease: "<version>"`, plus the operator's `ANDROID_PRODUCTION_AUTHORIZED=<version>` | Android must be approved for the same commit before anything publishes. No workflow sets `ANDROID_PRODUCTION_AUTHORIZED` yet, so Android's first production release needs its own reviewed workflow change. |
+| Android required on a testing track | `crossPlatformReady: true` with `internal`/`alpha`/`beta` | Refused when the release or candidate starts |
+
+### Before the next release: what the pipeline still lacks
+
+The CI pipeline has not completed a release yet. Every `release/2.0.0`
+candidate stopped in `plan` with "couldn't update release-state after 5
+attempts" ([run](https://github.com/raiseCatError/meowdisplay/actions/runs/41196833601)).
+At that time the `release-state` ruleset was closed to every writer; the
+release App now exists and is its only bypass (2026-11-02), but the signing and
+store secrets are not yet in their environments. 2.0.0 was built
+locally and published by two one-time workflows, `mac-stable-launch.yml` and
+`mac-stable-finalize.yml`, which ran only on their own `release/mac-2.0.0-*`
+branches and are now disabled in Actions. Before CI can release, the owner:
+
+1. ~~Creates the [release GitHub App](#the-release-github-app) and makes it the
+   only bypass actor of the `release-state` ruleset.~~ Done 2026-11-02; prove
+   it with **Release state access check**.
+2. Moves the signing and store secrets into their environments and deletes
+   the repository-level copies ([Credentials](#credentials)).
+3. Cuts `release/<version>` from `dev` and runs **Release dry run** on it
+   (`gh workflow run release-dry-run.yml --ref release/<version>`). It names
+   anything still missing without building or publishing.
+
+Until all three are done, use the [manual path](#manual-path-without-ci-credentials).
 
 **Scheduled workflows** (`release-monitor`, `repository-guard`, `reference-sync`)
 run only from the default branch, `main`, and only while their repository
@@ -209,6 +242,74 @@ use the stable `latest/download` URLs, which switch with the GitHub
 Release). Until that change lands, `update-website.sh` refuses and the
 website step reports a blocker; nothing else is affected.
 
+## Homebrew
+
+Nothing in this repository updates Homebrew. The
+[`raiseCatError/homebrew-tap`](https://github.com/raiseCatError/homebrew-tap)
+`autobump.yml` runs daily (05:55 UTC), notices the new GitHub Release
+through each cask's `livecheck`, and opens a PR bumping the `meowdisplay`
+and `meowdisplay-receiver` casks (version and SHA-256). The two
+repositories share no token or secret.
+
+The tap's CI runs only style checks and an offline tap audit, so verify a
+bump locally before merging it:
+
+```sh
+brew update
+brew audit --cask --strict --online raiseCatError/tap/meowdisplay raiseCatError/tap/meowdisplay-receiver
+brew upgrade --cask meowdisplay   # or a fresh: brew install --cask raiseCatError/tap/meowdisplay
+spctl -a -vv /Applications/MeowDisplay.app   # "Notarized Developer ID"
+```
+
+Homebrew users get a release only after the bump PR is merged. To hold
+back a bad release, close that PR, or revert the casks' `version` and
+`sha256` in the tap.
+
+## The release GitHub App
+
+Only the release App writes the `release-state` branch. Its ruleset refuses
+every other writer, `GITHUB_TOKEN` included, so a release job that changes the
+state mints the App's token first. That token is limited to `contents: write`
+on this repository (`state-token` steps; `check-release-workflows.rb` enforces
+it) and is passed to `release-state.sh` as `RELEASE_STATE_TOKEN`. The release
+PR and the `main` promotion PR use the same App with pull-request and issue
+access as well.
+
+| Setting | Value |
+| --- | --- |
+| Type | Private GitHub App `meowdisplay-release` (App ID 5582030, created 2026-11-02) owned by `raiseCatError`, installed on `meowdisplay` only ("Only select repositories") |
+| Repository permissions | Contents: read & write · Pull requests: read & write · Issues: read & write (release-please labels) · Metadata: read. Nothing else |
+| Webhook / events | Off / none |
+| Repository variables | `RELEASE_APP_ID`, `RELEASE_APP_CLIENT_ID` (identifiers, not secrets) |
+| Secret `RELEASE_APP_PRIVATE_KEY` | In `release-state`, `release-state-check`, `release-pr`, `release-stores`, `release-publish` and `website-update`, the environments whose jobs mint its token. Never at repository level |
+| Rulesets | The only bypass actor of `release-state` (`.github/rulesets/release-state.json`). No bypass on `main`, `dev`, `release/*` or tags |
+
+Create it with `scripts/release/create-release-app.sh`. `start` opens
+GitHub's pre-filled "Create GitHub App" page. `finish <code>` stores the
+variables and the key without printing or saving the key. Then install the App
+from the link it prints. A token covers only what the job's `permission-*`
+inputs ask for, so the state token can't open PRs even though the App can.
+
+**Diagnosing "couldn't update release-state after 5 attempts":**
+- "no RELEASE_STATE_TOKEN": the job didn't mint the App token. Look at the
+  `Release state token` step: either `RELEASE_APP_CLIENT_ID`/`RELEASE_APP_PRIVATE_KEY`
+  is missing, or the App isn't installed on the repository.
+- Otherwise the push was refused: check that the App is the `release-state`
+  ruleset's bypass actor (`gh api repos/raiseCatError/meowdisplay/rulesets`)
+  and that its installation still has Contents: read & write.
+- The branch itself: `git fetch origin release-state && git show FETCH_HEAD:releases/<version>.json`.
+- **Release dry run**'s `release-state` job proves the setup without touching
+  a release record. It checks three things: the App's token reaches this
+  repository only, a `GITHUB_TOKEN` push is refused, and an App push is
+  accepted. The App push updates `dry-run.json` at the branch root
+  (`scripts/release/check-release-state-access.sh`).
+- **Release state access check** (`release-state-access.yml`) runs the same
+  script from `main`, on demand, without a `release/<version>` branch (pushing
+  one starts a real candidate). Its own environment, `release-state-check`,
+  allows `main` only and holds nothing but the App key. Run it after changing
+  the App, its installation or the ruleset:
+  `gh workflow run release-state-access.yml --ref main`.
+
 ## Credentials
 
 Every secret lives in one protected environment; jobs check the
@@ -216,7 +317,14 @@ environment's protection (`check-environment.sh`) before using a secret,
 because a job naming a missing environment silently gets an unprotected one.
 `Release dry run` reports what is missing, by name only.
 
-`scripts/release/apply-environments.sh` creates and protects the seven
+`scripts/release/release-secrets.rb status` lists, from the workflows themselves,
+which secret and variable each environment needs and whether GitHub has it
+(names only). The owner sets a secret with `release-secrets.rb set NAME`,
+reading from a hidden prompt, stdin or `--file PATH`. The value goes into
+exactly the environments whose jobs use it, through `gh`'s stdin; it's never
+printed or put on a command line.
+
+`scripts/release/apply-environments.sh` creates and protects the eight
 environments below (branch patterns, owner approval where marked, no admin
 bypass) and then checks each one; it never touches secrets. It prints the plan
 unless given `--apply`, and is safe to re-run.
@@ -226,10 +334,19 @@ unless given `--apply`, and is safe to re-run.
 | `release-build` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_GIT_URL`, `MATCH_DEPLOY_KEY`, `MATCH_PASSWORD`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_CONTENT` (notarization), `SPARKLE_PRIVATE_KEY` | — | Owner; a Developer ID certificate in match via `fastlane match developer_id` (Account Holder) |
 | `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect API key, App Manager role) |
 | `android-upload` (`release/*`) | `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | `ANDROID_UPLOAD_CERT_SHA256` (the upload certificate registered with Play App Signing) | Owner (Play Console service account with release permissions; the upload key) |
-| `release-stores` (default branch, `release/*`) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON` | — | Owner |
-| `release-publish` (`release/*`) | none | — | Owner adds themselves as **required reviewer** |
-| `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App (Contents, Pull requests, Issues: read & write) installed on this repository only |
-| `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
+| `release-stores` (`main`, `release/*`; owner approval) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON`, `RELEASE_APP_PRIVATE_KEY` | — | Owner |
+| `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
+| `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | [The release App](#the-release-github-app) |
+| `release-state` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Jobs with no other environment that write the release state |
+| `release-state-check` (`main`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Only the release state access check |
+| `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY`, `RELEASE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
+
+The release monitor asks for the `release-stores` approval only while a release
+is unfinished (a candidate exists and isn't published): its read-only `pending`
+job, with no environment or secret, checks the release state first, so a
+scheduled run with nothing in flight ends without an approval request. While a
+release is in flight every monitor run still needs the approval, because it can
+submit to App Store review and move the Play release between tracks.
 
 Repository variables that switch automation on, each off until set:
 `RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
@@ -267,9 +384,11 @@ edited copy.
 `release-pr.yml` (manual, from `release/<version>`) runs release-please
 with the release App's token and `skip-github-release`: it opens or updates
 the release PR (CHANGELOG, `version.txt`, `.release-please-manifest.json`)
-and never tags or releases. `release-please-config.json`'s `release-as:
-2.0.0` makes the next PR propose 2.0.0; delete it in the follow-up, or every
-later PR proposes 2.0.0 again. The repository inherited the OpenDisplay
+and never tags or releases. Release-please proposes the next version from
+the Conventional Commit titles since `v2.0.0`. To force a version, set
+`"release-as"` under `packages["."]` in `release-please-config.json` on the
+release branch only, and remove it after that release. The `release-as:
+2.0.0` used for 2.0.0 was removed afterwards. The repository inherited the OpenDisplay
 reference's old tags (`v0.1.0`–`v1.19.0`); MeowDisplay's own releases start
 at `v1.20.0`, the candidate refuses a version whose tag exists, and the
 reference sync never imports tags.

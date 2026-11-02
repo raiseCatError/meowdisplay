@@ -137,6 +137,52 @@ jobs:
           RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
         run: scripts/release/report-missing.sh --fail RELEASE_APP_PRIVATE_KEY RELEASE_APP_CLIENT_ID
 
+  # The only job here that writes: it proves the release-state branch takes the release
+  # App's token and refuses GITHUB_TOKEN (contents: write is for that refused attempt).
+  release-state:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: release-state
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        id: protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-state
+      - name: Missing secrets and variables
+        env:
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+        run: scripts/release/report-missing.sh --fail RELEASE_APP_PRIVATE_KEY RELEASE_APP_CLIENT_ID
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      # Not restricted to this repository (owner, no repositories), metadata only: lists
+      # every repository the installation can reach, which must be exactly this one.
+      - name: Installation scope token (metadata only)
+        id: scope-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-metadata: read
+      - name: Only the release App writes release-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
+          INSTALLATION_SCOPE_TOKEN: ${{ steps.scope-token.outputs.token }}
+        run: scripts/release/check-release-state-access.sh
+
   ios-upload:
     needs: guard
     runs-on: ubuntu-latest

@@ -95,5 +95,27 @@ module MeowRelease
     def android_rollout
       android["rollout"]
     end
+
+    # Android takes part as a testing release: its candidate is uploaded,
+    # sent to its testing review track and followed, but never holds the
+    # release and is never presented as public.
+    def android_testing_release?
+      !required_platforms.include?("android") && TESTING_TRACKS.include?(android["reviewTrack"])
+    end
+
+    # A platform the release requires must be able to reach the public.
+    # Android on a testing track reaches testers only, and publication
+    # refuses it (Coordinator#live_approval_blockers), so requiring Android
+    # there would hold the Mac and iOS releases forever. Refused when a
+    # release or candidate starts, instead of after every store approved it.
+    def check_publishable!
+      track = android["reviewTrack"]
+      return unless required_platforms.include?("android") && TESTING_TRACKS.include?(track)
+
+      raise Error, "Android is required (crossPlatformReady) but is reviewed on the #{track} testing track, " \
+                   "which never counts as public, so the release could not publish. For an Android testing " \
+                   "release set crossPlatformReady to false; for Android production use reviewTrack production " \
+                   "with its separate authorization (RELEASE.md)"
+    end
   end
 end
