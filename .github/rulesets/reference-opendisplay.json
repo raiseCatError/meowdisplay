@@ -1,0 +1,22 @@
+{
+  "name": "External reference: fast-forward only, never deleted (temporary)",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/reference/opendisplay"
+      ],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    }
+  ]
+}

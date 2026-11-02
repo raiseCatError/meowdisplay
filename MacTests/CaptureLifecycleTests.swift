@@ -1,0 +1,169 @@
+import XCTest
+
+final class CaptureLifecycleTests: XCTestCase {
+    func testInputIsAllowedWhileRunningAndRecoveryButBlockedDuringPause() {
+        var state = CaptureLifecycleState()
+        XCTAssertTrue(state.allowsInput) // Initial capture/recovery window.
+        XCTAssertTrue(state.captureStarted())
+        XCTAssertTrue(state.allowsInput)
+        XCTAssertTrue(state.requestPause())
+        XCTAssertFalse(state.allowsInput)
+        XCTAssertTrue(state.pauseCompleted())
+        XCTAssertFalse(state.allowsInput)
+        XCTAssertTrue(state.requestResume())
+        XCTAssertFalse(state.allowsInput)
+        XCTAssertTrue(state.ownsCaptureStop)
+        XCTAssertTrue(state.captureStarted())
+        XCTAssertTrue(state.allowsInput)
+        XCTAssertFalse(state.ownsCaptureStop)
+    }
+
+    func testUnexpectedStopRecoversButIntentionalPauseDoesNotRetry() {
+        var running = CaptureLifecycleState()
+        XCTAssertTrue(running.captureStarted())
+        XCTAssertTrue(running.unexpectedStop())
+        XCTAssertEqual(running.phase, .recovering)
+        XCTAssertTrue(running.shouldRetryCapture)
+
+        var paused = CaptureLifecycleState()
+        XCTAssertTrue(paused.requestPause())
+        XCTAssertTrue(paused.pauseCompleted())
+        XCTAssertFalse(paused.unexpectedStop())
+        XCTAssertFalse(paused.shouldRetryCapture)
+
+        var stopped = CaptureLifecycleState()
+        stopped.stop()
+        XCTAssertTrue(stopped.ownsCaptureStop)
+        XCTAssertFalse(stopped.unexpectedStop())
+        XCTAssertFalse(stopped.shouldRetryCapture)
+    }
+
+    func testRecoveryBudgetIsBoundedAndResettable() {
+        var budget = CaptureRecoveryBudget(maximumAttempts: 2)
+        XCTAssertTrue(budget.recordFailure())
+        XCTAssertFalse(budget.recordFailure())
+        budget.reset()
+        XCTAssertEqual(budget.failedAttempts, 0)
+        XCTAssertTrue(budget.recordFailure())
+    }
+
+    func testRecoveryReattachesWhenTargetDisplayStillExists() {
+        XCTAssertEqual(CaptureRecoveryPath.resolve(mode: .mirror, targetDisplayAvailable: true),
+                       .reattachMirrorCapture)
+        XCTAssertEqual(CaptureRecoveryPath.resolve(mode: .mirror, targetDisplayAvailable: false),
+                       .rebuildMirrorPipeline)
+        XCTAssertEqual(CaptureRecoveryPath.resolve(mode: .extend, targetDisplayAvailable: true),
+                       .reattachExtendCapture)
+        XCTAssertEqual(CaptureRecoveryPath.resolve(mode: .extend, targetDisplayAvailable: false),
+                       .rebuildExtendPipeline)
+    }
+
+    func testGenerationGateAcceptsMatchingGeneration() {
+        XCTAssertFalse(GenerationGate.isStale(capturedAt: 4, current: 4))
+    }
+
+    func testGenerationGateRejectsSupersededGeneration() {
+        // A topology health check captured generation 4 but a newer topology
+        // event bumped the counter to 5 before the check completed — it must
+        // recognize itself as stale rather than acting on outdated readings.
+        XCTAssertTrue(GenerationGate.isStale(capturedAt: 4, current: 5))
+    }
+
+    func testSuccessfulModeReplacementSynchronizesStalePausedReceiverToRunning() {
+        var oldSession = CaptureLifecycleState()
+        XCTAssertTrue(oldSession.captureStarted())
+        XCTAssertTrue(oldSession.requestPause())
+        XCTAssertEqual(oldSession.receiverDisplayState, .paused)
+
+        // A mode switch creates a replacement sender while the receiver keeps
+        // the old session's last semantic display state until told otherwise.
+        var replacementSession = CaptureLifecycleState()
+        XCTAssertTrue(replacementSession.captureStarted())
+        XCTAssertEqual(replacementSession.receiverDisplayState, .running)
+    }
+}
+
+final class DisplayStateTests: XCTestCase {
+    func testDisplayStateDecodesKnownAdditiveMessagesAndIgnoresUnknownValues() {
+        XCTAssertEqual(DisplayState.decode(messageType: "displayState", value: "paused"), .paused)
+        XCTAssertEqual(DisplayState.decode(messageType: "displayState", value: "running"), .running)
+        XCTAssertNil(DisplayState.decode(messageType: "gesture", value: "paused"))
+        XCTAssertNil(DisplayState.decode(messageType: "displayState", value: "stalled"))
+        XCTAssertNil(DisplayState.decode(messageType: "displayState", value: nil))
+    }
+}
+
+final class VideoStateUpdateTests: XCTestCase {
+    func testDecodesStateAndRetainedMappingGeometry() {
+        XCTAssertEqual(VideoStateUpdate(message: [
+            "type": WireMessage.videoState,
+            "enabled": false,
+            "width": 2556,
+            "height": 1179,
+        ]), VideoStateUpdate(enabled: false, width: 2556, height: 1179))
+    }
+
+    func testToleratesGeometryThatIsNotKnownYet() {
+        XCTAssertEqual(VideoStateUpdate(message: [
+            "type": WireMessage.videoState,
+            "enabled": false,
+            "width": 0,
+            "height": 0,
+        ]), VideoStateUpdate(enabled: false, width: nil, height: nil))
+    }
+
+    func testRejectsWrongTypeOrMissingAuthoritativeState() {
+        XCTAssertNil(VideoStateUpdate(message: ["type": "displayState", "enabled": false]))
+        XCTAssertNil(VideoStateUpdate(message: ["type": WireMessage.videoState]))
+    }
+}
+
+final class VideoModePolicyTests: XCTestCase {
+    func testVideoOffNormalizesAndRestrictsModeToMirror() {
+        XCTAssertEqual(VideoModePolicy.normalized(mode: .extend, videoEnabled: false), .mirror)
+        XCTAssertTrue(VideoModePolicy.allows(.mirror, videoEnabled: false))
+        XCTAssertFalse(VideoModePolicy.allows(.extend, videoEnabled: false))
+    }
+
+    func testVideoOnDoesNotRestoreExtendImplicitly() {
+        let off = VideoModePolicy.normalized(mode: .extend, videoEnabled: false)
+        XCTAssertEqual(VideoModePolicy.normalized(mode: off, videoEnabled: true), .mirror)
+    }
+}
+
+final class NativeAppGestureProtocolTests: XCTestCase {
+    func testContinuousLifecycleRequiresBeginAndCleansUp() throws {
+        var state = NativeAppGestureSessionState()
+        let changed = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "changed", "delta": 0.1,
+        ]))
+        XCTAssertFalse(state.accept(changed))
+        let began = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "began", "delta": 0,
+        ]))
+        XCTAssertTrue(state.accept(began))
+        XCTAssertTrue(state.accept(changed))
+        let ended = try XCTUnwrap(NativeAppGestureUpdate(message: [
+            "type": WireMessage.nativeAppGesture, "kind": "magnify",
+            "phase": "ended", "delta": 0,
+        ]))
+        XCTAssertTrue(state.accept(ended))
+        XCTAssertTrue(state.active.isEmpty)
+    }
+
+    func testMagnifyAndRotateCanRemainActiveSimultaneously() throws {
+        var state = NativeAppGestureSessionState()
+        for kind in ["magnify", "rotate"] {
+            let update = try XCTUnwrap(NativeAppGestureUpdate(message: [
+                "type": WireMessage.nativeAppGesture, "kind": kind,
+                "phase": "began", "delta": 0,
+            ]))
+            XCTAssertTrue(state.accept(update))
+        }
+        XCTAssertEqual(state.active, Set([.magnify, .rotate]))
+        state.cancelAll()
+        XCTAssertTrue(state.active.isEmpty)
+    }
+}

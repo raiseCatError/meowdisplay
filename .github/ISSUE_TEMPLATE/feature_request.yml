@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an idea or improvement for MeowDisplay.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security or privacy vulnerabilities must not be filed as issues — use the **Security** tab → **Report a vulnerability**.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

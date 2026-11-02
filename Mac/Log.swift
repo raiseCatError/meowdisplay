@@ -14,20 +14,25 @@ import Foundation
 /// the *oldest* bytes and discard everything recent, which is backwards: when a
 /// report comes in, the useful window is what happened just before the problem.
 enum Log {
-    /// `~/Library/Logs/OpenDisplay`. The platform convention, and deliberately
+    /// `~/Library/Logs/MeowDisplay`. The platform convention, and deliberately
     /// not /tmp: macOS clears /tmp on reboot, and rebooting is the first thing
     /// someone tries before filing a bug, so a log there is gone exactly when
     /// it's wanted. Living here also means Console.app lists it under Log
     /// Reports without us doing anything.
     ///
-    /// The folder is named after the app: the sender logs to `OpenDisplay`,
+    /// The folder is named after the app: the sender logs to `MeowDisplay`,
     /// the receiver app (a separate bundle sharing this file) to
-    /// `OpenDisplay Receiver`, so running both on one Mac keeps two logs.
-    private static let directory: URL = {
+    /// `MeowDisplay Receiver`, so running both on one Mac keeps two logs.
+    /// Exposed so other DEBUG-only diagnostic writers (`AudioCaptureEncoder`'s
+    /// PCM/AAC A/B dumps) resolve to the SAME folder this log file lives in,
+    /// rather than an independently hardcoded path that can silently drift
+    /// out of sync with it — see `AudioCaptureEncoder.makeDumpFile`'s
+    /// forensic note for what happened the one time that drift occurred.
+    static let directory: URL = {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
         let product = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? ""
-        let folder = product.hasPrefix("OpenDisplay") ? product : "OpenDisplay"
+        let folder = product.hasPrefix("MeowDisplay") ? product : "MeowDisplay"
         return library.appendingPathComponent("Logs/\(folder)", isDirectory: true)
     }()
 
@@ -51,7 +56,7 @@ enum Log {
     }()
 
     static func info(_ message: String) {
-        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        let line = "[\(formatter.string(from: Date()))] \(LogRedaction.redact(message))\n"
         print(line, terminator: "")
         guard let data = line.data(using: .utf8) else { return }
         queue.async { writer.append(data) }
@@ -79,7 +84,19 @@ enum Log {
 /// Stateful file sink behind `Log`. Calls are serialized by `Log.queue` in the
 /// app; keeping the sink synchronous also makes its filesystem behavior
 /// directly testable.
-final class RotatingLogFile {
+///
+/// `@unchecked Sendable`: the only mutable stored state is `handle` and
+/// `lockHandle`. Every read and write of both is confined to the body
+/// closure passed to `withExclusiveLock`, which holds `processLock`
+/// (`NSLock`) for the duration — including the `currentLockHandle()` call
+/// that first populates `lockHandle`, itself made only after `processLock`
+/// is acquired. Every other stored property (`directory`, `fileURL`,
+/// `rotatedURL`, `maxBytes`, `lockURL`, `fileManager`, `reportError`) is a
+/// `let` fixed at `init` and never reassigned. No handle or other reference
+/// to the locked state escapes a `withExclusiveLock` body. `processLock` is
+/// `static`, so it also serializes access across independent instances,
+/// which is required here since the file lock it guards is process-wide.
+final class RotatingLogFile: @unchecked Sendable {
     typealias ErrorReporter = (String) -> Void
     private static let processLock = NSLock()
 
@@ -254,6 +271,6 @@ final class RotatingLogFile {
     }
 
     private static func reportToStandardError(_ message: String) {
-        try? FileHandle.standardError.write(contentsOf: Data("OpenDisplay log: \(message)\n".utf8))
+        try? FileHandle.standardError.write(contentsOf: Data("MeowDisplay log: \(message)\n".utf8))
     }
 }

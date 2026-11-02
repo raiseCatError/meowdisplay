@@ -1,0 +1,644 @@
+// Compiled into BOTH the Mac and iOS targets (see project.yml `sources`).
+// Shared but NOT Foundation-only (unlike Protocol.swift): imports CryptoKit,
+// Security, X509, SwiftASN1.
+
+import Foundation
+import CryptoKit
+import Security
+import X509
+import SwiftASN1
+
+/// Own TLS identity + per-peer SPKI pin store. Shared by both targets.
+///
+/// All Keychain access uses the data-protection keychain (TN3137) under the
+/// `WireCrypto.*` namespace. Thread-safe: every public method is internally
+/// synchronized (private `NSLock`s); `allPinnedPeerSPKIs()` reads ONLY the
+/// in-memory snapshot (no Keychain I/O) so it is safe to call from a TLS
+/// verify block.
+///
+/// Runtime caveat (not a compile-time concern): on macOS, the data-protection
+/// keychain requires the app to be signed with an application identifier
+/// (TN3137). Normal team-signed Debug/Release builds are fine; a fully
+/// unsigned build (`DEVELOPMENT_TEAM` unset, as in CI) will get
+/// `errSecMissingEntitlement` at runtime. Every method below fails soft
+/// (nil / false / empty, logged) in that case — never crashes.
+/// `@unchecked Sendable`: the only mutable stored property is `pinState`.
+/// Every read (`allPinnedPeerSPKIs`, `peerID(forSPKI:)`) and write
+/// (`refreshSnapshot`, `finishPinMutation`) of it is bracketed by
+/// `snapshotLock.lock()` / `snapshotLock.unlock()`, never held across
+/// Keychain I/O, and both reads copy out value types (`[Data]`, `String?`),
+/// so nothing protected escapes the lock. `pinWriteLock` protects no stored
+/// state: it serializes Keychain pin mutations (`setPin`, `forget`,
+/// `purgeAll`) against each other, each through its snapshot commit, while
+/// `PinSnapshotState`'s revision stops an older lock-free refresh read from
+/// overwriting a newer mutation's commit. All Keychain-facing identity
+/// helpers (`queryIdentity`, `queryInstallID`, `generateAndStoreIdentity`,
+/// `deletePartialIdentityItems`, `spkiFromCertificate`) touch only local
+/// state and the Keychain APIs — never `pinState` — so their
+/// `identityLock`-held contract (documented at each call site) exists only
+/// to serialize Keychain generation, not to protect additional shared state.
+/// Lock order: `pinWriteLock` → `snapshotLock`; `identityLock` is never held
+/// together with either. All three locks and `shared` are `let`s; `shared`'s
+/// one-time initialization is guaranteed by Swift's `static let` semantics.
+final class TrustStore: PeerTrustStoring, @unchecked Sendable {
+    /// Which Keychain items a store owns. Each namespace is a complete,
+    /// independent identity + pin set: nothing pinned in one authorizes a
+    /// peer in another.
+    struct Namespace: Equatable, Sendable {
+        let identityLabel: String
+        let pinService: String
+
+        /// The original names — every existing install's identity and pins.
+        static let standard = Namespace(identityLabel: WireCrypto.identityKeychainLabel,
+                                        pinService: WireCrypto.pinKeychainService)
+
+        /// The unified Mac app's receiver role ("Use This Mac as a Display"):
+        /// its own identity and pins, so pairing a Mac as this Mac's receiver
+        /// never makes it a trusted sender here, or the other way round —
+        /// the same separation the two standalone apps had.
+        static let macReceiverRole = Namespace(identityLabel: WireCrypto.identityKeychainLabel + ".receiver",
+                                               pinService: WireCrypto.pinKeychainService + ".receiver")
+    }
+
+    /// The sender's (and the iPhone/iPad app's) store: unchanged names, so
+    /// existing identities and pins are found exactly as before.
+    static let shared = TrustStore(namespace: .standard)
+
+    /// The store the receiver role uses (`StreamReceiver`, its pairing and
+    /// QUIC listener, receiver settings). The same object as `shared` in
+    /// every app except one that declares `MeowDisplayReceiverRoleTrust` =
+    /// `separate` in its Info.plist (the unified Mac app), where the receiver
+    /// role gets its own namespace. Read once, from the bundle, so it can't
+    /// change while anything holds keys from it.
+    static let receiverRole: TrustStore = ReceiverRoleConfiguration.separateTrust
+        ? TrustStore(namespace: .macReceiverRole) : shared
+
+    let namespace: Namespace
+
+    /// Serializes own-identity lookup + generation (`ownIdentity`,
+    /// `installID`). Held across Keychain I/O.
+    private let identityLock = NSLock()
+    /// Serializes Keychain pin mutations. Held across Keychain I/O, so the
+    /// TLS verify path never takes it.
+    private let pinWriteLock = NSLock()
+    /// Guards `pinState` only; never held across Keychain I/O.
+    private let snapshotLock = NSLock()
+    /// In-memory snapshot of all pinned peers as (peerID, SPKI DER) pairs,
+    /// plus the revision that orders Keychain reads against mutations.
+    /// Refreshed from the Keychain by `refreshSnapshot()` and after every pin
+    /// mutation; read lock-only everywhere else, so both the TLS verify block
+    /// (SPKI membership) and resolvePeerID (SPKI → peerID) run with zero
+    /// Keychain I/O on the queue.
+    private var pinState = PinSnapshotState()
+
+    private init(namespace: Namespace) {
+        self.namespace = namespace
+        refreshSnapshot()
+    }
+
+    // MARK: - Own identity
+
+    /// Fetch the stored identity, generating and persisting a fresh one on
+    /// first call. nil = keychain unusable (logged, never crashes).
+    func ownIdentity() -> SecIdentity? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        if let existing = queryIdentity() {
+            return existing
+        }
+        return generateAndStoreIdentity()
+    }
+
+    /// DER SubjectPublicKeyInfo of our own public key — the exact bytes the
+    /// bootstrap exchange sends and the peer pins. Always produced by
+    /// CryptoKit's `P256.Signing.PublicKey.derRepresentation` (same-source).
+    func ownSPKI() -> Data? {
+        guard let identity = ownIdentity() else { return nil }
+        var cert: SecCertificate?
+        let status = SecIdentityCopyCertificate(identity, &cert)
+        guard status == errSecSuccess, let cert else {
+            Log.info("ERROR: ownSPKI failed to copy certificate from identity (status \(status))")
+            return nil
+        }
+        return spkiFromCertificate(cert)
+    }
+
+    /// Keychain-backed install ID, created atomically with the identity and
+    /// deleted by `purgeAll()` — id and key live and die together.
+    /// The caller's own self-id: the Mac uses it as macInstallID for its wire
+    /// identity. Never called on iOS — the phone's wire id is
+    /// PhoneReceiver.installID (UserDefaults-backed).
+    func installID() -> String? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        if let existing = queryInstallID() {
+            return existing
+        }
+        // No identity yet ⇒ nothing generated ⇒ no install ID either. Drive
+        // generation through the same path as ownIdentity() so the two never
+        // diverge (id+key created together, in the same call).
+        guard generateAndStoreIdentity() != nil else { return nil }
+        return queryInstallID()
+    }
+
+    // MARK: - Peer pins (kSecClassGenericPassword rows)
+
+    func hasPin(peerID: String) -> Bool {
+        pin(peerID: peerID) != nil
+    }
+
+    /// Pinned SPKI DER for a peer, or nil. Reads the Keychain (cold path).
+    func pin(peerID: String) -> Data? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecAttrAccount: peerID,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else {
+            if status != errSecItemNotFound {
+                Log.info("ERROR: pin(peerID:) lookup failed (status \(status))")
+            }
+            return nil
+        }
+        return data
+    }
+
+    /// Persist a new pin, or accept an exact existing match. A changed key is
+    /// never overwritten; recovery requires an explicit forget first.
+    /// The existing-pin check, delete+add and snapshot commit run as one unit
+    /// under `pinWriteLock`, so no other pin mutation interleaves with them.
+    @discardableResult
+    func setPin(peerID: String, spki: Data, displayName: String,
+                allowIdentityChange: Bool) -> Bool {
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
+        snapshotLock.lock()
+        let heldElsewhere = pinState.isHeldByAnotherPeer(peerID, spki: spki)
+        snapshotLock.unlock()
+        guard !heldElsewhere else {
+            Log.info("SECURITY: refused a pin another peer already holds (peer \(peerID))")
+            return false
+        }
+        switch TrustPinPolicy.decision(existing: pin(peerID: peerID), presented: spki) {
+        case .match:
+            return true
+        case .identityChanged where !allowIdentityChange:
+            Log.info("SECURITY: refused changed identity for peer \(peerID)")
+            return false
+        case .identityChanged, .new:
+            break
+        }
+        let deleteQuery: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecAttrAccount: peerID,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecAttrAccount: peerID,
+            kSecAttrLabel: displayName,
+            kSecValueData: spki,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        // Read back even when the add failed: the delete above may already
+        // have removed the old pin, and the snapshot must not keep it.
+        finishPinMutation()
+        guard status == errSecSuccess else {
+            Log.info("ERROR: setPin failed for peer \(peerID) (status \(status))")
+            return false
+        }
+        return true
+    }
+
+    /// Remove one peer's pin and refresh the snapshot.
+    func forget(peerID: String) {
+        PairedMacUserName.forget(peerID: peerID)
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecAttrAccount: peerID,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        if status != errSecSuccess, status != errSecItemNotFound {
+            Log.info("ERROR: forget(peerID:) failed for \(peerID) (status \(status))")
+        }
+        finishPinMutation()
+    }
+
+    /// Nuke everything in both namespaces: all pins, identity key+cert,
+    /// install-ID row; empty the snapshot. (Reinstall cleanup and
+    /// "Reset identity" both land here.)
+    func purgeAll() {
+        pinWriteLock.lock()
+        defer { pinWriteLock.unlock() }
+        let deletions: [[CFString: Any]] = [
+            [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: namespace.pinService,
+                kSecUseDataProtectionKeychain: true,
+            ],
+            [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: namespace.identityLabel,
+                kSecUseDataProtectionKeychain: true,
+            ],
+            [
+                kSecClass: kSecClassCertificate,
+                kSecAttrLabel: namespace.identityLabel,
+                kSecUseDataProtectionKeychain: true,
+            ],
+            [
+                kSecClass: kSecClassKey,
+                kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
+                kSecUseDataProtectionKeychain: true,
+            ],
+        ]
+        for query in deletions {
+            let status = SecItemDelete(query as CFDictionary)
+            if status != errSecSuccess, status != errSecItemNotFound {
+                Log.info("ERROR: purgeAll deletion failed for class \(query[kSecClass] ?? "?") (status \(status))")
+            }
+        }
+        finishPinMutation(purged: true)
+    }
+
+    /// When each pinned peer was paired (its Keychain row's creation date), for Clean Up.
+    func pinnedPeerDates() -> [String: Date] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let items = out as? [[CFString: Any]] else { return [:] }
+        return items.reduce(into: [:]) { r, item in
+            if let account = item[kSecAttrAccount] as? String, let date = item[kSecAttrCreationDate] as? Date { r[account] = date }
+        }
+    }
+
+    /// (peerID, displayName) rows for the "Paired Macs"/forget UI
+    /// (kSecMatchLimitAll enumeration). Wired to the iOS Settings
+    /// "Paired Macs" list.
+    func pinnedPeers() -> [(peerID: String, displayName: String)] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecReturnAttributes: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess, let items = out as? [[CFString: Any]] else {
+            if status != errSecItemNotFound {
+                Log.info("ERROR: pinnedPeers lookup failed (status \(status))")
+            }
+            return []
+        }
+        return items.compactMap { item in
+            guard let account = item[kSecAttrAccount] as? String else { return nil }
+            let label = item[kSecAttrLabel] as? String ?? account
+            return (peerID: account, displayName: label)
+        }
+    }
+
+    // MARK: - In-memory SPKI snapshot
+
+    /// Lock-protected copy of the snapshot. NEVER touches the Keychain —
+    /// this is what TLS verify blocks read via the `pinnedSPKIs` closure.
+    func allPinnedPeerSPKIs() -> [Data] {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pinState.allSPKIs
+    }
+
+    /// Which pinned peerID owns this leaf SPKI, from the in-memory snapshot
+    /// ONLY — no Keychain I/O, so it is safe on the TLS/video queue right after
+    /// a handshake (resolvePeerID). nil if the SPKI matches no current pin.
+    func peerID(forSPKI spki: Data) -> String? {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return pinState.peerID(forSPKI: spki)
+    }
+
+    /// Re-read all pins from the Keychain into the snapshot. Called by init;
+    /// listeners also call it on start. The read runs with no lock held, so
+    /// it is committed only if no pin mutation happened since it began —
+    /// otherwise it may predate that mutation's write, and it is dropped:
+    /// the mutation commits its own, later read-back.
+    func refreshSnapshot() {
+        snapshotLock.lock()
+        let ticket = pinState.beginRefresh()
+        snapshotLock.unlock()
+        let fresh = readPinsFromKeychain()
+        snapshotLock.lock()
+        pinState.commit(fresh, readAt: ticket)
+        snapshotLock.unlock()
+    }
+
+    /// Tail of every Keychain pin mutation. Must be called with
+    /// `pinWriteLock` held and only AFTER the mutation's Keychain writes:
+    /// the revision bump invalidates any refresh that may have read the
+    /// Keychain before those writes, then this mutation's read-back (empty
+    /// after `purgeAll`) commits.
+    private func finishPinMutation(purged: Bool = false) {
+        snapshotLock.lock()
+        let ticket = pinState.keychainDidMutate()
+        snapshotLock.unlock()
+        let fresh = purged ? [] : readPinsFromKeychain()
+        snapshotLock.lock()
+        pinState.commit(fresh, readAt: ticket)
+        snapshotLock.unlock()
+    }
+
+    /// All pins currently in the Keychain. Takes no lock; must never be
+    /// called with `snapshotLock` held.
+    private func readPinsFromKeychain() -> [PinSnapshotState.Pin] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.pinService,
+            kSecReturnAttributes: true,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitAll,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        var fresh: [PinSnapshotState.Pin] = []
+        // kSecReturnAttributes + kSecReturnData + kSecMatchLimitAll returns an
+        // array of attribute dictionaries, each carrying the pin bytes under
+        // kSecValueData and the peerID under kSecAttrAccount. (With
+        // kSecReturnData ALONE the shape is instead a bare [Data]; casting the
+        // wrong shape silently yields an empty snapshot, which makes the TLS
+        // verify block reject every pinned peer as NoAuth.)
+        if status == errSecSuccess, let items = out as? [[CFString: Any]] {
+            fresh = items.compactMap { item in
+                guard let spki = item[kSecValueData] as? Data,
+                      let peerID = item[kSecAttrAccount] as? String else { return nil }
+                return PinSnapshotState.Pin(peerID: peerID, spki: spki)
+            }
+        } else if status != errSecItemNotFound {
+            Log.info("ERROR: pin snapshot lookup failed (status \(status))")
+        }
+        return fresh
+    }
+
+    // MARK: - Short ID
+
+    /// Four hex characters that tell same-named Macs apart in lists ("Macbook · 4F2A"). Derived from
+    /// the identity key under its own HKDF label, so it shows none of the fingerprint's digits (those
+    /// stay hidden until asked for). The same on every device and in the Mac's own Settings.
+    static func shortID(spki: Data) -> String {
+        let output = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: spki),
+                                            salt: WireCrypto.fingerprintHKDFSalt,
+                                            info: Data("MeowDisplay short ID v1".utf8), outputByteCount: 2)
+        return output.withUnsafeBytes { $0.map { String(format: "%02X", $0) }.joined() }
+    }
+
+    /// The paired Mac's short ID, from its pinned key.
+    func shortID(peerID: String) -> String? { pin(peerID: peerID).map(Self.shortID(spki:)) }
+
+    // MARK: - Fingerprint
+
+    /// Human-comparable grouped digits: HKDF-SHA256(ikm: spki,
+    /// salt: WireCrypto.fingerprintHKDFSalt, info: WireCrypto.fingerprintHKDFInfo,
+    /// outputByteCount: 10); split into five 2-byte big-endian integers; each
+    /// rendered `% 10000` zero-padded to 4 digits; joined with single spaces.
+    /// Example: "0421 9977 1024 0003 8810".
+    static func fingerprint(spki: Data) -> String {
+        let key = SymmetricKey(data: spki)
+        let output = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: key,
+            salt: WireCrypto.fingerprintHKDFSalt,
+            info: WireCrypto.fingerprintHKDFInfo,
+            outputByteCount: 10)
+        let bytes = output.withUnsafeBytes { Array($0) }
+        var groups: [String] = []
+        groups.reserveCapacity(5)
+        for i in stride(from: 0, to: 10, by: 2) {
+            let value = (UInt16(bytes[i]) << 8) | UInt16(bytes[i + 1])
+            groups.append(String(format: "%04d", value % 10000))
+        }
+        return groups.joined(separator: " ")
+    }
+
+    // MARK: - Private helpers
+
+    /// The ONLY sanctioned identity retrieval path — never
+    /// `SecIdentityCreateWithCertificate`. Must be called with `identityLock`
+    /// held.
+    private func queryIdentity() -> SecIdentity? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassIdentity,
+            kSecAttrLabel: namespace.identityLabel,
+            kSecReturnRef: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess else { return nil }
+        // Safe force-cast: errSecSuccess + kSecReturnRef on kSecClassIdentity
+        // is documented to yield a SecIdentity; `as!` here is a type-system
+        // formality, not a possible-failure force-unwrap.
+        return (out as! SecIdentity)
+    }
+
+    /// Must be called with `identityLock` held.
+    private func queryInstallID() -> String? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.identityLabel,
+            kSecAttrAccount: WireCrypto.installIDAccount,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Frozen identity-generation call sequence. Must be called with
+    /// `identityLock` held. On any failure, deletes whatever partial items
+    /// were added and returns nil — no orphans, no crash.
+    private func generateAndStoreIdentity() -> SecIdentity? {
+        // 1. CryptoKit key — we own the SPKI bytes end to end.
+        let priv = P256.Signing.PrivateKey()
+        let installID = UUID().uuidString
+
+        // 2. Self-sign with swift-certificates (native CryptoKit signer, no
+        //    SecKey bridge for signing).
+        let certKey: Certificate.PrivateKey
+        let certificate: Certificate
+        do {
+            certKey = Certificate.PrivateKey(priv)
+            let name = try DistinguishedName { CommonName(installID) }
+            let now = Date()
+            certificate = try Certificate(
+                version: .v3,
+                serialNumber: Certificate.SerialNumber(),
+                publicKey: certKey.publicKey,
+                notValidBefore: now.addingTimeInterval(-86_400),
+                notValidAfter: now.addingTimeInterval(20 * 365 * 86_400),
+                issuer: name,
+                subject: name,
+                signatureAlgorithm: .ecdsaWithSHA256,
+                extensions: try Certificate.Extensions {
+                    Critical(BasicConstraints.notCertificateAuthority)
+                },
+                issuerPrivateKey: certKey)
+        } catch {
+            Log.info("ERROR: identity self-sign failed: \(error)")
+            return nil
+        }
+
+        // 3. DER-serialize (SwiftASN1).
+        let certDER: Data
+        do {
+            var serializer = DER.Serializer()
+            try serializer.serialize(certificate)
+            certDER = Data(serializer.serializedBytes)
+        } catch {
+            Log.info("ERROR: identity DER serialization failed: \(error)")
+            return nil
+        }
+
+        // 4. Import the private key as a SecKey (X9.63: 04||X||Y||K).
+        var cfErr: Unmanaged<CFError>?
+        guard let secKey = SecKeyCreateWithData(priv.x963Representation as CFData, [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+        ] as CFDictionary, &cfErr) else {
+            Log.info("ERROR: SecKeyCreateWithData failed: \(String(describing: cfErr?.takeRetainedValue()))")
+            return nil
+        }
+
+        // 5. Add key, then cert. The keychain auto-derives the key's
+        //    kSecAttrApplicationLabel (SHA-1 of public key); the identity
+        //    forms when that matches the cert's public key — byte-identical
+        //    by construction here.
+        var status = SecItemAdd([
+            kSecClass: kSecClassKey,
+            kSecValueRef: secKey,
+            kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            Log.info("ERROR: SecItemAdd(key) failed (status \(status))")
+            return nil
+        }
+
+        guard let secCert = SecCertificateCreateWithData(nil, certDER as CFData) else {
+            Log.info("ERROR: SecCertificateCreateWithData failed")
+            deletePartialIdentityItems()
+            return nil
+        }
+        status = SecItemAdd([
+            kSecClass: kSecClassCertificate,
+            kSecValueRef: secCert,
+            kSecAttrLabel: namespace.identityLabel,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            Log.info("ERROR: SecItemAdd(certificate) failed (status \(status))")
+            deletePartialIdentityItems()
+            return nil
+        }
+
+        // 6. Persist installID in the SAME namespace (id+key die together).
+        status = SecItemAdd([
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: namespace.identityLabel,
+            kSecAttrAccount: WireCrypto.installIDAccount,
+            kSecValueData: Data(installID.utf8),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            Log.info("ERROR: SecItemAdd(installID) failed (status \(status))")
+            deletePartialIdentityItems()
+            return nil
+        }
+
+        // 7. Fetch the implicitly-formed identity — the ONLY sanctioned
+        //    retrieval (a SecIdentityCreateWithCertificate fallback is
+        //    deliberately NOT implemented).
+        var out: CFTypeRef?
+        status = SecItemCopyMatching([
+            kSecClass: kSecClassIdentity,
+            kSecAttrLabel: namespace.identityLabel,
+            kSecReturnRef: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary, &out)
+        guard status == errSecSuccess else {
+            Log.info("ERROR: identity fetch after generation failed (status \(status))")
+            deletePartialIdentityItems()
+            return nil
+        }
+        guard let identity = out else {
+            Log.info("ERROR: identity fetch after generation returned no ref")
+            deletePartialIdentityItems()
+            return nil
+        }
+        // Safe force-cast: errSecSuccess + kSecReturnRef on kSecClassIdentity
+        // is documented to yield a SecIdentity.
+        return (identity as! SecIdentity)
+    }
+
+    /// Cleanup for a failed/partial generateAndStoreIdentity() run: deletes
+    /// the key (by tag) and cert (by label) so nothing orphaned survives.
+    /// Does NOT touch the install-ID row from a prior successful generation.
+    private func deletePartialIdentityItems() {
+        SecItemDelete([
+            kSecClass: kSecClassKey,
+            kSecAttrApplicationTag: Data(namespace.identityLabel.utf8),
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary)
+        SecItemDelete([
+            kSecClass: kSecClassCertificate,
+            kSecAttrLabel: namespace.identityLabel,
+            kSecUseDataProtectionKeychain: true,
+        ] as CFDictionary)
+    }
+
+    /// Same-source SPKI extraction from a certificate already in the
+    /// Keychain: cert → SecKey → X9.63 → CryptoKit → DER. Never hand-assemble
+    /// SPKI headers; never return raw X9.63 from any public API.
+    private func spkiFromCertificate(_ cert: SecCertificate) -> Data? {
+        guard let key = SecCertificateCopyKey(cert) else {
+            Log.info("ERROR: SecCertificateCopyKey failed")
+            return nil
+        }
+        var cfErr: Unmanaged<CFError>?
+        guard let x963 = SecKeyCopyExternalRepresentation(key, &cfErr) as Data? else {
+            Log.info("ERROR: SecKeyCopyExternalRepresentation failed: \(String(describing: cfErr?.takeRetainedValue()))")
+            return nil
+        }
+        guard let pub = try? P256.Signing.PublicKey(x963Representation: x963) else {
+            Log.info("ERROR: P256 public key reconstruction from X9.63 failed")
+            return nil
+        }
+        return pub.derRepresentation
+    }
+}

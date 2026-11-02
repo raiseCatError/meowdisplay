@@ -17,7 +17,26 @@ import Metal
 import QuartzCore
 import CoreVideo
 
-final class MetalVideoRenderer {
+// @unchecked Sendable invariant:
+// - render(_:captureMs:) may be called from any executor (the receiver's
+//   decode queue); the only state it touches, `pendingFrame`, is fully
+//   guarded by `lock` for every read and write.
+// - `drainPending()`/`draw(_:captureMs:)` — and therefore all Metal resource
+//   access (`metalLayer`, `textureCache`) — run exclusively, serially, on
+//   `renderQueue`. Nothing else touches those resources.
+// - `device`, `commandQueue`, `pipeline` are assigned once in `init` and
+//   never reassigned; sharing them across executors afterward is Metal's
+//   own supported usage, not new unsynchronized mutable state.
+// - `onPresented` is assigned exactly once, synchronously, by the caller
+//   immediately after construction — before the receiver's decode pipeline
+//   is wired up, so no frame can complete a render round trip and read it
+//   before that assignment lands. It is never reassigned afterward, so the
+//   presented-handler callback (a Metal-managed thread on device) always
+//   observes the same already-settled closure.
+// - No mutable renderer state may be added without equivalent synchronization
+//   (either lock-guarded like `pendingFrame`, or confined to `renderQueue`
+//   like the Metal resources) — doing so would invalidate this conformance.
+final class MetalVideoRenderer: @unchecked Sendable {
     let metalLayer = CAMetalLayer()
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -157,7 +176,8 @@ final class MetalVideoRenderer {
         }
         #endif
         // Keep the source textures alive until the GPU is done with them.
-        cmd.addCompletedHandler { _ in _ = cvY; _ = cvCbCr }
+        let textureLifetime = FrameMediaBox((cvY, cvCbCr))
+        cmd.addCompletedHandler { _ in _ = textureLifetime }
         cmd.present(drawable)
         cmd.commit()
     }

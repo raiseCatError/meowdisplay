@@ -1,0 +1,18 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "NSLocalNetworkUsageDescription" : {
+      "comment" : "Privacy - Local Network Usage Description",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "MeowDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

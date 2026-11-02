@@ -1,0 +1,577 @@
+{
+ "comment": "Which reported Tailscale endpoints are acceptable (automatic Remote Access, Phase 1). Run by MacTests/TailnetEndpointFilterTests.swift and core TailnetEndpointFilterTest.kt. Values are trimmed; names lowercased with one trailing dot dropped; IPv6 written in RFC 5952 form. `rejected` keeps the order the values came in; reasons: invalid, notTailnet, reserved, otherTailnet, overCap. Empty values are ignored, not rejected.",
+ "cases": [
+  {
+   "name": "ipv4 in the tailnet range",
+   "names": [],
+   "ips": [
+    "100.101.102.103"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.101.102.103"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv4 range edges",
+   "names": [],
+   "ips": [
+    "100.64.0.0",
+    "100.127.255.255"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.0",
+     "100.127.255.255"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv4 just outside the range",
+   "names": [],
+   "ips": [
+    "100.63.255.255",
+    "100.128.0.0"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "100.63.255.255",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "100.128.0.0",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "tailscale's own service address",
+   "names": [],
+   "ips": [
+    "100.100.100.100"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "100.100.100.100",
+      "reason": "reserved"
+     }
+    ]
+   }
+  },
+  {
+   "name": "private and public ipv4 are not tailnet",
+   "names": [],
+   "ips": [
+    "192.168.1.20",
+    "10.0.0.5",
+    "8.8.8.8"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "192.168.1.20",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "10.0.0.5",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "8.8.8.8",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "leading zeros are invalid",
+   "names": [],
+   "ips": [
+    "100.064.0.1"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "100.064.0.1",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "octet over 255",
+   "names": [],
+   "ips": [
+    "100.64.0.256"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "100.64.0.256",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "too few octets",
+   "names": [],
+   "ips": [
+    "100.64.1"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "100.64.1",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "whitespace is trimmed",
+   "names": [],
+   "ips": [
+    " 100.64.0.7 "
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.7"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv6 in the tailnet prefix, canonical form",
+   "names": [],
+   "ips": [
+    "fd7a:115c:a1e0::1"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "fd7a:115c:a1e0::1"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv6 written long is canonicalized",
+   "names": [],
+   "ips": [
+    "FD7A:115C:A1E0:0000:0000:0000:0000:0001"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "fd7a:115c:a1e0::1"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv6 with a full suffix",
+   "names": [],
+   "ips": [
+    "fd7a:115c:a1e0:ab12:4843:cd96:6258:b240"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "fd7a:115c:a1e0:ab12:4843:cd96:6258:b240"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "ipv6 outside the prefix",
+   "names": [],
+   "ips": [
+    "fd7a:115c:a1e1::1",
+    "fe80::1",
+    "2001:db8::1"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "fd7a:115c:a1e1::1",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "fe80::1",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "2001:db8::1",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "ipv6 with a zone is invalid",
+   "names": [],
+   "ips": [
+    "fd7a:115c:a1e0::1%en0"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "fd7a:115c:a1e0::1%en0",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "ipv6 garbage",
+   "names": [],
+   "ips": [
+    "fd7a::115c::1",
+    "fd7a:115c:a1e0::g"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "fd7a::115c::1",
+      "reason": "invalid"
+     },
+     {
+      "value": "fd7a:115c:a1e0::g",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "an ipv4-mapped ipv6 is not tailnet",
+   "names": [],
+   "ips": [
+    "::ffff:100.64.0.1"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "::ffff:100.64.0.1",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a hostname in the ip list is invalid",
+   "names": [],
+   "ips": [
+    "mac.tail1234.ts.net"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "mac.tail1234.ts.net",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "magicdns name",
+   "names": [
+    "mac.tail1234.ts.net"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [
+     "mac.tail1234.ts.net"
+    ],
+    "ips": [],
+    "rejected": []
+   }
+  },
+  {
+   "name": "names are lowercased and a trailing dot dropped",
+   "names": [
+    "Mac-Studio.Tail1234.TS.NET."
+   ],
+   "ips": [],
+   "expect": {
+    "names": [
+     "mac-studio.tail1234.ts.net"
+    ],
+    "ips": [],
+    "rejected": []
+   }
+  },
+  {
+   "name": "a name outside ts.net",
+   "names": [
+    "mac.example.com",
+    "mac.local"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "mac.example.com",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "mac.local",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "too few labels for a magicdns name",
+   "names": [
+    "tail1234.ts.net",
+    "ts.net"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "tail1234.ts.net",
+      "reason": "notTailnet"
+     },
+     {
+      "value": "ts.net",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "bad labels",
+   "names": [
+    "-mac.tail1234.ts.net",
+    "mac-.tail1234.ts.net",
+    "ma_c.tail1234.ts.net",
+    "m..tail1234.ts.net"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "-mac.tail1234.ts.net",
+      "reason": "invalid"
+     },
+     {
+      "value": "mac-.tail1234.ts.net",
+      "reason": "invalid"
+     },
+     {
+      "value": "ma_c.tail1234.ts.net",
+      "reason": "invalid"
+     },
+     {
+      "value": "m..tail1234.ts.net",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a label over 63 characters",
+   "names": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tail1234.ts.net"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tail1234.ts.net",
+      "reason": "invalid"
+     }
+    ]
+   }
+  },
+  {
+   "name": "the reporter's own tailnet",
+   "names": [
+    "mac.tail1234.ts.net",
+    "mac.tail9999.ts.net"
+   ],
+   "ips": [],
+   "tailnet": "tail1234.ts.net",
+   "expect": {
+    "names": [
+     "mac.tail1234.ts.net"
+    ],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "mac.tail9999.ts.net",
+      "reason": "otherTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a tailnet suffix that only looks the same",
+   "names": [
+    "mac.eviltail1234.ts.net"
+   ],
+   "ips": [],
+   "tailnet": "tail1234.ts.net",
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "mac.eviltail1234.ts.net",
+      "reason": "otherTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "duplicates count once",
+   "names": [
+    "mac.tail1234.ts.net",
+    "MAC.tail1234.ts.net"
+   ],
+   "ips": [
+    "100.64.0.1",
+    "100.64.0.1"
+   ],
+   "expect": {
+    "names": [
+     "mac.tail1234.ts.net"
+    ],
+    "ips": [
+     "100.64.0.1"
+    ],
+    "rejected": []
+   }
+  },
+  {
+   "name": "at most two names",
+   "names": [
+    "a.t.ts.net",
+    "b.t.ts.net",
+    "c.t.ts.net"
+   ],
+   "ips": [],
+   "expect": {
+    "names": [
+     "a.t.ts.net",
+     "b.t.ts.net"
+    ],
+    "ips": [],
+    "rejected": [
+     {
+      "value": "c.t.ts.net",
+      "reason": "overCap"
+     }
+    ]
+   }
+  },
+  {
+   "name": "at most four addresses",
+   "names": [],
+   "ips": [
+    "100.64.0.1",
+    "100.64.0.2",
+    "100.64.0.3",
+    "fd7a:115c:a1e0::4",
+    "100.64.0.5"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.1",
+     "100.64.0.2",
+     "100.64.0.3",
+     "fd7a:115c:a1e0::4"
+    ],
+    "rejected": [
+     {
+      "value": "100.64.0.5",
+      "reason": "overCap"
+     }
+    ]
+   }
+  },
+  {
+   "name": "rejected values don't use up the cap",
+   "names": [],
+   "ips": [
+    "8.8.8.8",
+    "100.64.0.1",
+    "100.64.0.2",
+    "100.64.0.3",
+    "100.64.0.4"
+   ],
+   "expect": {
+    "names": [],
+    "ips": [
+     "100.64.0.1",
+     "100.64.0.2",
+     "100.64.0.3",
+     "100.64.0.4"
+    ],
+    "rejected": [
+     {
+      "value": "8.8.8.8",
+      "reason": "notTailnet"
+     }
+    ]
+   }
+  },
+  {
+   "name": "empty values are ignored",
+   "names": [
+    "",
+    "  "
+   ],
+   "ips": [
+    ""
+   ],
+   "expect": {
+    "names": [],
+    "ips": [],
+    "rejected": []
+   }
+  }
+ ]
+}

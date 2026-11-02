@@ -1,14 +1,166 @@
-// Compiled into BOTH targets. The iOS App Store listing — the numeric ID
-// otherwise lives only in the landing page (`src/App.tsx`). Centralized here so
-// the iOS app can deep-link to its own update page AND the Mac can hand the
-// same link to the phone in an `updateRequired` message.
+// Compiled into every app target. MeowDisplay's App Store identity and where
+// an out-of-date receiver is sent to update, centralized so the iOS app's
+// update screen AND the Mac's `updateRequired` message use the same link.
+//
+// The ID this file once carried was upstream OpenDisplay's; no MeowDisplay
+// build may send anyone to another app's listing. Without `iOSAppID`, every
+// update link resolves to the project page instead.
 
 import Foundation
 
 enum AppStore {
-    static let iOSAppID = "6780264891"
-    /// Opens the App Store app directly on the listing (with an Update button).
-    static let updateURL = URL(string: "itms-apps://apps.apple.com/app/id\(iOSAppID)")!
-    /// Web fallback for anywhere the itms-apps scheme can't be handled.
-    static let webURL = URL(string: "https://apps.apple.com/app/id\(iOSAppID)")!
+    /// MeowDisplay's own iOS App Store listing ID (the digits after `id` in
+    /// `apps.apple.com/app/id…`), or nil while it has none. The one place to
+    /// configure: set it once App Store Connect assigns the app its Apple ID,
+    /// and every URL below follows.
+    static let iOSAppID: String? = "6817552864"
+
+    /// The project page: how to get and update every MeowDisplay app, and
+    /// where an update link points while there is no App Store listing.
+    static var projectURL: URL { ProjectLinks.gitHub }
+
+    /// Opens the App Store app directly on the listing (with an Update
+    /// button). Nil while there is no listing.
+    static var updateURL: URL? { listingURL(appID: iOSAppID, scheme: "itms-apps") }
+    /// Web fallback for anywhere the itms-apps scheme can't be handled. Nil
+    /// while there is no listing.
+    static var webURL: URL? { listingURL(appID: iOSAppID, scheme: "https") }
+
+    /// Where an out-of-date iOS receiver is sent: the listing when there is
+    /// one, otherwise the project page. Never nil, so the Mac always puts a
+    /// `store` in `updateRequired` — an older receiver that finds none falls
+    /// back to the upstream listing it was built with.
+    static var receiverUpdateURL: URL { updateDestination(appID: iOSAppID) }
+
+    /// The link to open for one offered from elsewhere: the Mac's
+    /// `updateRequired.store`, or the version manifest's `storeURL`. An App
+    /// Store link is kept only when it is this app's own listing (an older
+    /// MeowDisplay Mac sends upstream's), any other link only when it is
+    /// `https`. Anything else, or nothing, becomes `receiverUpdateURL`.
+    static func resolveReceiverUpdateURL(_ offered: String?) -> URL {
+        resolveReceiverUpdateURL(offered, appID: iOSAppID)
+    }
+
+    /// Whether `url` leads into the App Store at all, by scheme or by host.
+    static func isAppStoreLink(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let host = url.host?.lowercased() ?? ""
+        return scheme.hasPrefix("itms")
+            || ["apps.apple.com", "itunes.apple.com"].contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    // MARK: - Pure forms (the listing ID is a parameter, so both states are testable)
+
+    static func listingURL(appID: String?, scheme: String) -> URL? {
+        guard let appID, isListingID(appID) else { return nil }
+        return URL(string: "\(scheme)://apps.apple.com/app/id\(appID)")
+    }
+
+    static func updateDestination(appID: String?) -> URL {
+        listingURL(appID: appID, scheme: "itms-apps") ?? projectURL
+    }
+
+    static func resolveReceiverUpdateURL(_ offered: String?, appID: String?) -> URL {
+        let fallback = updateDestination(appID: appID)
+        guard let offered, let url = URL(string: offered) else { return fallback }
+        if isAppStoreLink(url) {
+            guard let appID, isListingID(appID), listingID(in: url) == appID else { return fallback }
+            return url
+        }
+        guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else { return fallback }
+        return url
+    }
+
+    /// The listing ID in an App Store link (`…/id123…`), or nil.
+    static func listingID(in url: URL) -> String? {
+        url.pathComponents
+            .first { $0.hasPrefix("id") && isListingID(String($0.dropFirst(2))) }
+            .map { String($0.dropFirst(2)) }
+    }
+
+    private static func isListingID(_ id: String) -> Bool {
+        !id.isEmpty && id.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    // MARK: - Android (Google Play)
+
+    /// MeowDisplay's Android application ID once its Google Play listing is
+    /// public, or nil until then. Like `iOSAppID`, the one place to
+    /// configure: until it is set, an Android receiver told to update is sent
+    /// to the project page rather than to a listing that doesn't exist yet.
+    static let androidPlayPackage: String? = nil
+
+    /// Where an out-of-date Android receiver is sent: the Play listing when
+    /// there is one, otherwise the project page. Never nil, like
+    /// `receiverUpdateURL`.
+    static var androidReceiverUpdateURL: URL { androidUpdateDestination(package: androidPlayPackage) }
+
+    static func androidListingURL(package: String?) -> URL? {
+        guard let package, isAndroidPackage(package) else { return nil }
+        return URL(string: "https://play.google.com/store/apps/details?id=\(package)")
+    }
+
+    static func androidUpdateDestination(package: String?) -> URL {
+        androidListingURL(package: package) ?? projectURL
+    }
+
+    /// Java-package shape: two or more dot-separated segments, each a letter
+    /// followed by letters, digits or underscores. Nothing else can be
+    /// pasted into the listing URL.
+    private static func isAndroidPackage(_ package: String) -> Bool {
+        let segments = package.split(separator: ".", omittingEmptySubsequences: false)
+        return segments.count >= 2 && segments.allSatisfy { segment in
+            guard let first = segment.first, first.isASCII, first.isLetter else { return false }
+            return segment.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
+        }
+    }
+}
+
+/// Which app a receiver runs, from its `hello.device`, for the platform an
+/// `updateRequired` names (`target`) and the link it carries (`store`).
+/// `device` is free-form text: anything that isn't a Mac or Android is the
+/// iPhone/iPad app, as before Android existed.
+enum ReceiverUpdatePlatform: String, Equatable {
+    case ios
+    case mac
+    case android
+
+    init(receiverKind kind: String) {
+        if kind == "Mac" {
+            self = .mac
+        } else if kind.hasPrefix("Android") {
+            self = .android
+        } else {
+            self = .ios
+        }
+    }
+
+    var storeURL: URL {
+        switch self {
+        case .ios: AppStore.receiverUpdateURL
+        case .mac: AppStore.projectURL
+        case .android: AppStore.androidReceiverUpdateURL
+        }
+    }
+
+    /// The `updateRequired` message for a receiver of `kind`. Dormant while
+    /// `WireProtocol.minSupportedPeer` is 1, but the copy must fit the
+    /// platform the day a floor is raised. `store` is always present: an
+    /// older receiver without it falls back to the link it was built with.
+    static func updateRequiredMessage(receiverKind kind: String) -> [String: Any] {
+        let platform = ReceiverUpdatePlatform(receiverKind: kind)
+        let message: String
+        switch platform {
+        case .mac:
+            message = "The MeowDisplay Receiver app on that Mac is too old for this Mac. Update it from the MeowDisplay GitHub page to reconnect."
+        case .android, .ios:
+            message = "This \(kind) app is too old for this Mac. Update MeowDisplay on it to reconnect."
+        }
+        return [
+            "type": WireMessage.updateRequired,
+            "target": platform.rawValue,
+            "store": platform.storeURL.absoluteString,
+            "message": message,
+        ]
+    }
 }

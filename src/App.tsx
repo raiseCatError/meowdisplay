@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react"
 import { AnimatePresence, motion } from "motion/react"
-import Showcase from "./components/Showcase"
-import SupportNudge from "./components/SupportNudge"
 import TextRotate from "./components/TextRotate"
 
 const HERO_WORDS = [
@@ -16,16 +14,7 @@ const HERO_WORDS = [
   "iPad",
 ]
 
-function AppStoreButton() {
-  return (
-    <a className="app-store-button" href="https://apps.apple.com/app/id6780264891" aria-label="Download on the App Store">
-      <img src="app-store-badge.svg" alt="" width="120" height="40" />
-    </a>
-  )
-}
-
 export default function App() {
-  const [macVer, setMacVer] = useState<string | null>(null)
   const [starCount, setStarCount] = useState<string | null>(null)
   // Show the brand icon in the navbar only once the big hero logo has
   // scrolled up behind the sticky nav — it "hands off" from hero to navbar.
@@ -44,19 +33,10 @@ export default function App() {
     return () => io.disconnect()
   }, [])
 
-  // Progressive enhancement: current release version + live star count.
+  // Progressive enhancement: live GitHub star count.
   // Fails silent (offline / rate-limited) — the page works without it.
   useEffect(() => {
-    fetch("https://api.github.com/repos/peetzweg/opendisplay/releases/latest", {
-      headers: { Accept: "application/vnd.github+json" },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data && data.tag_name) setMacVer(data.tag_name)
-      })
-      .catch(() => {})
-
-    fetch("https://api.github.com/repos/peetzweg/opendisplay", {
+    fetch("https://api.github.com/repos/raiseCatError/MeowDisplay", {
       headers: { Accept: "application/vnd.github+json" },
     })
       .then((r) => (r.ok ? r.json() : null))
@@ -124,12 +104,10 @@ export default function App() {
               layout
               transition={{ type: "spring", damping: 22, stiffness: 340 }}
             >
-              OpenDisplay
+              MeowDisplay
             </motion.span>
           </a>
           <div className="links">
-            <a href="#demo">Demo</a>
-            <a href="#support">Support</a>
             <a href="#features">Features</a>
             <a href="#why">Compare</a>
             <a href="#faq">FAQ</a>
@@ -137,8 +115,8 @@ export default function App() {
             <a href="#contribute">Contribute</a>
             <a
               className="gh"
-              href="https://github.com/peetzweg/opendisplay"
-              title="Star OpenDisplay on GitHub"
+              href="https://github.com/raiseCatError/MeowDisplay"
+              title="Star MeowDisplay on GitHub"
             >
               <svg className="gh-logo" viewBox="0 0 16 16" aria-hidden="true">
                 <path
@@ -156,12 +134,9 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Sticky-scope: the Ko-fi bar sticks under the nav through the hero and
-          demo, then releases where this div ends — right before #support. */}
-      <div className="nudge-scope">
       <section>
         <div className="wrap hero">
-          <img ref={heroLogoRef} className="hero-logo" src="logo.png" alt="OpenDisplay" width="160" height="160" />
+          <img ref={heroLogoRef} className="hero-logo" src="logo.png" alt="MeowDisplay" width="160" height="160" />
           <p className="eyebrow">Free &amp; open source</p>
           <h1>
             <span className="l1">
@@ -184,40 +159,33 @@ export default function App() {
           </h1>
           <p className="tagline">
             A free, open-source alternative to Apple Sidecar, Duet Display and Luna Display.
-            Use your iPhone and iPad as a second — and even a third — screen for your Mac.
-            A true extended display, not a mirror: USB or WiFi, Retina-sharp, with touch and
-            scroll. No subscription. No dongle. No account.
+            Use your iPhone and iPad as a second — and even a third — screen for your Mac,
+            with real touch, mouse and keyboard input routed back, locally over USB/WiFi or
+            remotely through a private network like Tailscale. No subscription. No dongle.
+            No MeowDisplay-hosted account or relay.
           </p>
           <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 16+ &nbsp;·&nbsp; iOS 16+ &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; GPL-3.0</p>
+          <p className="meta">Primary tested configuration: <strong>Mac host → iPhone receiver.</strong> Other combinations may already work but aren't as thoroughly validated yet.</p>
         </div>
       </section>
-
-      {/* Full-width Ko-fi bar between the hero pitch and the downloads. It sits
-          in flow here and pins under the nav once you scroll past it. */}
-      <SupportNudge />
 
       <section className="downloads-sec">
         <div className="wrap">
           <p className="needs-both">
-            OpenDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac and a <strong>Receiver</strong> on the device you want to use as a display. Install both to get going.
+            MeowDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac and a <strong>Receiver</strong> on the device you want to use as a display. Public prebuilt downloads aren't live yet — build from source today.
           </p>
           <div className="download-group sender-group">
             <h2 className="download-role">Sender</h2>
             <p className="download-group-intro">Install this on the Mac whose desktop you want to extend or mirror.</p>
             <div className="download-options sender-download">
               <div className="download-option">
-                <div className="platform">macOS <span className="ver">{macVer}</span></div>
-                <p className="dl-sub">Captures a virtual display and streams it.</p>
-                <a className="btn primary" href="https://github.com/peetzweg/opendisplay/releases/latest/download/OpenDisplay.dmg">
-                  Download
+                <div className="platform">macOS</div>
+                <p className="dl-sub">Captures a virtual display and streams it. Build from source today — a signed, notarized direct download is planned.</p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
                 </a>
                 <p className="note">
-                  Signed &amp; notarized — opens normally on macOS&nbsp;14+. Prefer to compile it yourself?{" "}
-                  <a href="https://github.com/peetzweg/opendisplay#quick-start">Build from source ↗</a>
-                </p>
-                <p className="note">
-                  Looking for an older version?{" "}
-                  <a href="https://github.com/peetzweg/opendisplay/releases">Browse all releases ↗</a>
+                  <a href="https://github.com/raiseCatError/MeowDisplay">View on GitHub ↗</a>
                 </p>
               </div>
             </div>
@@ -231,83 +199,44 @@ export default function App() {
                 <div className="platform">
                   <span className="platform-name">iOS</span><span className="platform-separator">&amp;</span><span className="platform-name">iPadOS</span>
                 </div>
-                <p className="dl-sub">The receiver app for your iPhone and iPad.</p>
-                <AppStoreButton />
-                <p className="sub">
-                  Want early builds? <a id="testflight" href="https://testflight.apple.com/join/3NYaY11c">Join the TestFlight beta</a>, or <a href="https://github.com/peetzweg/opendisplay#quick-start">compile from source ↗</a>.
-                </p>
+                <p className="dl-sub">The receiver app for your iPhone and iPad. Build and install through Xcode today — a TestFlight beta is planned, with the App Store to follow.</p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
+                </a>
               </div>
               <div className="download-option">
                 <div className="platform">macOS</div>
-                <p className="dl-sub">Turns an older Mac into a second display.</p>
-                <a className="btn primary" href="https://github.com/peetzweg/opendisplay/releases/latest/download/OpenDisplayReceiver.dmg">
-                  Download
+                <p className="dl-sub">
+                  Got a spare <em>Mac</em> to use as the display? The separate <strong>MeowDisplay Receiver</strong> app
+                  turns an older Mac into a second display — runs on macOS&nbsp;12+, so older Macs qualify. Build from source today.
+                </p>
+                <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay#getting-started">
+                  Build from Source
                 </a>
-                <p className="note">
-                  Got a spare <em>Mac</em> to use as the display? Install OpenDisplay Receiver on it instead of the iOS app — runs on macOS&nbsp;12+, so older Macs qualify.
-                </p>
-                <p className="note">
-                  <a href="https://github.com/peetzweg/opendisplay/releases">Browse all releases ↗</a>
-                </p>
               </div>
             </div>
           </div>
-        </div>
-      </section>
 
-      <section id="demo">
-        <div className="wrap sec">
-          <p className="eyebrow">Demo</p>
-          <h2>See it in action.</h2>
-          <p className="sub">
-            Using OpenDisplay in the wild?{" "}
-            <a href="https://x.com/peetzweg">Tag @peetzweg on X</a> and your setup might
-            end up here.
+          <p className="note" style={{ marginTop: "16px" }}>
+            Setup, signing, permissions, and pairing: see the{" "}
+            <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/SETUP.md">Setup Guide ↗</a>.
+            Want to see what's coming? Check the{" "}
+            <a href="https://github.com/raiseCatError/MeowDisplay#roadmap">Roadmap ↗</a>.
           </p>
-          <Showcase />
         </div>
       </section>
-      </div>
 
-      <section id="support">
-        <div className="wrap sec support">
-          <p className="eyebrow">Support the project</p>
-          <img className="kofi-logo" src="kofi-logo.png" alt="Ko-fi" width="200" height="61" />
-          <h2>If OpenDisplay saved you a monitor, consider buying me a coffee.</h2>
-          <div className="support-note">
-            <p>
-              OpenDisplay is a one-person labour of love, built and maintained by me,
-              Philip. It's not a company. It's just me.
-            </p>
-            <p>
-              It's free, open source, and funded out of my own pocket. The fixed costs
-              are modest but real: <strong>$99 a year</strong> for the Apple Developer
-              membership behind the signed, one-click installs, and <strong>$11 a year</strong>{" "}
-              for the domain. On top of that go a lot of unpaid evenings and weekends.
-            </p>
-            <p>
-              Supporting me on Ko-fi keeps OpenDisplay well maintained and free for
-              everyone, including the people who can't afford to chip in. My goal is to
-              make this the greatest display companion app there is for iPad.
-            </p>
-            <p>
-              If it saved you from buying a monitor, a small tip helps keep it going.
-              Thank you.
-            </p>
-          </div>
-          <a className="btn kofi" href="https://ko-fi.com/peetzweg">
-            <img className="kofi-mark" src="kofi-mark.webp" alt="" width="28" height="28" />
-            Support on Ko-fi
-          </a>
-        </div>
-      </section>
+      {/* No "Demo" section: the only existing demo videos are upstream
+          OpenDisplay's own recordings (a different developer's product),
+          so showing them here as MeowDisplay footage would misattribute
+          them. Re-add once MeowDisplay-branded demo footage exists. */}
 
       <section id="features">
         <div className="wrap sec">
           <p className="eyebrow">Features</p>
           <h2>A true extended display, the way it should be.</h2>
           <div className="fgrid">
-            <div className="fcell"><span className="n">001</span><h3>No account, ever</h3><p>No sign-up, no email, no login. And unlike Apple Sidecar — which only works between devices on the <em>same</em> Apple ID — OpenDisplay pairs across different Apple IDs, so you can use a partner's or friend's iPad. Download both apps and go.</p></div>
+            <div className="fcell"><span className="n">001</span><h3>No account, ever</h3><p>No sign-up, no email, no login. And unlike Apple Sidecar — which only works between devices on the <em>same</em> Apple ID — MeowDisplay pairs across different Apple IDs, so you can use a partner's or friend's iPad. Download both apps and go.</p></div>
             <div className="fcell"><span className="n">002</span><h3>Low-latency pipeline</h3><p>Up to 60 FPS over USB. Hardware H.264 (VideoToolbox real-time mode), TCP_NODELAY, and frame-dropping backpressure with instant keyframe recovery keep it responsive.</p></div>
             <div className="fcell"><span className="n">003</span><h3>Two, even three screens</h3><p>You're not limited to one device. Run several iPads and iPhones at once, each as its own extended display — up to three has been tested, and you can freely mix iPads and iPhones. Arrange them all in System Settings like real monitors.</p></div>
             <div className="fcell"><span className="n">004</span><h3>Retina sharp</h3><p>Native Retina resolution — the virtual display matches your device panel pixel-for-pixel at HiDPI (@2x), so text looks exactly like it should.</p></div>
@@ -316,14 +245,14 @@ export default function App() {
             <div className="fcell"><span className="n">007</span><h3>Touch &amp; scroll</h3><p>Tap to click, drag to drag, two-finger pan to scroll. A tiny touchscreen for your Mac.</p></div>
             <div className="fcell"><span className="n">008</span><h3>Portrait mode</h3><p>Rotate the phone and the virtual display rebuilds as a vertical monitor — perfect for chat, logs, or docs.</p></div>
             <div className="fcell"><span className="n">009</span><h3>Private by design</h3><p>One direct TCP connection between your devices. No servers, no accounts, no telemetry. Read the code.</p></div>
-            <div className="fcell"><span className="n">010</span><h3>A spare Mac as a display</h3><p>Install the small <em>OpenDisplay Receiver</em> app (macOS 12+) on an old Mac and another Mac extends onto it — a real Retina extended display, over WiFi or a Thunderbolt or Ethernet cable. An old MacBook becomes a second monitor.</p></div>
+            <div className="fcell"><span className="n">010</span><h3>A spare Mac as a display</h3><p>Install the small <em>MeowDisplay Receiver</em> app (macOS 12+) on an old Mac and another Mac extends onto it — a real Retina extended display, over WiFi or a Thunderbolt or Ethernet cable. An old MacBook becomes a second monitor.</p></div>
           </div>
         </div>
       </section>
 
       <section id="why">
         <div className="wrap sec">
-          <p className="eyebrow">Why OpenDisplay</p>
+          <p className="eyebrow">Why MeowDisplay</p>
           <h2>The device you already own becomes a real additional display.</h2>
           <div className="compare">
             <div className="row">
@@ -340,7 +269,7 @@ export default function App() {
               <p>Great latency, but you're buying a hardware dongle.</p>
             </div>
             <div className="row highlight">
-              <div className="name">OpenDisplay</div>
+              <div className="name">MeowDisplay</div>
               <p>Free, open source, auditable. The device you already own becomes a real additional
               display. If you were about to build your own — contribute here instead.</p>
             </div>
@@ -350,7 +279,7 @@ export default function App() {
           <div className="tbl-scroll">
             <table>
               <thead>
-                <tr><th></th><th className="os">OpenDisplay</th><th>Apple Sidecar</th><th>Duet</th><th>Luna</th></tr>
+                <tr><th></th><th className="os">MeowDisplay</th><th>Apple Sidecar</th><th>Duet</th><th>Luna</th></tr>
               </thead>
               <tbody>
                 <tr><td>Price</td><td className="mark-yes os">Free &amp; open source</td><td>Free</td><td className="mark-no">Subscription</td><td className="mark-no">$$$ + dongle</td></tr>
@@ -382,12 +311,13 @@ export default function App() {
             </details>
             <details>
               <summary>Is this on the App Store?</summary>
-              <p>Yes — the iPhone &amp; iPad receiver is{" "}
-              <a href="https://apps.apple.com/app/id6780264891">live on the App Store</a>. The Mac
-              app ships as a signed, notarized direct download rather than through the Mac App Store
-              because it relies on <code>CGVirtualDisplay</code>, a private API — that's the deal for
-              every virtual-display product: use it or ship a dongle. You can also build either app
-              from source with your own (free) Apple developer account in a few minutes.</p>
+              <p>Not yet. The iPhone &amp; iPad receiver is planned for TestFlight and later the App
+              Store, after broader validation. The Mac app is planned to ship as a signed, notarized
+              direct download rather than through the Mac App Store, because it relies on{" "}
+              <code>CGVirtualDisplay</code>, a private API — that's the deal for every virtual-display
+              product: use it or ship a dongle. You can build either app from source today with your
+              own (free) Apple developer account in a few minutes — see the{" "}
+              <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/SETUP.md">Setup Guide</a>.</p>
             </details>
             <details>
               <summary>Why do I see the purple screen-recording indicator on my Mac?</summary>
@@ -411,8 +341,20 @@ export default function App() {
               (Apple Pencil, pressure) are on the roadmap.</p>
             </details>
             <details>
+              <summary>Can I use it away from home, not just on the same WiFi?</summary>
+              <p>Yes — Remote Access lets you connect to a paired Mac through any reachable address,
+              such as a <a href="https://tailscale.com">Tailscale</a> endpoint. Tailscale (or an
+              equivalent private network) is only used for reachability, not authentication — the
+              actual trust still comes from the same pinned, encrypted session established during
+              pairing. There's no MeowDisplay-hosted account or relay involved. One honest limitation:
+              waking a sleeping Mac remotely over Tailscale isn't solved yet (Wake-on-LAN is a
+              local-network broadcast) — see the{" "}
+              <a href="https://github.com/raiseCatError/MeowDisplay#roadmap">roadmap</a>.</p>
+            </details>
+            <details>
               <summary>Can another Mac be the display?</summary>
-              <p>Yes. Install <em>OpenDisplay Receiver</em>, a separate small app from the same release, on
+              <p>Yes, where implemented — it needs broader validation than the primary Mac→iPhone setup.
+              Install <em>MeowDisplay Receiver</em>, a separate small app built from the same source tree, on
               the spare Mac. It needs only macOS 12 Monterey or newer (the sending Mac needs 14), so Macs
               from around 2015 onward qualify. It appears on the sending Mac like a phone would and
               becomes a real extended Retina display. WiFi works out of the box. For a cable, use a
@@ -431,12 +373,13 @@ export default function App() {
             </details>
             <details>
               <summary>What's the license? Can I fork it or use it commercially?</summary>
-              <p>OpenDisplay is licensed under{" "}
-              <a href="https://github.com/peetzweg/opendisplay/blob/main/LICENSE">GPL-3.0</a>. You can
+              <p>MeowDisplay is licensed under{" "}
+              <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/LICENSE">GPL-3.0</a>, the
+              same license as the upstream OpenDisplay project it's built on. You can
               use, study, and adapt it freely — including commercially. If you distribute a modified
               version, it must remain open source under the same license with the original attribution
-              intact, so improvements flow back to everyone instead of into closed forks. (Releases up
-              to v0.4.x were MIT-licensed and remain available under those terms.)</p>
+              intact, so improvements flow back to everyone instead of into closed forks. (Upstream
+              releases up to v0.4.x were MIT-licensed and remain available under those terms.)</p>
             </details>
           </div>
         </div>
@@ -480,10 +423,11 @@ export default function App() {
             </a>
           </div>
           <p className="compat-note">
-            These are fan-made projects, not official builds. They aren't affiliated with
-            OpenDisplay and aren't maintained, reviewed or supported by us, so please report issues
-            with them in their own repositories. Listing them here also says nothing about our own
-            plans: an official OpenDisplay app may still ship for any of these platforms later.
+            These are fan-made projects built for the same open protocol, not official builds. They
+            aren't affiliated with MeowDisplay (or the upstream OpenDisplay project) and aren't
+            maintained, reviewed or supported by us, so please report issues with them in their own
+            repositories. Listing them here also says nothing about our own plans: an official
+            MeowDisplay app may still ship for any of these platforms later.
           </p>
         </div>
       </section>
@@ -493,20 +437,20 @@ export default function App() {
           <p className="eyebrow">Contribute</p>
           <h2>Open source, and built in the open.</h2>
           <p style={{ color: "var(--muted)", maxWidth: "72ch", marginTop: "8px" }}>
-            OpenDisplay is GPL-3.0 and developed entirely on GitHub — the whole stack, from Mac
+            MeowDisplay is GPL-3.0 and developed entirely on GitHub — the whole stack, from Mac
             capture and H.264 encoding to the iOS receiver, is yours to read, build, and improve.
             Bug reports, feature ideas, and pull requests are all welcome. Build-and-run instructions
             live in the README.
           </p>
           <div className="btn-row">
-            <a className="btn primary" href="https://github.com/peetzweg/opendisplay">View on GitHub ↗</a>
-            <a className="btn ghost" href="https://github.com/peetzweg/opendisplay/issues">Open an issue ↗</a>
+            <a className="btn primary" href="https://github.com/raiseCatError/MeowDisplay">View on GitHub ↗</a>
+            <a className="btn ghost" href="https://github.com/raiseCatError/MeowDisplay/issues">Open an issue ↗</a>
           </div>
           <p className="sub">
             New here? Start with the{" "}
-            <a href="https://github.com/peetzweg/opendisplay#quick-start">README quick-start</a>{" "}
+            <a href="https://github.com/raiseCatError/MeowDisplay#quick-start">README quick-start</a>{" "}
             to build both apps, or browse the{" "}
-            <a href="https://github.com/peetzweg/opendisplay/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issues</a>.
+            <a href="https://github.com/raiseCatError/MeowDisplay/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issues</a>.
           </p>
         </div>
       </section>
@@ -514,14 +458,13 @@ export default function App() {
       <footer>
         <div className="wrap">
           <div className="links">
-            <a href="https://github.com/peetzweg/opendisplay">GitHub</a>
-            <a href="https://github.com/peetzweg/opendisplay/releases/latest">Releases</a>
-            <a href="https://github.com/peetzweg/opendisplay/issues">Issues</a>
-            <a href="https://ko-fi.com/peetzweg">Support / Ko-fi</a>
+            <a href="https://github.com/raiseCatError/MeowDisplay">GitHub</a>
+            <a href="https://github.com/raiseCatError/MeowDisplay/releases/latest">Releases</a>
+            <a href="https://github.com/raiseCatError/MeowDisplay/issues">Issues</a>
             <a href="privacy.html">Privacy</a>
-            <a href="https://github.com/peetzweg/opendisplay/blob/main/LICENSE">GPL-3.0 License</a>
+            <a href="https://github.com/raiseCatError/MeowDisplay/blob/main/LICENSE">GPL-3.0 License</a>
           </div>
-          <p className="fine">OpenDisplay — use your iPhone or iPad as a second monitor for your Mac. Free forever.</p>
+          <p className="fine">MeowDisplay — use your iPhone or iPad as a second monitor for your Mac. Free forever.</p>
         </div>
       </footer>
     </>

@@ -55,7 +55,7 @@ enum LogSnapshot {
 
     static func header(context: Context, generatedAt: Date) -> String {
         """
-        OpenDisplay diagnostics
+        MeowDisplay diagnostics
         Generated: \(timestamp.string(from: generatedAt))
         App: \(context.appVersion) (\(context.appBuild))
         Device: \(context.model), iOS \(context.systemVersion)
@@ -84,7 +84,7 @@ enum LogSnapshot {
     static func fileName(deviceName: String, date: Date) -> String {
         let name = slug(deviceName)
         let stamp = fileStamp.string(from: date)
-        return name.isEmpty ? "OpenDisplay-\(stamp).txt" : "OpenDisplay-\(name)-\(stamp).txt"
+        return name.isEmpty ? "MeowDisplay-\(stamp).txt" : "MeowDisplay-\(name)-\(stamp).txt"
     }
 
     /// Device names carry apostrophes, spaces and emoji. Anything that isn't a

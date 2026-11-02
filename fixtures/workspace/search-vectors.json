@@ -1,0 +1,141 @@
+{
+ "comment": "WorkspaceSearch parity: Swift (MacTests/WorkspaceBrowseTests) and Kotlin (core WorkspaceBrowseTest) rank the same.",
+ "apps": [
+  {
+   "bundle": "com.apple.finder",
+   "name": "Finder",
+   "running": true
+  },
+  {
+   "bundle": "com.google.Chrome",
+   "name": "Google Chrome",
+   "running": true,
+   "windows": 3
+  },
+  {
+   "bundle": "dev.zed.Zed",
+   "name": "Zed",
+   "running": true,
+   "windows": 1
+  },
+  {
+   "bundle": "com.microsoft.VSCode",
+   "name": "Visual Studio Code"
+  },
+  {
+   "bundle": "com.apple.Safari",
+   "name": "Safari"
+  },
+  {
+   "bundle": "com.apple.Terminal",
+   "name": "Terminal"
+  },
+  {
+   "bundle": "com.apple.TextEdit",
+   "name": "TextEdit"
+  },
+  {
+   "bundle": "org.mozilla.firefox",
+   "name": "Firefox"
+  },
+  {
+   "bundle": "com.apple.systempreferences",
+   "name": "System Settings"
+  },
+  {
+   "bundle": "com.apple.Preview",
+   "name": "Préview"
+  }
+ ],
+ "windows": [
+  {
+   "id": 11,
+   "bundle": "com.google.Chrome",
+   "app": "Google Chrome",
+   "title": "MeowDisplay – Pull requests"
+  },
+  {
+   "id": 12,
+   "bundle": "com.google.Chrome",
+   "app": "Google Chrome",
+   "title": "Inbox (3) – Gmail"
+  },
+  {
+   "id": 21,
+   "bundle": "dev.zed.Zed",
+   "app": "Zed",
+   "title": "meowdisplay — StagePeek.swift"
+  },
+  {
+   "id": 31,
+   "bundle": "com.apple.Terminal",
+   "app": "Terminal",
+   "title": "zsh — 80×24"
+  }
+ ],
+ "cases": [
+  {
+   "q": "chrome",
+   "apps": [
+    "com.google.Chrome"
+   ],
+   "windows": [
+    12,
+    11
+   ]
+  },
+  {
+   "q": "Zed",
+   "apps": [
+    "dev.zed.Zed"
+   ],
+   "windows": [
+    21
+   ]
+  },
+  {
+   "q": "vsc",
+   "apps": [
+    "com.microsoft.VSCode"
+   ],
+   "windows": []
+  },
+  {
+   "q": "te",
+   "apps": [
+    "com.apple.Terminal",
+    "com.apple.TextEdit",
+    "com.apple.systempreferences"
+   ],
+   "windows": [
+    31
+   ]
+  },
+  {
+   "q": "gmail",
+   "apps": [],
+   "windows": [
+    12
+   ]
+  },
+  {
+   "q": "preview",
+   "apps": [
+    "com.apple.Preview"
+   ],
+   "windows": []
+  },
+  {
+   "q": "stagepeek",
+   "apps": [],
+   "windows": [
+    21
+   ]
+  },
+  {
+   "q": "xyzzy",
+   "apps": [],
+   "windows": []
+  }
+ ]
+}

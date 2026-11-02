@@ -1,0 +1,2125 @@
+import XCTest
+
+final class ReceiverControlsTests: XCTestCase {
+    func testModifierTapLatchesAndSecondTapUnlatches() {
+        var state = ControlInteractionState()
+        XCTAssertEqual(state.tap(.command), [.modifierDown(.command), .haptic(.latch)])
+        XCTAssertEqual(state.latchedModifiers, [.command])
+        XCTAssertEqual(state.tap(.command), [.modifierUp(.command), .haptic(.latch)])
+        XCTAssertTrue(state.latchedModifiers.isEmpty)
+    }
+
+    func testMultipleModifiersLatch() {
+        var state = ControlInteractionState()
+        _ = state.tap(.command)
+        _ = state.tap(.option)
+        XCTAssertEqual(state.latchedModifiers, [.command, .option])
+    }
+
+    func testHoldOpensPaletteWithoutLatchingAndBuildsChord() {
+        var state = ControlInteractionState()
+        state.press(.command)
+        let effects = state.beginPalette(with: .command)
+        XCTAssertEqual(effects, [.modifierDown(.command), .haptic(.selection)])
+        XCTAssertTrue(state.latchedModifiers.isEmpty)
+        XCTAssertEqual(state.activeChord, ModifierChord([.command]))
+
+        XCTAssertEqual(state.addTemporaryModifier(.option),
+                       [.modifierDown(.option), .haptic(.selection)])
+        XCTAssertEqual(state.activeChord, ModifierChord([.command, .option]))
+        XCTAssertEqual(state.paletteChord, ModifierChord([.command, .option]))
+        XCTAssertEqual(state.addTemporaryModifier(.option), [])
+        XCTAssertEqual(state.activeChord, ModifierChord([.command, .option]))
+    }
+
+    func testContinuousChordSelectionHapticsAndExecutionAreSemantic() {
+        var state = ControlInteractionState()
+        state.press(.command)
+        _ = state.beginPalette(with: .command)
+        XCTAssertEqual(state.addTemporaryModifier(.option),
+                       [.modifierDown(.option), .haptic(.selection)])
+        XCTAssertEqual(state.addTemporaryModifier(.option), [])
+
+        let action = ShortcutItem(id: "move-here", title: "Move Item Here",
+                                  displayKey: "V", usage: 25,
+                                  modifiers: ModifierChord([.command, .option]))
+        XCTAssertEqual(state.selectAction(action.id), [.haptic(.selection)])
+        XCTAssertEqual(state.selectAction(action.id), [])
+        XCTAssertEqual(state.finish(with: action),
+                       [.execute(action), .haptic(.confirmation),
+                        .modifierUp(.command), .modifierUp(.option)])
+        XCTAssertTrue(state.temporaryModifiers.isEmpty)
+        XCTAssertNil(state.paletteChord)
+    }
+
+    func testTemporaryReleaseWithoutActionReturnsToLatchedPalette() {
+        var state = ControlInteractionState()
+        _ = state.tap(.shift)
+        state.press(.command)
+        _ = state.beginPalette(with: .command)
+        _ = state.addTemporaryModifier(.option)
+        XCTAssertEqual(state.finish(with: nil),
+                       [.modifierUp(.command), .modifierUp(.option)])
+        XCTAssertEqual(state.latchedModifiers, [.shift])
+        XCTAssertEqual(state.paletteChord, ModifierChord([.shift]))
+    }
+
+    func testTapLatchedChordKeepsItsPaletteVisible() {
+        var state = ControlInteractionState()
+        _ = state.tap(.command)
+        XCTAssertEqual(state.paletteChord, ModifierChord([.command]))
+        _ = state.tap(.option)
+        XCTAssertEqual(state.paletteChord, ModifierChord([.command, .option]))
+    }
+
+    func testExecutingShortcutClearsTemporaryAndPreservesPermanentModifiers() {
+        var state = ControlInteractionState()
+        _ = state.tap(.shift)
+        _ = state.beginPalette(with: .command)
+        _ = state.updateTemporaryChord([.command, .option])
+        let action = ShortcutItem(title: "Paste", displayKey: "V", usage: 25,
+                                  modifiers: ModifierChord([.command, .option, .shift]))
+        let effects = state.finish(with: action)
+        XCTAssertEqual(effects, [.execute(action), .haptic(.confirmation),
+                                 .modifierUp(.command), .modifierUp(.option)])
+        XCTAssertEqual(state.latchedModifiers, [.shift])
+        XCTAssertTrue(state.temporaryModifiers.isEmpty)
+    }
+
+    func testCancelAndResetReleaseHeldModifiers() {
+        var state = ControlInteractionState()
+        _ = state.beginPalette(with: .command)
+        XCTAssertEqual(state.cancelTemporary(), [.modifierUp(.command)])
+        _ = state.tap(.command)
+        _ = state.tap(.option)
+        XCTAssertEqual(state.resetAll(), [.modifierUp(.command), .modifierUp(.option)])
+        XCTAssertTrue(state.latchedModifiers.isEmpty)
+    }
+
+    func testCanonicalProfileContentsAndArbitraryChordLookup() {
+        var profile = ControlProfile.canonical()
+        XCTAssertEqual(profile.visibleTrayItems, ControlTrayItem.allCases)
+        XCTAssertEqual(profile.actions(for: ModifierChord([.command])).map(\.displayKey),
+                       ["C", "V", "X", "Z", "A", "W", "Space"])
+        XCTAssertEqual(profile.actions(for: ModifierChord([.command, .option])).count, 5)
+        XCTAssertEqual(profile.actions(for: ModifierChord([.command, .shift])).count, 6)
+
+        let arbitrary = ModifierChord([.control, .option, .shift])
+        let action = ShortcutItem(title: "Test", displayKey: "T", usage: 23,
+                                  modifiers: arbitrary)
+        profile.setActions([action], for: arbitrary)
+        XCTAssertEqual(profile.actions(for: ModifierChord([.shift, .control, .option])), [action])
+    }
+
+    func testDefaultTrayIncludesCustomizableOneShotTab() {
+        let profile = ControlProfile.canonical()
+        XCTAssertEqual(profile.visibleTrayItems,
+                       [.command, .option, .control, .shift, .escape, .tab, .dock, .keyboard, .settings])
+        XCTAssertEqual(ControlTrayItem.tab.displayLabel, "tab")
+        XCTAssertEqual(profile.trayItems.first(where: { $0.item == .tab })?.isVisible, true)
+    }
+
+    func testShortcutHUDReflectsActiveCombinationWithoutActionTitle() {
+        XCTAssertEqual(ModifierChord([.command]).hudText(for: "C"), "⌘C")
+        XCTAssertEqual(ModifierChord([.command, .option]).hudText(for: "V"), "⌘⌥V")
+        XCTAssertEqual(ModifierChord([.command, .shift]).hudText(for: "4"), "⌘⇧4")
+    }
+
+    func testReceiverCanRequestMirrorToExtendAndExtendToMirror() {
+        var mirror = DisplayModeRequestState()
+        XCTAssertFalse(mirror.confirm(.mirror))
+        XCTAssertTrue(mirror.request(.extend))
+        XCTAssertEqual(mirror.pendingMode, .extend)
+
+        var extend = DisplayModeRequestState()
+        XCTAssertFalse(extend.confirm(.extend))
+        XCTAssertTrue(extend.request(.mirror))
+        XCTAssertEqual(extend.pendingMode, .mirror)
+    }
+
+    func testDuplicateModeRequestIsSuppressedWhilePending() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        XCTAssertTrue(state.request(.extend))
+        XCTAssertFalse(state.request(.extend))
+        XCTAssertFalse(state.request(.mirror))
+        XCTAssertEqual(state.pendingMode, .extend)
+    }
+
+    func testConfirmedModeUpdatesReceiverAndProducesOneReceiverConfirmation() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        _ = state.request(.extend)
+        XCTAssertTrue(state.confirm(.extend))
+        XCTAssertEqual(state.confirmedMode, .extend)
+        XCTAssertNil(state.pendingMode)
+        XCTAssertFalse(state.confirm(.extend))
+    }
+
+    func testUnansweredModeRequestExpiresAndKeepsTheActualMode() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        XCTAssertTrue(state.request(.extend))
+        let generation = state.pendingGeneration
+        XCTAssertTrue(state.expirePending(generation: generation))
+        XCTAssertNil(state.pendingMode)
+        XCTAssertEqual(state.confirmedMode, .mirror)
+        // Idempotent, and a stale deadline can never retire a newer request.
+        XCTAssertFalse(state.expirePending(generation: generation))
+        XCTAssertTrue(state.request(.extend))
+        XCTAssertFalse(state.expirePending(generation: generation))
+        XCTAssertEqual(state.pendingMode, .extend)
+    }
+
+    func testSessionResetClearsStalePendingAndConfirmedMode() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        _ = state.request(.extend)
+        state.reset()
+        XCTAssertNil(state.pendingMode)
+        XCTAssertNil(state.confirmedMode)
+        // Nothing is carried over: the first state after a reset is a plain
+        // Mac-originated update, not a receiver confirmation.
+        XCTAssertFalse(state.confirm(.extend))
+        XCTAssertTrue(state.request(.mirror))
+    }
+
+    func testMacOriginatedModeStateUpdatesWithoutReceiverConfirmation() {
+        var state = DisplayModeRequestState()
+        XCTAssertFalse(state.confirm(.mirror))
+        XCTAssertEqual(state.confirmedMode, .mirror)
+        XCTAssertFalse(state.confirm(.extend))
+        XCTAssertEqual(state.confirmedMode, .extend)
+    }
+
+    func testCaptureModeMapsToExplicitReceiverModeBothWays() {
+        XCTAssertEqual(CaptureMode(ReceiverDisplayMode.mirror), .mirror)
+        XCTAssertEqual(CaptureMode(ReceiverDisplayMode.extend), .extend)
+        XCTAssertEqual(CaptureMode.mirror.receiverMode, .mirror)
+        XCTAssertEqual(CaptureMode.extend.receiverMode, .extend)
+    }
+
+    func testProfileReorderHideAndPaletteEditing() {
+        var profile = ControlProfile.canonical()
+        profile.moveTrayItems(from: IndexSet(integer: 0), to: 3)
+        XCTAssertEqual(profile.trayItems.map(\.item).prefix(3), [.option, .control, .command])
+        profile.trayItems[0].isVisible = false
+        XCTAssertFalse(profile.visibleTrayItems.contains(.option))
+
+        let chord = ModifierChord([.command])
+        let originalCount = profile.actions(for: chord).count
+        var actions = profile.actions(for: chord)
+        actions.removeFirst()
+        actions.append(ShortcutItem(title: "New", displayKey: "N", usage: 17,
+                                    modifiers: chord))
+        profile.setActions(actions, for: chord)
+        profile.moveActions(for: chord, from: IndexSet(integer: originalCount - 1), to: 0)
+        XCTAssertEqual(profile.actions(for: chord).first?.title, "New")
+    }
+
+    func testPreferencesSerializationSlotsPersistenceAndReset() throws {
+        let suite = "ReceiverControlsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.activeControlProfile = .profile2
+        preferences.trayEnabled = false
+        preferences.keyboardButtonEnabled = false
+        preferences.hapticsEnabled = false
+        preferences.preferredLandscapeSide = .leading
+        preferences.allowInput = false
+        preferences.inputMode = .trackpad
+        preferences.showSurfaceGrid = false
+        var profile1 = preferences.profile(for: .profile1)
+        profile1.trayItems[0].isVisible = false
+        preferences.updateProfile(profile1)
+        repository.save(preferences)
+
+        let loaded = repository.load()
+        XCTAssertEqual(loaded, preferences)
+        XCTAssertNotEqual(loaded.profile(for: .profile1), loaded.profile(for: .profile2))
+        var reset = loaded
+        reset.resetProfile(.profile1)
+        XCTAssertEqual(reset.profile(for: .profile1), .canonical(slot: .profile1))
+        XCTAssertFalse(reset.trayEnabled)
+    }
+
+    func testSchemaThreePreferencesDefaultAllowInputAndDirectTouch() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 3
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        // A save written before either preference existed must migrate to
+        // exactly the pre-feature behavior: input always allowed, touch
+        // always direct/absolute — never silently disable input or switch
+        // an existing user into an unfamiliar pointer model.
+        XCTAssertTrue(migrated.allowInput)
+        XCTAssertEqual(migrated.inputMode, .direct)
+    }
+
+    func testSchemaFourPreferencesDefaultTrackpadSensitivityToPreSettingSpeed() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 4
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertEqual(migrated.trackpadSensitivity, PointerGestureConfig.defaultTrackpadSensitivity)
+    }
+
+    func testSchemaEightPreferencesDefaultSurfaceGridOn() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 8
+        let encoded = try JSONEncoder().encode(old)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "showSurfaceGrid")
+        defaults.set(try JSONSerialization.data(withJSONObject: object),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.showSurfaceGrid)
+    }
+
+    func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {
+        var preferences = ReceiverControlPreferences()
+        XCTAssertTrue(preferences.trayCanBeShown)
+
+        preferences.allowInput = false
+        XCTAssertFalse(preferences.trayCanBeShown)
+        // Turning input back on restores the tray automatically because the
+        // stored `trayEnabled` preference was never touched.
+        preferences.allowInput = true
+        XCTAssertTrue(preferences.trayCanBeShown)
+
+        preferences.trayEnabled = false
+        XCTAssertFalse(preferences.trayCanBeShown)
+    }
+
+    func testVersionOnePreferencesGainTabWithoutLosingCustomization() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 1
+        for index in old.profiles.indices {
+            old.profiles[index].trayItems.removeAll { $0.item == .tab }
+        }
+        old.profiles[0].trayItems[0].isVisible = false
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertFalse(migrated.profiles[0].trayItems[0].isVisible)
+        XCTAssertEqual(migrated.profiles[0].trayItems.firstIndex { $0.item == .tab },
+                       migrated.profiles[0].trayItems.firstIndex { $0.item == .keyboard }.map { $0 - 1 })
+    }
+
+    func testLandscapeTrayHugsChosenSideAndCentersVertically() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        func layout(_ side: LandscapeTraySide) -> ControlTrayLayout {
+            ControlTrayGeometry.layout(
+                container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+                portrait: false, side: side, traySize: CGSize(width: 44, height: 348),
+                paletteSize: CGSize(width: 42, height: 260), avoidNotch: true)
+        }
+        let right = layout(.trailing)
+        let left = layout(.leading)
+        XCTAssertEqual(right.trayFrame.maxX, container.maxX - 12, accuracy: 0.5)
+        XCTAssertEqual(left.trayFrame.minX, container.minX + 12, accuracy: 0.5)
+        // Vertically centered, and the palette opens inward on both sides.
+        XCTAssertEqual(right.trayFrame.midY, container.midY, accuracy: 0.5)
+        XCTAssertEqual(left.trayFrame.midY, container.midY, accuracy: 0.5)
+        XCTAssertLessThan(right.paletteFrame.maxX, right.trayFrame.minX)
+        XCTAssertGreaterThan(left.paletteFrame.minX, left.trayFrame.maxX)
+    }
+
+    func testSchemaTwoLandscapeCornerMigratesToTraySide() throws {
+        let suite = "ReceiverControlsSideMigration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let encoded = try JSONEncoder().encode(ReceiverControlPreferences())
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["version"] = 2
+        object.removeValue(forKey: "preferredLandscapeSide")
+        object["preferredLandscapeCorner"] = LandscapeTrayCorner.bottomLeading.rawValue
+        defaults.set(try JSONSerialization.data(withJSONObject: object),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertEqual(migrated.preferredLandscapeSide, .leading)
+    }
+
+    func testGeometryKeepsPortraitTrayAndPaletteAboveKeyboard() {
+        let visible = CGRect(x: 0, y: 0, width: 390, height: 500)
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(x: 0, y: 0, width: 390, height: 844), safeInsets: .zero,
+            keyboardVisibleRect: visible, portrait: true, side: .trailing,
+            traySize: CGSize(width: 360, height: 58), paletteSize: CGSize(width: 330, height: 92),
+            avoidNotch: true)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxY, visible.maxY)
+        XCTAssertLessThanOrEqual(layout.paletteFrame.maxY, layout.trayFrame.minY)
+        XCTAssertTrue(visible.contains(layout.paletteFrame))
+    }
+
+    /// Nine 40pt chips need 396pt: wider than a 390pt (or 375pt) iPhone in
+    /// portrait, and taller than it in landscape, so the end chips ran off
+    /// the screen and out of the tray's touch area.
+    func testTrayChipsShrinkJustEnoughToFitTheScreen() {
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 9, length: 440), 40)
+        for length: CGFloat in [402, 390, 375] {
+            let chip = ControlTrayGeometry.fittedChipDiameter(count: 9, length: length)
+            XCTAssertLessThan(chip, 40)
+            let tray = 9 * chip + 8 * 4 + 4
+            XCTAssertLessThanOrEqual(tray, length - 24, "\(length)pt screen")
+        }
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 4, length: 390), 40)
+        XCTAssertEqual(ControlTrayGeometry.fittedChipDiameter(count: 20, length: 390), 30)
+    }
+
+    /// Avoid Notch lifts the portrait tray off the home indicator; the
+    /// palette must move with it rather than stay where the tray used to
+    /// be (it covered half the tray on every Face ID iPhone).
+    func testAvoidNotchCarriesPortraitPaletteWithTheTray() {
+        let container = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let layout = ControlTrayGeometry.layout(
+            container: container,
+            safeInsets: ControlSafeInsets(top: 62, leading: 0, bottom: 34, trailing: 0),
+            keyboardVisibleRect: nil, portrait: true, side: .trailing,
+            traySize: CGSize(width: 396, height: 44), paletteSize: CGSize(width: 300, height: 42),
+            avoidNotch: true)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxY, container.maxY - 34)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.trayFrame.minY - layout.paletteFrame.maxY, 10, accuracy: 0.001)
+    }
+
+    func testAvoidNotchCarriesLandscapePaletteWithTheTray() {
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(x: 0, y: 0, width: 874, height: 402),
+            safeInsets: ControlSafeInsets(top: 0, leading: 62, bottom: 21, trailing: 62),
+            keyboardVisibleRect: nil, portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(layout.trayFrame.minX, 62)
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.paletteFrame.minX - layout.trayFrame.maxX, 10, accuracy: 0.001)
+    }
+
+    func testLandscapeCornerFallsBackInsideKeyboardVisibleBounds() {
+        let visible = CGRect(x: 0, y: 0, width: 700, height: 190)
+        let layout = ControlTrayGeometry.layout(
+            container: CGRect(x: 0, y: 0, width: 700, height: 390), safeInsets: .zero,
+            keyboardVisibleRect: visible, portrait: false, side: .trailing,
+            traySize: CGSize(width: 58, height: 300), paletteSize: CGSize(width: 320, height: 92),
+            avoidNotch: true)
+        XCTAssertTrue(visible.contains(layout.trayFrame))
+        XCTAssertTrue(visible.contains(layout.paletteFrame))
+        XCTAssertFalse(layout.trayFrame.intersects(layout.paletteFrame))
+        XCTAssertEqual(layout.axis, .vertical)
+    }
+
+    func testHeldModifierTrackerNeverKeepsReleasedState() {
+        var tracker = HeldModifierTracker()
+        XCTAssertTrue(tracker.down(.command))
+        XCTAssertFalse(tracker.down(.command))
+        XCTAssertTrue(tracker.flags.contains(.maskCommand))
+        XCTAssertTrue(tracker.up(.command))
+        XCTAssertFalse(tracker.flags.contains(.maskCommand))
+        XCTAssertFalse(tracker.up(.command))
+    }
+
+    func testHapticPolicyHonorsPreference() {
+        for event in [ControlHapticEvent.selection, .latch, .confirmation, .profileChange, .reset] {
+            XCTAssertTrue(ControlHapticPolicy.shouldPlay(event, enabled: true))
+            XCTAssertFalse(ControlHapticPolicy.shouldPlay(event, enabled: false))
+        }
+    }
+
+    // MARK: - Function Tray
+
+    func testDefaultFunctionTrayContainsZoomEditAndReturnActionsInOrder() {
+        let profile = FunctionTrayProfile.canonical()
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo", "return"])
+        XCTAssertEqual(profile.visibleItems.map(\.title), ["Zoom In", "Zoom Out", "Undo", "Redo", "Return"])
+    }
+
+    /// Return gets its own cluster right after Undo/Redo: near the editing
+    /// actions, but with a gap so a reach for Redo doesn't submit.
+    func testDefaultFunctionTrayRendersReturnAsItsOwnGroupAfterEditing() {
+        let groups = FunctionTrayProfile.canonical().visibleGroups
+        XCTAssertEqual(groups.map { $0.map(\.id) }, [["zoom-in", "zoom-out"], ["undo", "redo"], ["return"]])
+    }
+
+    /// One activation is one ordinary Return press: usage 40, no modifiers
+    /// of its own, so a latched ⌘ or ⇧ (held on the Mac) still applies.
+    func testReturnIsOnePlainReturnPress() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "return" })
+        XCTAssertEqual(ControlActionPlan.operations(for: item.action), [.press(usage: 40, modifiers: [])])
+        XCTAssertTrue(item.action.isValid)
+        XCTAssertTrue(FunctionTrayProfile.isBuiltIn("return"))
+    }
+
+    /// On the Mac, usage 40 is the Return key, and a modifier latched on the
+    /// receiver (held via modifierDown) joins the press the way
+    /// `InputInjector.handleKeyboardPress` combines them: ⌘↵, ⇧↵.
+    func testReturnPressPicksUpLatchedModifiersOnTheMac() throws {
+        let usage = try XCTUnwrap(HIDKeyUsage.parse(40))
+        XCTAssertEqual(usage, .returnOrEnter)
+        XCTAssertEqual(usage.keyCode, 36)
+        var held = HeldModifierTracker()
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), [])
+        _ = held.down(.command)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskCommand)
+        _ = held.up(.command)
+        _ = held.down(.shift)
+        XCTAssertEqual(KeyModifier.flags(named: []).union(held.flags), .maskShift)
+    }
+
+    /// A profile saved before Return existed keeps its tray exactly as it
+    /// was; Return arrives hidden, ready to switch on in the editor.
+    func testSavedProfileGainsReturnHiddenWithoutChangingItsLayout() {
+        var saved = FunctionTrayProfile.canonical()
+        saved.items.removeAll { $0.id == "return" }
+        saved.moveItems(from: IndexSet(integer: 3), to: 0)
+        saved.items[1].isVisible = false
+        let refreshed = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(Array(refreshed.items.prefix(saved.items.count)), saved.items)
+        let added = refreshed.items.filter { !saved.items.map(\.id).contains($0.id) }
+        XCTAssertEqual(added.map(\.id), ["return"])
+        XCTAssertEqual(added.first?.isVisible, false)
+        XCTAssertEqual(refreshed.visibleItems.map(\.id), saved.visibleItems.map(\.id))
+    }
+
+    // MARK: Return upgrade from v1.20.0
+
+    /// One Function Tray profile's items as v1.20.0 (schema 18) stored them:
+    /// every slot started with this tray, and saving any receiver setting
+    /// wrote it out even when the tray itself was never touched.
+    private static let v1_20FunctionTrayItems = """
+        [
+          {"item": {"id": "zoom-in", "title": "Zoom In", "displayKey": "+", "systemImage": "plus.magnifyingglass",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 46, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 0},
+          {"item": {"id": "zoom-out", "title": "Zoom Out", "displayKey": "−", "systemImage": "minus.magnifyingglass",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 45, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 0},
+          {"item": {"id": "undo", "title": "Undo", "displayKey": "Z", "systemImage": "arrow.uturn.backward",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 29, "modifiers": {"modifiers": ["command"]}}}}},
+           "isVisible": true, "group": 1},
+          {"item": {"id": "redo", "title": "Redo", "displayKey": "Z", "systemImage": "arrow.uturn.forward",
+                    "action": {"keyboardShortcut": {"_0": {"usage": 29,
+                                                           "modifiers": {"modifiers": ["shift", "command"]}}}}},
+           "isVisible": true, "group": 1},
+          {"item": {"id": "menu-bar", "title": "Menu Bar", "displayKey": "Menu Bar", "systemImage": "menubar.rectangle",
+                    "action": {"receiverGesture": {"_0": "menuBar"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "launchpad", "title": "Launchpad", "displayKey": "Launchpad", "systemImage": "square.grid.3x3",
+                    "action": {"receiverGesture": {"_0": "launchpad"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "show-desktop", "title": "Show Desktop", "displayKey": "Show Desktop",
+                    "systemImage": "rectangle.dashed", "action": {"receiverGesture": {"_0": "showDesktop"}}},
+           "isVisible": false, "group": 2},
+          {"item": {"id": "control-center", "title": "Control Center", "displayKey": "Control Center",
+                    "systemImage": "switch.2", "action": {"receiverGesture": {"_0": "controlCenter"}}},
+           "isVisible": false, "group": 2}
+        ]
+        """
+
+    private func v1_20FunctionTrayProfile(_ slot: ControlProfileSlot) throws -> FunctionTrayProfile {
+        let json = #"{"slot": "\#(slot.rawValue)", "items": \#(Self.v1_20FunctionTrayItems)}"#
+        return try JSONDecoder().decode(FunctionTrayProfile.self, from: Data(json.utf8))
+    }
+
+    /// A schema-18 save holding `trays` (v1.20.0's tray in every slot when
+    /// nil) with some unrelated receiver settings changed.
+    private func saveV1_20Preferences(_ defaults: UserDefaults, trays: [FunctionTrayProfile]? = nil) throws {
+        var old = ReceiverControlPreferences()
+        old.version = 18
+        old.hapticsEnabled = false
+        old.inputMode = .trackpad
+        old.activeFunctionTrayProfile = .profile1
+        old.functionTrayPosition = .sameSide
+        old.functionTrayProfiles = try trays ?? ControlProfileSlot.allCases.map { try v1_20FunctionTrayProfile($0) }
+        defaults.set(try JSONEncoder().encode(old), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+    }
+
+    private func migrationDefaults() throws -> (UserDefaults, ReceiverControlPreferencesRepository) {
+        let suite = "ReceiverControlsReturnMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        return (defaults, ReceiverControlPreferencesRepository(defaults: defaults))
+    }
+
+    /// The fixture is v1.20.0's starting tray: Zoom and Undo/Redo showing,
+    /// the four system actions hidden, and no Return.
+    func testV1_20FixtureIsThatReleasesDefaultTray() throws {
+        let profile = try v1_20FunctionTrayProfile(.default)
+        XCTAssertEqual(profile.items.map(\.id), ["zoom-in", "zoom-out", "undo", "redo",
+                                                 "menu-bar", "launchpad", "show-desktop", "control-center"])
+        XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo"])
+        XCTAssertEqual(profile.items.map(\.group), [0, 0, 1, 1, 2, 2, 2, 2])
+        var today = FunctionTrayProfile.canonical()
+        today.items.removeAll { $0.id == "return" }
+        XCTAssertEqual(profile, today)
+    }
+
+    func testFreshInstallShowsReturnInEverySlot() throws {
+        let (_, repository) = try migrationDefaults()
+        for initial in [ReceiverControlPreferences.initial(isPad: false), .initial(isPad: true)] {
+            let loaded = repository.load(initial: initial)
+            for slot in ControlProfileSlot.allCases {
+                let profile = loaded.functionTrayProfile(for: slot)
+                XCTAssertEqual(profile, .canonical(slot: slot), "\(slot)")
+                XCTAssertEqual(profile.visibleItems.map(\.id), ["zoom-in", "zoom-out", "undo", "redo", "return"])
+            }
+        }
+    }
+
+    /// An untouched v1.20.0 tray, saved only because other settings
+    /// changed, upgrades to today's default in all three slots, and those
+    /// other settings stay as they were.
+    func testUntouchedV1_20TraysUpgradeToShowReturnInEverySlot() throws {
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults)
+
+        let loaded = repository.load()
+        for slot in ControlProfileSlot.allCases {
+            XCTAssertEqual(loaded.functionTrayProfiles.first { $0.slot == slot }, .canonical(slot: slot), "\(slot)")
+            XCTAssertEqual(loaded.functionTrayProfile(for: slot).visibleGroups.map { $0.map(\.id) },
+                           [["zoom-in", "zoom-out"], ["undo", "redo"], ["return"]], "\(slot)")
+        }
+        XCTAssertFalse(loaded.hapticsEnabled)
+        XCTAssertEqual(loaded.inputMode, .trackpad)
+        XCTAssertEqual(loaded.activeFunctionTrayProfile, .profile1)
+        XCTAssertEqual(loaded.functionTrayPosition, .sameSide)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    /// Each kind of customization keeps the user's tray exactly and only
+    /// adds Return hidden, ready in the editor. Untouched slots beside it
+    /// still upgrade on their own.
+    func testCustomizedV1_20TraysKeepTheirLayoutAndGainReturnHidden() throws {
+        let custom = ShortcutItem(id: "custom-save", title: "Save", displayKey: "S", usage: 22,
+                                  modifiers: ModifierChord([.command]))
+        let customizations: [(String, (inout FunctionTrayProfile) -> Void)] = [
+            ("order", { $0.moveItems(from: IndexSet(integer: 3), to: 0) }),
+            ("hidden", { $0.removeItem(id: "zoom-out") }),
+            ("shown", { $0.items[4].isVisible = true }),
+            ("group", { $0.items[1].group = 1 }),
+            ("custom action", { XCTAssertTrue($0.addCustomItem(custom)) }),
+            ("name", { $0.rename(id: "undo", to: "Back") }),
+            ("display", { $0.setDisplay(id: "redo", .emoji("🔁")) }),
+        ]
+        for (name, customize) in customizations {
+            let (defaults, repository) = try migrationDefaults()
+            var tray = try v1_20FunctionTrayProfile(.profile2)
+            customize(&tray)
+            try saveV1_20Preferences(defaults, trays: [try v1_20FunctionTrayProfile(.default),
+                                                       try v1_20FunctionTrayProfile(.profile1), tray])
+
+            let loaded = repository.load()
+            let migrated = loaded.functionTrayProfile(for: .profile2)
+            XCTAssertEqual(Array(migrated.items.dropLast()), tray.items, name)
+            XCTAssertEqual(migrated.items.last?.id, "return", name)
+            XCTAssertEqual(migrated.items.last?.isVisible, false, name)
+            XCTAssertEqual(migrated.visibleItems, tray.visibleItems, name)
+            XCTAssertEqual(loaded.functionTrayProfile(for: .default), .canonical(slot: .default), name)
+            XCTAssertEqual(loaded.functionTrayProfile(for: .profile1), .canonical(slot: .profile1), name)
+        }
+    }
+
+    /// A tray that already has Return keeps the user's choice for it.
+    func testSavedReturnChoiceIsKept() throws {
+        var hidden = FunctionTrayProfile.canonical(slot: .default)
+        hidden.removeItem(id: "return")
+        var moved = FunctionTrayProfile.canonical(slot: .profile1)
+        moved.moveItems(from: IndexSet(integer: 4), to: 0)
+        // A pre-release build appended it hidden to a v1.20.0 tray.
+        var appended = try v1_20FunctionTrayProfile(.profile2)
+        let returnItem = try XCTUnwrap(FunctionTrayProfile.canonical().items.first { $0.id == "return" })
+        appended.items.append(FunctionTrayItemConfiguration(item: returnItem.item, isVisible: false,
+                                                            group: returnItem.group))
+        for profile in [hidden, moved, appended] {
+            XCTAssertEqual(profile.resolvingCanonicalMetadata(), profile, "\(profile.slot)")
+        }
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults, trays: [hidden, moved, appended])
+        let loaded = repository.load()
+        XCTAssertEqual(loaded.functionTrayProfiles, [hidden, moved, appended])
+    }
+
+    /// Upgraded once, a tray is the user's: hiding Return sticks across
+    /// later loads, and loading again without a save upgrades the same way.
+    func testReturnUpgradeIsIdempotentAndRespectsALaterHide() throws {
+        let (defaults, repository) = try migrationDefaults()
+        try saveV1_20Preferences(defaults)
+        let first = repository.load()
+        XCTAssertEqual(repository.load(), first)
+        repository.save(first)
+        XCTAssertEqual(repository.load(), first)
+
+        var preferences = first
+        var tray = preferences.functionTrayProfile(for: .profile1)
+        tray.removeItem(id: "return")
+        preferences.updateFunctionTrayProfile(tray)
+        repository.save(preferences)
+        for _ in 0..<2 {
+            let reloaded = repository.load()
+            XCTAssertEqual(reloaded.functionTrayProfile(for: .profile1), tray)
+            XCTAssertFalse(reloaded.functionTrayProfile(for: .profile1).visibleItems.contains { $0.id == "return" })
+            XCTAssertTrue(reloaded.functionTrayProfile(for: .default).visibleItems.contains { $0.id == "return" })
+            repository.save(reloaded)
+        }
+    }
+
+    /// While typing, Return sits in the keyboard bar beside Escape and Tab.
+    func testKeyboardBarOffersReturnBeforeHideKeyboard() {
+        let items = KeyboardBarItem.defaultItems
+        XCTAssertEqual(Array(items.suffix(4)), [.escape, .tab, .returnKey, .dismissKeyboard])
+        XCTAssertEqual(items.filter { $0 == .returnKey }.count, 1)
+    }
+
+    /// The eight-key bar (same metrics as `keyboardBarBody`) fits a 375pt
+    /// and 390pt iPhone inside the layout margins, shrinking only as far as
+    /// it must and never below the 30pt floor.
+    func testEightKeyKeyboardBarFitsCompactIPhones() {
+        let count = KeyboardBarItem.defaultItems.count
+        XCTAssertEqual(count, 8)
+        let gap: CGFloat = 8, padding: CGFloat = 6
+        for (width, expected) in [(CGFloat(375), CGFloat(35)), (390, 37), (402, 38), (440, 38)] {
+            let item = ControlTrayGeometry.fittedChipDiameter(count: count, length: width, preferred: 38,
+                                                              gap: gap, slack: padding * 2)
+            XCTAssertEqual(item, expected, "\(width)pt")
+            let barWidth = CGFloat(count) * item + CGFloat(count - 1) * gap + padding * 2
+            XCTAssertLessThanOrEqual(barWidth, width - 24, "\(width)pt")
+        }
+    }
+
+    func testZoomInResolvesToCommandPlus() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-in" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.equal.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testZoomOutResolvesToCommandMinus() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-out" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.minus.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testUndoResolvesToCommandZ() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "undo" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.keyZ.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command]))
+    }
+
+    func testRedoResolvesToShiftCommandZ() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "redo" })
+        guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail("expected a keyboard shortcut") }
+        XCTAssertEqual(shortcut.usage, HIDKeyUsage.keyZ.rawValue)
+        XCTAssertEqual(shortcut.modifiers, ModifierChord([.command, .shift]))
+    }
+
+    func testHIDKeyUsageMinusAndEqualParseAndMapToCorrectKeyCodes() {
+        XCTAssertEqual(HIDKeyUsage.parse(45 as NSNumber), .minus)
+        XCTAssertEqual(HIDKeyUsage.parse(46 as NSNumber), .equal)
+        XCTAssertEqual(HIDKeyUsage.minus.keyCode, 27)
+        XCTAssertEqual(HIDKeyUsage.equal.keyCode, 24)
+    }
+
+    func testMainTrayOwnsToggleDockNotFunctionTray() {
+        let mainItems = ControlProfile.canonical().visibleTrayItems
+        let dockIndex = try? XCTUnwrap(mainItems.firstIndex(of: .dock))
+        let keyboardIndex = try? XCTUnwrap(mainItems.firstIndex(of: .keyboard))
+        XCTAssertEqual(dockIndex.map { $0 + 1 }, keyboardIndex)
+        XCTAssertEqual(ControlTrayItem.dock.title, "Toggle Dock")
+        XCTAssertEqual(ControlTrayItem.dock.displayLabel, "dock.rectangle")
+        let functionIDs = FunctionTrayProfile.canonical().visibleItems.map(\.id)
+        XCTAssertFalse(functionIDs.contains("dock"))
+        XCTAssertFalse(functionIDs.contains { $0.lowercased().contains("dock") })
+    }
+
+    func testOldFunctionTrayItemsResolveCanonicalSymbolsWithoutLosingCustomization() {
+        var saved = FunctionTrayProfile.canonical(slot: .profile1)
+        saved.items.reverse()
+        saved.items[0].isVisible = false
+        saved.items[0].group = 42
+        for index in saved.items.indices {
+            saved.items[index].item.systemImage = nil
+            saved.items[index].item.title = "Old \(saved.items[index].item.id)"
+        }
+
+        let resolved = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(resolved.items.map(\.id), saved.items.map(\.id))
+        XCTAssertFalse(resolved.items[0].isVisible)
+        XCTAssertEqual(resolved.items[0].group, 42)
+        XCTAssertEqual(resolved.items.first { $0.id == "zoom-in" }?.item.systemImage,
+                       "plus.magnifyingglass")
+        XCTAssertEqual(resolved.items.first { $0.id == "zoom-out" }?.item.systemImage,
+                       "minus.magnifyingglass")
+        XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.systemImage,
+                       "arrow.uturn.backward")
+        XCTAssertEqual(resolved.items.first { $0.id == "redo" }?.item.systemImage,
+                       "arrow.uturn.forward")
+        XCTAssertEqual(resolved.items.first { $0.id == "undo" }?.item.title, "Undo")
+    }
+
+    /// Launchpad and Show Desktop have no reliable Mac keyboard shortcut, so
+    /// these opt-in items are their only route besides the 4/5-finger pinch.
+    /// Hidden by default: the default tray is unchanged.
+    func testLaunchpadAndShowDesktopAreOptInFunctionTrayGestures() throws {
+        let profile = FunctionTrayProfile.canonical()
+        XCTAssertFalse(profile.visibleItems.contains { $0.id == "launchpad" || $0.id == "show-desktop" })
+        let launchpad = try XCTUnwrap(profile.items.first { $0.id == "launchpad" })
+        let showDesktop = try XCTUnwrap(profile.items.first { $0.id == "show-desktop" })
+        XCTAssertFalse(launchpad.isVisible)
+        XCTAssertFalse(showDesktop.isVisible)
+        XCTAssertEqual(launchpad.item.action, .receiverGesture(ReceiverGesture.launchpad.rawValue))
+        XCTAssertEqual(showDesktop.item.action, .receiverGesture(ReceiverGesture.showDesktop.rawValue))
+        XCTAssertEqual(launchpad.group, showDesktop.group)
+        // The system group holds exactly the semantic system actions.
+        XCTAssertEqual(Set(profile.items.filter { $0.group == launchpad.group }.map(\.id)),
+                       ["menu-bar", "launchpad", "show-desktop", "control-center"])
+    }
+
+    func testSavedFunctionTrayGainsNewItemsHiddenWithoutChangingItsTray() throws {
+        var saved = FunctionTrayProfile.canonical(slot: .profile2)
+        saved.items.removeAll { $0.id == "launchpad" || $0.id == "show-desktop" }
+        saved.items.swapAt(0, 1)
+        saved.items[2].isVisible = false
+        let resolved = saved.resolvingCanonicalMetadata()
+        XCTAssertEqual(resolved.visibleItems.map(\.id), saved.visibleItems.map(\.id))
+        XCTAssertEqual(Array(resolved.items.map(\.id).prefix(saved.items.count)), saved.items.map(\.id))
+        XCTAssertEqual(Array(resolved.items.map(\.id).suffix(2)), ["launchpad", "show-desktop"])
+        XCTAssertFalse(resolved.items.suffix(2).contains { $0.isVisible })
+        // Idempotent: nothing is appended twice.
+        XCTAssertEqual(resolved.resolvingCanonicalMetadata().items.map(\.id), resolved.items.map(\.id))
+    }
+
+    func testReceiverGestureActionRoundTripsThroughPersistence() throws {
+        let item = ShortcutItem(id: "launchpad", title: "Launchpad", gesture: .launchpad, systemImage: "square.grid.3x3")
+        let decoded = try JSONDecoder().decode(ShortcutItem.self, from: JSONEncoder().encode(item))
+        XCTAssertEqual(decoded, item)
+        let legacy = try JSONDecoder().decode(ShortcutItem.self, from: JSONEncoder().encode(
+            ShortcutItem(id: "undo", title: "Undo", displayKey: "Z", usage: 29, modifiers: ModifierChord([.command]))))
+        XCTAssertEqual(legacy.action, .keyboardShortcut(KeyboardShortcut(usage: 29, modifiers: ModifierChord([.command]))))
+    }
+
+    func testSchemaSevenProfilesGainDockImmediatelyBeforeKeyboard() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 7
+        for index in old.profiles.indices {
+            old.profiles[index].trayItems.removeAll { $0.item == .dock }
+        }
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        for profile in migrated.profiles {
+            let dock = try XCTUnwrap(profile.trayItems.firstIndex { $0.item == .dock })
+            let keyboard = try XCTUnwrap(profile.trayItems.firstIndex { $0.item == .keyboard })
+            XCTAssertEqual(dock + 1, keyboard)
+            XCTAssertEqual(profile.trayItems[dock].isVisible, profile.slot == .default)
+        }
+    }
+
+    func testSameSideFunctionGroupsAvoidRenderedMainTrayWhenMiddleCannotFit() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let renderedMain = CGRect(x: 12, y: -3, width: 44, height: 396)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: renderedMain,
+            groupSizes: [CGSize(width: 44, height: 88), CGSize(width: 44, height: 88)],
+            avoiding: nil, avoidNotch: true)
+
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertTrue(frames.allSatisfy { !$0.intersects(renderedMain) })
+        XCTAssertTrue(frames.allSatisfy { container.contains($0) })
+    }
+
+    func testFunctionTrayProfilesPersistIndependentlyFromMainTrayProfiles() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+
+        var preferences = ReceiverControlPreferences()
+        preferences.activeControlProfile = .profile2
+        preferences.activeFunctionTrayProfile = .profile1
+        var mainProfile1 = preferences.profile(for: .profile1)
+        mainProfile1.trayItems[0].isVisible = false
+        preferences.updateProfile(mainProfile1)
+        var functionProfile1 = preferences.functionTrayProfile(for: .profile1)
+        functionProfile1.items[0].isVisible = false
+        preferences.updateFunctionTrayProfile(functionProfile1)
+        repository.save(preferences)
+
+        let loaded = repository.load()
+        XCTAssertEqual(loaded, preferences)
+        XCTAssertEqual(loaded.activeControlProfile, .profile2)
+        XCTAssertEqual(loaded.activeFunctionTrayProfile, .profile1)
+        XCTAssertFalse(loaded.profile(for: .profile1).trayItems[0].isVisible)
+        XCTAssertFalse(loaded.functionTrayProfile(for: .profile1).items[0].isVisible)
+        // Changing one tray's profile 1 never touched the other's.
+        XCTAssertEqual(loaded.functionTrayProfile(for: .profile2), .canonical(slot: .profile2))
+        XCTAssertEqual(loaded.profile(for: .profile2), .canonical(slot: .profile2))
+    }
+
+    func testVisibilityAndOrderChangesDoNotMergeMainAndFunctionProfileState() {
+        var preferences = ReceiverControlPreferences()
+        var mainProfile = preferences.profile(for: .default)
+        mainProfile.moveTrayItems(from: [0], to: mainProfile.trayItems.count)
+        preferences.updateProfile(mainProfile)
+        // The Function Tray's default profile — untouched by the Main Tray
+        // edit above — still reads exactly as canonical.
+        XCTAssertEqual(preferences.functionTrayProfile(for: .default), .canonical(slot: .default))
+
+        var functionProfile = preferences.functionTrayProfile(for: .default)
+        functionProfile.items[0].isVisible = false
+        preferences.updateFunctionTrayProfile(functionProfile)
+        // And the Main Tray edit from above is still intact after that.
+        XCTAssertEqual(preferences.profile(for: .default), mainProfile)
+    }
+
+    func testSchemaFivePreferencesDefaultFunctionTrayToEnabledWithCanonicalProfiles() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 5
+        // Schema 5 had no Function Tray, so its saves carry none of its keys.
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(old)) as? [String: Any])
+        for key in ["functionTrayEnabled", "activeFunctionTrayProfile", "functionTrayPosition", "functionTrayProfiles"] {
+            json.removeValue(forKey: key)
+        }
+        defaults.set(try JSONSerialization.data(withJSONObject: json),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.functionTrayEnabled)
+        // Older saves keep the earlier same-side placement.
+        XCTAssertEqual(migrated.functionTrayPosition, .sameSide)
+        XCTAssertEqual(migrated.functionTrayProfile(for: .default), .canonical(slot: .default))
+    }
+
+    func testFunctionTrayHiddenWhenAllowInputOff() {
+        var preferences = ReceiverControlPreferences()
+        XCTAssertTrue(preferences.functionTrayCanBeShown)
+        preferences.allowInput = false
+        XCTAssertFalse(preferences.functionTrayCanBeShown)
+        // Independent of the Main Tray's own visibility, which reacts the
+        // same way to the same single `allowInput` gate.
+        XCTAssertFalse(preferences.trayCanBeShown)
+        preferences.allowInput = true
+        preferences.functionTrayEnabled = false
+        XCTAssertFalse(preferences.functionTrayCanBeShown)
+        XCTAssertTrue(preferences.trayCanBeShown)   // Main Tray unaffected by Function Tray's own toggle
+    }
+
+    // MARK: - Function Tray layout / collision avoidance
+
+    private let functionContainer = CGRect(x: 0, y: 0, width: 400, height: 300)
+    private let functionGroupSizes = [CGSize(width: 44, height: 90), CGSize(width: 44, height: 90)]
+
+    func testFunctionTraySameSideAnchorsZoomAboveAndEditBelowMainTrayWithoutOverlap() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .sameSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: false)
+        XCTAssertEqual(frames.count, 2)
+        let zoom = frames[0], edit = frames[1]
+        // Both hug the Main Tray's own (trailing) side.
+        XCTAssertGreaterThan(zoom.midX, 200)
+        XCTAssertGreaterThan(edit.midX, 200)
+        // Zoom above, Edit below, neither overlapping the Main Tray or each other.
+        XCTAssertLessThan(zoom.maxY, mainFrame.minY)
+        XCTAssertGreaterThan(edit.minY, mainFrame.maxY)
+        XCTAssertFalse(zoom.intersects(mainFrame))
+        XCTAssertFalse(edit.intersects(mainFrame))
+        XCTAssertFalse(zoom.intersects(edit))
+        // Zoom anchors toward the top of the available space, Edit toward the bottom.
+        XCTAssertLessThan(zoom.minY, functionContainer.midY)
+        XCTAssertGreaterThan(edit.maxY, functionContainer.midY)
+    }
+
+    func testFunctionTrayOppositeSideUsesTheOtherEdgeIndependentlyOfMainTray() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: false)
+        // Opposite of the Main Tray's trailing side — hugs leading instead,
+        // nowhere near the Main Tray's own frame — and top/bottom anchoring
+        // is independent of where the Main Tray happens to sit.
+        for frame in frames {
+            XCTAssertLessThan(frame.midX, 200)
+            XCTAssertFalse(frame.intersects(mainFrame))
+        }
+        XCTAssertLessThan(frames[0].minY, frames[1].minY)
+    }
+
+    func testFunctionTrayDisplacesAroundACollidingPaletteThenReturns() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        func layout(avoiding: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .sameSide,
+                mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: avoiding, avoidNotch: false)
+        }
+        let undisplaced = layout(avoiding: nil)
+        // A palette that exactly covers where the Zoom group would sit.
+        let collidingPalette = undisplaced[0].insetBy(dx: -2, dy: -2)
+        let displaced = layout(avoiding: collidingPalette)
+
+        XCTAssertFalse(displaced[0].intersects(collidingPalette))
+        XCTAssertNotEqual(displaced[0], undisplaced[0])
+        // The uninvolved (Edit) group is untouched.
+        XCTAssertEqual(displaced[1], undisplaced[1])
+
+        // The palette closing (avoiding: nil) returns it to the exact
+        // original position — no permanent reservation of the moved-to spot.
+        XCTAssertEqual(layout(avoiding: nil), undisplaced)
+    }
+
+    func testLeftSameSideLivePaletteMovesOnlyTopGroupAndReturnsExactly() {
+        assertSameSidePaletteMovement(side: .leading, collidingGroup: 0)
+    }
+
+    func testRightSameSideLivePaletteMovesOnlyTopGroupAndReturnsExactly() {
+        assertSameSidePaletteMovement(side: .trailing, collidingGroup: 0)
+    }
+
+    func testSameSideBottomPaletteCollisionMovesOnlyBottomGroup() {
+        assertSameSidePaletteMovement(side: .leading, collidingGroup: 1)
+    }
+
+    private func assertSameSidePaletteMovement(side: LandscapeTraySide,
+                                               collidingGroup: Int,
+                                               file: StaticString = #filePath,
+                                               line: UInt = #line) {
+        // A tall rendered Main Tray forces the working Same Side base
+        // fallback inward. This is the real-device geometry that exposed
+        // the old palette->main displacement loop.
+        let mainX: CGFloat = side == .leading ? 12 : 344
+        let main = CGRect(x: mainX, y: 20, width: 44, height: 260)
+        func layout(palette: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero,
+                keyboardVisibleRect: nil, portrait: false,
+                mainSide: side, position: .sameSide,
+                mainTrayFrame: main, groupSizes: functionGroupSizes,
+                avoiding: palette, avoidNotch: false)
+        }
+
+        let closed = layout(palette: nil)
+        let palette = closed[collidingGroup].insetBy(dx: -2, dy: -2)
+        let open = layout(palette: palette)
+        let other = collidingGroup == 0 ? 1 : 0
+
+        XCTAssertNotEqual(open[collidingGroup], closed[collidingGroup], file: file, line: line)
+        XCTAssertFalse(open[collidingGroup].intersects(palette), file: file, line: line)
+        XCTAssertFalse(open[collidingGroup].intersects(main), file: file, line: line)
+        XCTAssertEqual(open[other], closed[other], file: file, line: line)
+        // `nil` models `paletteChord` closing: geometry is stateless and
+        // recomputes the exact base frame used by SwiftUI's frame animation.
+        XCTAssertEqual(layout(palette: nil), closed, file: file, line: line)
+    }
+
+    func testOppositeSideMovesOnlyForActualPaletteIntersection() {
+        let main = CGRect(x: 344, y: 100, width: 44, height: 100)
+        func layout(palette: CGRect?) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: functionContainer, safeInsets: .zero,
+                keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .oppositeSide,
+                mainTrayFrame: main, groupSizes: functionGroupSizes,
+                avoiding: palette, avoidNotch: false)
+        }
+        let base = layout(palette: nil)
+        XCTAssertEqual(layout(palette: CGRect(x: 300, y: 120, width: 44, height: 60)), base)
+
+        let palette = base[0].insetBy(dx: -2, dy: -2)
+        let moved = layout(palette: palette)
+        XCTAssertNotEqual(moved[0], base[0])
+        XCTAssertFalse(moved[0].intersects(palette))
+        XCTAssertEqual(moved[1], base[1])
+    }
+
+    func testPaletteDisplacementRemainsClearOfUnsafeRegion() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let safe = ControlSafeInsets(top: 0, leading: 50, bottom: 0, trailing: 0)
+        let main = CGRect(x: 50, y: 100, width: 44, height: 200)
+        let base = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: main, groupSizes: functionGroupSizes,
+            avoiding: nil, avoidNotch: true)
+        let palette = base[0].insetBy(dx: -2, dy: -2)
+        let moved = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .leading, position: .sameSide,
+            mainTrayFrame: main, groupSizes: functionGroupSizes,
+            avoiding: palette, avoidNotch: true)
+
+        XCTAssertFalse(moved[0].intersects(palette))
+        XCTAssertFalse(moved[0].intersects(main))
+        XCTAssertGreaterThanOrEqual(moved[0].minX, safe.leading)
+        XCTAssertTrue(container.contains(moved[0]))
+    }
+
+    func testFunctionTrayLayoutIsANoOpWhenNotActuallyColliding() {
+        let mainFrame = CGRect(x: 300, y: 120, width: 44, height: 60)
+        let farAwayPalette = CGRect(x: 0, y: 0, width: 20, height: 20)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: functionContainer, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .sameSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: farAwayPalette, avoidNotch: false)
+        for frame in frames { XCTAssertFalse(frame.intersects(farAwayPalette)) }
+    }
+
+    // MARK: - Avoid Notch
+
+    func testAvoidingUnsafeRegionShiftsOnlyWhenIntersectingAndOnlyOnTheAffectedEdge() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+
+        // Frame sitting inside the notch's strip — shifted to clear it.
+        let overlapping = CGRect(x: 10, y: 100, width: 44, height: 120)
+        let shifted = ControlTrayGeometry.avoidingUnsafeRegion(overlapping, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading)
+        XCTAssertEqual(shifted.minX, 40)
+        XCTAssertEqual(shifted.minY, overlapping.minY)   // only the affected axis moves
+
+        // A frame nowhere near the unsafe strip is returned unchanged.
+        let clear = CGRect(x: 200, y: 100, width: 44, height: 120)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(clear, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading), clear)
+
+        // Disabled: never shifts, even when intersecting.
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(overlapping, in: container, safeInsets: leftNotch, enabled: false, notchSide: .leading), overlapping)
+    }
+
+    func testAvoidingUnsafeRegionHandlesAllFourEdgesIndependently() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 30, leading: 40, bottom: 20, trailing: 50)
+        // Trailing-edge overlap — the physical notch side is given
+        // explicitly (see `PhysicalNotchSide`), not inferred from comparing
+        // `leading`/`trailing` depths.
+        let trailing = CGRect(x: 770, y: 100, width: 44, height: 44)
+        let shiftedTrailing = ControlTrayGeometry.avoidingUnsafeRegion(trailing, in: container, safeInsets: insets, enabled: true, notchSide: .trailing)
+        XCTAssertEqual(shiftedTrailing.maxX, 750)
+        // Top overlap — independent of notchSide entirely.
+        let top = CGRect(x: 378, y: 5, width: 44, height: 44)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(top, in: container, safeInsets: insets, enabled: true).minY, 30)
+        // Bottom overlap — independent of notchSide entirely.
+        let bottom = CGRect(x: 378, y: 370, width: 44, height: 44)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(bottom, in: container, safeInsets: insets, enabled: true).maxY, 380)
+    }
+
+    func testLeftSideNotchShiftsLeadingTrayInward() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(on.trayFrame.minX, 40)
+    }
+
+    func testRightSideNotchShiftsTrailingTrayInward() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let rightNotch = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 40)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: rightNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(on.trayFrame.maxX, container.maxX - 40)
+    }
+
+    func testLeftTrayIsUnchangedByRightUnsafeInset() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true)
+        let rightUnsafe = ControlSafeInsets(top: 0, leading: 0, bottom: 21, trailing: 59)
+        let resolved = ControlTrayGeometry.layout(
+            container: container, safeInsets: rightUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertEqual(resolved.trayFrame.minX, raw.trayFrame.minX)
+    }
+
+    func testRightTrayIsUnchangedByLeftUnsafeInset() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil,
+            portrait: false, side: .trailing,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true)
+        let leftUnsafe = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        let resolved = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .trailing,
+            traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 46, height: 330),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(resolved.trayFrame.maxX, raw.trayFrame.maxX)
+    }
+
+    func testCollapsedGearUsesTheSameNotchSafeMainTrayFrame() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let leftUnsafe = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        let gearSize = CGSize(width: 50, height: 50)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading, traySize: gearSize,
+            paletteSize: .zero, avoidNotch: true, notchSide: .leading)
+
+        XCTAssertEqual(layout.trayFrame.minX, leftUnsafe.leading)
+        XCTAssertEqual(layout.trayFrame.size, gearSize)
+
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftUnsafe, keyboardVisibleRect: nil,
+            portrait: false, side: .leading, traySize: gearSize,
+            paletteSize: .zero, avoidNotch: false, notchSide: .leading)
+        XCTAssertEqual(off.trayFrame.minX, 12)
+    }
+
+    func testRuntimeSafeAreaReportRepairsZeroedSwiftUIInsetsAfterRotation() {
+        let zeroedProxy = ControlSafeInsets.zero
+        let landscapeWindow = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: zeroedProxy, runtime: landscapeWindow),
+                       landscapeWindow)
+
+        // Rotating the other way swaps the physical sensor side. The live
+        // snapshot replaces, rather than merges with, the stale proxy.
+        let rotatedWindow = ControlSafeInsets(top: 0, leading: 0, bottom: 21, trailing: 59)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: landscapeWindow, runtime: rotatedWindow),
+                       rotatedWindow)
+        XCTAssertEqual(ControlSafeInsets.resolved(proxy: landscapeWindow, runtime: nil),
+                       landscapeWindow)
+    }
+
+    func testTrayOnNonNotchSideIsUnaffected() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let unaffected = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withLeftNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        // A trailing-side tray is unaffected by a leading-edge notch.
+        XCTAssertEqual(unaffected.trayFrame, withLeftNotch.trayFrame)
+    }
+
+    func testAvoidNotchOffPreservesFullEdgePlacementEvenOverTheUnsafeStrip() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: false, notchSide: .leading)
+        // With Avoid Notch off, the tray sits at the literal screen edge,
+        // ignoring the notch's inset entirely.
+        XCTAssertEqual(off.trayFrame.minX, 12, accuracy: 0.5)
+    }
+
+    func testAvoidNotchOnWithNoActualMainTrayOverlapMatchesOffExactly() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        // A top sensor region is centered horizontally; this left-side
+        // landscape tray never intersects it.
+        let topUnsafe = ControlSafeInsets(top: 59, leading: 0, bottom: 0, trailing: 0)
+        func layout(avoid: Bool) -> ControlTrayLayout {
+            ControlTrayGeometry.layout(
+                container: container, safeInsets: topUnsafe, keyboardVisibleRect: nil,
+                portrait: false, side: .leading,
+                traySize: CGSize(width: 44, height: 300),
+                paletteSize: CGSize(width: 46, height: 330), avoidNotch: avoid)
+        }
+        XCTAssertEqual(layout(avoid: true), layout(avoid: false))
+    }
+
+    func testNonIntersectingFunctionTrayGroupsStayAtExactRawFrames() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let mainFrame = CGRect(x: 700, y: 120, width: 44, height: 60)
+        func layout(avoid: Bool) -> [CGRect] {
+            ControlTrayGeometry.functionTrayLayout(
+                container: container, safeInsets: leftNotch, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: .oppositeSide,
+                mainTrayFrame: mainFrame, groupSizes: functionGroupSizes,
+                avoiding: nil, avoidNotch: avoid, notchSide: .leading)
+        }
+        XCTAssertEqual(layout(avoid: true), layout(avoid: false))
+    }
+
+    func testIntersectingFunctionTrayGroupMovesOnlyMinimumDistance() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 0)
+        let mainFrame = CGRect(x: 700, y: 120, width: 44, height: 60)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: leftNotch, keyboardVisibleRect: nil,
+            portrait: false, mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: [CGSize(width: 44, height: 200)],
+            avoiding: nil, avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(frames[0].minX, leftNotch.leading)
+    }
+
+    func testTemporaryPaletteUsesConditionalObstacleAvoidance() {
+        let container = CGRect(x: 0, y: 0, width: 844, height: 390)
+        let leftNotch = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let clearPalette = CGRect(x: 12, y: 12, width: 46, height: 60)
+        XCTAssertEqual(ControlTrayGeometry.avoidingUnsafeRegion(
+            clearPalette, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading), clearPalette)
+
+        let collidingPalette = CGRect(x: 12, y: 150, width: 46, height: 100)
+        let shifted = ControlTrayGeometry.avoidingUnsafeRegion(
+            collidingPalette, in: container, safeInsets: leftNotch, enabled: true, notchSide: .leading)
+        XCTAssertEqual(shifted.minX, leftNotch.leading)
+        XCTAssertEqual(shifted.minY, collidingPalette.minY)
+    }
+
+    func testResultingFrameStaysWithinVisibleBoundsWithAvoidNotch() {
+        // Asymmetric so the trailing edge is the notch side under test; the
+        // symmetric case (a real device CAN report equal depths on both
+        // edges while still having a real, single-sided notch) is covered
+        // separately below.
+        let container = CGRect(x: 0, y: 0, width: 200, height: 150)
+        let heavyInsets = ControlSafeInsets(top: 10, leading: 0, bottom: 10, trailing: 40)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: heavyInsets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 120), paletteSize: CGSize(width: 42, height: 100),
+            avoidNotch: true, notchSide: .trailing)
+        let visible = CGRect(x: container.minX, y: heavyInsets.top,
+                             width: container.width - heavyInsets.trailing,
+                             height: container.height - heavyInsets.top - heavyInsets.bottom)
+        XCTAssertTrue(visible.contains(layout.trayFrame))
+    }
+
+    /// The real-device failure this replaces: `leading=59, trailing=59`
+    /// used to make the old leading/trailing-depth-comparison heuristic
+    /// (`horizontalNotchSide`, now removed) conclude "no notch," even
+    /// though the device had a real, single-sided physical notch. Depth
+    /// comparison can never distinguish that case from actual symmetric
+    /// rounded corners — only `UIInterfaceOrientation` can (see
+    /// `PhysicalNotchSide`) — so equal insets must still produce an
+    /// exclusion once the physical side is given explicitly.
+    func testSymmetricSafeInsetsStillExcludeGivenAnExplicitNotchSide() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let symmetric = ControlSafeInsets(top: 0, leading: 59, bottom: 20, trailing: 59)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: symmetric, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(on.trayFrame.minX, symmetric.leading)
+
+        // The opposite (non-notch) side is unaffected by the same symmetric
+        // insets, exactly as with an asymmetric notch.
+        let unaffected = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withSymmetricNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: symmetric, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(unaffected.trayFrame, withSymmetricNotch.trayFrame)
+    }
+
+    /// `nil` (no known physical notch side) is the safe default — e.g. a
+    /// non-notched device, or an orientation that isn't clearly landscape —
+    /// and must not invent an obstacle on either edge even with sizable
+    /// insets present.
+    func testNoNotchSideProducesNoHorizontalObstacleEvenWithSizableInsets() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 40, bottom: 0, trailing: 40)
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: nil)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        XCTAssertEqual(on.trayFrame, raw.trayFrame)
+    }
+
+    // MARK: - Notch side vs. tray side matrix
+
+    func testPhysicalNotchLeftAndControlLeftIsDisplaced() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(layout.trayFrame.minX, insets.leading)
+    }
+
+    func testPhysicalNotchLeftAndControlRightIsUnchanged() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(raw.trayFrame, withNotch.trayFrame)
+    }
+
+    func testPhysicalNotchRightAndControlRightIsDisplaced() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let layout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(layout.trayFrame.maxX, container.maxX - insets.trailing)
+    }
+
+    func testPhysicalNotchRightAndControlLeftIsUnchanged() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let raw = ControlTrayGeometry.layout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true)
+        let withNotch = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertEqual(raw.trayFrame, withNotch.trayFrame)
+    }
+
+    // MARK: - Main Tray / Function Tray independence
+
+    /// Both trays share one geometry/avoidance path
+    /// (`ControlTrayGeometry.avoidingUnsafeRegion`, fed the same `notchSide`)
+    /// but are evaluated against their OWN actual rendered frame — a Main
+    /// Tray and Function Tray on opposite sides must not move together.
+    func testMainTrayAndFunctionTrayOnOppositeSidesOnlyTheIntersectingOneMoves() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        // Notch on the right; Main Tray on the right (intersects), Function
+        // Tray on the left (opposite side — never intersects).
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 59)
+        let mainLayout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .trailing, traySize: CGSize(width: 44, height: 300), paletteSize: CGSize(width: 42, height: 260),
+            avoidNotch: true, notchSide: .trailing)
+        XCTAssertLessThanOrEqual(mainLayout.trayFrame.maxX, container.maxX - insets.trailing)
+
+        let mainFrame = CGRect(x: mainLayout.trayFrame.midX - 22, y: mainLayout.trayFrame.midY - 150,
+                               width: 44, height: 300)
+        let functionRaw = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil, avoidNotch: true)
+        let functionWithNotch = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: functionGroupSizes, avoiding: nil,
+            avoidNotch: true, notchSide: .trailing)
+        // The Function Tray (opposite/left side) is untouched by the
+        // right-side notch even though the Main Tray (right side) moved.
+        XCTAssertEqual(functionRaw, functionWithNotch)
+    }
+
+    /// Main Tray and Function Tray on the SAME side both avoid the notch
+    /// when it intersects them, independently, each shifted only its own
+    /// minimum distance.
+    func testMainTrayAndFunctionTrayOnTheSameSideBothAvoidTheNotch() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 400)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)
+        // Main Tray near the bottom, out of the group's way.
+        let mainLayout = ControlTrayGeometry.layout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            side: .leading, traySize: CGSize(width: 44, height: 60), paletteSize: CGSize(width: 42, height: 60),
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertGreaterThanOrEqual(mainLayout.trayFrame.minX, insets.leading)
+        let lowMainFrame = CGRect(x: mainLayout.trayFrame.minX, y: 340, width: 44, height: 60)
+
+        // A single tall group anchored from the top corner — at height 200
+        // starting at y=12, it spans into the notch's vertical band
+        // (centered on the container, per `unsafeRegions`) and must be
+        // pushed clear exactly like the Main Tray was, independently.
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .leading, position: .sameSide,
+            mainTrayFrame: lowMainFrame, groupSizes: [CGSize(width: 44, height: 200)], avoiding: nil,
+            avoidNotch: true, notchSide: .leading)
+        XCTAssertEqual(frames[0].minX, insets.leading)
+    }
+
+    /// Landscape `bottomRow` (iPhone): Zoom keeps the top corner; the Edit column sits in the
+    /// bottom corner and Return to its right, bottoms aligned, so nothing is left beside the notch.
+    func testLandscapeBottomRowPutsEditInTheCornerAndReturnBesideIt() {
+        let container = CGRect(x: 0, y: 0, width: 932, height: 430)
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 59)
+        let mainFrame = CGRect(x: 932 - 59 - 12 - 44, y: 40, width: 44, height: 350)
+        let zoom = CGSize(width: 44, height: 84), edit = CGSize(width: 44, height: 84), enter = CGSize(width: 44, height: 44)
+        let frames = ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: insets, keyboardVisibleRect: nil, portrait: false,
+            mainSide: .trailing, position: .oppositeSide,
+            mainTrayFrame: mainFrame, groupSizes: [zoom, edit, enter], avoiding: nil,
+            avoidNotch: true, notchSide: .leading, bottomRow: true)
+        XCTAssertEqual(frames.count, 3)
+        XCTAssertLessThan(frames[0].midY, container.midY, "Zoom stays at the top")
+        XCTAssertEqual(frames[1].maxY, frames[2].maxY, "Edit and Return share the bottom edge")
+        XCTAssertGreaterThan(frames[1].midY, container.midY)
+        XCTAssertLessThan(frames[1].maxX, frames[2].minX, "Return sits to the right of Edit")
+        XCTAssertLessThan(frames[1].minX, frames[2].minX)
+        // Nothing in the notch's band (centered on the leading edge, three times its depth).
+        let notch = CGRect(x: 0, y: container.midY - 59 * 1.5, width: 59, height: 59 * 3)
+        XCTAssertTrue(frames.allSatisfy { !$0.intersects(notch) })
+    }
+
+    func testPortraitNeverTreatsSideInsetsAsANotch() {
+        let container = CGRect(x: 0, y: 0, width: 400, height: 844)
+        let sideInsets = ControlSafeInsets(top: 0, leading: 30, bottom: 0, trailing: 0)
+        // `notchSide` given explicitly (as if a landscape reading were
+        // stale) — portrait's own guard must still win.
+        let on = ControlTrayGeometry.layout(
+            container: container, safeInsets: sideInsets, keyboardVisibleRect: nil, portrait: true,
+            side: .leading, traySize: CGSize(width: 260, height: 60), paletteSize: CGSize(width: 200, height: 60),
+            avoidNotch: true, notchSide: .leading)
+        let off = ControlTrayGeometry.layout(
+            container: container, safeInsets: sideInsets, keyboardVisibleRect: nil, portrait: true,
+            side: .leading, traySize: CGSize(width: 260, height: 60), paletteSize: CGSize(width: 200, height: 60),
+            avoidNotch: false)
+        XCTAssertEqual(on.trayFrame, off.trayFrame)
+    }
+
+    func testSchemaSixPreferencesDefaultAvoidNotchToTrue() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var old = ReceiverControlPreferences()
+        old.version = 6
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertTrue(migrated.avoidNotch)
+    }
+
+    func testAvoidNotchPersistsAcrossSaveAndLoad() throws {
+        let suite = "ReceiverControlsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.avoidNotch = false
+        repository.save(preferences)
+        XCTAssertFalse(repository.load().avoidNotch)
+    }
+
+    // MARK: - Function Tray icons
+
+    func testUndoUsesUndoArrowSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "undo" })
+        XCTAssertEqual(item.systemImage, "arrow.uturn.backward")
+    }
+
+    func testRedoUsesRedoArrowSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "redo" })
+        XCTAssertEqual(item.systemImage, "arrow.uturn.forward")
+    }
+
+    func testZoomInUsesMagnifierPlusSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-in" })
+        XCTAssertEqual(item.systemImage, "plus.magnifyingglass")
+    }
+
+    func testZoomOutUsesMagnifierMinusSymbol() throws {
+        let item = try XCTUnwrap(FunctionTrayProfile.canonical().visibleItems.first { $0.id == "zoom-out" })
+        XCTAssertEqual(item.systemImage, "minus.magnifyingglass")
+    }
+
+    func testMainTrayPaletteShortcutsHaveNoSystemImageByDefault() {
+        // Main Tray palette shortcuts keep their plain keycap presentation —
+        // adding `systemImage` never touched their existing definitions.
+        let copy = ControlProfile.canonical().actions(for: ModifierChord([.command])).first { $0.id == "copy" }
+        XCTAssertNil(copy?.systemImage)
+    }
+
+    func testMacDeliveredPreferenceUpdateChangesOnlySuppliedFields() throws {
+        var preferences = ReceiverControlPreferences()
+        preferences.hapticsEnabled = false
+        let update = try XCTUnwrap(ReceiverUIPreferenceUpdate(message: [
+            "type": WireMessage.receiverUI,
+            "trayEnabled": false,
+        ]))
+        update.apply(to: &preferences)
+        XCTAssertFalse(preferences.trayEnabled)
+        XCTAssertTrue(preferences.keyboardButtonEnabled)
+        XCTAssertFalse(preferences.hapticsEnabled)
+        XCTAssertNil(ReceiverUIPreferenceUpdate(message: ["type": "unknown",
+                                                          "trayEnabled": true]))
+    }
+
+    func testPortraitTrackpadSurfaceUsesMostAvailableHeightAndClearsControls() {
+        let container = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let tray = CGRect(x: 40, y: 770, width: 310, height: 50)
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: container,
+            safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [tray], portrait: true, inputMode: .trackpad,
+            remoteAspectSize: CGSize(width: 1920, height: 1080))
+        XCTAssertGreaterThan(surface.height, surface.width)
+        XCTAssertGreaterThan(surface.height, 650)
+        XCTAssertGreaterThanOrEqual(surface.minY, 69)
+        XCTAssertLessThanOrEqual(surface.maxY, tray.minY - VideoOffSurfaceGeometry.controlGap)
+    }
+
+    func testDirectVideoOffSurfacePreservesRemoteAspectInsideSameAvailableRegion() {
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: CGRect(x: 0, y: 0, width: 390, height: 844),
+            safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [CGRect(x: 50, y: 770, width: 290, height: 50)],
+            portrait: true, inputMode: .direct,
+            remoteAspectSize: CGSize(width: 16, height: 9))
+        XCTAssertEqual(surface.width / surface.height, 16.0 / 9.0, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(surface.minY, 69)
+        XCTAssertLessThanOrEqual(surface.maxY, 760)
+    }
+
+    func testGesturePreferencesDefaultAndMigrateWithoutOverwritingOldChoices() throws {
+        let suite = "ReceiverGestureMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 9
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        // Schema 16 moves pre-release installs to Pinch → Viewport,
+        // Rotation → Disabled once.
+        XCTAssertEqual(loaded.pinchTarget, .viewport)
+        XCTAssertEqual(loaded.rotateTarget, .disabled)
+        XCTAssertTrue(loaded.snapRotation)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    func testAudioPreferencesMigrateInDisabledAndCentered() throws {
+        let suite = "AudioPreferenceMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 11
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertFalse(loaded.audioPreferred)
+        XCTAssertEqual(loaded.avSyncOffsetMs, 0)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    func testAudioPreferencesPersistAcrossSaveAndLoad() throws {
+        let suite = "AudioPreferencePersistenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var preferences = ReceiverControlPreferences()
+        preferences.audioPreferred = true
+        preferences.avSyncOffsetMs = -250
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        repository.save(preferences)
+        let loaded = repository.load()
+        XCTAssertTrue(loaded.audioPreferred)
+        XCTAssertEqual(loaded.avSyncOffsetMs, -250)
+    }
+
+    func testAudioSyncOffsetClampsOnDecodeOfOutOfRangeValue() throws {
+        let suite = "AudioOffsetClampTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var preferences = ReceiverControlPreferences()
+        preferences.avSyncOffsetMs = 5_000   // out of range if ever written by a future build
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        repository.save(preferences)
+        let loaded = repository.load()
+        XCTAssertEqual(loaded.avSyncOffsetMs, AVSyncOffset.range.upperBound)
+    }
+
+    // MARK: - App Gesture Commands
+
+    func testAppGestureCommandDefaultsMatchSpec() {
+        let defaults = AppGestureCommands.defaults
+        XCTAssertEqual(defaults.zoomIn, KeyboardShortcut(usage: 46, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.zoomOut, KeyboardShortcut(usage: 45, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.rotateLeft, KeyboardShortcut(usage: 47, modifiers: ModifierChord([.command])))
+        XCTAssertEqual(defaults.rotateRight, KeyboardShortcut(usage: 48, modifiers: ModifierChord([.command])))
+    }
+
+    func testAppGestureCommandsMigrateInWithCanonicalDefaults() throws {
+        let suite = "AppGestureCommandMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var old = ReceiverControlPreferences()
+        old.version = 10
+        defaults.set(try JSONEncoder().encode(old),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load()
+        XCTAssertEqual(loaded.appGestureCommands, AppGestureCommands.defaults)
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+    }
+
+    func testAppGestureCommandsPersistAcrossSaveAndLoad() throws {
+        let suite = "AppGestureCommandPersistenceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        var preferences = ReceiverControlPreferences()
+        preferences.appGestureCommands.setShortcut(
+            KeyboardShortcut(usage: 6, modifiers: ModifierChord([.option, .shift])), for: .zoomIn)
+        repository.save(preferences)
+        XCTAssertEqual(repository.load().appGestureCommands.zoomIn,
+                       KeyboardShortcut(usage: 6, modifiers: ModifierChord([.option, .shift])))
+    }
+
+    func testResetAppGestureCommandsRestoresOnlyTheFourDefaultsNotUnrelatedSettings() {
+        var preferences = ReceiverControlPreferences()
+        preferences.appGestureCommands.setShortcut(
+            KeyboardShortcut(usage: 6, modifiers: ModifierChord([.control])), for: .rotateRight)
+        preferences.pinchTarget = .app
+        preferences.rotateTarget = .app
+        preferences.snapRotation = false
+        preferences.avoidNotch = false
+
+        preferences.resetAppGestureCommands()
+
+        XCTAssertEqual(preferences.appGestureCommands, AppGestureCommands.defaults)
+        // Unrelated settings — including the gesture targets themselves —
+        // are untouched by this reset (spec section G).
+        XCTAssertEqual(preferences.pinchTarget, .app)
+        XCTAssertEqual(preferences.rotateTarget, .app)
+        XCTAssertFalse(preferences.snapRotation)
+        XCTAssertFalse(preferences.avoidNotch)
+    }
+
+    // MARK: - Physical notch side (orientation-derived)
+
+    /// `UIInterfaceOrientation` describes how CONTENT rotates to compensate
+    /// for the device — the opposite of the device's own physical rotation
+    /// — confirmed against a real notched iPhone: `.landscapeLeft` (device
+    /// rotated left) puts the physical notch on the screen's TRAILING edge.
+    func testLandscapeLeftMapsToTrailingNotchSide() {
+        XCTAssertEqual(PhysicalNotchSide.forLandscape(.landscapeLeft), .trailing)
+    }
+
+    /// `.landscapeRight` (device rotated right) puts the physical notch on
+    /// the screen's LEADING edge.
+    func testLandscapeRightMapsToLeadingNotchSide() {
+        XCTAssertEqual(PhysicalNotchSide.forLandscape(.landscapeRight), .leading)
+    }
+
+    /// No landscape orientation (portrait, flat, or simply unknown) means no
+    /// landscape notch side — never invented.
+    func testNoLandscapeOrientationMapsToNoNotchSide() {
+        XCTAssertNil(PhysicalNotchSide.forLandscape(nil))
+    }
+}
+
+/// Adaptive layout against system-reserved regions (iOS 27.1 `ReservedRegion`,
+/// converted to `ControlReservedRegion` at the SwiftUI boundary). Every
+/// container and region below is a representative fixture exercising the
+/// pure geometry — none of it is a device identifier or a runtime constant.
+final class ReservedRegionLayoutTests: XCTestCase {
+    private let landscape = CGRect(x: 0, y: 0, width: 844, height: 390)
+    private let portrait = CGRect(x: 0, y: 0, width: 390, height: 844)
+    private let verticalTray = CGSize(width: 44, height: 300)
+    private let verticalPalette = CGSize(width: 42, height: 260)
+    private let horizontalTray = CGSize(width: 300, height: 44)
+    private let horizontalPalette = CGSize(width: 260, height: 42)
+
+    private func division(x: CGFloat, width: CGFloat = 24, in container: CGRect) -> ControlReservedRegion {
+        ControlReservedRegion(kind: .division,
+                              frame: CGRect(x: x, y: container.minY, width: width, height: container.height))
+    }
+
+    private func division(y: CGFloat, height: CGFloat = 24, in container: CGRect) -> ControlReservedRegion {
+        ControlReservedRegion(kind: .division,
+                              frame: CGRect(x: container.minX, y: y, width: container.width, height: height))
+    }
+
+    private func layout(_ container: CGRect, portrait: Bool = false, side: LandscapeTraySide = .trailing,
+                        safeInsets: ControlSafeInsets = .zero, avoidNotch: Bool = true,
+                        notchSide: LandscapeTraySide? = nil,
+                        regions: [ControlReservedRegion] = [],
+                        traySize: CGSize? = nil, paletteSize: CGSize? = nil) -> ControlTrayLayout {
+        ControlTrayGeometry.layout(
+            container: container, safeInsets: safeInsets, keyboardVisibleRect: nil, portrait: portrait,
+            side: side, traySize: traySize ?? (portrait ? horizontalTray : verticalTray),
+            paletteSize: paletteSize ?? (portrait ? horizontalPalette : verticalPalette),
+            avoidNotch: avoidNotch, notchSide: notchSide, reservedRegions: regions)
+    }
+
+    private func functionFrames(_ container: CGRect, main: ControlTrayLayout, portrait: Bool = false,
+                                position: FunctionTrayPosition,
+                                regions: [ControlReservedRegion]) -> [CGRect] {
+        let sizes = portrait
+            ? [CGSize(width: 92, height: 44), CGSize(width: 92, height: 44)]
+            : [CGSize(width: 44, height: 92), CGSize(width: 44, height: 92)]
+        return ControlTrayGeometry.functionTrayLayout(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: portrait,
+            mainSide: main.side, position: position, mainTrayFrame: main.trayFrame,
+            groupSizes: sizes, avoiding: nil, avoidNotch: true, reservedRegions: regions)
+    }
+
+    // MARK: A. Existing-device compatibility
+
+    func testOrdinaryPortraitTrayKeepsItsExactBottomCenteredFrame() {
+        let insets = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        let result = layout(portrait, portrait: true, safeInsets: insets)
+        // Bottom-centered, lifted just clear of the home-indicator band.
+        XCTAssertEqual(result.trayFrame, CGRect(x: 45, y: 810 - 44, width: 300, height: 44))
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.side, .trailing)
+    }
+
+    func testOrdinaryLandscapeTrailingAndLeadingFramesAreUnchanged() {
+        let trailing = layout(landscape, side: .trailing)
+        let leading = layout(landscape, side: .leading)
+        XCTAssertEqual(trailing.trayFrame, CGRect(x: 844 - 12 - 44, y: 45, width: 44, height: 300))
+        XCTAssertEqual(leading.trayFrame, CGRect(x: 12, y: 45, width: 44, height: 300))
+        XCTAssertEqual(trailing.side, .trailing)
+        XCTAssertEqual(leading.side, .leading)
+        XCTAssertEqual(trailing.axis, .vertical)
+    }
+
+    /// A normal notched iPhone on a system that reports its camera as an
+    /// occlusion region: no control touches the region, so nothing moves.
+    func testNonCollidingOcclusionLeavesEveryFrameBitForBitUnchanged() {
+        let island = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 0, y: 140, width: 50, height: 110))
+        let insets = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 59)
+        for side in LandscapeTraySide.allCases {
+            let legacy = layout(landscape, side: side, safeInsets: insets, notchSide: .leading)
+            let adaptive = layout(landscape, side: side, safeInsets: insets, notchSide: .leading, regions: [island])
+            XCTAssertEqual(adaptive, legacy)
+        }
+        let portraitIsland = ControlReservedRegion(kind: .occlusion,
+                                                   frame: CGRect(x: 140, y: 11, width: 110, height: 37))
+        let portraitInsets = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        XCTAssertEqual(layout(portrait, portrait: true, safeInsets: portraitInsets, regions: [portraitIsland]),
+                       layout(portrait, portrait: true, safeInsets: portraitInsets))
+    }
+
+    func testFunctionTrayWithoutRegionsMatchesLegacyCallExactly() {
+        let main = layout(landscape)
+        for position in FunctionTrayPosition.allCases {
+            let legacy = ControlTrayGeometry.functionTrayLayout(
+                container: landscape, safeInsets: .zero, keyboardVisibleRect: nil, portrait: false,
+                mainSide: .trailing, position: position, mainTrayFrame: main.trayFrame,
+                groupSizes: [CGSize(width: 44, height: 92), CGSize(width: 44, height: 92)],
+                avoiding: nil, avoidNotch: true)
+            XCTAssertEqual(functionFrames(landscape, main: main, position: position, regions: []), legacy)
+        }
+    }
+
+    // MARK: B. Duo-like outer/full-width geometry
+
+    func testCornerOcclusionAndAsymmetricInsetsNeverCoverTrailingControls() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let insets = ControlSafeInsets(top: 0, leading: 0, bottom: 20, trailing: 40)
+        let result = layout(container, safeInsets: insets, regions: [camera])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertFalse(result.trayFrame.intersects(camera.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(camera.frame))
+        XCTAssertTrue(container.insetBy(dx: 12, dy: 12).contains(result.trayFrame))
+        // The palette still opens inward, away from the reserved edge.
+        XCTAssertLessThan(result.paletteFrame.maxX, result.trayFrame.minX)
+        XCTAssertGreaterThan(result.trayFrame.midX, container.midX)
+    }
+
+    func testAvoidNotchOffKeepsItsMeaningForOcclusionsButNeverForDivisions() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let off = layout(container, avoidNotch: false, regions: [camera])
+        XCTAssertEqual(off, layout(container, avoidNotch: false))
+
+        let fold = division(x: 700, in: landscape)
+        let offWithFold = layout(landscape, avoidNotch: false, regions: [fold])
+        XCTAssertEqual(offWithFold.side, .leading)
+        XCTAssertFalse(offWithFold.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(offWithFold.paletteFrame.intersects(fold.frame))
+    }
+
+    // MARK: C. Division / fold
+
+    func testDivisionNearTrailingEdgeMovesTrayToLeadingOuterEdge() {
+        let fold = division(x: 700, in: landscape)
+        let result = layout(landscape, side: .trailing, regions: [fold])
+        XCTAssertEqual(result.side, .leading)
+        XCTAssertEqual(result.trayFrame.minX, 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        XCTAssertGreaterThan(result.paletteFrame.minX, result.trayFrame.maxX)
+    }
+
+    func testDivisionNearLeadingEdgeMovesTrayToTrailingOuterEdge() {
+        let fold = division(x: 120, in: landscape)
+        let result = layout(landscape, side: .leading, regions: [fold])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertEqual(result.trayFrame.maxX, 844 - 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+    }
+
+    /// Split View style: the app's view ends at the fold, so the division
+    /// (with its margins) sits on — and partly beyond — one edge.
+    func testDivisionOnAnEdgeSendsControlsToTheOppositeOuterEdge() {
+        let atTrailing = division(x: 830, width: 30, in: landscape)
+        XCTAssertEqual(layout(landscape, side: .trailing, regions: [atTrailing]).side, .leading)
+        let atLeading = division(x: -16, width: 30, in: landscape)
+        let result = layout(landscape, side: .leading, regions: [atLeading])
+        XCTAssertEqual(result.side, .trailing)
+        XCTAssertEqual(result.trayFrame.maxX, 844 - 12)
+    }
+
+    func testCenteredDivisionKeepsTheStoredPreferenceOnEitherSide() {
+        let fold = division(x: 410, in: landscape)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(landscape, side: side, regions: [fold])
+            XCTAssertEqual(result.side, side)
+            XCTAssertEqual(result.trayFrame, layout(landscape, side: side).trayFrame)
+            XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        }
+    }
+
+    func testPaletteOpensInsideTheTraysUsablePieceOfACenteredDivision() {
+        let fold = division(x: 410, in: landscape)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(landscape, side: side, regions: [fold])
+            XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+            XCTAssertFalse(result.paletteFrame.intersects(result.trayFrame))
+            if side == .trailing {
+                XCTAssertGreaterThanOrEqual(result.paletteFrame.minX, fold.frame.maxX)
+            } else {
+                XCTAssertLessThanOrEqual(result.paletteFrame.maxX, fold.frame.minX)
+            }
+        }
+    }
+
+    func testPaletteMovesWithATrayDisplacedByAnOcclusion() {
+        let container = CGRect(x: 0, y: 0, width: 800, height: 360)
+        let camera = ControlReservedRegion(kind: .occlusion, frame: CGRect(x: 740, y: 0, width: 60, height: 60))
+        let plain = layout(container)
+        let result = layout(container, regions: [camera])
+        XCTAssertNotEqual(result.trayFrame, plain.trayFrame)
+        XCTAssertFalse(result.paletteFrame.intersects(result.trayFrame))
+        XCTAssertEqual(result.trayFrame.minX - result.paletteFrame.maxX,
+                       plain.trayFrame.minX - plain.paletteFrame.maxX, accuracy: 0.5)
+    }
+
+    func testFunctionTraySameSideFollowsEffectiveMainTraySide() {
+        let fold = division(x: 700, in: landscape)
+        // A tray short enough to leave room above and below it, so Same Side
+        // groups keep their outer-edge anchors.
+        let main = layout(landscape, side: .trailing, regions: [fold], traySize: CGSize(width: 44, height: 150))
+        XCTAssertEqual(main.side, .leading)
+        let frames = functionFrames(landscape, main: main, position: .sameSide, regions: [fold])
+        XCTAssertEqual(frames.count, 2)
+        for frame in frames {
+            XCTAssertEqual(frame.minX, 12)
+            XCTAssertFalse(frame.intersects(fold.frame))
+            XCTAssertFalse(frame.intersects(main.trayFrame))
+        }
+    }
+
+    func testFunctionTrayOppositeSideIsOppositeTheEffectiveSideAndNeverCrossesTheDivision() {
+        // Fold at the trailing edge (Split View style): the trailing outer
+        // edge has no usable space, so Opposite Side groups settle at the far
+        // edge of the usable piece, just before the fold.
+        let atEdge = division(x: 830, width: 30, in: landscape)
+        let edgeMain = layout(landscape, side: .trailing, regions: [atEdge])
+        XCTAssertEqual(edgeMain.side, .leading)
+        for frame in functionFrames(landscape, main: edgeMain, position: .oppositeSide, regions: [atEdge]) {
+            XCTAssertFalse(frame.intersects(atEdge.frame))
+            XCTAssertLessThanOrEqual(frame.maxX, atEdge.frame.minX)
+            XCTAssertGreaterThan(frame.midX, landscape.midX)
+        }
+        // Centered fold: each side keeps a full half; Opposite Side uses the
+        // other half's outer edge.
+        let centered = division(x: 410, in: landscape)
+        let centeredMain = layout(landscape, side: .trailing, regions: [centered])
+        for frame in functionFrames(landscape, main: centeredMain, position: .oppositeSide, regions: [centered]) {
+            XCTAssertEqual(frame.minX, 12)
+            XCTAssertFalse(frame.intersects(centered.frame))
+        }
+    }
+
+    func testVideoOffSurfaceNeverBridgesAnActiveDivision() {
+        let fold = division(x: 410, in: landscape)
+        let tray = layout(landscape, regions: [fold]).trayFrame
+        for mode in [PointerInputMode.trackpad, .direct] {
+            let surface = VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10), divisions: [fold.frame])
+            XCTAssertFalse(surface.isEmpty)
+            XCTAssertFalse(surface.intersects(fold.frame.insetBy(dx: -VideoOffSurfaceGeometry.controlGap, dy: 0)))
+            XCTAssertFalse(surface.intersects(tray))
+            if mode == .direct {
+                XCTAssertEqual(surface.width / surface.height, 1.6, accuracy: 0.001)
+            }
+        }
+        // Portrait with a horizontal fold: the tall Trackpad surface keeps
+        // one side of it.
+        let horizontalFold = division(y: 410, in: portrait)
+        let portraitTray = layout(portrait, portrait: true, regions: [horizontalFold]).trayFrame
+        let surface = VideoOffSurfaceGeometry.interactionRect(
+            container: portrait, safeInsets: ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
+            occupiedControlFrames: [portraitTray], portrait: true, inputMode: .trackpad,
+            remoteAspectSize: CGSize(width: 16, height: 10), divisions: [horizontalFold.frame])
+        XCTAssertFalse(surface.isEmpty)
+        XCTAssertFalse(surface.intersects(horizontalFold.frame))
+    }
+
+    func testVideoOffSurfaceWithoutDivisionsIsUnchanged() {
+        let tray = layout(landscape).trayFrame
+        for mode in [PointerInputMode.trackpad, .direct] {
+            let legacy = VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10))
+            let away = CGRect(x: 2000, y: 0, width: 24, height: 390)
+            XCTAssertEqual(VideoOffSurfaceGeometry.interactionRect(
+                container: landscape, safeInsets: .zero, occupiedControlFrames: [tray], portrait: false,
+                inputMode: mode, remoteAspectSize: CGSize(width: 16, height: 10), divisions: [away]), legacy)
+        }
+    }
+
+    // MARK: D. Portrait inner layout
+
+    func testPortraitStaysHorizontalAndBottomAnchoredBesideAVerticalFold() {
+        let inner = CGRect(x: 0, y: 0, width: 700, height: 800)
+        let fold = division(x: 338, in: inner)
+        let result = layout(inner, portrait: true, side: .trailing, regions: [fold])
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.trayFrame.maxY, inner.maxY - 12)
+        XCTAssertFalse(result.trayFrame.intersects(fold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(fold.frame))
+        // Centered within the usable half on the preferred side.
+        XCTAssertEqual(result.trayFrame.midX, (362 + 700) / 2, accuracy: 0.5)
+        let leading = layout(inner, portrait: true, side: .leading, regions: [fold])
+        XCTAssertEqual(leading.trayFrame.midX, 338 / 2, accuracy: 0.5)
+        for frame in functionFrames(inner, main: result, portrait: true, position: .sameSide, regions: [fold]) {
+            XCTAssertFalse(frame.intersects(fold.frame))
+            XCTAssertLessThan(frame.maxY, result.trayFrame.minY)
+        }
+    }
+
+    func testPortraitHorizontalFoldLeavesTheBottomCenteredTrayExactlyInPlace() {
+        let inner = CGRect(x: 0, y: 0, width: 700, height: 800)
+        let fold = division(y: 388, in: inner)
+        let result = layout(inner, portrait: true, regions: [fold])
+        XCTAssertEqual(result.trayFrame, layout(inner, portrait: true).trayFrame)
+        XCTAssertEqual(result.paletteFrame, layout(inner, portrait: true).paletteFrame)
+        XCTAssertEqual(result.axis, .horizontal)
+    }
+
+    /// A fold always splits the display's longer dimension (landscape: a
+    /// vertical fold; portrait: a horizontal one), so the tray runs
+    /// parallel to it and keeps that dimension's full length. Even a tray
+    /// longer than the screen — which `ReceiverControlOverlay` draws at its
+    /// intrinsic size, centered on `trayFrame` — therefore overflows only
+    /// along the fold, never across it.
+    func testFullLengthTrayRunsParallelToAFoldThatSplitsTheLongerDimension() {
+        func rendered(_ layout: ControlTrayLayout, _ size: CGSize) -> CGRect {
+            CGRect(x: layout.trayFrame.midX - size.width / 2, y: layout.trayFrame.midY - size.height / 2,
+                   width: size.width, height: size.height)
+        }
+        let wide = CGRect(x: 0, y: 0, width: 900, height: 620)
+        let verticalFold = division(x: 438, in: wide)
+        let tallTray = CGSize(width: 44, height: 700)
+        for side in LandscapeTraySide.allCases {
+            let result = layout(wide, side: side, regions: [verticalFold], traySize: tallTray)
+            XCTAssertEqual(result.axis, .vertical)
+            XCTAssertEqual(result.trayFrame.height, wide.height - 24)
+            XCTAssertFalse(rendered(result, tallTray).intersects(verticalFold.frame))
+        }
+        let tall = CGRect(x: 0, y: 0, width: 620, height: 900)
+        let horizontalFold = division(y: 438, in: tall)
+        let wideTray = CGSize(width: 700, height: 44)
+        let result = layout(tall, portrait: true, regions: [horizontalFold], traySize: wideTray)
+        XCTAssertEqual(result.axis, .horizontal)
+        XCTAssertEqual(result.trayFrame.width, tall.width - 24)
+        XCTAssertFalse(rendered(result, wideTray).intersects(horizontalFold.frame))
+        XCTAssertFalse(result.paletteFrame.intersects(horizontalFold.frame))
+    }
+
+    // MARK: E. Dynamic changes
+
+    func testFoldingAndUnfoldingRecomputesFromEachSnapshotWithoutStaleState() {
+        let flat = layout(landscape, side: .trailing)
+        let fold = division(x: 700, in: landscape)
+        let folded = layout(landscape, side: .trailing, regions: [fold])
+        XCTAssertNotEqual(folded, flat)
+        XCTAssertEqual(layout(landscape, side: .trailing, regions: [fold]), folded)
+        // The region disappears: nothing of it survives.
+        XCTAssertEqual(layout(landscape, side: .trailing), flat)
+        // Rotation to a new container is a fresh snapshot as well.
+        XCTAssertEqual(layout(portrait, portrait: true), layout(portrait, portrait: true, regions: []))
+    }
+
+    func testRuntimePlacementNeverRewritesStoredPreferences() {
+        let preferences = ReceiverControlPreferences()
+        XCTAssertEqual(preferences.preferredLandscapeSide, .trailing)
+        let before = preferences
+        let main = layout(landscape, side: preferences.preferredLandscapeSide,
+                          regions: [division(x: 700, in: landscape)])
+        _ = functionFrames(landscape, main: main, position: preferences.functionTrayPosition,
+                           regions: [division(x: 700, in: landscape)])
+        XCTAssertEqual(main.side, .leading)
+        XCTAssertEqual(preferences, before)
+        XCTAssertEqual(preferences.preferredLandscapeSide, .trailing)
+    }
+
+    func testSegmentsSplitAroundDivisionsInOrder() {
+        let area = CGRect(x: 0, y: 0, width: 100, height: 50)
+        let pieces = ControlPlacementArea.segments(
+            of: area, removing: [CGRect(x: 60, y: 0, width: 10, height: 50),
+                                 CGRect(x: 20, y: 0, width: 10, height: 50)], horizontal: true)
+        XCTAssertEqual(pieces, [CGRect(x: 0, y: 0, width: 20, height: 50),
+                                CGRect(x: 30, y: 0, width: 30, height: 50),
+                                CGRect(x: 70, y: 0, width: 30, height: 50)])
+    }
+}

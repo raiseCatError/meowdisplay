@@ -6,8 +6,9 @@
 // keeping the machine awake while it serves as a screen. It ships as its own
 // app (OpenSidecarMacReceiver target, macOS 12+) so old Macs can be displays.
 //
-// Display-only for now: the receiving Mac's keyboard/trackpad are not
-// forwarded to the sender (KVM-style input is a follow-up).
+// Input (issue #12): once the sending Mac grants this session control, this
+// Mac's own keyboard and trackpad drive it while the video window is in
+// front — see ReceiverInputForwarding.swift for the rules.
 
 import AppKit
 import AVFoundation
@@ -19,6 +20,9 @@ import SwiftUI
 final class ReceiverController: ObservableObject {
     static let shared = ReceiverController()
 
+    /// Window mode: this Mac's arrangement of the sending Mac's windows.
+    let workspace = WorkspaceModel()
+
     // A fresh StreamReceiver per activation: stop() tears the old one down
     // and drops it, so listener/decoder state can't leak across mode flips.
     // Nil whenever receiver mode is off.
@@ -26,20 +30,120 @@ final class ReceiverController: ObservableObject {
     // Summaries for views that don't observe the receiver itself (menu bar
     // icon, status bar): a sender is connected / frames are on screen.
     @Published private(set) var connected = false
+    /// What the connected Mac last said about control for this session; Off when none.
+    private(set) var sessionInputState: SessionInputWireState = .off
     @Published private(set) var streaming = false
+    // The one canonical status presentation — republished from the
+    // receiver's `session` (phase/interruption), the same state iOS's
+    // interruption overlay already reads. Every status-bearing surface in
+    // this app (the toolbar status badge and the Overview status row)
+    // reads this pair instead of each independently re-deriving "Connected"/
+    // "Waiting for a Mac…" from `connected`, which could otherwise drift.
+    @Published private(set) var statusTitle = String(localized: "Waiting for a Mac…")
+    @Published private(set) var statusColor: Color = .secondary
+    // The sender has no usable physical display for Mirror (pv 17). Mirrors
+    // `receiver.mirrorUnavailable` so Settings can present the Cancel /
+    // Use Extend alert; the sender stays authoritative for the actual mode.
+    @Published private(set) var mirrorUnavailableOffer = false
+    /// Wake & Connect for a paired Mac (the same shared coordinator the
+    /// iPhone app drives). Lives exactly as long as `receiver`.
+    @Published private(set) var wakeConnect: WakeConnectCoordinator?
+    /// Keyboard/trackpad forwarding for this receiver's sessions. Lives
+    /// exactly as long as `receiver`.
+    @Published private(set) var input: ReceiverInputController?
+    /// The receiver-local manual A/V Sync offset (`AVSyncOffset.range`),
+    /// persisted here and applied to the shared receiver's
+    /// `avSyncPreference` — the one value its audio scheduling and video
+    /// delay read. Never sent to the other Mac.
+    @Published private(set) var avSyncOffsetMs = AVSyncOffset.clamped(
+        UserDefaults.standard.integer(forKey: ReceiverController.avSyncOffsetKey))
+    /// Fired when something needs the user's answer while the Settings
+    /// window may be closed (the headless-Mirror offer) — the app delegate
+    /// brings it up.
+    var onNeedsAttention: (() -> Void)?
+    /// The video window appeared (`true`) or went away. The unified app
+    /// uses it to be a regular, Command-Tab-able app while it's a display.
+    var onVideoWindowVisibilityChanged: ((Bool) -> Void)?
 
     var active: Bool { receiver != nil }
 
+    /// Another receiver owns this Mac's receiver ports (`ReceiverOwnershipLock`):
+    /// `start()` is waiting for it and retries by itself. `statusTitle`
+    /// says what to do.
+    @Published private(set) var waitingForOtherReceiver = false
+    /// What the user can do about the other receiver. The standalone
+    /// receiver's wording by default; MeowDisplay sets its own.
+    var otherReceiverMessage = String(localized: "MeowDisplay is already using this Mac as a display. Turn off Use This Mac as a Display there, or quit it, and this receiver starts by itself.")
+    /// A receiver that predates the ownership lock is running (MeowDisplay
+    /// checks for already-released MeowDisplay Receiver builds by bundle id). Nil: none to
+    /// check.
+    var otherReceiverRunning: (() -> Bool)?
+    /// The ownership lock can't be used safely, so the receiver didn't
+    /// start. `statusTitle` says what to fix; it doesn't retry by itself —
+    /// `start()` again (Try Again) once it's fixed.
+    @Published private(set) var lockProblem: ReceiverLockProblem?
+    /// A receiver port is failing to bind (another user's receiver or an
+    /// unrelated app holds it); `statusTitle` says which.
+    @Published private(set) var portsUnavailable = false
+    /// Something is in the way of being a display: show `statusTitle` as an
+    /// explanation, not a plain status.
+    var statusNeedsAttention: Bool { waitingForOtherReceiver || lockProblem != nil || portsUnavailable }
+    /// This receiver is running and holds the receiver ports (not waiting for
+    /// another receiver, not stopped by a lock problem).
+    var ownsReceiverPorts: Bool { receiver != nil && !waitingForOtherReceiver && lockProblem == nil }
+    /// Set by the host app when another receiver it knows about was opened
+    /// while this one owns the ports (`StandaloneReceiverConflict`); shown
+    /// next to the status. The standalone receiver never sets it.
+    @Published var coexistenceNotice: String?
+    private let ownership = ReceiverOwnershipLock()
+    private var ownershipRetry: Timer?
+
     private var window: NSWindow?
+    private var retiringReceiver: StreamReceiver?
+    /// `start()` arrived while the previous receiver was still tearing down
+    /// (MeowDisplay's display role turned off and straight back on). It
+    /// runs once that receiver has released its listeners and services.
+    private var startWhenRetired = false
     private var cancellables = Set<AnyCancellable>()
     private var sleepActivity: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
     private var screenSleepObservers: [NSObjectProtocol] = []
+    private var windowLifecycle = ReceiverWindowLifecycle()
+    private var windowObservers: [NSObjectProtocol] = []
 
     private var fallbackName: String { Host.current().localizedName ?? "Mac" }
 
     func start() {
         guard receiver == nil else { return }
+        guard retiringReceiver == nil else {
+            startWhenRetired = true
+            return
+        }
+        // Never bind or advertise next to another receiver: whichever
+        // started second waits here, with a status saying why, until the
+        // owner lets go.
+        let decision = ReceiverStartGate.decide(otherReceiverRunning: otherReceiverRunning?() ?? false) {
+            ownership.tryAcquire()
+        }
+        switch decision {
+        case .start:
+            break
+        case .waitForOtherReceiver:
+            lockProblem = nil
+            waitForOtherReceiver()
+            return
+        case .cannotStart(let problem):
+            // Never run without ownership: a second receiver could then
+            // bind next to this one. Not retried by itself.
+            stopWaitingForOtherReceiver()
+            if lockProblem != problem { Log.info("receiver mode not started: ownership lock unusable") }
+            lockProblem = problem
+            statusTitle = problem.message
+            statusColor = .red
+            return
+        }
+        stopWaitingForOtherReceiver()
+        lockProblem = nil
         // 4096x2304 is H.264's practical hardware-decode ceiling: end-to-end
         // playback stops below 5120 wide on every Mac measured, including an
         // M4 Pro — a format limit, not an age one. A 5K/6K panel still gets
@@ -48,18 +152,93 @@ final class ReceiverController: ObservableObject {
         let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                       deviceKind: "Mac",
                                       fallbackServiceName: fallbackName,
-                                      maxEncodeWide: 4096, maxEncodeHigh: 2304)
+                                      maxEncodeWide: 4096, maxEncodeHigh: 2304,
+                                      maxFPS: NSScreen.screens.first?.maximumFramesPerSecond)
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)
+        // Audio stays a per-receiver opt-in; the shared receiver resends it on
+        // every welcome, so reconnects and migrations restore it.
+        receiver.primeAudioPreference(UserDefaults.standard.bool(forKey: Self.audioPreferredKey))
+        receiver.avSyncPreference.set(avSyncOffsetMs)
         self.receiver = receiver
-        receiver.start(port: 9000)
+        wakeConnect = WakeConnectCoordinator(receiver: receiver)
+        input = ReceiverInputController(receiver: receiver)
+        let windowWorkspace = self.workspace
+        receiver.workspaceEvents.set { [weak receiver] event in
+            windowWorkspace.apply(event)
+            receiver?.noteWorkspaceEvent(event)
+        }
+        windowWorkspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
+        windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
+        windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        // The Mac's confirmed decision on control (Request Control), never assumed: Window mode's
+        // control-only actions (Stage Manager, Lock Mac, …) are offered only once the Mac allowed
+        // them, and not after the session ends. It was left at its default, `.allowed`, so in
+        // View Only those buttons looked available and the Mac dropped what they sent.
+        receiver.onAllowInputStateChange = { [weak self, weak windowWorkspace] state in
+            self?.sessionInputState = state
+            windowWorkspace?.objectWillChange.send()
+        }
+        windowWorkspace.controlState = { [weak self] in self?.sessionInputState ?? .off }
+        input?.localOverlayActive = { windowWorkspace.overviewOpen || windowWorkspace.arranging }
+        input?.onOpenWindowOverview = { if windowWorkspace.available { windowWorkspace.openOverview() } }
+        receiver.$connected
+            .removeDuplicates()
+            .filter { !$0 }
+            .sink { [weak receiver, weak self] _ in
+                self?.sessionInputState = .off
+                windowWorkspace.apply(.disconnected)
+                receiver?.noteWorkspaceEvent(.disconnected)
+            }
+            .store(in: &cancellables)
+        receiver.start()
 
         receiver.$connected
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connected in
                 self?.connected = connected
+            }
+            .store(in: &cancellables)
+        receiver.$session
+            .removeDuplicates()
+            .combineLatest(receiver.$portFailures.removeDuplicates())
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] session, portFailures in
+                let portMessage = session.phase == .connected ? nil : ReceiverPortMessage.text(for: portFailures)
+                self?.portsUnavailable = portMessage != nil
+                self?.statusTitle = portMessage ?? receiver.canonicalPhaseTitle
+                self?.statusColor = portMessage == nil ? Self.statusColor(for: session.phase) : .orange
+            }
+            .store(in: &cancellables)
+        receiver.$mirrorUnavailable
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] offered in
+                self?.mirrorUnavailableOffer = offered
+                if offered { self?.onNeedsAttention?() }
+            }
+            .store(in: &cancellables)
+        // A sender asking to pair (or this Mac pairing with a nearby one)
+        // needs the code confirmed here before any trust is written.
+        receiver.pairingPrompt.$pending
+            .map { $0 != nil }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak receiver] pending in
+                guard pending, let prompt = receiver?.pairingPrompt else { return }
+                ReceiverPairingPanel.present(prompt: prompt)
+            }
+            .store(in: &cancellables)
+        // Session invitations (pv 21): a Mac asking to share, or this Mac's
+        // own Connect waiting for the sending Mac's approval.
+        receiver.$pendingSessionApproval.map { $0?.id }.removeDuplicates()
+            .combineLatest(receiver.$awaitingSenderApprovalName.removeDuplicates())
+            .receive(on: DispatchQueue.main)
+            .sink { [weak receiver] _, _ in
+                guard let receiver else { return }
+                ReceiverSessionInvitationPanel.update(receiver: receiver)
             }
             .store(in: &cancellables)
         // Streaming = connected and the video format is known — that's when
@@ -71,7 +250,7 @@ final class ReceiverController: ObservableObject {
             .sink { [weak self] streaming in
                 self?.streaming = streaming
                 self?.updateSleepAssertion(streaming)
-                if streaming { self?.showWindow() } else { self?.closeWindow() }
+                if streaming { self?.showWindow() } else { self?.scheduleCloseWindow() }
             }
             .store(in: &cancellables)
 
@@ -108,10 +287,35 @@ final class ReceiverController: ObservableObject {
         Log.info("receiver mode started (advertising \"\(receiver.serviceName)\")")
     }
 
+    private func waitForOtherReceiver() {
+        if !waitingForOtherReceiver { Log.info("receiver mode waiting: another receiver owns this Mac's receiver ports") }
+        waitingForOtherReceiver = true
+        statusTitle = otherReceiverMessage
+        statusColor = .orange
+        guard ownershipRetry == nil else { return }
+        ownershipRetry = Timer.scheduledTimer(withTimeInterval: ReceiverStartGate.retryInterval,
+                                              repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.start() }
+        }
+    }
+
+    private func stopWaitingForOtherReceiver() {
+        ownershipRetry?.invalidate()
+        ownershipRetry = nil
+        waitingForOtherReceiver = false
+    }
+
     /// Leave receiver mode. `completion` fires once "closing" has gone out
     /// to a live sender (or a second has passed) — the quit path waits on it
     /// so the sender ends its session instead of retrying a dead peer.
-    func stop(completion: (() -> Void)? = nil) {
+    func stop(completion: (@Sendable () -> Void)? = nil) {
+        startWhenRetired = false
+        if waitingForOtherReceiver || lockProblem != nil {
+            stopWaitingForOtherReceiver()
+            lockProblem = nil
+            statusTitle = String(localized: "Waiting for a Mac…")
+            statusColor = .secondary
+        }
         guard let receiver else { completion?(); return }
         cancellables.removeAll()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
@@ -119,16 +323,68 @@ final class ReceiverController: ObservableObject {
         let workspace = NSWorkspace.shared.notificationCenter
         screenSleepObservers.forEach { workspace.removeObserver($0) }
         screenSleepObservers = []
-        receiver.stop(completion: completion)
+        wakeConnect?.cancel()
+        wakeConnect = nil
+        input?.invalidate()
+        input = nil
+        // The receiver finishes its teardown on its own queue and only calls
+        // back while it still exists, so keep it alive until it has — views
+        // observing it are released as soon as `receiver` goes nil below.
+        retiringReceiver = receiver
+        receiver.stop { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.retiringReceiver = nil
+                // Only now have its listeners and services gone: a waiting
+                // receiver may take over.
+                self.ownership.release()
+                if self.startWhenRetired {
+                    self.startWhenRetired = false
+                    self.start()
+                }
+            }
+            completion?()
+        }
         self.receiver = nil
         connected = false
         streaming = false
+        portsUnavailable = false
+        statusTitle = String(localized: "Waiting for a Mac…")
+        statusColor = .secondary
+        mirrorUnavailableOffer = false
         closeWindow()
         updateSleepAssertion(false)
         Log.info("receiver mode stopped")
     }
 
-    /// Re-published name from the panel's text field. Empty falls back to the
+    static let audioPreferredKey = "audioPreferred"
+
+    func setAudioPreferred(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.audioPreferredKey)
+        receiver?.requestAudioEnabled(enabled)
+    }
+
+    static let avSyncOffsetKey = "avSyncOffsetMs"
+
+    /// Snaps to `AVSyncOffset.stepMs` and clamps, exactly like the iPhone
+    /// app's A/V Sync slider, then applies it to the live receiver.
+    func setAVSyncOffset(_ milliseconds: Int) {
+        let step = AVSyncOffset.stepMs
+        let snapped = AVSyncOffset.clamped(Int((Double(milliseconds) / Double(step)).rounded()) * step)
+        guard snapped != avSyncOffsetMs else { return }
+        avSyncOffsetMs = snapped
+        UserDefaults.standard.set(snapped, forKey: Self.avSyncOffsetKey)
+        receiver?.avSyncPreference.set(snapped)
+    }
+
+    /// "Use Extend" on the Mirror-unavailable alert — the shared receiver
+    /// sends the existing `displayModeRequest`; nothing is faked locally.
+    func acceptMirrorUnavailableOffer() { receiver?.acceptMirrorUnavailableOffer() }
+
+    /// "Cancel" — ends this attempt exactly like Disconnect (trust stays).
+    func declineMirrorUnavailableOffer() { receiver?.declineMirrorUnavailableOffer() }
+
+    /// Re-published name from the System page's name field. Empty falls back to the
     /// computer name (mirrors the iOS Settings behavior).
     func setAdvertisedName(_ name: String) {
         UserDefaults.standard.set(name, forKey: "receiverName")
@@ -168,35 +424,109 @@ final class ReceiverController: ObservableObject {
 
     // MARK: - Video window
 
-    /// Bring the video window (back) up — also bound to the panel button for
+    /// Bring the video window (back) up — also bound to Show Window in Settings for
     /// when the user closed the window while the stream keeps running.
     func showWindow() {
-        guard let receiver, streaming || window != nil else { return }
+        guard let receiver, let input, streaming || window != nil else { return }
+        // Streaming again within the grace period keeps this window, in
+        // whatever full screen state it's already in.
+        if streaming { windowLifecycle.cancelPendingClose() }
+        var enterFullscreen = false
         if window == nil {
             let w = NSWindow(contentRect: initialContentRect(video: receiver.videoSize),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
-            w.title = "OpenDisplay"
-            w.contentView = ReceiverVideoView(receiver: receiver)
+            w.title = "MeowDisplay"
+            let videoView = ReceiverVideoView(receiver: receiver, input: input, workspace: workspace)
+            w.contentView = videoView
+            w.initialFirstResponder = videoView
             w.isReleasedWhenClosed = false
+            // A fixed slot (macOS 12 has no hosting-view sizing options):
+            // the indicator right-aligns inside it as its text changes.
+            let indicator = NSTitlebarAccessoryViewController()
+            let indicatorView = NSHostingView(rootView: ReceiverControlIndicator(input: input))
+            indicatorView.frame = NSRect(x: 0, y: 0, width: 340, height: 28)
+            indicator.view = indicatorView
+            indicator.layoutAttribute = .trailing
+            w.addTitlebarAccessoryViewController(indicator)
+            let windows = NSTitlebarAccessoryViewController()
+            let windowsView = NSHostingView(rootView: MacWorkspaceTitlebar(model: workspace))
+            windowsView.frame = NSRect(x: 0, y: 0, width: 190, height: 28)
+            windows.view = windowsView
+            windows.layoutAttribute = .trailing
+            w.addTitlebarAccessoryViewController(windows)
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.center()
             window = w
+            observeWindow(w)
+            input.attach(to: w)
+            onVideoWindowVisibilityChanged?(true)
+            enterFullscreen = windowLifecycle.windowCreated()
         }
         // Resizes keep the stream's shape; re-set on every show because a
         // reconnect can arrive with new dimensions in the same window.
         if receiver.videoSize != .zero { window?.contentAspectRatio = receiver.videoSize }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // Only a freshly built window takes the preference, so a reused
+        // window is never toggled mid-transition.
+        if enterFullscreen { window?.toggleFullScreen(nil) }
+    }
+
+    /// Streaming stopped: take the window down after a short grace, in case
+    /// the sender is only moving the session to another transport.
+    private func scheduleCloseWindow() {
+        guard window != nil else { return }
+        let token = windowLifecycle.scheduleClose()
+        DispatchQueue.main.asyncAfter(deadline: .now() + ReceiverWindowLifecycle.closeGrace) { [weak self] in
+            guard let self, self.windowLifecycle.consumeClose(token) else { return }
+            self.closeWindow()
+        }
     }
 
     private func closeWindow() {
+        // Our own teardown is not the user's choice: stop recording before
+        // closing a full screen window reports its exit.
+        windowLifecycle.windowClosing()
+        stopObservingWindow()
+        let hadWindow = window != nil
         window?.close()
         window = nil
+        if hadWindow { onVideoWindowVisibilityChanged?(false) }
     }
 
-    /// Windowed at ~70% of the screen to start — the green button (native
-    /// full screen) is the "use the whole panel" gesture.
+    /// Records the user's green-button choice, and forgets the window when
+    /// the user closes it; Show Window (or the next stream) then builds a
+    /// fresh one with the preference.
+    private func observeWindow(_ window: NSWindow) {
+        let center = NotificationCenter.default
+        // Synchronous on .main: a close must stop recording before the full
+        // screen exit it causes is delivered.
+        func observe(_ name: Notification.Name,
+                     _ apply: @escaping @MainActor (ReceiverController) -> Void) -> NSObjectProtocol {
+            center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { if let self { apply(self) } }
+            }
+        }
+        windowObservers = [
+            observe(NSWindow.didEnterFullScreenNotification) { $0.windowLifecycle.fullscreenChanged(entered: true) },
+            observe(NSWindow.didExitFullScreenNotification) { $0.windowLifecycle.fullscreenChanged(entered: false) },
+            observe(NSWindow.willCloseNotification) {
+                $0.windowLifecycle.windowClosing()
+                $0.stopObservingWindow()
+                $0.window = nil
+                $0.onVideoWindowVisibilityChanged?(false)
+            },
+        ]
+    }
+
+    private func stopObservingWindow() {
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        windowObservers = []
+    }
+
+    /// Windowed at ~70% of the screen; full screen returns here when the
+    /// user leaves it.
     private func initialContentRect(video: CGSize) -> NSRect {
         let visible = NSScreen.screens.first?.visibleFrame.size
             ?? CGSize(width: 1440, height: 900)
@@ -215,15 +545,24 @@ final class ReceiverController: ObservableObject {
     /// dark by the time a sender connects, and frames into a black panel
     /// looked like nothing worked at all. Declaring user activity is what
     /// actually lights the display again.
+    private static func statusColor(for phase: ReceiverSessionPhase) -> Color {
+        switch phase {
+        case .connected: return .green
+        case .reconnectFailed, .unrecoverable: return .red
+        case .connecting, .reconnecting, .paused: return .orange
+        case .disconnected, .peerDisconnected: return .secondary
+        }
+    }
+
     private func updateSleepAssertion(_ receiving: Bool) {
         if receiving, sleepActivity == nil {
             var assertionID = IOPMAssertionID(0)
             IOPMAssertionDeclareUserActivity(
-                "OpenDisplay stream started" as CFString,
+                "MeowDisplay stream started" as CFString,
                 kIOPMUserActiveLocal, &assertionID)
             sleepActivity = ProcessInfo.processInfo.beginActivity(
                 options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
-                reason: "OpenDisplay is receiving a display stream")
+                reason: "MeowDisplay is receiving a display stream")
         } else if !receiving, let activity = sleepActivity {
             ProcessInfo.processInfo.endActivity(activity)
             sleepActivity = nil
@@ -239,8 +578,10 @@ final class ReceiverController: ObservableObject {
 /// extended desktop would have no visible pointer.
 final class ReceiverVideoView: NSView {
     private weak var receiver: StreamReceiver?
+    private let input: ReceiverInputController
     private let displayLayer: AVSampleBufferDisplayLayer
     private var videoSizeObserver: AnyCancellable?
+    private var cursorEcho = CursorEchoPolicy()
 
     private let cursorLayer: CALayer = {
         let layer = CALayer()
@@ -256,8 +597,13 @@ final class ReceiverVideoView: NSView {
     private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
     private var cursorVisible = false
 
-    init(receiver: StreamReceiver) {
+    private let workspace: WorkspaceModel
+    private var workspaceObserver: AnyCancellable?
+
+    init(receiver: StreamReceiver, input: ReceiverInputController, workspace: WorkspaceModel) {
         self.receiver = receiver
+        self.input = input
+        self.workspace = workspace
         self.displayLayer = receiver.displayLayer
         super.init(frame: .zero)
         wantsLayer = true
@@ -268,7 +614,16 @@ final class ReceiverVideoView: NSView {
         layer?.addSublayer(cursorLayer)
 
         receiver.onCursor = { [weak self] x, y, visible in
-            self?.moveCursor(x: x, y: y, visible: visible)
+            guard let self else { return }
+            // While this Mac drives the pointer the sprite already sits at
+            // the local pointer; the sending Mac's (older) reports take over
+            // once local movement stops.
+            if self.input.echoesCursor,
+               !self.cursorEcho.appliesRemotePosition(at: ProcessInfo.processInfo.systemUptime) {
+                self.setCursorVisible(visible)
+                return
+            }
+            self.moveCursor(x: x, y: y, visible: visible)
         }
         receiver.onCursorImage = { [weak self] image, anchor, normSize in
             self?.setCursorSprite(image, anchor: anchor, normSize: normSize)
@@ -292,16 +647,99 @@ final class ReceiverVideoView: NSView {
         // required constraints that size drove the *window*, which collapsed
         // to 0 × titlebar with the HUD hidden. Springs and struts never feed
         // back into the window, on any macOS the app supports.
-        let overlay = OverlayHostingView(rootView: ReceiverPerfOverlay(receiver: receiver))
+        let overlay = OverlayHostingView(rootView: ReceiverPerfOverlay(receiver: receiver, input: input))
         overlay.frame = bounds
         overlay.autoresizingMask = [.width, .height]
         addSubview(overlay)
+        // Window mode: tile borders and states over the picture; it takes clicks
+        // only while the overview or Arrange is open (nothing reaches the Mac then).
+        let workspaceView = WorkspaceHostingView(rootView: MacWorkspaceOverlay(model: workspace, receiver: receiver))
+        workspaceView.interactive = { [weak workspace] in workspace.map { $0.overviewOpen || $0.arranging } ?? false }
+        workspaceView.frame = bounds
+        workspaceView.autoresizingMask = [.width, .height]
+        addSubview(workspaceView)
+        // One pointer: in Window mode it's this Mac's own (hover over another
+        // tile stays local), so the streamed cursor isn't drawn as well.
+        workspaceObserver = workspace.$windowMode.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] on in
+            guard let self else { return }
+            self.cursorLayer.isHidden = on
+            self.window?.invalidateCursorRects(for: self)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: blankCursor)
+        addCursorRect(bounds, cursor: workspace.windowMode ? .arrow : blankCursor)
+    }
+
+    // MARK: Input (issue #12)
+
+    private var geometry: ReceiverVideoGeometry {
+        ReceiverVideoGeometry(viewSize: bounds.size, videoSize: receiver?.videoSize ?? .zero)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) { pointerMoved(event) }
+    override func mouseDragged(with event: NSEvent) { pointerMoved(event) }
+    override func rightMouseDragged(with event: NSEvent) { pointerMoved(event) }
+
+    override func mouseDown(with event: NSEvent) {
+        input.mouseDown(event, button: .left, geometry: geometry, in: self)
+        echoCursor(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        input.mouseUp(event, button: .left, geometry: geometry, in: self)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        input.mouseDown(event, button: .right, geometry: geometry, in: self)
+        echoCursor(event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        input.mouseUp(event, button: .right, geometry: geometry, in: self)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        input.scrollWheel(event, geometry: geometry, in: self)
+    }
+
+    override func magnify(with event: NSEvent) { input.magnify(event) }
+    override func rotate(with event: NSEvent) { input.rotate(event) }
+
+    private func pointerMoved(_ event: NSEvent) {
+        input.mouseMoved(event, geometry: geometry, in: self)
+        if workspace.windowMode {
+            let p = convert(event.locationInWindow, from: nil)
+            let picture = MacWorkspaceOverlay.picture(in: bounds.size, video: receiver?.videoSize ?? .zero)
+            let n = CGPoint(x: (p.x - picture.minX) / max(picture.width, 1), y: 1 - (p.y - picture.minY) / max(picture.height, 1))
+            workspace.hover(at: (0...1).contains(n.x) && (0...1).contains(n.y) ? n : nil)
+            return
+        }
+        echoCursor(event)
+    }
+
+    /// Draws the streamed cursor at the local pointer while controlling.
+    private func echoCursor(_ event: NSEvent) {
+        guard input.echoesCursor,
+              let (point, _) = geometry.normalized(convert(event.locationInWindow, from: nil)) else { return }
+        cursorEcho.localMove(at: ProcessInfo.processInfo.systemUptime)
+        moveCursor(x: Double(point.x), y: Double(point.y), visible: cursorVisible)
+    }
+
+    private func setCursorVisible(_ visible: Bool) {
+        guard visible != cursorVisible else { return }
+        moveCursor(x: Double(cursorNorm.x), y: Double(cursorNorm.y), visible: visible)
     }
 
     override func layout() {
@@ -364,7 +802,7 @@ final class ReceiverVideoView: NSView {
 // what acts as a monitor — blank it there. The streamed sender cursor
 // (cursorLayer) is the pointer that matters. File-scope so both the video
 // view and the overlay above it use the same cursor.
-private let blankCursor: NSCursor = {
+@MainActor private let blankCursor: NSCursor = {
     let size = NSSize(width: 1, height: 1)
     let image = NSImage(size: size)
     image.lockFocus()
@@ -375,26 +813,33 @@ private let blankCursor: NSCursor = {
 }()
 
 /// The shared PerfOverlay pinned to the bottom of the video, driven by the
-/// same "showAnalytics" default the iOS app uses (toggled in the panel).
+/// same "showAnalytics" default the iOS app uses (Settings → System).
 struct ReceiverPerfOverlay: View {
     @ObservedObject var receiver: StreamReceiver
+    let input: ReceiverInputController
     @AppStorage("showAnalytics") private var showAnalytics = false
 
     var body: some View {
-        if showAnalytics {
-            VStack {
-                Spacer()
-                PerfOverlay(stats: receiver.perf, videoSize: receiver.videoSize)
-                    .padding(.bottom, 10)
+        ZStack {
+            ReceiverControlHint(input: input)
+            if showAnalytics {
+                VStack {
+                    Spacer()
+                    PerfOverlay(stats: receiver.perf, videoSize: receiver.videoSize)
+                        .padding(.bottom, 10)
+                }
+                .allowsHitTesting(false)
             }
-            .allowsHitTesting(false)
         }
     }
 }
 
-/// Full-bleed, non-interactive layer above the video. Subclassed only so the
-/// blank-cursor rect covers the HUD area too.
+/// Full-bleed, non-interactive layer above the video. Subclassed so the
+/// blank-cursor rect covers the HUD area too, and so it never takes a click,
+/// scroll or drag meant for the video view (and the other Mac) underneath.
 private final class OverlayHostingView: NSHostingView<ReceiverPerfOverlay> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     required init(rootView: ReceiverPerfOverlay) {
         super.init(rootView: rootView)
     }
@@ -407,3 +852,66 @@ private final class OverlayHostingView: NSHostingView<ReceiverPerfOverlay> {
         addCursorRect(bounds, cursor: blankCursor)
     }
 }
+
+// MARK: - Window mode
+
+/// Window mode over the Mac Receiver's picture: tile chrome and the overview.
+struct MacWorkspaceOverlay: View {
+    @ObservedObject var model: WorkspaceModel
+    @ObservedObject var receiver: StreamReceiver
+
+    static func picture(in size: CGSize, video: CGSize) -> CGRect {
+        guard video.width > 0, video.height > 0, size.width > 0, size.height > 0 else { return CGRect(origin: .zero, size: size) }
+        let s = min(size.width / video.width, size.height / video.height)
+        let w = video.width * s, h = video.height * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                WorkspaceChromeView(model: model, picture: Self.picture(in: geo.size, video: receiver.videoSize),
+                                    inputAllowed: receiver.session.allowsLiveInput)
+                WindowOverviewView(model: model, macName: model.hostName, inputAllowed: receiver.session.allowsLiveInput,
+                                   onMirror: { receiver.requestDisplayMode(.mirror) },
+                                   onExtend: { receiver.requestDisplayMode(.extend) })
+            }
+        }
+    }
+}
+
+/// Titlebar: Windows (the overview, ⌃⌥W) and Arrange, when the sending Mac offers Window mode.
+struct MacWorkspaceTitlebar: View {
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if model.available {
+                Button("Windows") { model.openOverview() }
+                    .help("Choose Mac windows to show here (⌃⌥W)")
+                if model.windowMode {
+                    Toggle("Arrange", isOn: $model.arranging).toggleStyle(.button)
+                        .help("Move and resize tiles. Clicks stay on this Mac while arranging.")
+                }
+            }
+        }
+        .controlSize(.small)
+        .padding(.trailing, 6)
+    }
+}
+
+private final class WorkspaceHostingView: NSHostingView<MacWorkspaceOverlay> {
+    var interactive: () -> Bool = { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { interactive() ? super.hitTest(point) : nil }
+
+    required init(rootView: MacWorkspaceOverlay) {
+        super.init(rootView: rootView)
+    }
+
+    @MainActor required dynamic init?(coder: NSCoder) {
+        fatalError("not used")
+    }
+}
+

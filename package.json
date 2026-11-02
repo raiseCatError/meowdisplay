@@ -1,9 +1,9 @@
 {
-  "name": "opendisplay-site",
+  "name": "meowdisplay-site",
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "OpenDisplay landing page (Vite + React + motion). Builds into docs/ for GitHub Pages.",
+  "description": "MeowDisplay landing page (Vite + React + motion). Builds into docs/ for GitHub Pages.",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",

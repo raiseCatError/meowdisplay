@@ -1,0 +1,22 @@
+{
+  "name": "Tags: never deleted or moved",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "~ALL"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "update"
+    }
+  ],
+  "bypass_actors": []
+}

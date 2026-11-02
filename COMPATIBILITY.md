@@ -1,8 +1,28 @@
-# Mac ↔ iOS compatibility
+# MeowDisplay platform compatibility
 
-How the two OpenDisplay apps stay compatible when they update on **different
-schedules**, who is responsible for detecting a mismatch, and what pairings we
-support. This is the spec for issues
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
+| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+The main Mac app includes both sharing and receiving: share this Mac's display,
+or use this Mac as another Mac's display. The separate Receiver-only app is
+also available for Macs running macOS 12 or later. Android 2.0 requires the
+Mac 2.0 app.
+
+
+New Window mode, Stage Peek, Files and Clipboard capabilities require peers
+that implement them. Protocol version alone is not a promise of identical UI
+or transport support. See [PARITY.md](PARITY.md) for platform differences.
+
+
+How MeowDisplay's Mac and receiver apps stay compatible when they update on
+**different schedules**, who detects a mismatch, and what pairings we support.
+The historical policy below originated with OpenDisplay issues
 [#132](https://github.com/peetzweg/opendisplay/issues/132) (release
 orchestration), [#135](https://github.com/peetzweg/opendisplay/issues/135)
 (force update), and the wire-protocol handshake.
@@ -11,8 +31,8 @@ The wire protocol itself — framing, discovery, the video format, and the
 full control-message catalog — is specified in [PROTOCOL.md](PROTOCOL.md).
 This document is the companion policy for *evolving* it.
 
-> Status: **draft / not yet fully implemented.** Phase 1 (version on the wire +
-> the remote-config force lever) is in progress. Sections marked _(planned)_
+> Status: **draft / partially implemented.** Version negotiation and the pv 11
+> secure-transport boundary are implemented. Sections marked _(planned)_
 > describe target behavior.
 
 ---
@@ -23,7 +43,7 @@ We cut Mac and iOS from one release tag, but distribution is not simultaneous:
 
 | | Update channel | Time to reach a user |
 |---|---|---|
-| **Mac** | Sparkle appcast (`opendisplay.app/appcast.xml`) | hours — auto, silent |
+| **Mac** | Sparkle appcast (`meowdisplay.app/appcast.xml`, `appcast-receiver.xml`) | within a day once the user allows automatic checks (Sparkle asks); installs when the user accepts, unless they opted into automatic installs |
 | **iOS** | App Store (review + user tapping Update) | days → weeks, with a **long tail** |
 
 So at any moment the field holds many version pairings. The dominant one is
@@ -52,6 +72,47 @@ handshake and sends no version, so it is defined as protocol 1. New builds send
 Each side also declares **`minPeer`** — the oldest peer `pv` it still supports.
 Both start at `1` (support everything). We only raise a `minPeer` as the second
 half of a deliberate two-phase breaking change (§6).
+
+### Secure transport boundary
+
+Protocol 11 requires prior pairing and pinned mutual TLS 1.3 for LAN/AWDL
+media. Pairing, TLS negotiation, and pin failures never fall back to the
+historical plaintext Bonjour transport. Current MeowDisplay also requires
+paired, pinned mutual TLS over iOS USB; there is no plaintext USB exception.
+Bonjour names, addresses, interfaces, and TXT records are discovery hints,
+not identities.
+
+Mac system audio (`pv` 12, PROTOCOL.md section 5A) is media on this same
+single connection: it inherits whatever transport security that connection
+already has — pinned mutual TLS over LAN/AWDL and over the usbmux USB tunnel —
+with no separate channel, no separate Bonjour service, and no
+authentication of its own to get wrong. There is deliberately no wire path
+for unauthenticated or unencrypted audio at any protocol version.
+
+### Optional QUIC transport (`pv` 22)
+
+QUIC (PROTOCOL.md section 2.4) is purely **additive**:
+
+- `WireProtocol.version` is 22; `minSupportedPeer` stays **1**. No peer is
+  asked to update for QUIC.
+- A peer is QUIC-capable only when its **authenticated** `hello`/`welcome`
+  lists `"quic"` in `transports` with `qv` 1. A missing field — every
+  pv ≤ 21 build — means TCP only, and QUIC is never inferred from `pv`.
+  The `_meowdisp-q._udp` Bonjour record is only a hint that may justify a
+  local QUIC attempt; it never marks a peer capable or trusted.
+- New Mac + old receiver → TCP. Old Mac + new receiver → TCP (the receiver
+  keeps its TCP listener and simply sees no QUIC dial). New + new → Auto may
+  use QUIC. For Remote Access, Auto uses TCP until one authenticated
+  session has shown QUIC support, then may use QUIC on later sessions.
+- An unknown `qv` disables QUIC for that peer rather than guessing.
+- A peer whose authenticated `hello` reports `pv` below 22 (downgraded to a
+  pre-QUIC build) loses any remembered QUIC capability and is TCP-only again;
+  the decision uses that hello's `pv`, never the Bonjour TXT record.
+- The one pv-sensitive check that compared against the build's *current*
+  version (`streamingProfileRequest`) is now pinned to pv 21
+  (`WireProtocol.streamingProfileRequestWireVersion`), so the bump does not
+  stop honoring pv 21 receivers.
+- The pairing protocol version is unchanged (13); QUIC reuses the same pins.
 
 ## 3. Compatibility matrix
 
@@ -105,23 +166,34 @@ direction and owns the offline/never-connect case.
 ## 5. The remote-config force lever (iOS) — issue #135
 
 Connection-independent. On launch the iPhone fetches a small static file we host
-next to the Sparkle appcast:
+next to the Sparkle appcast.
 
-- **URL:** `https://opendisplay.app/ios-version.json` (source of truth:
-  `public/ios-version.json`; Vite copies it into `docs/` and Pages serves it).
+> **MeowDisplay status: disabled.** `VersionGate.manifestURL` is `nil`, so no
+> request is made: MeowDisplay hosts no policy file yet and must not follow
+> the OpenDisplay reference project's. The design below is that project's,
+> kept for when a MeowDisplay-owned file exists.
+
+- **URL:** OpenDisplay used `https://opendisplay.app/ios-version.json` (source of
+  truth: `public/ios-version.json`; Vite copies it into `docs/` and Pages
+  serves it). This repository has no `public/ios-version.json`.
 - **Shape:**
   ```json
   {
     "ios": {
       "hardMinimumVersion": "0.0.0",
       "recommendedVersion": "1.12.0",
-      "storeURL": "itms-apps://apps.apple.com/app/id6780264891",
+      "storeURL": "https://github.com/raiseCatError/MeowDisplay",
       "message": "…"
     }
   }
   ```
-- `version < hardMinimumVersion` → **blocking** update screen (App Store deep
-  link, non-dismissible). This is the force.
+- `storeURL` is optional. The app opens it only if it is an `https` link or
+  MeowDisplay's own App Store listing (`AppStore.iOSAppID`); anything else,
+  including another app's listing, is replaced by `AppStore.receiverUpdateURL`
+  — the listing once it exists, the project page until then. The Mac's
+  `updateRequired.store` goes through the same check.
+- `version < hardMinimumVersion` → **blocking** update screen (update link as
+  above, non-dismissible). This is the force.
 - `hardMinimumVersion ≤ version < recommendedVersion` → **soft, dismissible** nag.
 - **`hardMinimumVersion` is the force floor: hand-edited via PR, deliberately and
   rarely.** It must _not_ auto-track "latest" or every release would force an
@@ -145,6 +217,58 @@ the floor once a force-capable build has spread.
   fields and new message types, gated on the peer's `pv`. Both apps already
   log-and-ignore unknown message types and tolerate missing optional fields, so
   additive changes never break an older peer.
+- **Example: `pv` 4 keyboard input (M4).** The `keyboard` message family
+  (PROTOCOL.md §6.1) is additive in the same sense as `pencil`/`proximity`
+  at `pv` 3 — an old Mac simply ignores the unknown `keyboard` type, so
+  nothing breaks. The `pv` bump exists so iOS can gate the *UI*: the
+  floating keyboard button only appears while `welcome.pv ≥ 4`, because
+  unlike stylus input there is no legacy fallback for typed text — showing
+  the button against an old Mac would silently type into nothing. `minPeer`
+  stays at `1` on both sides; a `pv 3` Mac keeps streaming and receiving
+  touch/scroll/pencil exactly as before, just without the keyboard button.
+- **Example: `pv` 5 pointer/click gestures (M7).** The `pointer` message
+  family (PROTOCOL.md §6.1) is additive the same way — an old Mac ignores
+  the unknown `pointer` type, so nothing breaks. Unlike keyboard, there
+  *is* a legacy fallback here: iOS gates on `macSupportsPointerWire`
+  (`welcome.pv ≥ 5`) and, when it's false, drives the pre-M7 `touch`
+  click-drag behavior instead of hiding a feature outright. `minPeer`
+  stays at `1`; a `pv 4` Mac keeps receiving `touch`/`scroll` exactly as
+  before, just without absolute-pointer/precision/right-click/right-drag.
+- **Example: `pv` 6 receiver controls.** The receiver advertises its local
+  tray/keyboard-button state in optional `hello` fields. A pv 6 Mac can update
+  those fields with `receiverUI`, reset receiver-side latch state with
+  `inputReset`, and accept explicit modifier transitions. Older peers ignore
+  the new fields/messages; iOS gates modifier/chord transmission on
+  `welcome.pv >= 6` while the existing native keyboard remains available to
+  pv 4 and pv 5 Macs.
+- **Example: `pv` 7 display-mode synchronization.** A pv 7 receiver may send
+  `displayModeRequest`; the Mac applies it through its existing mode-switch
+  path and replies with authoritative `displayModeState` only after setup.
+  Older peers ignore the messages, and the receiver does not offer switching
+  unless `welcome.pv >= 7`.
+- **Example: `pv` 9 Video On/Off.** A pv 9 receiver may request video
+  production independently of the logical/input session. The Mac confirms the
+  actual state and retained mapping geometry with `videoState`. Against an
+  older receiver the Mac keeps video on, and an older Mac leaves the receiver's
+  Video control unavailable, avoiding an unexplained frozen frame.
+- **Example: `pv` 10 continuous app gestures.** A pv 10 receiver may send
+  overlapping magnify and rotate lifecycles. The wire is additive and older
+  peers ignore it. The official Mac currently validates the lifecycle but
+  cannot inject it across applications: public `CGEvent` types cover mouse,
+  keyboard, scroll, tablet, and related events, while AppKit's received
+  `NSEvent.magnification`/`rotation` values are read-only and its public event
+  constructors expose no gesture payload/phase. No private event fields or
+  keyboard-shortcut emulation are used.
+- **Example: `pv` 12 Mac system audio.** Audio frames use a reserved typed
+  marker byte (PROTOCOL.md section 5A) rather than extending the section-4
+  heuristic — the first genuine use of the "typed frame header" the
+  heuristic's own deprecation note anticipated. It is additive in the same
+  no-legacy-fallback sense as `keyboard`: a `pv < 12` peer never sends
+  `audioRequest` and a `pv < 12` sender never emits an audio media frame, so
+  older peers see nothing new at all, not even a message they ignore.
+  `minPeer` stays at `1` on both sides; a `pv 11` Mac keeps streaming video
+  and accepting input exactly as before, with Audio simply unavailable in
+  the receiver's UI.
 - Mac supports iOS receivers **≥ N releases back** — _N is TBD (see open
   questions); until decided, "all protocol-1 receivers."_
 - iOS supports Macs back to protocol 1 (no floor raised yet).

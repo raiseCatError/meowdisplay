@@ -1,0 +1,18 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "NSLocalNetworkUsageDescription" : {
+      "comment" : "Privacy - Local Network Usage Description",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "MeowDisplay connects to your iPhone, iPad, Android device or other Mac over your Wi-Fi network."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

@@ -1,0 +1,108 @@
+import CoreGraphics
+
+/// A snapshot of the CoreGraphics-reported state for one display ID, plain
+/// data so the usability decision below is pure and unit-testable without
+/// a live display.
+struct DisplayReading: Equatable {
+    let id: CGDirectDisplayID
+    let isOnline: Bool
+    let isActive: Bool
+    let boundsEmpty: Bool
+    let hasValidMode: Bool
+    /// Tri-state mirror of `CGDisplayIsInMirrorSet`'s `boolean_t` (Int32):
+    /// 1 = mirrored, 0 = not mirrored, anything else (notably -1 for a
+    /// released/nonexistent display) is `.unknown` — see PR #250's fix and
+    /// the identical strict check already in `VirtualDisplay.ensureNotMirrored`.
+    let mirrorState: MirrorState
+    /// Display this one mirrors (`CGDisplayMirrorsDisplay`), or
+    /// `kCGNullDirectDisplay`. Diagnostics only — not part of usability.
+    var mirrorsDisplay: CGDirectDisplayID = kCGNullDirectDisplay
+    var isMain = false
+
+    /// Compact one-line CG state for SCK-failure logs.
+    var diagnosticSummary: String {
+        "displayID=\(id) inMirrorSet=\(mirrorState) mirrors=\(mirrorsDisplay) "
+            + "active=\(isActive) online=\(isOnline) main=\(isMain)"
+    }
+
+    enum MirrorState: Equatable {
+        case mirrored
+        case notMirrored
+        case unknown
+    }
+}
+
+/// Centralized answer to "is this display (virtual or physical) actually
+/// usable right now" — the question upstream PR #219 showed cannot be
+/// answered by bounds alone: a torn-down/offline CGVirtualDisplay can keep
+/// non-empty bounds while `CGDisplayIsOnline`/`CGDisplayIsActive` are false,
+/// and ScreenCaptureKit never sees it. Pure decision logic lives in
+/// `evaluate(_:)`; only `reading(for:)`/`isUsable(_:)` touch CoreGraphics.
+enum DisplayUsability: Equatable {
+    case usable
+    case stale(reason: String)
+
+    static func evaluate(_ reading: DisplayReading) -> DisplayUsability {
+        guard reading.isOnline else { return .stale(reason: "CGDisplayIsOnline=false") }
+        guard reading.isActive else { return .stale(reason: "CGDisplayIsActive=false") }
+        guard !reading.boundsEmpty else { return .stale(reason: "bounds empty") }
+        guard reading.hasValidMode else { return .stale(reason: "no valid display mode") }
+        // `.unknown` (CGDisplayIsInMirrorSet == -1) is a released/unregistered
+        // display ID in practice, which the other checks above already catch;
+        // it is deliberately NOT treated as "mirrored" here (that would be
+        // exactly the #250 regression: an unrelated stale display trips a
+        // mirror-set rejection it never actually earned).
+        guard reading.mirrorState != .mirrored else { return .stale(reason: "in a system mirror set") }
+        return .usable
+    }
+}
+
+enum DisplayHealth {
+    static func reading(for id: CGDirectDisplayID) -> DisplayReading {
+        // boolean_t (Int32): 1 = mirrored, 0 = not mirrored, -1 = unknown/
+        // unregistered display ID — see the strict `== 1` check this mirrors
+        // in `VirtualDisplay.ensureNotMirrored` and PR #250's fix.
+        let mirrorState: DisplayReading.MirrorState
+        switch CGDisplayIsInMirrorSet(id) {
+        case 1: mirrorState = .mirrored
+        case 0: mirrorState = .notMirrored
+        default: mirrorState = .unknown
+        }
+        return DisplayReading(
+            id: id,
+            isOnline: CGDisplayIsOnline(id) != 0,
+            isActive: CGDisplayIsActive(id) != 0,
+            boundsEmpty: CGDisplayBounds(id).isEmpty,
+            hasValidMode: CGDisplayCopyDisplayMode(id) != nil,
+            mirrorState: mirrorState,
+            mirrorsDisplay: CGDisplayMirrorsDisplay(id),
+            isMain: CGDisplayIsMain(id) != 0
+        )
+    }
+
+    static func isUsable(_ id: CGDirectDisplayID) -> Bool {
+        DisplayUsability.evaluate(reading(for: id)) == .usable
+    }
+
+    /// True when at least one CoreGraphics-active display other than
+    /// `excluded` is currently usable — the general "is there a genuinely
+    /// usable PHYSICAL display right now" check. Callers exclude every
+    /// MEOW-owned virtual display ID they know about (a healthy VD reads as
+    /// "usable" through this same API, so it must be excluded explicitly to
+    /// answer the physical-display question rather than "any display").
+    /// Shared by `MacSender` (excluding its own VD) and `SenderController`
+    /// (excluding every session's VD, when deciding whether Mirror may be
+    /// selected at all).
+    static func hasUsablePhysicalDisplay(excludingAny excluded: Set<CGDirectDisplayID> = []) -> Bool {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        guard count > 0 else { return false }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        return ids.contains { id in !excluded.contains(id) && isUsable(id) }
+    }
+
+    static func hasUsablePhysicalDisplay(excluding id: CGDirectDisplayID?) -> Bool {
+        hasUsablePhysicalDisplay(excludingAny: id.map { [$0] } ?? [])
+    }
+}

@@ -32,12 +32,13 @@ struct DiagnosticsLogView: View {
 
     var body: some View {
         content
-            .navigationTitle("Connection log")
+            .navigationTitle("Connection Log")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if case let .ready(url, text, _) = snapshot {
                     ToolbarItem(placement: .primaryAction) {
                         ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
+                            .accessibilityLabel(Text("Share Log"))
                     }
                     ToolbarItem(placement: .primaryAction) {
                         Button {
@@ -47,6 +48,7 @@ struct DiagnosticsLogView: View {
                             Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         }
                         .disabled(copied)
+                        .accessibilityLabel(copied ? Text("Copied") : Text("Copy Log"))
                     }
                 }
             }
@@ -85,8 +87,9 @@ struct DiagnosticsLogView: View {
                 Image(systemName: "doc.text.magnifyingglass")
                     .font(.largeTitle)
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 Text("The log could not be read.")
-                Text("Restart OpenDisplay and try again.")
+                Text("Restart MeowDisplay and try again.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -103,11 +106,13 @@ struct DiagnosticsLogView: View {
 
     private func load() {
         Log.snapshot(context: context) { result in
-            guard let (url, text) = result else {
-                snapshot = .failed
-                return
+            Task { @MainActor in
+                guard let (url, text) = result else {
+                    snapshot = .failed
+                    return
+                }
+                snapshot = .ready(url: url, text: text, display: displayText(from: text))
             }
-            snapshot = .ready(url: url, text: text, display: displayText(from: text))
         }
     }
 

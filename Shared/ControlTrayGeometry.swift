@@ -1,0 +1,750 @@
+import SwiftUI
+import CoreGraphics
+
+struct ControlSafeInsets: Equatable {
+    var top: CGFloat
+    var leading: CGFloat
+    var bottom: CGFloat
+    var trailing: CGFloat
+
+    static let zero = ControlSafeInsets(top: 0, leading: 0, bottom: 0, trailing: 0)
+
+    var edgeInsets: EdgeInsets { EdgeInsets(top: top, leading: leading, bottom: bottom, trailing: trailing) }
+
+    /// The safe rectangle of a screen of [size].
+    func safeRect(in size: CGSize) -> CGRect {
+        CGRect(x: leading, y: top, width: max(0, size.width - leading - trailing), height: max(0, size.height - top - bottom))
+    }
+
+    /// UIKit's live report is authoritative once the probe has published;
+    /// GeometryProxy is only the startup fallback. Treating the runtime
+    /// value as one complete snapshot matters on rotation, when the old
+    /// notch-side inset must become zero as the opposite side gains it.
+    static func resolved(proxy: ControlSafeInsets,
+                         runtime: ControlSafeInsets?) -> ControlSafeInsets {
+        runtime ?? proxy
+    }
+}
+
+/// Mirrors only the two landscape cases of UIKit's `UIInterfaceOrientation`
+/// — kept UIKit-free so the mapping to a physical notch side is testable
+/// from the hostless Mac test target (`Shared/` compiles there too).
+enum LandscapeInterfaceOrientation {
+    case landscapeLeft
+    case landscapeRight
+}
+
+/// The ONLY reliable signal for which landscape edge holds the physical
+/// notch/Dynamic Island. A prior implementation compared leading vs.
+/// trailing safe-area depth and treated a "meaningfully deeper" side as the
+/// notch — but real devices can report equal depths on both edges (e.g.
+/// leading=59, trailing=59) despite a real, single-sided physical notch, so
+/// that comparison is fundamentally unreliable.
+///
+/// `UIInterfaceOrientation` is unambiguous, but its naming is a well-known
+/// trap: `UIInterfaceOrientation` describes how the CONTENT is rotated to
+/// compensate for the device, which is the OPPOSITE of the device's own
+/// physical rotation (`UIDeviceOrientation`) — confirmed against real
+/// devices (a prior mapping using the "content" reading, `.landscapeLeft`
+/// -> `.leading`, was verified backwards on-device: rotating the phone so
+/// the physical notch ends up on the device's own left required
+/// `.landscapeRight`). `.landscapeLeft` rotating the device LEFT (physical
+/// top swings toward the screen's own RIGHT edge) puts the notch on the
+/// TRAILING edge; `.landscapeRight` puts it on the LEADING edge.
+enum PhysicalNotchSide {
+    static func forLandscape(_ orientation: LandscapeInterfaceOrientation?) -> LandscapeTraySide? {
+        switch orientation {
+        case .landscapeLeft: return .trailing
+        case .landscapeRight: return .leading
+        case nil: return nil
+        }
+    }
+}
+
+enum ControlTrayAxis: Equatable {
+    case horizontal
+    case vertical
+}
+
+struct ControlTrayLayout: Equatable {
+    var trayFrame: CGRect
+    var paletteFrame: CGRect
+    var axis: ControlTrayAxis
+    /// The side the Main Tray actually uses this pass. Equals the stored
+    /// `preferredLandscapeSide` unless an active division leaves that edge
+    /// without usable space (see `ControlPlacementArea`); the preference
+    /// itself is never rewritten.
+    var side: LandscapeTraySide
+}
+
+/// A system-reserved area of the receiver's container, converted from
+/// SwiftUI's `ReservedRegion` (iOS 27.1+) at the view boundary. Kept
+/// UIKit/SwiftUI-free so the geometry below — and its hostless tests — never
+/// depend on the SDK that introduced the runtime type. Older systems simply
+/// report no regions and take the existing safe-area/notch path unchanged.
+struct ControlReservedRegion: Equatable {
+    enum Kind: Equatable {
+        /// Covered by hardware or system UI, e.g. a camera.
+        case occlusion
+        /// Content should split around it, e.g. a folded hinge.
+        case division
+    }
+
+    var kind: Kind
+    /// In the container's coordinate space, including the system's
+    /// interactive margins around the reserved rect.
+    var frame: CGRect
+
+    static func frames(of kind: Kind, in regions: [ControlReservedRegion]) -> [CGRect] {
+        regions.filter { $0.kind == kind }.map(\.frame)
+    }
+}
+
+/// Where the controls may live once active divisions are removed from the
+/// visible container. Divisions are taken from the runtime snapshot as a
+/// whole — nothing here is carried between passes — so a fold appearing,
+/// moving or disappearing simply yields a new area on the next layout.
+///
+/// A division taller than it is wide splits the area into columns; a wider
+/// one splits it into rows. Of the columns, the Main Tray keeps the
+/// preferred side's outer edge unless the opposite outer edge offers clearly
+/// more usable width — which is exactly the case when the fold sits at or
+/// near the preferred edge (e.g. the app occupies one side of a folded
+/// display). A centered fold leaves both outer edges equally usable, so the
+/// stored preference wins.
+struct ControlPlacementArea: Equatable {
+    /// The Main Tray, its palette and Same Side Function groups.
+    var main: CGRect
+    /// Opposite Side Function groups (landscape).
+    var opposite: CGRect
+    var side: LandscapeTraySide
+
+    /// How much wider (as a fraction of the visible extent) the other
+    /// outer segment must be before the effective side leaves the stored
+    /// preference. Keeps a nearly-centered fold from flipping the tray.
+    static let balanceTolerance: CGFloat = 0.1
+
+    /// Decides the effective side, then resolves the areas for it.
+    static func resolve(visible: CGRect, divisions: [CGRect], portrait: Bool,
+                        preferredSide: LandscapeTraySide, minimumExtent: CGFloat) -> ControlPlacementArea {
+        let splitters = activeSplitters(divisions, in: visible)
+        guard !splitters.columns.isEmpty || !splitters.rows.isEmpty else {
+            return ControlPlacementArea(main: visible, opposite: visible, side: preferredSide)
+        }
+        let columns = segments(of: visible, removing: splitters.columns, horizontal: true)
+        let side = chooseEnd(of: columns, in: visible, horizontal: true,
+                             preferringTrailing: preferredSide == .trailing,
+                             minimumExtent: minimumExtent) ? LandscapeTraySide.trailing : .leading
+        return area(visible: visible, divisions: divisions, portrait: portrait,
+                    side: side, minimumExtent: minimumExtent)
+    }
+
+    /// Resolves the areas for an already-decided side, so the Function Tray
+    /// follows the Main Tray's effective side instead of re-deciding it.
+    static func area(visible: CGRect, divisions: [CGRect], portrait: Bool,
+                     side: LandscapeTraySide, minimumExtent: CGFloat) -> ControlPlacementArea {
+        let splitters = activeSplitters(divisions, in: visible)
+        guard !splitters.columns.isEmpty || !splitters.rows.isEmpty else {
+            return ControlPlacementArea(main: visible, opposite: visible, side: side)
+        }
+        let columns = segments(of: visible, removing: splitters.columns, horizontal: true)
+        let rows = segments(of: visible, removing: splitters.rows, horizontal: false)
+        // Rows: the bottom edge is the natural home in both orientations
+        // (portrait's tray is bottom-anchored; in landscape it keeps the
+        // lower, thumb-side half when a fold crosses horizontally).
+        let row = segment(atTrailingEnd: chooseEnd(of: rows, in: visible, horizontal: false,
+                                                   preferringTrailing: true, minimumExtent: minimumExtent),
+                          of: rows, in: visible, horizontal: false, minimumExtent: minimumExtent) ?? visible
+        let mainColumn = segment(atTrailingEnd: side == .trailing, of: columns, in: visible,
+                                 horizontal: true, minimumExtent: minimumExtent) ?? visible
+        let main = mainColumn.intersection(row)
+        guard !portrait else {
+            return ControlPlacementArea(main: main, opposite: main, side: side)
+        }
+        let oppositeColumn = segment(atTrailingEnd: side != .trailing, of: columns, in: visible,
+                                     horizontal: true, minimumExtent: minimumExtent) ?? mainColumn
+        return ControlPlacementArea(main: main, opposite: oppositeColumn.intersection(row), side: side)
+    }
+
+    private static func activeSplitters(_ divisions: [CGRect],
+                                        in visible: CGRect) -> (columns: [CGRect], rows: [CGRect]) {
+        let clipped = divisions
+            .map { $0.intersection(visible) }
+            .filter { !$0.isNull && !$0.isEmpty }
+        return (clipped.filter { $0.height >= $0.width }, clipped.filter { $0.height < $0.width })
+    }
+
+    /// The pieces of `area` left between `splitters` along one axis, in
+    /// increasing coordinate order.
+    static func segments(of area: CGRect, removing splitters: [CGRect], horizontal: Bool) -> [CGRect] {
+        var pieces: [(CGFloat, CGFloat)] = [horizontal ? (area.minX, area.maxX) : (area.minY, area.maxY)]
+        for splitter in splitters {
+            let cut = horizontal ? (splitter.minX, splitter.maxX) : (splitter.minY, splitter.maxY)
+            pieces = pieces.flatMap { lower, upper -> [(CGFloat, CGFloat)] in
+                guard cut.0 < upper, cut.1 > lower else { return [(lower, upper)] }
+                return [(lower, min(upper, cut.0)), (max(lower, cut.1), upper)].filter { $0.1 > $0.0 }
+            }
+        }
+        return pieces.sorted { $0.0 < $1.0 }.map { lower, upper in
+            horizontal
+                ? CGRect(x: lower, y: area.minY, width: upper - lower, height: area.height)
+                : CGRect(x: area.minX, y: lower, width: area.width, height: upper - lower)
+        }
+    }
+
+    /// Usable extent of the segment touching one outer edge; 0 when the
+    /// division itself occupies that edge or leaves only a sliver there.
+    private static func edgeExtent(atTrailingEnd trailing: Bool, of segments: [CGRect], in area: CGRect,
+                                   horizontal: Bool, minimumExtent: CGFloat) -> CGFloat {
+        let edge = trailing ? segments.last : segments.first
+        guard let edge else { return 0 }
+        let touches = horizontal
+            ? (trailing ? edge.maxX >= area.maxX : edge.minX <= area.minX)
+            : (trailing ? edge.maxY >= area.maxY : edge.minY <= area.minY)
+        let extent = horizontal ? edge.width : edge.height
+        return touches && extent >= minimumExtent ? extent : 0
+    }
+
+    /// `true` for the trailing (or bottom) end.
+    private static func chooseEnd(of segments: [CGRect], in area: CGRect, horizontal: Bool,
+                                  preferringTrailing: Bool, minimumExtent: CGFloat) -> Bool {
+        let preferred = edgeExtent(atTrailingEnd: preferringTrailing, of: segments, in: area,
+                                   horizontal: horizontal, minimumExtent: minimumExtent)
+        let other = edgeExtent(atTrailingEnd: !preferringTrailing, of: segments, in: area,
+                               horizontal: horizontal, minimumExtent: minimumExtent)
+        let total = horizontal ? area.width : area.height
+        return other - preferred > total * balanceTolerance ? !preferringTrailing : preferringTrailing
+    }
+
+    /// The usable segment at one outer edge, or — when that edge has none —
+    /// the nearest usable segment toward it.
+    private static func segment(atTrailingEnd trailing: Bool, of segments: [CGRect], in area: CGRect,
+                                horizontal: Bool, minimumExtent: CGFloat) -> CGRect? {
+        let usable = segments.filter { (horizontal ? $0.width : $0.height) >= minimumExtent }
+        return (trailing ? usable.last : usable.first) ?? (trailing ? segments.last : segments.first)
+    }
+}
+
+/// One source of truth for the Video-Off interaction surface. The returned
+/// rectangle is consumed unchanged by drawing, hit testing, and input
+/// admission. In portrait, Trackpad deliberately fills the tall space left
+/// between the unsafe top edge and bottom controls; it does not inherit the
+/// remote display's landscape aspect ratio.
+enum VideoOffSurfaceGeometry {
+    static let margin: CGFloat = 12
+    static let controlGap: CGFloat = 10
+
+    static func interactionRect(container: CGRect,
+                                safeInsets: ControlSafeInsets,
+                                occupiedControlFrames: [CGRect],
+                                portrait: Bool,
+                                inputMode: PointerInputMode,
+                                remoteAspectSize: CGSize,
+                                divisions: [CGRect] = []) -> CGRect {
+        guard container.width > 0, container.height > 0 else { return .zero }
+        var available = container.insetBy(dx: margin, dy: margin)
+        available.origin.y = max(available.minY, container.minY + safeInsets.top + controlGap)
+
+        if portrait {
+            // Only bottom chrome limits the large portrait surface. A
+            // temporary palette higher on screen is still an occupied
+            // control, so use the first lower-half frame as the boundary.
+            let bottomBoundary = occupiedControlFrames
+                .filter { !$0.isNull && !$0.isEmpty && $0.midY >= container.midY }
+                .map(\.minY)
+                .min() ?? (container.maxY - safeInsets.bottom)
+            let maxY = min(available.maxY, bottomBoundary - controlGap,
+                           container.maxY - safeInsets.bottom - controlGap)
+            available.size.height = max(0, maxY - available.minY)
+            available = usablePiece(of: available, removing: divisions)
+            guard inputMode == .direct else { return available }
+        } else {
+            // Landscape keeps the established broad surface, but carves
+            // away only the side actually occupied by visible controls.
+            for frame in occupiedControlFrames where frame.intersects(available) {
+                if frame.midX < container.midX {
+                    let minX = max(available.minX, frame.maxX + controlGap)
+                    available.size.width = max(0, available.maxX - minX)
+                    available.origin.x = minX
+                } else {
+                    available.size.width = max(0, min(available.maxX, frame.minX - controlGap) - available.minX)
+                }
+            }
+            available = usablePiece(of: available, removing: divisions)
+            guard inputMode == .direct else { return available }
+        }
+
+        // Direct Touch must retain an exact aspect-mapped surface. Trackpad
+        // is intentionally free-form because it sends relative movement.
+        guard remoteAspectSize.width > 0, remoteAspectSize.height > 0,
+              available.width > 0, available.height > 0 else { return .zero }
+        let aspect = remoteAspectSize.width / remoteAspectSize.height
+        let size: CGSize
+        if available.width / available.height > aspect {
+            size = CGSize(width: available.height * aspect, height: available.height)
+        } else {
+            size = CGSize(width: available.width, height: available.width / aspect)
+        }
+        return CGRect(x: available.midX - size.width / 2,
+                      y: available.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    /// The surface is drawn, hit-tested and mapped as ONE rectangle, so it
+    /// must never bridge an active division: a touch on the fold would land
+    /// on neither half. The largest piece left beside the division is kept
+    /// (ties go to the later, i.e. bottom/trailing, piece so the choice is
+    /// deterministic); `controlGap` separates it from the fold. Without an
+    /// intersecting division the rectangle is returned unchanged.
+    static func usablePiece(of available: CGRect, removing divisions: [CGRect]) -> CGRect {
+        let splitters = divisions
+            .map { $0.insetBy(dx: -controlGap, dy: -controlGap).intersection(available) }
+            .filter { !$0.isNull && !$0.isEmpty }
+        guard !splitters.isEmpty else { return available }
+        let columns = ControlPlacementArea.segments(
+            of: available, removing: splitters.filter { $0.height >= $0.width }, horizontal: true)
+        let rows = ControlPlacementArea.segments(
+            of: available, removing: splitters.filter { $0.height < $0.width }, horizontal: false)
+        let pieces = columns.flatMap { column in
+            rows.map { column.intersection($0) }
+        }.filter { !$0.isNull && !$0.isEmpty }
+        func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
+        return pieces.reduce(nil as CGRect?) { best, piece in
+            guard let best else { return piece }
+            return area(piece) >= area(best) ? piece : best
+        } ?? .zero
+    }
+}
+
+enum ControlTrayGeometry {
+    /// Base placement always uses the raw/full container — or, while an
+    /// active division splits it, the usable piece at the effective outer
+    /// edge (`ControlPlacementArea`). `avoidNotch` affects only the final
+    /// per-frame obstacle pass below; it never turns the safe-area
+    /// rectangle into a global layout margin.
+    static func layout(container: CGRect, safeInsets: ControlSafeInsets,
+                       keyboardVisibleRect: CGRect?, portrait: Bool,
+                       side: LandscapeTraySide, traySize: CGSize,
+                       paletteSize: CGSize, avoidNotch: Bool,
+                       notchSide: LandscapeTraySide? = nil,
+                       reservedRegions: [ControlReservedRegion] = [],
+                       spacing: CGFloat = 10) -> ControlTrayLayout {
+        var fullVisible = container
+        if let keyboardVisibleRect {
+            fullVisible = fullVisible.intersection(keyboardVisibleRect)
+        }
+        guard !fullVisible.isNull, !fullVisible.isEmpty else {
+            return ControlTrayLayout(trayFrame: .zero, paletteFrame: .zero,
+                                     axis: portrait ? .horizontal : .vertical, side: side)
+        }
+
+        let margin: CGFloat = 12
+        let axis: ControlTrayAxis = portrait ? .horizontal : .vertical
+        // Without an active division this is `visible` itself and `side`
+        // unchanged, so every existing placement below is bit-for-bit the
+        // same. With one, placement happens inside the usable piece at the
+        // effective outer edge.
+        let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+        let area = ControlPlacementArea.resolve(
+            visible: fullVisible, divisions: divisions, portrait: portrait, preferredSide: side,
+            minimumExtent: min(traySize.width, traySize.height) + margin * 2)
+        let visible = area.main
+        let requestedTraySize = traySize
+        let tray = CGSize(width: min(requestedTraySize.width, max(0, visible.width - margin * 2)),
+                          height: min(requestedTraySize.height, max(0, visible.height - margin * 2)))
+        // Portrait: bottom-centered. Landscape: hugging the chosen side and
+        // vertically centered, so the tray sits under the thumb on whichever
+        // hand holds the device.
+        let trailing = area.side == .trailing
+        let trayOrigin: CGPoint
+        if portrait {
+            trayOrigin = CGPoint(x: visible.midX - tray.width / 2,
+                                 y: visible.maxY - margin - tray.height)
+        } else {
+            trayOrigin = CGPoint(x: trailing ? visible.maxX - margin - tray.width : visible.minX + margin,
+                                 y: clamp(visible.midY - tray.height / 2,
+                                          min: visible.minY + margin,
+                                          max: visible.maxY - margin - tray.height))
+        }
+        var trayFrame = CGRect(origin: trayOrigin, size: tray)
+
+        var palette = CGSize(width: min(paletteSize.width, visible.width - margin * 2),
+                             height: min(paletteSize.height, visible.height - margin * 2))
+        palette.width = max(0, palette.width)
+        palette.height = max(0, palette.height)
+        var paletteOrigin: CGPoint
+        if portrait {
+            paletteOrigin = CGPoint(x: min(max(visible.minX + margin, visible.midX - palette.width / 2),
+                                           visible.maxX - margin - palette.width),
+                                    y: trayFrame.minY - spacing - palette.height)
+        } else {
+            let proposedX = trailing
+                ? trayFrame.minX - spacing - palette.width
+                : trayFrame.maxX + spacing
+            paletteOrigin = CGPoint(x: proposedX,
+                                    y: min(max(visible.minY + margin, trayFrame.midY - palette.height / 2),
+                                           visible.maxY - margin - palette.height))
+            if proposedX < visible.minX + margin || proposedX + palette.width > visible.maxX - margin {
+                paletteOrigin.x = min(max(visible.minX + margin, trayFrame.midX - palette.width / 2),
+                                      visible.maxX - margin - palette.width)
+                paletteOrigin.y = trayFrame.minY - spacing - palette.height
+            }
+        }
+        paletteOrigin.y = min(max(visible.minY + margin, paletteOrigin.y),
+                              visible.maxY - margin - palette.height)
+        var paletteFrame = CGRect(origin: paletteOrigin, size: palette)
+
+        // Obstacle avoidance is deliberately after normal placement. A
+        // non-intersecting frame must remain bit-for-bit unchanged.
+        let unsafeTrayFrame = avoidingUnsafeRegion(trayFrame, in: container, safeInsets: safeInsets,
+                                                   enabled: avoidNotch, portrait: portrait, notchSide: notchSide)
+        // The palette belongs to the tray: when the tray steps off the home
+        // indicator or notch, the palette moves with it instead of staying
+        // where the tray used to be.
+        paletteFrame = paletteFrame.offsetBy(dx: unsafeTrayFrame.minX - trayFrame.minX,
+                                             dy: unsafeTrayFrame.minY - trayFrame.minY)
+        trayFrame = unsafeTrayFrame
+        paletteFrame = avoidingUnsafeRegion(paletteFrame, in: container, safeInsets: safeInsets, enabled: avoidNotch,
+                                            portrait: portrait, notchSide: notchSide)
+        let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
+        let obstacleBounds = fullVisible.insetBy(dx: margin, dy: margin)
+        let reservedTrayFrame = avoidingReservedRegions(trayFrame, obstacles: obstacles, within: obstacleBounds)
+        // The palette belongs to the tray: carry it along by the same amount
+        // before clearing it too, so it never ends up under the tray.
+        paletteFrame = paletteFrame.offsetBy(dx: reservedTrayFrame.minX - trayFrame.minX,
+                                             dy: reservedTrayFrame.minY - trayFrame.minY)
+        trayFrame = reservedTrayFrame
+        paletteFrame = avoidingReservedRegions(paletteFrame, obstacles: obstacles, within: obstacleBounds,
+                                               alsoAvoiding: [trayFrame])
+        return ControlTrayLayout(trayFrame: trayFrame, paletteFrame: paletteFrame, axis: axis, side: area.side)
+    }
+
+    /// Divisions are never usable for controls, whatever Avoid Notch says.
+    /// Occlusions are the runtime counterpart of the notch/camera the Avoid
+    /// Notch setting already governs, so they follow it — and they are added
+    /// on top of the safe-area fallback rather than replacing it, which keeps
+    /// every existing device's frames unchanged unless a control genuinely
+    /// collides with a reported region.
+    static func reservedObstacles(_ regions: [ControlReservedRegion], avoidNotch: Bool) -> [CGRect] {
+        ControlReservedRegion.frames(of: .division, in: regions)
+            + (avoidNotch ? ControlReservedRegion.frames(of: .occlusion, in: regions) : [])
+    }
+
+    /// Moves `frame` the shortest distance that clears every obstacle it
+    /// touches while staying inside `bounds` and off `protectedFrames`
+    /// (other controls it must not land on). A frame that touches no
+    /// obstacle is returned unchanged, so the pass is a no-op on layouts
+    /// without reserved regions.
+    static func avoidingReservedRegions(_ frame: CGRect, obstacles: [CGRect], within bounds: CGRect,
+                                        alsoAvoiding protectedFrames: [CGRect] = []) -> CGRect {
+        let obstacles = obstacles.filter { !$0.isNull && !$0.isEmpty }
+        guard !frame.isEmpty, obstacles.contains(where: { $0.intersects(frame) }) else { return frame }
+        func isClear(_ candidate: CGRect) -> Bool {
+            bounds.contains(candidate)
+                && !(obstacles + protectedFrames).contains { $0.intersects(candidate) }
+        }
+        // Candidates hug each side of every obstacle the frame currently
+        // touches; the nearest fully-clear one wins.
+        var candidates: [CGRect] = []
+        for obstacle in obstacles where obstacle.intersects(frame) {
+            candidates += [
+                CGRect(x: obstacle.minX - frame.width, y: frame.minY, width: frame.width, height: frame.height),
+                CGRect(x: obstacle.maxX, y: frame.minY, width: frame.width, height: frame.height),
+                CGRect(x: frame.minX, y: obstacle.minY - frame.height, width: frame.width, height: frame.height),
+                CGRect(x: frame.minX, y: obstacle.maxY, width: frame.width, height: frame.height),
+            ]
+        }
+        func distance(_ candidate: CGRect) -> CGFloat {
+            abs(candidate.minX - frame.minX) + abs(candidate.minY - frame.minY)
+        }
+        return candidates.filter(isClear).min { distance($0) < distance($1) } ?? frame
+    }
+}
+
+private func clamp(_ value: CGFloat, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
+    // `upper` can fall below `lower` when the visible area is tiny; the
+    // lower bound wins so the tray never leaves the safe area.
+    Swift.max(lower, Swift.min(value, Swift.max(lower, upper)))
+}
+
+extension ControlTrayGeometry {
+    /// `notchSide` is the physical notch edge, as determined by
+    /// `PhysicalNotchSide.forLandscape` from `UIInterfaceOrientation` — NOT
+    /// derived here from safe-area depth comparison (see that type's doc for
+    /// why). `nil` means "no known/applicable physical notch side": portrait
+    /// (the notch there is the top inset, handled below independent of this
+    /// parameter), a flat/unknown orientation, or a non-notched device.
+    static func unsafeRegions(in container: CGRect,
+                              safeInsets: ControlSafeInsets,
+                              portrait: Bool = false,
+                              notchSide: LandscapeTraySide? = nil) -> [CGRect] {
+        var regions: [CGRect] = []
+        if !portrait, notchSide == .leading, safeInsets.leading > 0 {
+            let span = min(container.height, safeInsets.leading * 3)
+            regions.append(CGRect(x: container.minX, y: container.midY - span / 2,
+                                  width: safeInsets.leading, height: span))
+        }
+        if !portrait, notchSide == .trailing, safeInsets.trailing > 0 {
+            let span = min(container.height, safeInsets.trailing * 3)
+            regions.append(CGRect(x: container.maxX - safeInsets.trailing,
+                                  y: container.midY - span / 2,
+                                  width: safeInsets.trailing, height: span))
+        }
+        if safeInsets.top > 0 {
+            let span = min(container.width, safeInsets.top * 3)
+            regions.append(CGRect(x: container.midX - span / 2, y: container.minY,
+                                  width: span, height: safeInsets.top))
+        }
+        if safeInsets.bottom > 0 {
+            let span = min(container.width, safeInsets.bottom * 3)
+            regions.append(CGRect(x: container.midX - span / 2,
+                                  y: container.maxY - safeInsets.bottom,
+                                  width: span, height: safeInsets.bottom))
+        }
+        return regions
+    }
+
+    /// Shifts `frame` inward just enough to clear localized physical edge
+    /// obstacles. UIKit exposes each obstruction's edge depth through safe
+    /// area insets, but not its outline; the cross-edge extent is therefore
+    /// conservatively represented as a centered band three times that
+    /// depth. Crucially, these are obstacles rather than full-edge strips:
+    /// a top/bottom Function group that does not touch the side sensor area
+    /// stays at its exact raw position.
+    static func avoidingUnsafeRegion(_ frame: CGRect, in container: CGRect,
+                                     safeInsets: ControlSafeInsets, enabled: Bool,
+                                     portrait: Bool = false, notchSide: LandscapeTraySide? = nil) -> CGRect {
+        guard enabled else { return frame }
+        var result = frame
+        if !portrait, notchSide == .leading, safeInsets.leading > 0 {
+            let span = min(container.height, safeInsets.leading * 3)
+            let unsafe = CGRect(x: container.minX, y: container.midY - span / 2,
+                                width: safeInsets.leading, height: span)
+            if result.intersects(unsafe) { result.origin.x = unsafe.maxX }
+        }
+        if !portrait, notchSide == .trailing, safeInsets.trailing > 0 {
+            let span = min(container.height, safeInsets.trailing * 3)
+            let unsafe = CGRect(x: container.maxX - safeInsets.trailing,
+                                y: container.midY - span / 2,
+                                width: safeInsets.trailing, height: span)
+            if result.intersects(unsafe) { result.origin.x = unsafe.minX - result.width }
+        }
+        if safeInsets.top > 0 {
+            let span = min(container.width, safeInsets.top * 3)
+            let unsafe = CGRect(x: container.midX - span / 2, y: container.minY,
+                                width: span, height: safeInsets.top)
+            if result.intersects(unsafe) { result.origin.y = unsafe.maxY }
+        }
+        if safeInsets.bottom > 0 {
+            let span = min(container.width, safeInsets.bottom * 3)
+            let unsafe = CGRect(x: container.midX - span / 2,
+                                y: container.maxY - safeInsets.bottom,
+                                width: span, height: safeInsets.bottom)
+            if result.intersects(unsafe) { result.origin.y = unsafe.minY - result.height }
+        }
+        return result
+    }
+
+    /// One frame per Function Tray group (see `FunctionTrayProfile.visibleGroups`)
+    /// — never a single combined frame, so groups can anchor independently
+    /// (the default Zoom group toward the top of its side, the Edit group
+    /// toward the bottom). Portrait lays every group out in one horizontal
+    /// row, side by side with a visible gap, stacked above the Main Tray.
+    /// Landscape splits the groups in half: the first half anchor toward
+    /// the top of the tray's side, the second half toward the bottom —
+    /// "Same Side" additionally keeps both halves clear of the Main Tray
+    /// itself (first half above it, second half below, neither overlapping
+    /// it); "Opposite Side" anchors independently against the opposite
+    /// edge, ignoring the Main Tray's own position entirely.
+    static func functionTrayLayout(container: CGRect, safeInsets: ControlSafeInsets,
+                                   keyboardVisibleRect: CGRect?, portrait: Bool,
+                                   mainSide: LandscapeTraySide, position: FunctionTrayPosition,
+                                   mainTrayFrame: CGRect, groupSizes: [CGSize],
+                                   avoiding collisionFrame: CGRect?, avoidNotch: Bool,
+                                   notchSide: LandscapeTraySide? = nil,
+                                   reservedRegions: [ControlReservedRegion] = [],
+                                   bottomRow: Bool = false,
+                                   spacing: CGFloat = 10, groupGap: CGFloat = 14) -> [CGRect] {
+        guard !groupSizes.isEmpty else { return [] }
+        var fullVisible = container
+        if let keyboardVisibleRect {
+            fullVisible = fullVisible.intersection(keyboardVisibleRect)
+        }
+        guard !fullVisible.isNull, !fullVisible.isEmpty else { return Array(repeating: .zero, count: groupSizes.count) }
+
+        let margin: CGFloat = 12
+        // `mainSide` is the Main Tray's EFFECTIVE side (`ControlTrayLayout.
+        // side`), so Same/Opposite Side are relative to where the tray
+        // really is. Each group is then laid out, and kept, inside its own
+        // usable piece; without a division both pieces are `visible` itself.
+        let area = ControlPlacementArea.area(
+            visible: fullVisible, divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
+            portrait: portrait, side: mainSide,
+            minimumExtent: min(mainTrayFrame.width, mainTrayFrame.height) + margin * 2)
+        let visible = portrait || position == .sameSide ? area.main : area.opposite
+        func bounded(_ size: CGSize) -> CGSize {
+            CGSize(width: min(size.width, max(0, visible.width - margin * 2)),
+                  height: min(size.height, max(0, visible.height - margin * 2)))
+        }
+
+        var frames: [CGRect]
+        if portrait {
+            let sizes = groupSizes.map(bounded)
+            let totalWidth = sizes.reduce(0) { $0 + $1.width } + CGFloat(max(0, sizes.count - 1)) * groupGap
+            var x = visible.midX - totalWidth / 2
+            let rowHeight = sizes.map(\.height).max() ?? 0
+            let y = mainTrayFrame.minY - spacing - rowHeight
+            frames = sizes.map { size in
+                let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+                x += size.width + groupGap
+                return frame
+            }
+        } else if bottomRow, groupSizes.count > 1 {
+            // Landscape with `bottomRow`: the first group keeps the top corner and every other
+            // group sits side by side along the bottom edge, bottoms aligned, starting in the
+            // corner (the Edit column, then Return beside it). Nothing is left in the middle of
+            // the side, where the camera housing is.
+            let side = position == .sameSide ? mainSide : mainSide.opposite
+            let topBound = position == .sameSide ? mainTrayFrame.minY - spacing : visible.maxY - margin
+            let first = bounded(groupSizes[0])
+            frames = [CGRect(x: side == .trailing ? visible.maxX - margin - first.width : visible.minX + margin,
+                             y: max(visible.minY + margin, min(visible.minY + margin, topBound - first.height)),
+                             width: first.width, height: first.height)]
+            let rest = groupSizes.dropFirst().map(bounded)
+            let rowWidth = rest.reduce(0) { $0 + $1.width } + CGFloat(rest.count - 1) * groupGap
+            let rowHeight = rest.map(\.height).max() ?? 0
+            // From the corner inward, or from just past the Main Tray when it shares the edge
+            // and reaches down that far.
+            var corner = side == .trailing ? visible.maxX - margin : visible.minX + margin
+            let row = CGRect(x: side == .trailing ? corner - rowWidth : corner, y: visible.maxY - margin - rowHeight,
+                             width: rowWidth, height: rowHeight)
+            if position == .sameSide, row.intersects(mainTrayFrame) {
+                corner = side == .trailing ? mainTrayFrame.minX - spacing : mainTrayFrame.maxX + spacing
+            }
+            for size in rest {
+                let x = side == .trailing ? corner - size.width : corner
+                frames.append(CGRect(x: x, y: visible.maxY - margin - size.height, width: size.width, height: size.height))
+                corner = side == .trailing ? x - groupGap : x + size.width + groupGap
+            }
+        } else {
+            let side = position == .sameSide ? mainSide : mainSide.opposite
+            func originX(_ width: CGFloat) -> CGFloat {
+                side == .trailing ? visible.maxX - margin - width : visible.minX + margin
+            }
+            // Only constrains the halves against the Main Tray when they
+            // share its edge — an opposite-side Function Tray has nothing
+            // to keep clear of.
+            let topBound = position == .sameSide ? mainTrayFrame.minY - spacing : visible.maxY - margin
+            let bottomBound = position == .sameSide ? mainTrayFrame.maxY + spacing : visible.minY + margin
+            let topCount = (groupSizes.count + 1) / 2
+            frames = Array(repeating: CGRect.zero, count: groupSizes.count)
+
+            // Top half: anchored at the corner (`visible.minY + margin`)
+            // unless that would run into the Main Tray, in which case it's
+            // pulled up only as much as needed to stay clear.
+            var y = visible.minY + margin
+            for index in 0..<topCount {
+                let size = bounded(groupSizes[index])
+                let originY = min(y, topBound - size.height)
+                frames[index] = CGRect(x: originX(size.width), y: max(visible.minY + margin, originY),
+                                       width: size.width, height: size.height)
+                y = frames[index].maxY + spacing
+            }
+            // Bottom half: same idea from the opposite corner.
+            var yBottom = visible.maxY - margin
+            for index in stride(from: groupSizes.count - 1, through: topCount, by: -1) {
+                let size = bounded(groupSizes[index])
+                let originY = max(yBottom - size.height, bottomBound)
+                frames[index] = CGRect(x: originX(size.width), y: min(originY, visible.maxY - margin - size.height),
+                                       width: size.width, height: size.height)
+                yBottom = frames[index].minY - spacing
+            }
+        }
+
+        // The top/bottom anchors normally clear the Main Tray already. If
+        // the rendered tray is taller than the available middle region,
+        // however, vertical clearance is mathematically impossible. Move
+        // only the colliding Function group inward along the horizontal
+        // axis; this final collision pass makes overlap impossible without
+        // trusting a clamped SwiftUI frame to describe overflowing content.
+        if !portrait, position == .sameSide {
+            frames = frames.map {
+                displaced($0, avoiding: mainTrayFrame,
+                          within: visible.insetBy(dx: margin, dy: margin),
+                          axis: .vertical, spacing: spacing)
+            }
+        }
+        // The temporary palette has priority over both trays. Resolve it
+        // after the Same Side Main Tray fallback, while retaining the Main
+        // Tray as a protected obstacle so this displacement cannot move a
+        // group back onto the tray it just cleared. Each frame is processed
+        // independently, therefore only an actually-colliding group moves.
+        let protectedFrames = !portrait && position == .sameSide ? [mainTrayFrame] : []
+        frames = frames.map {
+            displaced($0, avoiding: collisionFrame,
+                      alsoAvoiding: protectedFrames,
+                      within: visible.insetBy(dx: margin, dy: margin),
+                      axis: portrait ? .horizontal : .vertical, spacing: spacing)
+        }
+        frames = frames.map {
+            avoidingUnsafeRegion($0, in: container, safeInsets: safeInsets, enabled: avoidNotch,
+                                portrait: portrait, notchSide: notchSide)
+        }
+        let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
+        return frames.map { frame in
+            var result = frame
+            result.origin.x = clamp(result.origin.x, min: visible.minX + margin, max: visible.maxX - margin - result.width)
+            result.origin.y = clamp(result.origin.y, min: visible.minY + margin, max: visible.maxY - margin - result.height)
+            return avoidingReservedRegions(result, obstacles: obstacles,
+                                           within: fullVisible.insetBy(dx: margin, dy: margin),
+                                           alsoAvoiding: [mainTrayFrame] + (collisionFrame.map { [$0] } ?? []))
+        }
+    }
+
+    /// Nudges `frame` clear of `avoid` along `axis` — up/down in portrait
+    /// (`.horizontal` axis, matching the tray's own row direction), left/
+    /// right in landscape — preferring whichever direction actually stays
+    /// inside `visible`. A no-op when there's nothing to avoid or they
+    /// don't overlap.
+    static func displaced(_ frame: CGRect, avoiding avoid: CGRect?,
+                          alsoAvoiding protectedFrames: [CGRect] = [],
+                          within visible: CGRect, axis: ControlTrayAxis,
+                          spacing: CGFloat) -> CGRect {
+        guard let avoid, frame.intersects(avoid) else { return frame }
+        func isAvailable(_ candidate: CGRect) -> Bool {
+            visible.contains(candidate)
+                && protectedFrames.allSatisfy { !candidate.intersects($0) }
+        }
+        if axis == .horizontal {
+            let above = CGRect(x: frame.minX, y: avoid.minY - spacing - frame.height,
+                               width: frame.width, height: frame.height)
+            let below = CGRect(x: frame.minX, y: avoid.maxY + spacing,
+                               width: frame.width, height: frame.height)
+            if isAvailable(above) { return above }
+            if isAvailable(below) { return below }
+            return frame
+        } else {
+            let before = CGRect(x: avoid.minX - spacing - frame.width, y: frame.minY,
+                                width: frame.width, height: frame.height)
+            let after = CGRect(x: avoid.maxX + spacing, y: frame.minY,
+                               width: frame.width, height: frame.height)
+            if isAvailable(before) { return before }
+            if isAvailable(after) { return after }
+            return frame
+        }
+    }
+}
+
+extension ControlTrayGeometry {
+    /// The iPhone Main Tray's chip diameter along a screen edge `length`
+    /// points long: the standard size, shrunk just enough that every chip
+    /// and the layout margins fit (nine 40pt chips don't fit a 390pt
+    /// iPhone), never below `minimum`.
+    static func fittedChipDiameter(count: Int, length: CGFloat, preferred: CGFloat = 40,
+                                   gap: CGFloat = 4, slack: CGFloat = 4, margin: CGFloat = 12,
+                                   minimum: CGFloat = 30) -> CGFloat {
+        guard count > 0 else { return preferred }
+        let room = length - margin * 2 - slack - CGFloat(count - 1) * gap
+        return max(minimum, min(preferred, (room / CGFloat(count)).rounded(.down)))
+    }
+}

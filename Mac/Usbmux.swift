@@ -105,7 +105,7 @@ enum Usbmux {
         let conn = try await connect(deviceID: deviceID, port: lockdownPort, queue: queue)
         defer { conn.cancel() }
         let request = try PropertyListSerialization.data(fromPropertyList: [
-            "Request": "GetValue", "Key": "DeviceName", "Label": "OpenDisplay",
+            "Request": "GetValue", "Key": "DeviceName", "Label": "MeowDisplay",
         ] as [String: Any], format: .xml, options: 0)
         var packet = withUnsafeBytes(of: UInt32(request.count).bigEndian) { Data($0) }
         packet.append(request)
@@ -138,19 +138,16 @@ enum Usbmux {
     static func open(queue: DispatchQueue) async throws -> NWConnection {
         let conn = NWConnection(to: .unix(path: socketPath), using: .tcp)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            var resumed = false   // the handler fires on `queue` (serial)
+            let completion = OneShotCompletion(cont)
             conn.stateUpdateHandler = { state in
-                guard !resumed else { return }
                 switch state {
                 case .ready:
-                    resumed = true
-                    cont.resume()
+                    Task { await completion.resume(returning: ()) }
                 case .failed(let error), .waiting(let error):
                     // No path updates on a Unix socket — .waiting would hang
                     // forever, so treat it as failure and let callers retry.
-                    resumed = true
                     conn.cancel()
-                    cont.resume(throwing: error)
+                    Task { await completion.resume(throwing: error) }
                 default:
                     break
                 }
@@ -163,8 +160,8 @@ enum Usbmux {
 
     static func send(_ message: [String: Any], on conn: NWConnection) async throws {
         var message = message
-        message["ProgName"] = "OpenDisplay"
-        message["ClientVersionString"] = "OpenDisplay"
+        message["ProgName"] = "MeowDisplay"
+        message["ClientVersionString"] = "MeowDisplay"
         let body = try PropertyListSerialization.data(
             fromPropertyList: message, format: .xml, options: 0)
         var packet = Data(capacity: 16 + body.count)

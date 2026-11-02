@@ -11,13 +11,17 @@ final class VirtualDisplay {
     private let maxPointsPerAxis: Int
     private(set) var pointsWide: Int
     private(set) var pointsHigh: Int
+    private var refreshRate: Int
 
-    private var restoreTarget: CGPoint?
-    private var restoreUntil: Date
-    private var lastReportedOrigin: CGPoint?
+    private var hidpiBackoff = HiDPIEnforcementBackoff()
+    private var originRestore: OriginRestore
     private let onOriginChange: ((CGPoint, CGSize) -> Void)?
 
     var displayID: CGDirectDisplayID { display.displayID }
+    /// Exposed only so a caller can remember mode A's rate before attempting
+    /// a resize to mode B, to roll back exactly if B never becomes usable
+    /// (see `MacSender.resizeExistingDisplay`'s transactional resize).
+    var currentRefreshRate: Int { refreshRate }
 
     /// Must be called on the main thread. `serialNum` must be unique per
     /// concurrent display AND stable per device — macOS keys saved display
@@ -25,19 +29,26 @@ final class VirtualDisplay {
     /// device keeps its position in System Settings across sessions.
     /// `restoreOrigin` overrides that saved arrangement (see manageOrigin);
     /// `onOriginChange` reports where the display sits afterwards, so the
-    /// caller can persist user drags.
+    /// caller can persist user drags. `refreshRate` is the virtual monitor's
+    /// mode refresh rate in Hz — the caller (MacSender) is responsible for
+    /// keeping it within `StreamingFPSPolicy.hardCapFPS` and matching it to
+    /// the receiver's actual capability; this class just publishes whatever
+    /// it's given.
+    @MainActor
     init?(name: String, pointsWide: Int, pointsHigh: Int, sizeInMillimeters: CGSize,
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
+          refreshRate: Int = 60,
           restoreOrigin: CGPoint? = nil,
+          owner: ObjectIdentifier? = nil,
           onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
+        self.refreshRate = refreshRate
         // Reserve the longer orientation on both axes. That lets a phone or
         // tablet change orientation by applying a new mode to this *same*
         // virtual monitor instead of removing it and stranding its windows.
         maxPointsPerAxis = max(pointsWide, pointsHigh)
-        self.restoreTarget = restoreOrigin
-        self.restoreUntil = restoreOrigin == nil ? .distantPast : Date().addingTimeInterval(6)
+        self.originRestore = OriginRestore(target: restoreOrigin)
         self.onOriginChange = onOriginChange
 
         let descriptor = CGVirtualDisplayDescriptor()
@@ -60,13 +71,19 @@ final class VirtualDisplay {
         settings = CGVirtualDisplaySettings()
         settings.hiDPI = 1
         settings.modes = [
-            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: 60)
+            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: Double(refreshRate))
         ]
         guard display.apply(settings) else {
             Log.info("CGVirtualDisplay applySettings FAILED")
             return nil
         }
         Log.info("virtual display created: id=\(display.displayID) \(pointsWide)x\(pointsHigh)pt @2x")
+        // Registered for exactly this object's lifetime (see `deinit`), so
+        // every teardown path — disconnect, mode switch, rotation rebuild,
+        // a failed probe — releases the record with the display itself.
+        VirtualDisplayRegistry.shared.register(
+            ObjectIdentifier(self), displayID: display.displayID,
+            identity: VirtualDisplayIdentity(serial: serialNum, productID: productID), owner: owner)
 
         // macOS defaults the new display to its 1x mode AND can restore a
         // stale saved mode for this serial asynchronously, seconds after the
@@ -91,24 +108,34 @@ final class VirtualDisplay {
         }
     }
 
+    deinit {
+        VirtualDisplayRegistry.shared.unregister(ObjectIdentifier(self))
+    }
+
     /// Change orientation without changing the virtual monitor's identity.
     /// Releasing a CGVirtualDisplay makes WindowServer redistribute every
     /// window on it before the replacement appears; with multiple devices,
     /// it may choose a sibling virtual display. Applying a new mode avoids
     /// that reassignment entirely.
     ///
+    /// `refreshRate` defaults to whatever this display is already running
+    /// (a plain rotation resize doesn't need to touch it); pass a value to
+    /// change it in the same mode-apply as the resize (a Streaming Profile
+    /// change mid-session).
+    ///
     /// Must be called on the main thread.
     @discardableResult
-    func resize(pointsWide: Int, pointsHigh: Int, movingTo origin: CGPoint?) -> Bool {
+    func resize(pointsWide: Int, pointsHigh: Int, refreshRate: Int? = nil, movingTo origin: CGPoint?) -> Bool {
         guard pointsWide <= maxPointsPerAxis, pointsHigh <= maxPointsPerAxis else {
             Log.info("virtual display \(display.displayID) cannot resize beyond its descriptor")
             return false
         }
+        let mode = refreshRate ?? self.refreshRate
 
         let newSettings = CGVirtualDisplaySettings()
         newSettings.hiDPI = 1
         newSettings.modes = [
-            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: 60)
+            CGVirtualDisplayMode(width: UInt(pointsWide), height: UInt(pointsHigh), refreshRate: Double(mode))
         ]
         guard display.apply(newSettings) else {
             Log.info("virtual display \(display.displayID) applySettings FAILED during resize")
@@ -117,6 +144,8 @@ final class VirtualDisplay {
         settings = newSettings
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
+        self.refreshRate = mode
+        hidpiBackoff.reset()
 
         if let origin {
             var config: CGDisplayConfigRef?
@@ -130,9 +159,7 @@ final class VirtualDisplay {
                 // on: a snap is system state, and persisting it as if it were a
                 // user drag is the ratchet #203 is about.
                 let settled = CGDisplayBounds(display.displayID).origin
-                restoreTarget = settled
-                restoreUntil = Date().addingTimeInterval(6)
-                lastReportedOrigin = settled
+                originRestore.rearm(at: settled)
                 Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt "
                     + "at (\(Int(origin.x)),\(Int(origin.y))), settled "
                     + "(\(Int(settled.x)),\(Int(settled.y))) (result \(err.rawValue))")
@@ -155,61 +182,75 @@ final class VirtualDisplay {
               let hidpi = modes.first(where: {
                   $0.width == pointsWide && $0.pixelWidth == pointsWide * 2
               }) else {
-            if recover {
+            if recover, hidpiBackoff.shouldAttempt(at: Date()) {
                 Log.info("@2x mode vanished from display \(display.displayID) — re-applying settings")
                 _ = display.apply(settings)
+                noteHiDPIFailure()
             }
             return false
         }
         if let current = CGDisplayCopyDisplayMode(display.displayID),
            current.width == hidpi.width, current.pixelWidth == hidpi.pixelWidth {
+            hidpiBackoff.reset()
             return true
         }
+        guard hidpiBackoff.shouldAttempt(at: Date()) else { return false }
         var config: CGDisplayConfigRef?
         CGBeginDisplayConfiguration(&config)
         CGConfigureDisplayWithDisplayMode(config, display.displayID, hidpi, nil)
         let err = CGCompleteDisplayConfiguration(config, .permanently)
         Log.info("HiDPI mode (re)selected: \(hidpi.width)x\(hidpi.height)@2x (result \(err.rawValue))")
-        return err == .success
+        if err == .success {
+            hidpiBackoff.reset()
+            return true
+        }
+        noteHiDPIFailure()
+        return false
     }
 
-    /// Arrangement restore + observation (#116). For the first few seconds,
-    /// assert `restoreTarget`: macOS restores ITS saved arrangement for this
-    /// display identity asynchronously, seconds after creation, and that
-    /// record is stale or default whenever the identity is fresh (rotation
-    /// swaps the serial, transport switches change it) — the caller's
-    /// device-keyed record must win. Afterwards, origin changes are the user
-    /// rearranging: report them so the caller can persist the new spot.
+    private func noteHiDPIFailure() {
+        if hidpiBackoff.recordFailure(at: Date()) {
+            Log.info("HiDPI enforcement on display \(display.displayID) failed "
+                + "\(HiDPIEnforcementBackoff.failureThreshold) times in a row — "
+                + "backing off, probing every \(Int(HiDPIEnforcementBackoff.probeInterval))s")
+        }
+    }
+
+    /// Re-arms the restore window to move this display to `origin`
+    /// (CoreGraphics defines "main display" as whichever display sits at
+    /// (0,0)) without persisting it as a user-driven placement — used when
+    /// going headless mid-session forces this display to become the system's
+    /// main display so macOS's login/lock UI has somewhere to render.
+    /// `manageOrigin()`'s enforcement tick drives the actual move on its
+    /// next pass; the per-device saved arrangement in `DisplayArrangement`
+    /// is left untouched, exactly like the initial creation-time restore
+    /// window.
+    func repositionForHeadlessMain(to origin: CGPoint = .zero) {
+        originRestore.retarget(to: origin)
+    }
+
+    /// Arrangement restore + observation (#116): enforce the caller's
+    /// device-keyed origin while macOS may still restore its own stale record
+    /// for this identity (rotation swaps the serial, transport switches
+    /// change it), then report user drags. Policy in `OriginRestore`.
     private func manageOrigin() {
         let id = display.displayID
         let origin = CGDisplayBounds(id).origin
-        if let target = restoreTarget, Date() < restoreUntil {
-            // Initial arrangement is system state, not a user drag. Mark it
-            // observed so it cannot overwrite the saved device placement
-            // when the restore window expires (#203).
-            guard origin != target else {
-                lastReportedOrigin = origin
-                return
-            }
+        switch originRestore.tick(origin: origin) {
+        case .none:
+            break
+        case .apply(let target):
             var config: CGDisplayConfigRef?
             guard CGBeginDisplayConfiguration(&config) == .success else { return }
             CGConfigureDisplayOrigin(config, id, Int32(target.x), Int32(target.y))
             let err = CGCompleteDisplayConfiguration(config, .permanently)
-            // WindowServer snaps the requested origin to the nearest valid
-            // arrangement — adopt what it settled on, or every remaining
-            // tick of the window would re-apply against the snap.
-            restoreTarget = CGDisplayBounds(id).origin
-            // A snap is also system state. Keep observing from the settled
-            // point, but only a later origin change may be a user drag.
-            lastReportedOrigin = restoreTarget
+            let settled = CGDisplayBounds(id).origin
+            originRestore.settled(at: settled)
             Log.info("display \(id) origin (\(Int(origin.x)),\(Int(origin.y))) → restored "
                 + "(\(Int(target.x)),\(Int(target.y))), settled "
-                + "(\(Int(restoreTarget!.x)),\(Int(restoreTarget!.y))) (result \(err.rawValue))")
-            return
-        }
-        if origin != lastReportedOrigin {
-            lastReportedOrigin = origin
-            onOriginChange?(origin, CGSize(width: pointsWide, height: pointsHigh))
+                + "(\(Int(settled.x)),\(Int(settled.y))) (result \(err.rawValue))")
+        case .report(let moved):
+            onOriginChange?(moved, CGSize(width: pointsWide, height: pointsHigh))
         }
     }
 
@@ -237,9 +278,11 @@ final class VirtualDisplay {
         // ...and any display currently mirroring the VD (covers the reporter's
         // arrangement: the device set as Main, with the built-in mirroring it).
         var n: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &n)
+        // Online, not active: a display mirroring another is online but
+        // inactive (upstream #126), so the active list would miss it.
+        CGGetOnlineDisplayList(0, nil, &n)
         var list = [CGDirectDisplayID](repeating: 0, count: Int(n))
-        CGGetActiveDisplayList(n, &list, &n)
+        CGGetOnlineDisplayList(n, &list, &n)
         for other in list where other != id && CGDisplayMirrorsDisplay(other) == id {
             CGConfigureDisplayMirrorOfDisplay(config, other, kCGNullDirectDisplay)
         }

@@ -1,0 +1,334 @@
+import Foundation
+
+/// Additive semantic receiver gestures understood by supported senders.
+enum ReceiverGesture: String, CaseIterable {
+    case missionControl
+    case appExpose
+    case nextSpace
+    case previousSpace
+    case showDesktop
+    case launchpad
+    case spotlight
+    /// macOS Control Center — a one-tap semantic action (no gesture maps to
+    /// it). Older senders ignore unknown names.
+    case controlCenter
+    /// Reveals and focuses the Mac's menu bar — also when a full-screen app
+    /// hides it. Momentary: macOS doesn't report menu bar visibility, so no
+    /// shown/hidden state is claimed. One-tap only.
+    case menuBar
+
+    static let swipeMinimumDistance = 80.0
+    static let swipeDominanceRatio = 1.5
+    static let threeFingerTapMaximumMovement = 12.0
+    static let spreadMinimumChange = 36.0
+    static let spreadMinimumRatio = 1.2
+
+    static func swipe(translationX: Double, translationY: Double) -> Self? {
+        let x = abs(translationX)
+        let y = abs(translationY)
+        if y >= swipeMinimumDistance, y >= x * swipeDominanceRatio {
+            return translationY < 0 ? .missionControl : .appExpose
+        }
+        if x >= swipeMinimumDistance, x >= y * swipeDominanceRatio {
+            return translationX < 0 ? .nextSpace : .previousSpace
+        }
+        return nil
+    }
+
+    static func threeFingerTap(touchCount: Int, maximumMovement: Double) -> Self? {
+        guard touchCount == 3,
+              maximumMovement.isFinite,
+              maximumMovement >= 0,
+              maximumMovement <= threeFingerTapMaximumMovement else { return nil }
+        return .spotlight
+    }
+
+    static func spreadGesture(start: Double, current: Double) -> Self? {
+        let change = current - start
+        guard abs(change) >= spreadMinimumChange,
+              max(start, current) >= min(start, current) * spreadMinimumRatio else { return nil }
+        return change > 0 ? .showDesktop : .launchpad
+    }
+
+    static func shouldRoute(name: String, inputAllowed: Bool) -> Bool {
+        inputAllowed && Self(rawValue: name) != nil
+    }
+}
+
+/// The receiver surface's custom direct-touch multi-finger recognizers.
+enum ReceiverMultiFingerRecognizer: CaseIterable {
+    /// Two-finger remote scroll and local viewport pinch/zoom/pan/rotation
+    /// (`TwoFingerViewportGestureRecognizer`).
+    case twoFingerViewport
+    /// Two-finger double-tap viewport reset/restore.
+    case viewportDoubleTap
+    /// Three-finger swipe: Mission Control, App Exposé, Spaces.
+    case threeFingerSwipe
+    /// Three-finger tap: Spotlight.
+    case threeFingerTap
+    /// Four/five-finger pinch/spread: Launchpad, Show Desktop.
+    case pinchSpread
+}
+
+/// Whether the multi-finger recognizers may run. VoiceOver owns two-, three-
+/// and four-finger gestures (two-finger double tap, rotor, three-finger
+/// scroll/tap, …), so every `ReceiverMultiFingerRecognizer` steps aside
+/// while it runs, and comes back when it stops. Ordinary one-finger input is
+/// not gated here. Held as a value so a recognizer force-cancelled by an
+/// `isEnabled` false/true toggle is restored to THIS state, never to a
+/// blind `true` that would undo the VoiceOver gate. Move View (local
+/// viewport navigation) also parks them, so no Mac gesture fires while the
+/// user is only moving the view.
+///
+/// Remote-only recognizers (three-finger, pinch/spread) also need Allow
+/// Input; the viewport double tap needs Local View Navigation, or Window
+/// mode panes (there it resets the pane under the fingers); the
+/// two-finger recognizer needs either (it both scrolls the Mac and moves
+/// the local view — see `TwoFingerRoutingPolicy`).
+struct ReceiverMultiFingerGestureGate: Equatable {
+    private(set) var voiceOverRunning: Bool
+    private(set) var viewportNavigationActive = false
+    private(set) var remoteInputAllowed = true
+    private(set) var localNavigationAllowed = true
+    private(set) var workspacePanes = false
+
+    init(voiceOverRunning: Bool) {
+        self.voiceOverRunning = voiceOverRunning
+    }
+
+    var recognizersEnabled: Bool { !voiceOverRunning && !viewportNavigationActive }
+
+    /// Returns whether availability changed.
+    mutating func update(remoteInputAllowed: Bool, localNavigationAllowed: Bool) -> Bool {
+        guard remoteInputAllowed != self.remoteInputAllowed
+                || localNavigationAllowed != self.localNavigationAllowed else { return false }
+        self.remoteInputAllowed = remoteInputAllowed
+        self.localNavigationAllowed = localNavigationAllowed
+        return true
+    }
+
+    /// Returns whether availability changed.
+    mutating func update(workspacePanes: Bool) -> Bool {
+        guard workspacePanes != self.workspacePanes else { return false }
+        self.workspacePanes = workspacePanes
+        return true
+    }
+
+    /// Returns whether availability changed.
+    mutating func update(viewportNavigationActive: Bool) -> Bool {
+        guard viewportNavigationActive != self.viewportNavigationActive else { return false }
+        self.viewportNavigationActive = viewportNavigationActive
+        return true
+    }
+
+    func isEnabled(_ recognizer: ReceiverMultiFingerRecognizer) -> Bool {
+        guard recognizersEnabled else { return false }
+        switch recognizer {
+        case .twoFingerViewport: return remoteInputAllowed || localNavigationAllowed
+        case .viewportDoubleTap: return localNavigationAllowed || workspacePanes
+        case .threeFingerSwipe, .threeFingerTap, .pinchSpread: return remoteInputAllowed
+        }
+    }
+
+    /// Returns whether availability changed (VoiceOver toggled at runtime).
+    mutating func update(voiceOverRunning: Bool) -> Bool {
+        guard voiceOverRunning != self.voiceOverRunning else { return false }
+        self.voiceOverRunning = voiceOverRunning
+        return true
+    }
+}
+
+/// Screen-edge system gestures are deferred (the first swipe goes to the
+/// Mac, a second still reaches iPadOS) only while the remote surface is on
+/// screen, input may reach the Mac, Prefer MeowDisplay Gestures is on, and
+/// VoiceOver is off — VoiceOver always owns its own gestures.
+enum ReceiverScreenEdgePolicy {
+    static func defersScreenEdges(surfaceShown: Bool, inputAllowed: Bool,
+                                  preferMeowDisplayGestures: Bool = true,
+                                  voiceOverRunning: Bool = false) -> Bool {
+        surfaceShown && inputAllowed && preferMeowDisplayGestures && !voiceOverRunning
+    }
+}
+
+/// Prefer MeowDisplay Gestures' effect on UIKit's three-finger editing
+/// interactions (undo/redo/copy/paste and their HUD) over the receiver
+/// surface. Public API only: this never claims iPadOS's 4/5-finger
+/// multitasking gestures, and VoiceOver's gestures are untouched by it.
+enum ReceiverEditingInteractionPolicy {
+    static func suppressesEditingInteractions(preferMeowDisplayGestures: Bool) -> Bool {
+        preferMeowDisplayGestures
+    }
+}
+
+/// The mean of every active fingertip pair gives pinch/spread a symmetric
+/// measure that does not assume one particular contact is the thumb.
+enum ReceiverGestureGeometry {
+    static func meanPairwiseDistance(_ points: [(x: Double, y: Double)]) -> Double? {
+        guard (4...5).contains(points.count) else { return nil }
+        var total = 0.0
+        var pairs = 0
+        for first in 0..<points.count {
+            for second in (first + 1)..<points.count {
+                let dx = points[first].x - points[second].x
+                let dy = points[first].y - points[second].y
+                total += (dx * dx + dy * dy).squareRoot()
+                pairs += 1
+            }
+        }
+        return total / Double(pairs)
+    }
+}
+
+/// Tracks one pinch/spread across 4↔5 contact changes. Each contact-count
+/// segment uses its own geometry baseline so adding or lifting a finger does
+/// not look like a sudden spread change. Movement within each segment
+/// accumulates toward the same distance and relative-change thresholds.
+struct ReceiverGestureSpreadSession {
+    private(set) var activeTouchCount: Int?
+    private(set) var hasEmitted = false
+    private(set) var isCancelled = false
+    private var segmentStartSpread: Double?
+    private var lastSpread: Double?
+    private var accumulatedChange = 0.0
+    private var accumulatedLogRatio = 0.0
+
+    mutating func update(touchCount: Int, spread: Double) -> ReceiverGesture? {
+        guard !isCancelled else { return nil }
+        guard (4...5).contains(touchCount), spread.isFinite, spread >= 0 else {
+            if activeTouchCount != nil || touchCount > 5 { isCancelled = true }
+            activeTouchCount = nil
+            return nil
+        }
+        guard !hasEmitted else {
+            activeTouchCount = touchCount
+            return nil
+        }
+        guard let activeTouchCount,
+              let segmentStartSpread,
+              let lastSpread else {
+            self.activeTouchCount = touchCount
+            self.segmentStartSpread = spread
+            self.lastSpread = spread
+            return nil
+        }
+
+        if activeTouchCount != touchCount {
+            accumulate(from: segmentStartSpread, to: lastSpread)
+            self.activeTouchCount = touchCount
+            self.segmentStartSpread = spread
+            self.lastSpread = spread
+            return nil
+        }
+
+        self.lastSpread = spread
+        let totalChange = accumulatedChange + spread - segmentStartSpread
+        let totalLogRatio = accumulatedLogRatio + logRatio(from: segmentStartSpread, to: spread)
+        let minimumLogRatio = log(ReceiverGesture.spreadMinimumRatio)
+        guard abs(totalChange) >= ReceiverGesture.spreadMinimumChange else {
+            return nil
+        }
+        if totalChange > 0, totalLogRatio >= minimumLogRatio {
+            hasEmitted = true
+            return .showDesktop
+        }
+        if totalChange < 0, totalLogRatio <= -minimumLogRatio {
+            hasEmitted = true
+            return .launchpad
+        }
+        return nil
+    }
+
+    mutating func reset() {
+        activeTouchCount = nil
+        hasEmitted = false
+        isCancelled = false
+        segmentStartSpread = nil
+        lastSpread = nil
+        accumulatedChange = 0
+        accumulatedLogRatio = 0
+    }
+
+    private mutating func accumulate(from start: Double, to end: Double) {
+        accumulatedChange += end - start
+        accumulatedLogRatio += logRatio(from: start, to: end)
+    }
+
+    private func logRatio(from start: Double, to end: Double) -> Double {
+        // Pairwise spread can be zero only when every contact is coincident;
+        // clamping keeps the ratio finite while the independent 36 pt test
+        // prevents that edge case from triggering on a tiny movement.
+        log(max(end, 0.001) / max(start, 0.001))
+    }
+}
+
+struct GestureEmissionGate {
+    private(set) var hasEmitted = false
+
+    mutating func claim() -> Bool {
+        guard !hasEmitted else { return false }
+        hasEmitted = true
+        return true
+    }
+
+    mutating func reset() {
+        hasEmitted = false
+    }
+}
+
+enum ReceiverTouchOwnershipAction: Equatable {
+    case sendCancellation
+    case discardPendingPress
+}
+
+enum ReceiverTouchOwnership {
+    /// Release a posted synthetic down before discarding local pending state.
+    static func cancellationActions(downWasSent: Bool) -> [ReceiverTouchOwnershipAction] {
+        downWasSent ? [.sendCancellation, .discardPendingPress] : [.discardPendingPress]
+    }
+}
+
+/// What touches on the Mac picture may do while a screen reader (VoiceOver, TalkBack) runs.
+///
+/// A screen reader's own gestures land on the picture too: exploring by touch, a double tap
+/// (which falls back to a real tap at the picture's centre when the element doesn't handle
+/// activation), and double-tap-and-hold (which passes a real touch through). With control
+/// granted, each of those would reach the Mac as a click or drag the user never meant. So while
+/// a screen reader runs, the picture takes no touch input at all until the user turns on Direct
+/// Touch from its actions; activating the picture never clicks. The keyboard, the tray and the
+/// pane actions are separate elements and keep working. Direct Touch ends when the screen
+/// reader stops, so it never outlives the choice. The Mac's own control grant still applies on
+/// top: without it nothing reaches the Mac either way.
+struct ScreenReaderPictureTouch: Equatable {
+    private(set) var screenReaderRunning: Bool
+    private(set) var directTouch = false
+
+    init(screenReaderRunning: Bool) {
+        self.screenReaderRunning = screenReaderRunning
+    }
+
+    /// Whether touches on the picture are handled at all (and so can reach the Mac).
+    var picturePassesTouches: Bool { !screenReaderRunning || directTouch }
+
+    /// VoiceOver's direct-interaction trait: on only while the user chose Direct Touch.
+    var allowsDirectInteraction: Bool { screenReaderRunning && directTouch }
+
+    /// The action offered on the picture while a screen reader runs (nil otherwise).
+    var directTouchActionTurnsOn: Bool? { screenReaderRunning ? !directTouch : nil }
+
+    /// Returns whether anything changed. Stopping the screen reader ends Direct Touch.
+    @discardableResult
+    mutating func update(screenReaderRunning running: Bool) -> Bool {
+        guard running != screenReaderRunning else { return false }
+        screenReaderRunning = running
+        if !running { directTouch = false }
+        return true
+    }
+
+    /// Returns whether anything changed. Only meaningful while a screen reader runs.
+    @discardableResult
+    mutating func setDirectTouch(_ on: Bool) -> Bool {
+        guard screenReaderRunning, on != directTouch else { return false }
+        directTouch = on
+        return true
+    }
+}

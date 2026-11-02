@@ -1,7 +1,9 @@
 import SwiftUI
 
-// `AppStore` (the App Store identity + deep link) lives in Shared/AppStore.swift
-// so the Mac can reference the same link when it asks the phone to update.
+// `AppStore` (the App Store identity + update link) lives in
+// Shared/AppStore.swift so the Mac can reference the same link when it asks
+// the phone to update. Every URL this gate opens goes through it, so no
+// update screen can ever point at another app's listing.
 
 // `PeerUpdateSignal` (what the connected Mac tells us about compatibility)
 // lives with the receiver core in Shared/StreamReceiver.swift — the Mac app's
@@ -44,7 +46,12 @@ final class VersionGate: ObservableObject {
     private var remoteStatus: Status = .ok
     private var peerStatus: Status = .ok
 
-    private let manifestURL = URL(string: "https://opendisplay.app/ios-version.json")!
+    // MeowDisplay does not yet have its own hosted manifest, and must not
+    // point at or be governed by upstream OpenDisplay's opendisplay.app
+    // policy file. The remote check below is disabled (inert, no request
+    // ever fires) until MeowDisplay-owned manifest infrastructure exists —
+    // set `manifestURL` and drop the early return to re-enable.
+    private let manifestURL: URL? = nil
 
     /// The running app's marketing version. Local/dev builds ship "0.0.0"
     /// (the project.yml default), which we treat as "skip the gate".
@@ -53,6 +60,8 @@ final class VersionGate: ObservableObject {
     }
 
     func check() async {
+        guard let manifestURL else { return }   // disabled — no MeowDisplay manifest yet
+
         let current = currentVersion
         guard current != "0.0.0" else { return }   // dev build — never gate
 
@@ -66,7 +75,7 @@ final class VersionGate: ObservableObject {
         else { return }   // fail open
 
         let policy = manifest.ios
-        let url = policy.storeURL.flatMap { URL(string: $0) } ?? AppStore.updateURL
+        let url = AppStore.resolveReceiverUpdateURL(policy.storeURL)
 
         if let floor = policy.hardMinimumVersion, isVersion(current, olderThan: floor) {
             remoteStatus = .required(Update(message: policy.message ?? Self.requiredFallback, url: url))
@@ -85,7 +94,10 @@ final class VersionGate: ObservableObject {
     func applyPeer(_ signal: PeerUpdateSignal?) {
         switch signal {
         case let .updateReceiver(message, storeURL):
-            peerStatus = .required(Update(message: message, url: storeURL))
+            // Re-resolved here too: whatever the Mac (or an older build of
+            // it) sent, this screen only ever opens an allowed link.
+            let url = AppStore.resolveReceiverUpdateURL(storeURL.absoluteString)
+            peerStatus = .required(Update(message: message, url: url))
         case let .updateMac(message):
             peerStatus = .recommended(Update(message: message, url: macAppURL))
         case nil:
@@ -119,9 +131,9 @@ final class VersionGate: ObservableObject {
     }
 
     private static let requiredFallback =
-        "This version of OpenDisplay is no longer supported. Update from the App Store to keep using your second display."
+        String(localized: "This version of MeowDisplay is no longer supported. Update from the App Store to keep using your second display.")
     private static let recommendedFallback =
-        "A newer version of OpenDisplay is available."
+        String(localized: "A newer version of MeowDisplay is available.")
 }
 
 /// Numeric dotted-version compare (e.g. "0.10.0" older than "0.11.0"). Missing
@@ -154,10 +166,12 @@ struct UpdateRequiredView: View {
             Image(systemName: "arrow.up.circle.fill")
                 .font(.system(size: 64, weight: .light))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
 
             VStack(spacing: 10) {
                 Text("Update required")
                     .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
                 Text(update.message)
                     .font(.body)
                     .foregroundStyle(.secondary)
@@ -168,10 +182,18 @@ struct UpdateRequiredView: View {
             Button {
                 UIApplication.shared.open(update.url)
             } label: {
-                Label("Update on the App Store", systemImage: "arrow.down.circle")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                // Until MeowDisplay has its own listing the link is the
+                // project page, so only promise the App Store when it is one.
+                Group {
+                    if AppStore.isAppStoreLink(update.url) {
+                        Label("Update on the App Store", systemImage: "arrow.down.circle")
+                    } else {
+                        Label("Get the Latest Version", systemImage: "arrow.down.circle")
+                    }
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
 

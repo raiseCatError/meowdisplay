@@ -1,0 +1,85 @@
+{
+  "comment": "Remote Access knock frame (PROTOCOL.md 6.9): 4-byte big-endian length + JSON. Checked by MacTests/RemoteConnectRequestFrameTests.swift (RemoteConnectRequestIntent) and core RemoteKnockFrameTest.kt (KnockFrame). `decode` is what the Mac makes of the bytes it read; anything but one well-formed frame with a known intent is automatic.",
+  "encode": [
+    {
+      "intent": "manual",
+      "hex": "000000317b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226d616e75616c227d"
+    },
+    {
+      "intent": "automatic",
+      "hex": "000000347b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226175746f6d61746963227d"
+    }
+  ],
+  "decode": [
+    {
+      "name": "manual frame",
+      "hex": "000000317b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226d616e75616c227d",
+      "intent": "manual"
+    },
+    {
+      "name": "automatic frame",
+      "hex": "000000347b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226175746f6d61746963227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "no frame at all",
+      "hex": "",
+      "intent": "automatic"
+    },
+    {
+      "name": "length only",
+      "hex": "00000000",
+      "intent": "automatic"
+    },
+    {
+      "name": "zero length",
+      "hex": "0000000078",
+      "intent": "automatic"
+    },
+    {
+      "name": "length longer than the body",
+      "hex": "000000c87b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226d616e75616c227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "length shorter than the body",
+      "hex": "0000000a7b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226d616e75616c227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "not JSON",
+      "hex": "0000000d6d616e75616c20706c65617365",
+      "intent": "automatic"
+    },
+    {
+      "name": "JSON array",
+      "hex": "0000000a5b226d616e75616c225d",
+      "intent": "automatic"
+    },
+    {
+      "name": "wrong type",
+      "hex": "000000227b2274797065223a2268656c6c6f222c22696e74656e74223a226d616e75616c227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "missing intent",
+      "hex": "0000001f7b2274797065223a2272656d6f7465436f6e6e65637452657175657374227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "unknown intent",
+      "hex": "000000317b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a22757267656e74227d",
+      "intent": "automatic"
+    },
+    {
+      "name": "intent is not a string",
+      "hex": "0000002a7b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a317d",
+      "intent": "automatic"
+    },
+    {
+      "name": "over the 256 byte bound",
+      "hex": "000001347b2274797065223a2272656d6f7465436f6e6e65637452657175657374222c22696e74656e74223a226d616e75616c222c22706164223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d",
+      "intent": "automatic"
+    }
+  ]
+}

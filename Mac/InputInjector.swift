@@ -19,14 +19,48 @@ private enum SystemClickMetrics {
     }()
 }
 
+/// Where `InputInjector`'s synthetic events go. The app always posts to the
+/// HID event tap; tests record them instead, so grant and revocation paths
+/// can be checked end to end without moving the real pointer or typing.
+protocol SyntheticEventSink: Sendable {
+    func post(_ event: CGEvent)
+}
+
+struct HIDEventTapSink: SyntheticEventSink {
+    func post(_ event: CGEvent) {
+        // While the Privacy Shield asks for the login password, only this Mac's own input counts;
+        // releases still go out so nothing a device held stays stuck down.
+        guard !PrivacyShieldWindows.isUnlocking || PrivacyShieldPolicy.postsWhileUnlocking(event.type, flags: event.flags) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+}
+
 /// Turns normalized touch coordinates from the phone into mouse events on a
 /// target display. Touch semantics: finger down = left button down, finger
 /// move = drag, finger up = button up — i.e. the phone acts as a touchscreen.
 final class InputInjector {
 
+    private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
+    // This session's ephemeral input grant (per-device-session milestone) —
+    // shared with the owning `MacSender`'s own control-message-level gate so
+    // both read the exact same bit under the same lock. See
+    // `SessionInputGrantBox`'s doc comment for why a plain shared `Bool`
+    // isn't safe here.
+    private let sessionInputGrant: SessionInputGrantBox
+    // Preference changes arrive on the main actor; receiver messages arrive on
+    // Network's callback queue. Serialize them so cancellation cannot race a
+    // new synthetic down event.
+    private let inputLock = NSRecursiveLock()
     private var isDown = false
     private var penDown = false
+    // M7 pointer/click wire (pv 5): which synthetic mouse button, if any,
+    // `PointerGestureEngine` currently holds down, plus the click count its
+    // `mouseDown` carried — every subsequent move/drag/up event echoes that
+    // same clickState, matching the CGEvent convention AppKit/WebKit expect
+    // across one press.
+    private var pointerHeldButton: CGMouseButton?
+    private var pointerHeldClickCount: Int64 = 1
     // A real event source (vs nil) plus non-zero clickState on down/up: menu
     // tracking treats sourceless/zero-click synthetic clicks as malformed — menus
     // open but their tracking session breaks, leaving zombie menu windows
@@ -58,12 +92,113 @@ final class InputInjector {
     private var penClickSession: PenClickSession?
     private var penLastClick: PenCompletedClick?
 
-    init(displayID: CGDirectDisplayID) {
+    // Hardware keys currently held down (M4) — released on cancellation so a
+    // dropped session can never leave a modifier or arrow key stuck.
+    private var heldKeys = HeldKeyTracker()
+    private var scrollRemainder = ScrollRemainder()
+    private var heldModifiers = HeldModifierTracker()
+
+    // Window mode: maps canvas points to the right Mac window, or to
+    // nothing. Nil for Mirror/Extend, where the canvas is one display.
+    private var targetMapper: InputTargetMapper?
+    // A mapped point for the tablet path, which positions by `screenPoint`.
+    private var mappedOverride: CGPoint?
+
+    /// Install or remove the window-workspace mapper. Held input is released
+    /// first: nothing pressed under one mapping is released under another.
+    func setTargetMapper(_ mapper: InputTargetMapper?) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        cancelActiveInputLocked()
+        targetMapper = mapper
+    }
+
+    /// Window mode keyboard gate: keys only reach the active tile's window.
+    private func keyboardTargetReady() -> Bool {
+        targetMapper?.keyboardTargetReady() ?? true
+    }
+
+    init(displayID: CGDirectDisplayID, sessionInputGrant: SessionInputGrantBox,
+         eventSink: SyntheticEventSink = HIDEventTapSink()) {
         self.displayID = displayID
+        self.sessionInputGrant = sessionInputGrant
+        self.eventSink = eventSink
+    }
+
+    /// Release every synthetic contact when capture is paused, torn down,
+    /// or input is disabled while a gesture is active.
+    func cancelActiveInput() {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        cancelActiveInputLocked()
+    }
+
+    /// Caller must already hold inputLock.
+    private func cancelActiveInputLocked() {
+        let point = currentCursor()
+        scrollRemainder.reset()
+
+        if isDown {
+            if let event = CGEvent(
+                mouseEventSource: source,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            ) {
+                event.setIntegerValueField(.mouseEventClickState, value: 0)
+                eventSink.post(event)
+            }
+            isDown = false
+        }
+
+        // M7: release whichever pointer-engine button (left or right) is
+        // currently held. This is the stuck-button safety net for the
+        // absolute/precision/chord pointer model — it MUST run on
+        // disconnect, input-disable, pause, and gesture-ownership takeover,
+        // exactly like the legacy touch `isDown` release above.
+        if let button = pointerHeldButton {
+            let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
+            if let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                   mouseCursorPosition: point, mouseButton: button) {
+                event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
+                eventSink.post(event)
+                pointerHeldButton = nil
+            }
+        }
+
+        if penDown {
+            penClickSession = nil
+            postTabletPoint(
+                phase: .up,
+                x: nil,
+                y: nil,
+                pressure: 0,
+                tiltX: 0,
+                tiltY: 0,
+                rotation: 0,
+                cancelClick: true
+            )
+            penDown = false
+        }
+
+        if inRange {
+            setProximity(entering: false, at: point)
+        }
+
+        penClickSession = nil
+        penLastClick = nil
+
+        for usage in heldKeys.releaseAll() {
+            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: heldModifiers.flags)
+        }
+        for modifier in heldModifiers.releaseAll() {
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
+        }
     }
 
     static func ensureAccessibilityPermission() -> Bool {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let promptKey = "AXTrustedCheckOptionPrompt" as CFString
+        let options = [promptKey: true] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
         if !trusted {
             Log.info("Accessibility permission missing — prompt requested")
@@ -73,11 +208,23 @@ final class InputInjector {
 
     /// x/y are normalized [0,1] in video space (origin top-left).
     func handleTouch(phase: String, x: Double, y: Double) {
-        let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
-        let point = CGPoint(
-            x: bounds.origin.x + x * bounds.width,
-            y: bounds.origin.y + y * bounds.height
-        )
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        let point: CGPoint
+        if let mapper = targetMapper {
+            let mapPhase: InputMapPhase = phase == "began" ? .down : (phase == "moved" ? (isDown ? .drag : .hover) : .up)
+            if let mapped = mapper.mapPointer(phase: mapPhase, x: x, y: y, dx: 0, dy: 0) {
+                point = mapped
+            } else if mapPhase == .up, isDown {
+                point = currentCursor()   // always release what was pressed
+            } else {
+                return
+            }
+        } else {
+            let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
+            point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        }
 
         let type: CGEventType
         // Click count on the release. A cancel means "a second finger joined,
@@ -110,32 +257,333 @@ final class InputInjector {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: .left) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
-        event.post(tap: .cghidEventTap)
+        // See `MouseEventFlags`'s doc: never let a touch tap silently
+        // inherit ambient/global modifier state left over from some other
+        // synthetic event (e.g. a system-gesture keyboard shortcut) —
+        // always state explicitly what this click intentionally carries.
+        event.flags = heldModifiers.flags
+        eventSink.post(event)
     }
 
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
     /// Scroll events take points, so convert via the display's pixel scale.
     func handleScroll(dx: Double, dy: Double) {
-        let bounds = CGDisplayBounds(displayID)
-        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        let whole: (dx: Int32, dy: Int32)
+        if let mapper = targetMapper {
+            // The tile under the workspace pointer, only where its window is
+            // frontmost; the Mac pointer moves onto it first (no focus change).
+            guard let p = mapper.mapPointer(phase: .scroll, x: nil, y: nil, dx: 0, dy: 0) else { return }
+            let here = currentCursor()
+            if pointerHeldButton == nil, !isDown, abs(here.x - p.x) > 1 || abs(here.y - p.y) > 1,
+               let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) {
+                move.flags = heldModifiers.flags
+                eventSink.post(move)
+            }
+            let v = mapper.scrollVector(dx: dx, dy: dy)
+            whole = scrollRemainder.take(dxPoints: v.dx, dyPoints: v.dy)
+        } else {
+            let bounds = CGDisplayBounds(displayID)
+            let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+            whole = scrollRemainder.take(dxPoints: dx / scale, dyPoints: dy / scale)
+        }
+        guard whole.dx != 0 || whole.dy != 0 else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
                                   wheelCount: 2,
-                                  wheel1: Int32((dy / scale).rounded()),
-                                  wheel2: Int32((dx / scale).rounded()),
+                                  wheel1: whole.dy,
+                                  wheel2: whole.dx,
                                   wheel3: 0) else { return }
-        event.post(tap: .cghidEventTap)
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
+        eventSink.post(event)
+    }
+
+    // MARK: - Pointer / click gestures (M7)
+
+    /// Absolute cursor move (`PointerCommand.moveAbsolute`). Never implies a
+    /// button — if the engine already holds one down (a left/right drag in
+    /// progress), the event type reflects that automatically so the drag
+    /// keeps moving; otherwise it's a plain `mouseMoved`.
+    func handlePointerMove(x: Double, y: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: x, y: y, dx: 0, dy: 0) else { return }
+            postPointerMotion(to: point)
+            return
+        }
+        let bounds = CGDisplayBounds(displayID)
+        let point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        postPointerMotion(to: point)
+    }
+
+    /// Relative cursor move (`PointerCommand.moveRelative`) — `dx`/`dy` in
+    /// video pixels, same convention as `handleScroll`. Moves from the
+    /// Mac's own current cursor position, never the touch location.
+    func handlePointerMoveRelative(dx: Double, dy: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            // The workspace pointer moves freely across tiles; the Mac pointer
+            // follows only where that is safe (see WorkspaceInputTargeting).
+            guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: nil, y: nil, dx: dx, dy: dy) else { return }
+            postPointerMotion(to: point)
+            return
+        }
+        let bounds = CGDisplayBounds(displayID)
+        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+        let current = currentCursor()
+        let point = CGPoint(x: current.x + dx / scale, y: current.y + dy / scale)
+        postPointerMotion(to: point)
+    }
+
+    private func postPointerMotion(to point: CGPoint) {
+        let type: CGEventType
+        let button: CGMouseButton
+        if let held = pointerHeldButton {
+            type = held == .left ? .leftMouseDragged : .rightMouseDragged
+            button = held
+        } else {
+            type = .mouseMoved
+            button = .left
+        }
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: button) else { return }
+        if pointerHeldButton != nil {
+            event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
+        }
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
+        eventSink.post(event)
+    }
+
+    /// Presses `button` down at the Mac's *current* cursor position —
+    /// never a touch location, matching the chord/precision-tap product
+    /// rule ("the physical centroid of the fingers should not teleport the
+    /// cursor").
+    func handlePointerDown(button: PointerButton, clickCount: Int) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        guard pointerHeldButton == nil else { return }
+        let cgButton: CGMouseButton = button == .left ? .left : .right
+        let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
+        let point: CGPoint
+        if let mapper = targetMapper {
+            guard let mapped = mapper.mapPointer(phase: .down, x: nil, y: nil, dx: 0, dy: 0) else { return }
+            point = mapped
+        } else {
+            point = currentCursor()
+        }
+        let clickState = Int64(max(clickCount, 1))
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: cgButton) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        // See `MouseEventFlags`'s doc: a plain click carries exactly
+        // OpenDisplay's own intentionally-held modifiers (empty, unless the
+        // control tray latched one) — never whatever ambient/global
+        // modifier state happens to be set from an unrelated synthetic
+        // event (e.g. a system-gesture keyboard shortcut still reporting
+        // Control down), which a left-unset `.flags` would otherwise
+        // silently inherit and macOS could read as a Control-click.
+        event.flags = heldModifiers.flags
+        eventSink.post(event)
+        pointerHeldButton = cgButton
+        pointerHeldClickCount = clickState
+    }
+
+    /// Releases `button` at the Mac's current cursor position.
+    func handlePointerUp(button: PointerButton, clickCount: Int) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        // No `inputIsAllowed()` gate on the up path: an up matching a
+        // down already posted must always be free to release the button,
+        // exactly like legacy touch's `"ended"`/`"cancelled"` handling.
+        let cgButton: CGMouseButton = button == .left ? .left : .right
+        // Window mode: the release always ends the workspace's drag binding,
+        // even when its press was refused (nothing was pressed on the Mac).
+        let mapped = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
+        guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
+        let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
+        let point = mapped ?? currentCursor()
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type,
+                                  mouseCursorPosition: point, mouseButton: cgButton) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
+        eventSink.post(event)
+        pointerHeldButton = nil
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
+        if let mapper = targetMapper {
+            guard let p = mapper.mapPointer(phase: .hover, x: x, y: y, dx: 0, dy: 0) else { return }
+            setProximity(entering: entering, at: p)
+            return
+        }
         setProximity(entering: entering, at: screenPoint(nx: x, ny: y))
+    }
+
+    // MARK: - Keyboard (M4)
+
+    /// Committed Unicode text from the software/hardware keyboard's text
+    /// path. Injected as one paired key-down/up carrying the whole string,
+    /// so multi-scalar clusters (emoji, accented composed characters) post
+    /// as a single event pair.
+    func handleKeyboardText(_ text: String) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
+        postUnicodeText(units)
+    }
+
+    /// An atomic special key from the software keyboard (no held state to
+    /// track — down and up post back to back).
+    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), keyboardTargetReady() else { return }
+        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        #if DEBUG
+        if usage == .deleteOrBackspace {
+            Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) down")
+        }
+        #endif
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+        #if DEBUG
+        if usage == .deleteOrBackspace {
+            Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) up")
+        }
+        #endif
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: flags)
+    }
+
+    func handleModifier(name: String, down: Bool) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), let modifier = ControlModifier(rawValue: name) else { return }
+        if down {
+            guard keyboardTargetReady(), heldModifiers.down(modifier) else { return }
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: true, flags: heldModifiers.flags)
+        } else {
+            guard heldModifiers.up(modifier) else { return }
+            postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
+        }
+    }
+
+    /// A hardware key going down. A duplicate down for an already-held key
+    /// is ignored rather than re-posted — unless it is marked `repeat` (a
+    /// receiving Mac's own key repeat), which posts an auto-repeat key-down
+    /// for the held key.
+    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed(), keyboardTargetReady() else { return }
+        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        if isRepeat {
+            guard heldKeys.allowsRepeat(usage) else { return }
+            postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags, autorepeat: true)
+            return
+        }
+        guard heldKeys.down(usage) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+    }
+
+    /// The matching release. A spurious up for a key that isn't held (e.g.
+    /// after cancellation already released it) is ignored.
+    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String]) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard heldKeys.up(usage) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: false,
+                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
+    }
+
+    private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags, autorepeat: Bool = false) {
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown) else { return }
+        event.flags = flags
+        if autorepeat { event.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
+        eventSink.post(event)
+    }
+
+    /// Attaching the Unicode string to both the key-down and key-up events is
+    /// the conventional pattern for `CGEventKeyboardSetUnicodeString`
+    /// (mirrored by, among others, Apple's own Quartz Event Services sample
+    /// code and every widely used open-source Unicode-typing utility built
+    /// on this API): text insertion is driven by the *key-down* event alone
+    /// — `keyUp` is never routed through `insertText:`/IME processing, so
+    /// carrying the string there cannot cause a second insertion. It matters
+    /// only because some apps read the string back off whichever event they
+    /// inspect (e.g. matching a down/up pair by content for key-repeat or
+    /// event-tap logic); omitting it from `up` risks that pairing seeing a
+    /// down for one character and an empty up, not a correctness issue for
+    /// insertion itself. Post as one down/up pair per commit either way.
+    ///
+    /// `.flags` is set explicitly to `KeyboardTextFlags.committed` (always
+    /// empty) rather than left at whatever `CGEventCreateKeyboardEvent`
+    /// defaults to for this event source — a real-device incident showed
+    /// plain typed text ("t") acting as a Command shortcut (Chrome opened a
+    /// new tab) after a modified hardware key combo, because an unset
+    /// `.flags` on a `.hidSystemState`-sourced event can inherit whatever
+    /// modifier state is currently ambient rather than reading as "none".
+    /// Committed text must never carry a modifier regardless of what any
+    /// other key event recently posted, so both events state that
+    /// explicitly instead of relying on a default.
+    private func postUnicodeText(_ units: [unichar]) {
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
+        down.flags = KeyboardTextFlags.committed
+        up.flags = KeyboardTextFlags.committed
+        down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+        eventSink.post(down)
+        eventSink.post(up)
+    }
+
+    /// The control-message gate is duplicated here under the input lock so an
+    /// OFF transition cannot race an event that already passed its outer gate.
+    /// A login session that is switched out (Fast User Switching) never
+    /// injects: someone else is using the Mac (`LoginSessionConsole`).
+    private func inputIsAllowed() -> Bool {
+        guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
+                                                   sessionGranted: sessionInputGrant.get()),
+              LoginSessionConsole.shared.isOnConsole else {
+            cancelActiveInputLocked()
+            return false
+        }
+        return true
     }
 
     func handlePencil(phase: String, x: Double, y: Double,
                       pressure: Double, azimuth: Double, altitude: Double,
                       rotation: Double) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard inputIsAllowed() else { return }
         // TODO: Wire Apple Pencil Pro barrel roll (UIKit rollAngle) once hardware
         // is available for testing. rotation on the wire is always 0 for now.
         _ = rotation
+        if let mapper = targetMapper {
+            let mapPhase: InputMapPhase
+            switch phase {
+            case "down": mapPhase = .down
+            case "move": mapPhase = penDown ? .drag : .hover
+            case "up": mapPhase = .up
+            default: mapPhase = .hover
+            }
+            if let mapped = mapper.mapPointer(phase: mapPhase, x: x, y: y, dx: 0, dy: 0) {
+                mappedOverride = mapped
+            } else if mapPhase == .up, penDown {
+                mappedOverride = currentCursor()
+            } else {
+                return
+            }
+        }
+        defer { mappedOverride = nil }
         let p = screenPoint(nx: x, ny: y)
         if phase == "down", !inRange {
             setProximity(entering: true, at: p)
@@ -194,14 +642,14 @@ final class InputInjector {
         ev.setIntegerValueField(.tabletProximityEventCapabilityMask, value: capabilityMask)
         ev.setIntegerValueField(.tabletProximityEventEnterProximity, value: entering ? 1 : 0)
         ev.flags = .maskNonCoalesced
-        ev.post(tap: .cghidEventTap)
+        eventSink.post(ev)
     }
 
     private enum PointPhase { case down, drag, up, hover }
 
     private func postTabletPoint(phase: PointPhase, x: Double?, y: Double?,
                                  pressure: Double, tiltX: Double, tiltY: Double,
-                                 rotation: Double) {
+                                 rotation: Double, cancelClick: Bool = false) {
         let p: CGPoint
         if let nx = x, let ny = y { p = screenPoint(nx: nx, ny: ny) }
         else { p = currentCursor() }
@@ -229,12 +677,13 @@ final class InputInjector {
         case .down:
             ev.setIntegerValueField(.mouseEventClickState, value: Int64(beginPenClickSession(at: p)))
         case .up:
-            ev.setIntegerValueField(.mouseEventClickState, value: Int64(finishPenClickSession(at: p)))
+            let clickState = cancelClick ? 0 : finishPenClickSession(at: p)
+            ev.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
         case .drag, .hover:
             break
         }
         ev.flags = .maskNonCoalesced
-        ev.post(tap: .cghidEventTap)
+        eventSink.post(ev)
     }
 
     private func penClickStateForMouseDown(at point: CGPoint) -> Int {
@@ -284,7 +733,17 @@ final class InputInjector {
         return (sin(azimuth) * mag, cos(azimuth) * mag)
     }
 
+    /// Global CG point for a normalized video coordinate on this injector's
+    /// target display — the same mapping touch/pointer input uses.
+    /// The Mac point under video point `x`/`y`. In Window mode it goes through
+    /// the tile under it (nil over gaps and letterbox).
+    func globalPoint(x: Double, y: Double) -> CGPoint? {
+        if let mapper = inputLock.withLock({ targetMapper }) { return mapper.locate(x: x, y: y) }
+        return InputCoordinateMapper.point(x: x, y: y, in: CGDisplayBounds(displayID))
+    }
+
     private func screenPoint(nx: Double, ny: Double) -> CGPoint {
+        if let mappedOverride { return mappedOverride }
         let bounds = CGDisplayBounds(displayID)
         return CGPoint(x: bounds.minX + nx * bounds.width,
                        y: bounds.minY + ny * bounds.height)

@@ -1,0 +1,122 @@
+name: Release candidate (iOS)
+
+# The iPhone/iPad app of one release candidate, from the exact commit
+# release-candidate.yml was started for: an App Store-signed build, uploaded
+# to App Store Connect with a build number above every existing build of this
+# version. It never submits for review and never releases: the release
+# monitor submits once App Store Connect has processed the build and the
+# version's prerequisites are met, and only release-publish.yml releases. A
+# re-run for the same commit skips the upload it already made.
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      uploaded: ${{ steps.state.outputs.uploaded }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Already uploaded for this commit?
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          record=$(scripts/release/release-state.sh "$VERSION" show STATE --platform ios --sha "$SHA" --at-least uploaded)
+          echo "uploaded=$(jq -r .done <<< "$record")" >> "$GITHUB_OUTPUT"
+
+  upload:
+    needs: check
+    if: needs.check.outputs.uploaded != 'true'
+    runs-on: xcode-27
+    environment: ios-upload
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.upload.outputs.build }}
+      ipa_sha256: ${{ steps.upload.outputs.ipa_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh ios-upload
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+      - name: Generate project
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: brew install xcodegen && xcodegen generate
+      - uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
+      - name: Build, sign and upload the binary
+        id: upload
+        env:
+          APP_MARKETING_VERSION: ${{ inputs.version }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane ios upload_candidate
+          echo "build=$(jq -r .build build/ios-candidate.json)" >> "$GITHUB_OUTPUT"
+          echo "ipa_sha256=$(shasum -a 256 "$(jq -r .ipa build/ios-candidate.json)" | cut -c1-64)" >> "$GITHUB_OUTPUT"
+
+  record:
+    needs: [check, upload]
+    if: always() && needs.check.outputs.uploaded != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Record the iOS candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+          RESULT: ${{ needs.upload.result }}
+          BUILD: ${{ needs.upload.outputs.build }}
+          IPA_SHA256: ${{ needs.upload.outputs.ipa_sha256 }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          state() { scripts/release/release-state.sh "$VERSION" "$@"; }
+          if [ "$RESULT" != success ] || ! [[ $BUILD =~ ^[0-9]+$ ]]; then
+            state record STATE --platform ios --stage failed --sha "$SHA" --set "blockers=iOS upload $RESULT (run $RUN_ID)"
+            exit 1
+          fi
+          for stage in built signed uploaded; do
+            state record STATE --platform ios --stage "$stage" --sha "$SHA" --set "build=$BUILD" --set "ipaSha256=$IPA_SHA256" --set "runId=$RUN_ID"
+          done
