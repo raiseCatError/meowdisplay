@@ -137,6 +137,8 @@ Two things keep what you type visible. Both work only after the Mac has granted 
 
 Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 
+On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and hold** the title (about 0.4 seconds), then release without dragging, to open its options menu; keep holding and drag to rearrange. The existing **Fullscreen on This Device** action only changes the receiver's view, while **Remove from Layout** doesn't close the Mac window. These gestures should not be confused with the separate **Close Window on Mac…** action.
+
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | Windows as a display mode | Yes | Yes | Yes. A **Windows** chip beside Mirror and Extend | Yes, from the **Windows** button |
@@ -149,7 +151,7 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Stage Peek **Expand** and **Add as Tile** | Yes | Yes | Yes | n/a |
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |
-| Tile menu (Type Here, Change Window…, Rotate, Fill Tile, Maximize, Arrange Tiles, Remove Tile, Close Window on Mac…) | Yes | Yes | Yes | Yes (shared view) |
+| Pane options (Fullscreen on This Device, Fit/Fill, Change Window…, Rotate, Arrange Panes, Remove from Layout, Close Window on Mac…) | Yes. Hold title, then release | Yes | Yes | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
 | Hinge-aware tiles on foldables | Yes. Simulator only | n/a | Yes. Emulator only | n/a |
