@@ -72,6 +72,16 @@ class WorkflowChecksTest < Minitest::Test
                   f => ["run: scripts/release/check-release-state-access.sh", "run: scripts/release/check-release-state-access.sh && scripts/release/release-state.sh 9.9.9 init STATE"])
   end
 
+  def test_the_monitor_pre_check_stays_read_only
+    msg = "its pending job must be read-only"
+    assert_caught(msg, "release-monitor.yml" => ["  pending:\n    if:", "  pending:\n    environment: release-stores\n    if:"])
+    assert_caught(msg, "release-monitor.yml" => ["    permissions:\n      contents: read\n    outputs:", "    permissions:\n      contents: write\n    outputs:"])
+    assert_caught(msg, "release-monitor.yml" => ["          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          repo=",
+                                                 "          GH_TOKEN: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}\n        run: |\n          set -euo pipefail\n          repo="])
+    assert_caught("the monitor job must run only when the pending job found an unfinished release",
+                  "release-monitor.yml" => ["    needs: pending\n", ""])
+  end
+
   def test_secrets_outside_the_release_workflows_are_caught
     assert_caught("pr-title.yml: uses secrets; only release workflows may",
                   "pr-title.yml" => ["secrets.GITHUB_TOKEN", "secrets.SPARKLE_PRIVATE_KEY"])

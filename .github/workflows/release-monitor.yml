@@ -26,8 +26,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  monitor:
+  # Read-only, no environment, no secret: is any release unfinished? Only then does the
+  # monitor job below ask for the release-stores approval, so a scheduled run with nothing
+  # to follow finishes here instead of waiting for an approval every half hour.
+  pending:
     if: github.event_name == 'workflow_dispatch' || vars.RELEASE_AUTOMATION == 'enabled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      versions: ${{ steps.find.outputs.versions }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
+        with:
+          ruby-version: '3.3'
+      - name: Unfinished releases
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          versions=$(git ls-remote "$repo" 'refs/heads/release/*' | sed -n 's#.*refs/heads/release/\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p')
+          pending=()
+          for version in $versions; do
+            status=$(scripts/release/release-state.sh "$version" status STATE)
+            [ "$(jq -r .candidate <<< "$status")" = null ] && continue
+            [ "$(jq -r .publication <<< "$status")" = published ] && continue
+            pending+=("$version")
+          done
+          echo "versions=${pending[*]}" >> "$GITHUB_OUTPUT"
+          if [ ${#pending[@]} -eq 0 ]; then
+            echo "No unfinished release: nothing to follow, no approval requested." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Unfinished: ${pending[*]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  monitor:
+    needs: pending
+    if: needs.pending.outputs.versions != '' && (github.event_name == 'workflow_dispatch' || vars.RELEASE_AUTOMATION == 'enabled')
     runs-on: ubuntu-latest
     environment: release-stores
     permissions:
