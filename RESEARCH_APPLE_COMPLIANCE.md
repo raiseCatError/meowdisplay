@@ -14,12 +14,14 @@
 | --- | --- | --- | --- |
 | https://github.com/peetzweg/opendisplay | GPL-3.0 upstream of MeowDisplay; own non-VNC protocol | Existing reference for sender/receiver architecture; Linux Rust example | Follow [REFERENCE.md](REFERENCE.md) and preserve upstream credit |
 | https://github.com/nekohasekai/open-screen-sharing | GPL-3.0-or-later per project; Apple Screen Sharing protocol implementation in Go, Swift UI, includes iOS-specific restricted paths | Evaluate standard/enhanced protocol behaviors; no copy until complete dependency/code/provenance/license audit | Exclude documented private API or exploit portions from iOS build |
-| https://github.com/renegadelink/iShareScreen | AGPL-3.0-or-later per project; experimental Apple HP reverse-engineered Python client and protocol notes | Research-only specification/test corpus | Review provenance and legal permissibility; AGPL 13 may matter if network-provided modified program; reuse requires legal assessment |
+| https://github.com/renegadelink/iShareScreen | AGPL-3.0 license file ("or later" not stated: confirm); experimental Apple HP reverse-engineered Python client and protocol notes | Research-only specification/test corpus | Review provenance and legal permissibility; AGPL 13 may matter if network-provided modified program; reuse requires legal assessment |
 | https://github.com/lucid-fabrics/sharelinux | Derived from Open Screen Sharing; GPLv3 described | Secondary Linux reference only | Do not count as independent confirmation |
-| Rust RFB clients | Not yet selected/verified | Standard VNC core candidate | Independently audit repo, license, auth support and maintenance |
+| Rust RFB clients | Not yet selected. `rustvnc/RustVNC` is a GPL-2.0 Android VNC server (not a client); `rustvnc/rfb-encodings` is Apache-2.0 | Standard VNC core candidate | Independently audit repo, license, auth support and maintenance |
 | Apple's official Screen Sharing / Sidecar docs | Apple documentation, not open-source code | Authoritative published supported behavior | Do not treat docs as grant of private API access |
 
-GPLv3/AGPLv3 compatibility can be possible under the applicable terms, but **translation into another language does not erase copyright**. A strictly independent reimplementation should document its input sources and reviewer findings. Check Open Screen Sharing's project-specific naming or trademark provisions; do not confuse these with baseline license grants.
+GPLv3/AGPLv3 compatibility can be possible under the applicable terms, but **translation into another language does not erase copyright**.
+
+**GPL and the App Store.** MeowDisplay is GPL-3.0 (inherited from OpenDisplay) and its iOS receiver ships on the App Store. Whether App Store distribution terms add restrictions the GPL forbids is a long-standing, unresolved question (it is why VLC was withdrawn from the App Store in 2011 after a copyright holder objected). Today this rests on the copyright holders of the code we ship not objecting. Incorporating code from Open Screen Sharing, iShareScreen or other GPL/AGPL projects adds copyright holders who could object, and another author's own App Store listing of their code is not permission for ours. Get legal review before any such code enters the iOS receiver. A strictly independent reimplementation should document its input sources and reviewer findings. Check Open Screen Sharing's project-specific naming or trademark provisions; do not confuse these with baseline license grants.
 
 ## Apple-specific constraints
 

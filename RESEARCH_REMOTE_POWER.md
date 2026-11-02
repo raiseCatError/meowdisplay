@@ -11,7 +11,7 @@ Existing design: [REMOTE_WAKE_ON_LAN.md](REMOTE_WAKE_ON_LAN.md), [TECHNICAL_NOTE
 | Sleep / locked logged-in session | Local WoL magic packet, existing reconnect and wake orchestration | Implemented best effort, physical device/network constraints |
 | Sleep, client outside LAN | Authenticated always-on LAN agent (router, Pi, NAS) sends WoL; then VPN/private network re-establishes | **Not implemented**. No direct broadcast over ordinary Tailscale overlay |
 | Fully shut down / still powered | Cannot assume WoL will boot Apple silicon Mac; test exact model and supported firmware/feature | Hardware- and model-dependent; no universal Apple remote-boot API |
-| Fully shut down, power restored | Supported desktop Mac "Start up when power is connected", configured in macOS; an authorized remotely controlled power switch *restores*, not interrupts, power | Conditional, requires specific Macs/software and hardware; never hard-cut an awake Mac |
+| Fully shut down, power restored | Desktop Macs: "Start up automatically after a power failure" (Energy settings, `pmset autorestart`); an authorized remotely controlled power switch *restores*, not interrupts, power. Not offered on Mac laptops (e.g. the MacBook Air M2); Apple silicon laptops may instead turn on when power is connected or the lid opens (configurable, verify per model and macOS version) | Conditional, requires specific Macs/software and hardware; never hard-cut an awake Mac |
 | Fully shut down via physical button | Approved external actuator or controller physically operates power button | Hardware project; installation, safe state/authorization and reliability tests |
 | Boots to FileVault preboot | Supported SSH-based preboot unlock mechanism on eligible Apple silicon/macOS 26 configurations | Independent auth/security research. VPN/normal daemon might not operate in preboot. No password bypass/storage by default |
 | Boots to LoginWindow without user | Built-in macOS Screen Sharing may support login/session behavior; native sender would need dedicated pre-login daemon/agent/XPC design | Separate research; not solved by WoL or `persistent-content-capture` |
@@ -24,7 +24,7 @@ The one-device relay design in [REMOTE_WAKE_ON_LAN.md](REMOTE_WAKE_ON_LAN.md) is
 
 ## Prior art, provisional source register
 
-- Apple Mac energy/automatic start docs: https://support.apple.com/ (find model-specific documentation for "Start up when power is connected" and confirm supported releases).
+- Apple Mac energy/automatic start docs: https://support.apple.com/ (find model-specific documentation for "Start up automatically after a power failure" and laptop power-on behavior, and confirm supported releases).
 - Apple remote FileVault unlock instructions: https://support.apple.com/ (verify supported macOS/Apple silicon versions, Remote Login provisioning and network).
 - Apple Developer Forums: https://developer.apple.com/forums/thread/814152 (ScreenCaptureKit LoginWindow sessions + launch daemon/agent).
 - Apple's restricted persistent-content-capture entitlement: https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.persistent-content-capture — host-side capture, not remote power-on.

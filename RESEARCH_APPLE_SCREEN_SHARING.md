@@ -1,6 +1,7 @@
 # Research: Companion-free macOS access via Apple Screen Sharing
 
 **Status:** Exploratory research only — NOT IMPLEMENTED, NOT COMMITTED TO A RELEASE  
+**Scope of approval:** merging these notes records research only; it authorizes no implementation, experiment build or distribution of any approach described here.  
 **Reviewed:** 2026-11-03  
 **Owner decision:** Preserve the existing native MeowDisplay full-experience path. Objective A is to connect to a Mac **without installing MeowDisplay on that Mac**. App Store eligibility of the iOS receiver is a mandatory design constraint. Swift/Rust preferred; Go is a reference, not an assumed runtime dependency.
 
@@ -29,10 +30,10 @@ Official upstream https://github.com/peetzweg/opendisplay — documented https:/
 | Source | What it offers | Status / caution |
 | --- | --- | --- |
 | https://github.com/nekohasekai/open-screen-sharing | Swift Apple app + Go Apple VNC/Screen Sharing core; iOS client experiments; README says App Store variant excludes noncompliant iOS-server exploit and private-API file drag | **Research candidate**; do not integrate exploits/private APIs; GPL-3.0-or-later and attribution/name restrictions require review. A claimed App Store listing is NOT legal clearance for our app. |
-| https://github.com/renegadelink/iShareScreen | Python independent High Performance client, HEVC/AAC/SRTP, Mac/Windows/Linux, protocol test/spec corpus | **Protocol research**; AGPL-3.0-or-later, no approval inferred; documented research includes static analysis/instrumentation, raising additional Apple contractual/legal review. |
+| https://github.com/renegadelink/iShareScreen | Python independent High Performance client, HEVC/AAC/SRTP, Mac/Windows/Linux, protocol test/spec corpus | **Protocol research**; AGPL-3.0 license file (whether "or later" applies is not stated: confirm), no approval inferred; documented research includes static analysis/instrumentation, raising additional Apple contractual/legal review. |
 | https://github.com/renegadelink/iShareScreen/blob/main/docs/apple_vnc_rfc.md | Explicitly experimental reverse-engineered RFB/Apple extensions, auth, encrypted controls, virtual-display and adaptive media | **Unverified independent protocol reference**, not an Apple standard. Legal review of provenance before implementing from it. |
 | https://github.com/lucid-fabrics/sharelinux | Linux derivative/reference of Open Screen Sharing | **Secondary**; avoid mistaking derivative for independent validation. |
-| https://github.com/rustvnc | Potential Rust standard VNC/RFB implementation building blocks | **Unassessed**: audit current license, security, iOS portability, maturity and codec/auth coverage first. |
+| https://github.com/rustvnc | Rust VNC pieces: `RustVNC` is a GPL-2.0 Android VNC **server** fork (not a client); `rfb-encodings` is Apache-2.0 | **Unassessed as a client base**: only the encodings crate is client-relevant; GPL-2.0 code needs a compatibility check before combining with GPL-3.0. Audit security, iOS portability, maturity and codec/auth coverage first. |
 
 ## Proposed architecture (not adopted)
 
@@ -92,10 +93,10 @@ Apple's documented High Performance implementation may blank a physical Mac when
 
 ## Primary references
 
-- Apple Screen Sharing and virtual displays: https://support.apple.com/en-in/guide/mac-help/mh14066/27/mac/27
-- Apple Screen Sharing host / VNC option: https://support.apple.com/en-vn/guide/mac-help/-mh11848/mac
-- Apple HP requirements: https://support.apple.com/or-in/guide/remote-desktop/apdf8e09f5a9/mac
-- Apple Sidecar (distinct feature): https://support.apple.com/en-in/102597
+- Apple Screen Sharing and virtual displays: https://support.apple.com/guide/mac-help/mh14066/mac
+- Apple Screen Sharing host / VNC option: https://support.apple.com/guide/mac-help/mh11848/mac
+- Apple HP requirements: https://support.apple.com/guide/remote-desktop/apdf8e09f5a9/mac
+- Apple Sidecar (distinct feature): https://support.apple.com/102597
 - OpenDisplay's protocol: https://github.com/peetzweg/opendisplay/blob/main/PROTOCOL.md
 - OpenDisplay Linux source / docs: https://github.com/peetzweg/opendisplay/tree/main/linux , https://opendisplay.app/docs/linux/desktops/
 - Apple interoperability protocol studies: project links in table above.
