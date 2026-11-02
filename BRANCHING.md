@@ -40,6 +40,13 @@ promotion PR (as `promote/2.0.0-main` did), never one that carries unreleased
 code. Don't change a frozen release candidate's commit merely to include
 documentation.
 
+Release tooling follows the same rule: dispatch-only and scheduled workflows
+run from the default branch, so a fix to them (`.github/workflows/release-*`,
+`scripts/release/`, `.github/rulesets/`, the release configuration files and
+release documentation) may reach `main` early through a tooling-only promotion
+PR (as `promote/release-tooling-main` did), never one that carries app code.
+The same branch is then merged into `dev` so the two stay reconciled.
+
 ## Historical repository migration snapshot (2026-10-30)
 
 This section records the migration checkpoint, not current branch or release
