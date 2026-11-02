@@ -4,16 +4,16 @@
 
 | Platform | Available version | Get it |
 | --- | --- | --- |
-| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
-| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
+| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
 | iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
 | Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
 
-Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
-stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
-GitHub's Latest links install that stable version. The Mac beta does not get
-beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
-for new betas. It still checks the stable update channel.
+The main Mac app includes both sharing and receiving: share this Mac's display,
+or use this Mac as another Mac's display. The separate Receiver-only app is
+also available for Macs running macOS 12 or later. Android 2.0 requires the
+Mac 2.0 app.
+
 
 
 This covers building MeowDisplay from source, connecting your devices, and
@@ -75,7 +75,7 @@ Open `MeowDisplay.xcodeproj` in Xcode. Three schemes are relevant:
 
 | Scheme | Builds | Platform |
 |---|---|---|
-| `OpenSidecarMac` | the Mac sender app (MeowDisplay) | macOS 14+ |
+| `OpenSidecarMac` | the main MeowDisplay Mac app (sharing and receiving) | macOS 14+ |
 | `OpenSidecarMacReceiver` | the standalone receiver app (MeowDisplay Receiver — use a spare Mac as a display) | macOS 12+ |
 | `OpenSidecariOS` | the iPhone/iPad receiver app | iOS/iPadOS 16.4+ |
 
@@ -244,8 +244,8 @@ Connecting alone never grants control: use **Request Control** in receiver
 Settings. **Always Allow Requests** skips the Mac prompt but still requires
 that request each session. See [Allow Input & control requests](README.md#allow-input--control-requests).
 
-Receivers can still view the Mac with input off. The standalone Mac Receiver
-uses the same request: once the sending Mac allows it, the receiving Mac's own
+Receivers can still view the Mac with input off. The main Mac app's receiver
+role and the separate Mac Receiver use the same request: once the sending Mac allows it, the receiving Mac's own
 keyboard and trackpad control it while the video window is in front. See
 [RECEIVER_INPUT.md](RECEIVER_INPUT.md).
 

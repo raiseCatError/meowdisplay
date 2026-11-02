@@ -2,7 +2,7 @@
 
 The current platform versions and download channels are in
 [README.md](README.md#platform-availability--november-2-2026). Keep documentation
-clear about released iOS features, the Mac artifact's exact status and Android closed testing;
+clear about the stable Mac/iOS release and Android closed testing;
 record source inspection, automated tests and physical-device tests separately.
 
 

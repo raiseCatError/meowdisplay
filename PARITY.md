@@ -1,14 +1,14 @@
 # Receiver feature parity
 
-**MeowDisplay 2.0 is officially released on iPhone/iPad.** Mac 2.0 downloads
-currently carry the public beta 1 artifact label; Android 2.0 is in closed
-testing and requires Mac 2.0. Android requires Android 10+ and has no USB
+**MeowDisplay 2.0 is the stable Mac and iPhone/iPad release.** The main Mac
+app shares and receives; the separate Receiver-only app remains available.
+Android 2.0 is in closed testing and requires Mac 2.0. Android requires Android 10+ and has no USB
 transport. See [platform availability](README.md#platform-availability--november-2-2026).
 
 
 What each receiving app can do today: iPhone/iPad (iOS), Android, and Mac Receiver.
 Release availability and implementation rows reconciled on 2026-11-02 against
-`dev` and the Mac 2.0 beta source. Physical-test notes below are the existing
+`dev` and the 2.0 release source. Physical-test notes below are the existing
 2026-10-29 records; this documentation update did not repeat device QA. Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and where each setting lives: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
 
 **Yes** works · **Partial** works with a gap noted · **No** not built yet · **—** not applicable.

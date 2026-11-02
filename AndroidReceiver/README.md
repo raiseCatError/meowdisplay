@@ -4,8 +4,9 @@
 
 Android 2.0 is in **Google Play closed testing**, not a public production release.
 [Request early access](https://meowdisplay.app/android/early-access).
-It requires **Android 10 or later** and the [Mac 2.0 download (beta 1 artifact)](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1)
-(macOS 14+). It does **not** work with stable Mac 1.20.0.
+It requires **Android 10 or later** and [MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)
+(macOS 14+). The main Mac app shares and receives; use its sharing role to
+connect an Android receiver.
 
 Connect over local Wi-Fi or a reachable private network such as Tailscale.
 There is no Android USB transport. iPhone/iPad 2.0 is separately available

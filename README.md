@@ -17,7 +17,7 @@ with touch, trackpad-style input, gestures and a keyboard.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download Mac 2.0 (beta 1 artifact)](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
 
 <br>
 
@@ -45,16 +45,16 @@ App Store. Distribution differs by platform as shown below.
 
 | Platform | Available version | Get it |
 | --- | --- | --- |
-| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
-| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
+| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
 | iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
 | Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
 
-Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
-stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
-GitHub's Latest links install that stable version. The Mac beta does not get
-beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
-for new betas. It still checks the stable update channel.
+The main Mac app includes both sharing and receiving: share this Mac's display,
+or use this Mac as another Mac's display. The separate Receiver-only app is
+also available for Macs running macOS 12 or later. Android 2.0 requires the
+Mac 2.0 app.
+
 
 ## What's new in MeowDisplay 2.0
 
@@ -75,13 +75,15 @@ experience, with an emphasis on making a Mac practical to use from a phone:
   sharing starts off on both sides.
 - **Privacy Shield:** cover the Mac's physical screens while using it remotely.
   This is a viewing shield, not a lock; its limitations are in [SECURITY.md](SECURITY.md#privacy-shield).
+- **One Mac app, both roles:** the main Mac app shares and receives. A
+  separate Receiver-only app remains available for macOS 12+.
 - **Mac Receiver input:** control the sending Mac with the receiving Mac's
   keyboard and trackpad after requesting control.
 - **Remote connection improvements:** easier remote access and authenticated
   Tailscale route handling, without claiming unrestricted Internet discovery.
 
-MeowDisplay 2.0 is officially released. The current Mac download retains its
-beta 1 artifact label, and Android 2.0 is in closed testing. See the platform table
+MeowDisplay 2.0 is the stable Mac and iPhone/iPad release. Android 2.0 remains
+in closed testing. See the platform table
 above and [downloads](https://meowdisplay.app/downloads) before installing.
 
 ## At a glance
@@ -96,7 +98,7 @@ above and [downloads](https://meowdisplay.app/downloads) before installing.
 | **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
 | **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
 | **Security** | Trusted pairing with a matching code · TLS 1.3 · pinned peer identity |
-| **Receivers** | iPhone and iPad · another Mac with the Mac Receiver, whose keyboard and trackpad can control the sending Mac |
+| **Receivers** | iPhone and iPad · Android in closed testing · another Mac using the main app's receiver role or Receiver-only app, with keyboard and trackpad control |
 
 ## Why MeowDisplay?
 
@@ -401,7 +403,8 @@ Either side can start a session, and the Mac sender always streams. When
 connection approval is required, an explicit Connect waits for acceptance;
 background reconnects never prompt.
 
-Receivers include **iPhone**, **iPad**, and the **Mac Receiver**. Once the
+Receivers include **iPhone**, **iPad**, **Android** (closed testing), and another
+Mac using the main app's receiver role or the separate **Mac Receiver**. Once the
 sending Mac allows control, the receiving Mac's own keyboard and trackpad drive
 it while the video window is in front; press ⌃⌥⎋ to pause.
 More on [Devices](https://meowdisplay.app/features.html#devices).
@@ -471,7 +474,7 @@ More in [SECURITY.md](SECURITY.md) and the
 
 | App | Runs on |
 |---|---|
-| **MeowDisplay** (the Mac app that shares its display) | macOS 14 or later |
+| **MeowDisplay** (the Mac app for sharing and receiving) | macOS 14 or later |
 | **MeowDisplay Receiver** (a spare Mac as a display) | macOS 12 or later |
 | **MeowDisplay** for iPhone and iPad | iOS / iPadOS 16.4 or later |
 | **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 sender required |
@@ -481,9 +484,9 @@ display needs Screen Recording.
 
 ## Install
 
-For 2.0, use the version-specific Mac beta links in
-[Platform availability](#platform-availability--november-2-2026). The commands
-and Latest download links below install the stable Mac channel, currently 1.20.0.
+The links in [Platform availability](#platform-availability--november-2-2026)
+install stable 2.0. The main Mac app can share and receive; choose the separate
+Receiver-only app when that is all the Mac needs.
 
 **Mac, with Homebrew (optional):** signed and notarized, macOS 14 or later.
 

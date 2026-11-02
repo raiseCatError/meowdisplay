@@ -1,9 +1,9 @@
 # Getting help
 
 For the current release, see [platform availability](README.md#platform-availability--november-2-2026).
-iPhone/iPad 2.0 is on the App Store. The current Mac 2.0 download retains its
-beta 1 artifact label; Android 2.0 is in closed testing. Both mobile 2.0 apps need the Mac 2.0 sender for new features;
-Android 2.0 cannot use Mac 1.20.0.
+MeowDisplay 2.0 is stable on Mac and released on iPhone/iPad. Android 2.0
+is in closed testing and requires Mac 2.0. The main Mac app shares and
+receives; the separate Receiver-only app also remains available.
 
 For a bug report, include both app versions, OS versions, device models,
 connection route, and whether it happens in Mirror, Extend or Windows.
