@@ -64,9 +64,21 @@ unfolds mid-session).
 
 Secure pairing, the authenticated media session, H.264/HEVC decoding, audio,
 the receiver controls and the adaptive phone/tablet/foldable UI are
-implemented. RECEIVER_CONTROLS.md has the iOS parity matrix with the
-remaining gaps and the physical QA checklist. [PARITY.md](../PARITY.md)
+implemented. This is **a receiver for a Mac sender**, not an Android
+screen-sharing/sender or an enterprise remote-desktop client.
+
+[RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) has the iOS parity matrix with
+the remaining gaps and the physical QA checklist. [PARITY.md](../PARITY.md)
 separates implemented features from the recorded physical-device coverage.
 Window mode supports up to nine panes, subject to minimum pane size. Phones
 initially use Trackpad; tablets use Direct Touch, with Classic as the default
-Touch Style. Natural Touch is optional.
+Touch Style. Natural Touch is optional. Android USB is not implemented.
+
+Earlier real-device testing was reported; **additional Android physical QA
+for the 2.0 release-candidate process was waived by the maintainer**. This
+does not imply every device or advanced function was verified.
+
+Android 2.0 is in **Google Play closed testing**
+([request early access](https://meowdisplay.app/android/early-access)). It is
+not in public production on Google Play; closed testing and production are
+separate milestones.

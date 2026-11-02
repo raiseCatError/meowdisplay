@@ -6,9 +6,10 @@
 
 **Mac Everywhere, On Whatever Display**
 
-Turn your iPhone or iPad into a free, open-source second display for your Mac.
-Mirror or extend the desktop over USB or local Wi-Fi, then control the Mac
-with touch, trackpad-style input, gestures and a keyboard.
+Use your iPhone, iPad or another Mac (and, in closed testing, an Android
+device) as a free, open-source display for your Mac. Mirror or extend the
+desktop over USB or local Wi-Fi, then control the Mac with touch,
+trackpad-style input, gestures and a keyboard.
 
 [Website](https://meowdisplay.app) ·
 [Features](https://meowdisplay.app/features.html) ·
@@ -27,11 +28,12 @@ with touch, trackpad-style input, gestures and a keyboard.
 
 ## Overview
 
-MeowDisplay mirrors or extends your Mac onto an iPhone or iPad, then turns
-that device into a way to work the Mac: touch, a trackpad-style pointer,
-multi-finger gestures, a keyboard, and trays of modifiers and shortcuts all
-travel back to the Mac. Connect over USB, local Wi-Fi, or a private network
-you control, with devices paired and every session encrypted.
+MeowDisplay mirrors, extends or shows individual Mac windows on an iPhone,
+iPad, Android device or another Mac. Mobile receivers add touch, pointer,
+keyboard, gestures and shortcut controls; Mac Receiver has keyboard/trackpad
+forwarding implemented, with physical two-Mac verification still pending.
+Connect using USB where supported, local Wi-Fi, or a private network you
+control, with devices paired and every session encrypted.
 
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
@@ -90,7 +92,7 @@ above and [downloads](https://meowdisplay.app/downloads) before installing.
 
 | | |
 |---|---|
-| **Display** | Mirror an existing Mac display · Extend with a separate virtual workspace · Windows: Mac windows you pick, side by side (Window mode) · clamshell and headless workflows |
+| **Display** | Mirror an existing Mac display · Extend with a separate virtual workspace · Window view: the Mac windows you pick, side by side · clamshell and headless workflows |
 | **Control** | Direct Touch (Natural Touch or Classic) · Trackpad · Precise Control in Classic and Trackpad · Smart Touch (Experimental, Classic) · keyboard · Apple Pencil · Mac gestures |
 | **Devices & permissions** | Active Display · Known Devices · Nearby pairing · connection policies · Allow Input and per-session control requests |
 | **Picture in Picture** | Keep a View Only window of the live Mac on screen while you use other apps (iPhone and iPad) |
@@ -98,7 +100,7 @@ above and [downloads](https://meowdisplay.app/downloads) before installing.
 | **Connections** | USB · local Wi-Fi · Remote Access · Auto-Reconnect · Wake & Connect |
 | **Audio** | Mac system audio on the receiver · Mac keeps playing locally · A/V sync and Resync |
 | **Security** | Trusted pairing with a matching code · TLS 1.3 · pinned peer identity |
-| **Receivers** | iPhone and iPad · Android in closed testing · another Mac using the main app's receiver role or Receiver-only app, with keyboard and trackpad control |
+| **Receivers** | iPhone and iPad · Android in closed testing · another Mac using the main app's receiver role or Receiver-only app, with keyboard and trackpad control (physical two-Mac input verification outstanding, [#12](https://github.com/raiseCatError/meowdisplay/issues/12)) |
 
 ## Why MeowDisplay?
 
@@ -477,7 +479,7 @@ More in [SECURITY.md](SECURITY.md) and the
 | **MeowDisplay** (the Mac app for sharing and receiving) | macOS 14 or later |
 | **MeowDisplay Receiver** (a spare Mac as a display) | macOS 12 or later |
 | **MeowDisplay** for iPhone and iPad | iOS / iPadOS 16.4 or later |
-| **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 sender required |
+| **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 sender required. Build requirements: [AndroidReceiver/README.md](AndroidReceiver/README.md); features: [PARITY.md](PARITY.md) |
 
 Remote control of the Mac needs Accessibility permission; capturing a
 display needs Screen Recording.
@@ -556,6 +558,8 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 - [WINDOW_MODE.md](WINDOW_MODE.md) — Window mode: tiles, switching, limits
 - [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md) and [PARITY.md](PARITY.md) —
   what each receiver can do and where its settings live
+- [AndroidReceiver/README.md](AndroidReceiver/README.md) — Android build and verification
+- [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md) — product goals, non-goals and idea discussions
 - [TERMINOLOGY.md](TERMINOLOGY.md) — names and copy rules
 - [TECHNICAL_NOTES.md](TECHNICAL_NOTES.md) — virtual displays, sleep and
   wake, and other internals
@@ -564,11 +568,27 @@ troubleshooting are in [SETUP.md](SETUP.md); release process in
 
 Source, issues and releases live at
 [github.com/raiseCatError/meowdisplay](https://github.com/raiseCatError/meowdisplay).
-Issues and pull requests are welcome, especially testing on iPad, different
-Mac models, external-display setups and networks. Please open an issue before
-starting large architecture work.
+Bug reports, suggestions, documentation updates and pull requests are
+welcome, especially testing on different devices, Mac models, external-display
+setups and networks. Our [contribution guide](CONTRIBUTING.md) has separate
+forms for bugs, feature requests, exploratory ideas, documentation, and
+hardware compatibility reports.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+**Base branches and pull requests on `dev`**, where development happens.
+`main` is the source of the latest published release and changes only when
+a release is promoted ([BRANCHING.md](BRANCHING.md)).
+
+MeowDisplay is **personal-first, not non-commercial**: using it for your own
+professional or commercial work is welcome. We are **not currently planning an
+enterprise remote-desktop/IT administration suite** ([discussion #86](https://github.com/raiseCatError/meowdisplay/issues/86)).
+[Windows](https://github.com/raiseCatError/meowdisplay/issues/84),
+[Linux](https://github.com/raiseCatError/meowdisplay/issues/85), and
+[hosted account/relay services](https://github.com/raiseCatError/meowdisplay/issues/87)
+are separate **unplanned ideas**, not roadmap commitments.
+Discussion does not guarantee consideration or implementation.
+
+See [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md),
+[CONTRIBUTING.md](CONTRIBUTING.md) and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities
 privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 

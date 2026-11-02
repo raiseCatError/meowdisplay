@@ -114,7 +114,11 @@ final class CoalescingFetchTests: XCTestCase {
     }
 
     func testNoMoreThanTwoRequestsAreOut() async throws {
-        let (fetcher, service) = make(.milliseconds(200))
+        // The six callers arrive over ~150 ms of sleeps; on a loaded CI runner
+        // those sleeps overshoot, so the fetch must outlast them by a wide
+        // margin or every caller misses the request in flight (CI run
+        // 41460720587: 6 calls, not < 6).
+        let (fetcher, service) = make(.seconds(1))
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<6 {
                 group.addTask { _ = try await fetcher.value(.startedAfterNow) }
