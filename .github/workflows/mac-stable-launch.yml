@@ -1,0 +1,223 @@
+name: Mac 2.0.0 stable promotion
+
+# One-time promotion of the immutable, already notarized 2.0.0 binaries.
+# No build, store upload, store release, config change or source merge.
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/mac-2.0.0-launch]
+
+permissions: {}
+
+concurrency:
+  group: mac-2.0.0-stable-promotion
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 3a9bc815848d5bb48b08a5d9362dd32a3f9f2a58
+  SPARKLE_TOOLS_VERSION: "2.10.0"
+  SPARKLE_TOOLS_SHA256: c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
+  REQUIRE_SIGNED_DMG: "1"
+
+jobs:
+  verify:
+    runs-on: xcode-27
+    environment: release-build
+    permissions:
+      contents: read
+    steps:
+      - name: Only the isolated launch branch
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = raiseCatError/meowdisplay ]
+          [ "$GITHUB_REF" = refs/heads/release/mac-2.0.0-launch ]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: 3a9bc815848d5bb48b08a5d9362dd32a3f9f2a58
+          persist-credentials: false
+      - name: Select Xcode and verify protected build environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          scripts/ci/select-xcode.sh
+          scripts/release/check-environment.sh release-build
+      - name: Fetch immutable beta binaries and verify every artifact check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          gh release download v2.0.0-mac-beta.1 -R "$GITHUB_REPOSITORY" -D dist \
+            -p MeowDisplay-2.0.0-beta.1.dmg -p MeowDisplayReceiver-2.0.0-beta.1.dmg
+          mv dist/MeowDisplay-2.0.0-beta.1.dmg dist/MeowDisplay.dmg
+          mv dist/MeowDisplayReceiver-2.0.0-beta.1.dmg dist/MeowDisplayReceiver.dmg
+          printf '%s  %s\n' \
+            9b9fb406774d40ca737d74fb597d9dd8eaf7b3877d6bc4e6d294fff7d239bae7 dist/MeowDisplay.dmg \
+            3860b8941aa48e8f48b59f7252be8fe742c6bbd01c22b067a5861cb847581d98 dist/MeowDisplayReceiver.dmg | shasum -a 256 -c -
+          scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
+          scripts/release/verify-mac-artifact.sh dist/MeowDisplay.dmg sender 2.0.0 2.0.0 "$RUNNER_TEMP/baseline"
+          scripts/release/verify-mac-artifact.sh dist/MeowDisplayReceiver.dmg receiver 2.0.0 2.0.0 "$RUNNER_TEMP/baseline"
+      - name: Pinned Sparkle tools and published key continuity
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$SPARKLE_PRIVATE_KEY" ] || { echo '::error::SPARKLE_PRIVATE_KEY missing'; exit 1; }
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+            "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_TOOLS_VERSION/Sparkle-$SPARKLE_TOOLS_VERSION.tar.xz"
+          echo "$SPARKLE_TOOLS_SHA256  $RUNNER_TEMP/sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/sparkle"
+          tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | scripts/release/check-sparkle-key.sh "$RUNNER_TEMP/sparkle/bin" "$RUNNER_TEMP/baseline"
+      - name: Generate and verify both stable feeds
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          for role in sender receiver; do
+            select_app "$role"
+            scripts/release/check-build-number.sh 2.0.0 "$LIVE_FEED_BASE/$FEED"
+            src="$RUNNER_TEMP/feed-$role"
+            mkdir "$src"
+            cp "dist/$DMG" "$src/"
+            printf '%s' "$SPARKLE_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/generate_appcast" --ed-key-file - \
+              --maximum-deltas 0 --link "$LIVE_FEED_BASE/" \
+              --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/v2.0.0/" \
+              -o "$src/$FEED" "$src"
+            cp "$src/$FEED" dist/
+            scripts/release/verify-feed.sh "dist/$FEED" "dist/$DMG" "$(cat "$RUNNER_TEMP/baseline/$role.key")" 2.0.0 2.0.0 \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/v2.0.0/$DMG"
+          done
+          (cd dist && shasum -a 256 MeowDisplay.dmg MeowDisplayReceiver.dmg appcast.xml appcast-receiver.xml > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-mac-stable-2.0.0
+          path: dist/
+          retention-days: 30
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    runs-on: xcode-27
+    environment: release-publish
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: 3a9bc815848d5bb48b08a5d9362dd32a3f9f2a58
+          persist-credentials: false
+      - name: Verify publication approval and immutable source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = raiseCatError/meowdisplay ]
+          [ "$GITHUB_REF" = refs/heads/release/mac-2.0.0-launch ]
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
+          scripts/ci/select-xcode.sh
+          scripts/release/check-environment.sh release-publish --require-reviewers
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-mac-stable-2.0.0
+          path: dist
+      - name: Independently verify hashes, signed artifacts and both feeds again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          (cd dist && shasum -a 256 -c SHA256SUMS.txt)
+          printf '%s  %s\n' \
+            9b9fb406774d40ca737d74fb597d9dd8eaf7b3877d6bc4e6d294fff7d239bae7 dist/MeowDisplay.dmg \
+            3860b8941aa48e8f48b59f7252be8fe742c6bbd01c22b067a5861cb847581d98 dist/MeowDisplayReceiver.dmg | shasum -a 256 -c -
+          scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
+          for role in sender receiver; do
+            select_app "$role"
+            scripts/release/check-build-number.sh 2.0.0 "$LIVE_FEED_BASE/$FEED"
+            scripts/release/verify-mac-artifact.sh "dist/$DMG" "$role" 2.0.0 2.0.0 "$RUNNER_TEMP/baseline"
+            scripts/release/verify-feed.sh "dist/$FEED" "dist/$DMG" "$(cat "$RUNNER_TEMP/baseline/$role.key")" 2.0.0 2.0.0 \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/v2.0.0/$DMG"
+          done
+          # Fail closed on a pre-existing tag or draft, including API errors.
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v2.0.0" > refs.json
+          jq -e '[.[] | select(.ref == "refs/tags/v2.0.0")] | length == 0' refs.json
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp > releases.json
+          jq -e '[.[][] | select(.tag_name == "v2.0.0")] | length == 0' releases.json
+      - name: Stage all five stable assets in a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name > previous-latest
+          cat > notes.md <<'NOTES'
+          MeowDisplay 2.0.0 for Mac is now stable. Use this Mac companion with the public iPhone/iPad 2.0 App Store app, another Mac receiver, or Android 2.0 in Google Play closed testing.
+
+          Window view, Stage Peek, Natural Touch and independent per-device displays are part of 2.0. See CHANGELOG.md on the release/2.0.0 branch for the full release notes.
+
+          Downloads: MeowDisplay.dmg is the sender (macOS 14+); MeowDisplayReceiver.dmg is the optional receiver (macOS 12+). Both support Apple silicon and Intel. Open the DMG and drag the app to Applications. Existing settings and pairings are retained.
+
+          Artifact promotion: these are the exact signed, notarized and stapled 2.0.0 binaries previously distributed as Mac public beta 1, built from source 3a9bc815848d5bb48b08a5d9362dd32a3f9f2a58. Only their external download filenames changed. Both internal marketing and build versions are 2.0.0. The binaries passed the existing strict verification against the published 1.20.0 identity, entitlements and Sparkle key; no app was rebuilt or re-signed. This stable release adds verified signed update feeds. No iOS or Android upload/publication was performed by this promotion.
+
+          SHA256SUMS.txt covers both DMGs and update feeds. Run shasum -a 256 -c SHA256SUMS.txt in their download folder. Android remains a closed test: https://meowdisplay.app/android/early-access
+
+          Known limits: physical two-Mac input testing and broader iPad/headless hardware validation remain ongoing. Remote connections require your own reachable private network. Report issues at https://github.com/raiseCatError/meowdisplay/issues.
+          NOTES
+          gh release create v2.0.0 -R "$GITHUB_REPOSITORY" --draft --target "$SOURCE_SHA" \
+            --title 'MeowDisplay 2.0.0 for Mac' --notes-file notes.md \
+            dist/MeowDisplay.dmg dist/MeowDisplayReceiver.dmg dist/appcast.xml dist/appcast-receiver.xml dist/SHA256SUMS.txt
+      - name: Re-download draft and compare every byte
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          names=$(gh release view v2.0.0 -R "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(" ")')
+          want=$(printf '%s\n' MeowDisplay.dmg MeowDisplayReceiver.dmg appcast.xml appcast-receiver.xml SHA256SUMS.txt | sort | paste -sd' ' -)
+          [ "$names" = "$want" ]
+          mkdir check
+          gh release download v2.0.0 -R "$GITHUB_REPOSITORY" -D check
+          for file in MeowDisplay.dmg MeowDisplayReceiver.dmg appcast.xml appcast-receiver.xml SHA256SUMS.txt; do
+            cmp "dist/$file" "check/$file"
+          done
+          (cd check && shasum -a 256 -c SHA256SUMS.txt)
+          gh release view v2.0.0 -R "$GITHUB_REPOSITORY" --json isDraft,targetCommitish --jq . > draft.json
+          jq -e --arg sha "$SOURCE_SHA" '.isDraft == true and .targetCommitish == $sha' draft.json
+      - name: Publish Latest and verify both live feeds, rolling back on failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . scripts/release/baseline.env
+          previous=$(cat previous-latest)
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = "$previous" ]
+          rollback() {
+            echo "::error::Publication did not verify; restoring Latest to $previous and returning v2.0.0 to draft"
+            gh release edit "$previous" -R "$GITHUB_REPOSITORY" --latest || true
+            gh release edit v2.0.0 -R "$GITHUB_REPOSITORY" --draft=true || true
+          }
+          trap rollback ERR
+          gh release edit v2.0.0 -R "$GITHUB_REPOSITORY" --draft=false --latest
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/v2.0.0" --jq .sha)" = "$SOURCE_SHA" ]
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = v2.0.0 ]
+          live_ok() {
+            for feed in "$SENDER_FEED" "$RECEIVER_FEED"; do
+              want=$(shasum -a 256 "dist/$feed" | cut -c1-64)
+              for url in "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/$feed" "$LIVE_FEED_BASE/$feed"; do
+                got=$(curl -fsSL --max-time 30 "$url" | shasum -a 256 | cut -c1-64) || return 1
+                [ "$got" = "$want" ] || return 1
+              done
+            done
+          }
+          success=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if live_ok; then success=true; break; fi
+            sleep 30
+          done
+          [ "$success" = true ]
+          trap - ERR
+          echo 'Stable Mac 2.0.0 published and both live update feeds verified.' >> "$GITHUB_STEP_SUMMARY"
