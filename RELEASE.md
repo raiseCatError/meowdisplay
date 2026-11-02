@@ -296,6 +296,11 @@ inputs ask for, so the state token can't open PRs even though the App can.
   ruleset's bypass actor (`gh api repos/raiseCatError/meowdisplay/rulesets`)
   and that its installation still has Contents: read & write.
 - The branch itself: `git fetch origin release-state && git show FETCH_HEAD:releases/<version>.json`.
+- **Release dry run**'s `release-state` job proves the setup without touching
+  a release record. It checks three things: the App's token reaches this
+  repository only, a `GITHUB_TOKEN` push is refused, and an App push is
+  accepted. The App push updates `dry-run.json` at the branch root
+  (`scripts/release/check-release-state-access.sh`).
 
 ## Credentials
 

@@ -361,8 +361,13 @@ if (doc = load("release-dry-run.yml"))
   name = "release-dry-run.yml"
   common(name, doc)
   only_trigger(name, doc, "workflow_dispatch")
-  secrets_behind_environments(name, doc, %w[release-build release-pr ios-upload android-upload release-stores website-update])
+  secrets_behind_environments(name, doc, %w[release-build release-pr ios-upload android-upload release-stores website-update
+                                              release-state])
   no_publishing(name, doc)
+  rs = doc.dig("jobs", "release-state")
+  unless rs && env_name(rs) == "release-state" && steps(rs).any? { |s| run_text(s).include?("check-release-state-access.sh") }
+    err(name, "must prove in a release-state job that only the release App writes release-state")
+  end
 end
 
 # Only release workflows may write the release state.
