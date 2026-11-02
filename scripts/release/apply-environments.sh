@@ -20,10 +20,12 @@ environments=(
   "release-build|release/*|no"
   "ios-upload|release/*|no"
   "android-upload|release/*|no"
-  "release-stores|dev,release/*|yes"
+  "release-stores|main,release/*|yes"
   "release-publish|release/*|yes"
   "release-pr|release/*|no"
   "website-update|release/*|no"
+  "release-state|release/*|no"
+  "release-state-check|main|no"
 )
 for entry in "${environments[@]}"; do
   IFS='|' read -r name branches approval <<< "$entry"
