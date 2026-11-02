@@ -1,11 +1,16 @@
 # Mac Receiver input
 
-A Mac running the Mac Receiver is a display **and** a control surface
-([issue #12](https://github.com/raiseCatError/meowdisplay/issues/12)). Once the
-sending Mac allows it, the receiving Mac's own trackpad, mouse and keyboard
-drive the sending Mac while the video window is in front, in Mirror and in
-Extend. Drag a window onto the receiving MacBook's extended desktop and use
-that MacBook's trackpad and keyboard on it.
+A Mac running the Mac Receiver has an implemented display **and**
+control-surface role ([open physical-QA tracker #12](https://github.com/raiseCatError/meowdisplay/issues/12)).
+Once the sending Mac allows it, the receiving Mac's local trackpad, mouse
+and keyboard are designed to drive that Mac while the video window is in
+front, in Mirror or Extend.
+
+**Verification boundary:** Automated input-forwarding tests and builds
+pass, but the behavior has **not yet been physically verified using two Macs**.
+The steps below describe intended behavior, not a claim that a real two-Mac
+session completed. This outstanding QA is separate from the successfully
+verified multi-device Mirror/Extend feature (#20).
 
 ## Using it
 

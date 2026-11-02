@@ -20,6 +20,26 @@ stay exactly as they are.
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).
 
+## Product scope and branches
+
+Windows and Linux senders or receivers
+([#84](https://github.com/raiseCatError/meowdisplay/issues/84),
+[#85](https://github.com/raiseCatError/meowdisplay/issues/85)), enterprise
+remote administration ([#86](https://github.com/raiseCatError/meowdisplay/issues/86))
+and hosted accounts or relays ([#87](https://github.com/raiseCatError/meowdisplay/issues/87))
+are unplanned ideas, not branches, development targets or milestones.
+Commercial **use** of MeowDisplay is welcome; see [PRODUCT_SCOPE.md](PRODUCT_SCOPE.md).
+
+### Documentation versus release snapshots
+
+A published tag `vX.Y.Z` and the release it names never change.
+Documentation merged into `dev` after a release does not retroactively
+modify that tag; it reaches `main` with the next release's promotion. If
+documentation must reach `main` sooner, use a separate documentation-only
+promotion PR (as `promote/2.0.0-main` did), never one that carries unreleased
+code. Don't change a frozen release candidate's commit merely to include
+documentation.
+
 ## Historical repository migration snapshot (2026-10-30)
 
 This section records the migration checkpoint, not current branch or release

@@ -8,6 +8,19 @@ the README, never on a home screen.
 
 Control and settings parity by platform: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
 
+**Marketing / public docs:** Don't use **“Windows”** as a standalone feature
+headline; it can be confused with the Microsoft Windows operating system.
+Explain it as **“Mac windows”**, **“Window view”**, or **“Choose the Mac
+windows you want”** instead. In app UI, the existing **Windows** mode label
+remains unchanged until an explicitly reviewed product-copy change; do not
+rename wire values, settings keys or UI-test identifiers. This capability
+is unrelated to a Windows OS port (unplanned idea #84).
+
+MeowDisplay's product scope is [personal-first](PRODUCT_SCOPE.md):
+professional/commercial use is welcome, while enterprise remote
+administration, hosted accounts/relays, Windows and Linux ports are not
+planned work. An idea discussed in an issue is not a delivery promise.
+
 ## Canonical names
 
 Title Case in labels, buttons and headings; the lowercase form in running
