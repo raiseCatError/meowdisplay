@@ -335,6 +335,11 @@ unless given `--apply`, and is safe to re-run.
 | `ios-upload` (`release/*`) | `DEVELOPMENT_TEAM`, `MATCH_*`, `APP_STORE_CONNECT_*` | — | Owner (App Store Connect API key, App Manager role) |
 | `android-upload` (`release/*`) | `PLAY_SERVICE_ACCOUNT_JSON`, `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_STORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD` | `ANDROID_UPLOAD_CERT_SHA256` (the upload certificate registered with Play App Signing) | Owner (Play Console service account with release permissions; the upload key) |
 | `release-stores` (`main`, `release/*`; owner approval) | `APP_STORE_CONNECT_*`, `PLAY_SERVICE_ACCOUNT_JSON`, `RELEASE_APP_PRIVATE_KEY` | — | Owner |
+| `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
+| `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | [The release App](#the-release-github-app) |
+| `release-state` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Jobs with no other environment that write the release state |
+| `release-state-check` (`main`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Only the release state access check |
+| `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY`, `RELEASE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
 
 The release monitor asks for the `release-stores` approval only while a release
 is unfinished (a candidate exists and isn't published): its read-only `pending`
@@ -342,11 +347,6 @@ job, with no environment or secret, checks the release state first, so a
 scheduled run with nothing in flight ends without an approval request. While a
 release is in flight every monitor run still needs the approval, because it can
 submit to App Store review and move the Play release between tracks.
-| `release-publish` (`release/*`; owner approval) | `RELEASE_APP_PRIVATE_KEY` only (the publish-mac job's state token) | — | Owner adds themselves as **required reviewer** |
-| `release-pr` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | `RELEASE_APP_CLIENT_ID` (repository) | [The release App](#the-release-github-app) |
-| `release-state` (`release/*`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Jobs with no other environment that write the release state |
-| `release-state-check` (`main`) | `RELEASE_APP_PRIVATE_KEY` | — | The release App. Only the release state access check |
-| `website-update` (`release/*`) | `WEBSITE_APP_PRIVATE_KEY`, `RELEASE_APP_PRIVATE_KEY` | `WEBSITE_APP_CLIENT_ID` (repository) | Owner creates a GitHub App installed on `MeowDisplayWebsite` only (Contents, Pull requests: read & write) |
 
 Repository variables that switch automation on, each off until set:
 `RELEASE_AUTOMATION=enabled` (monitor schedule), `RELEASE_PUBLISH_MODE`
