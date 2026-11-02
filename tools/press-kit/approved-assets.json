@@ -1,0 +1,108 @@
+[
+  {
+    "file": "Brand/MeowDisplay-AppIcon-1024.png",
+    "review": "approved",
+    "sha256": "77b7dd69e3bd8cb38db3d870120ecea90e66a7768bc0401c5ba656eaf1ea45d4",
+    "caption": "App icon \u00b7 1024 \u00d7 1024",
+    "width": 1024,
+    "height": 1024
+  },
+  {
+    "file": "Brand/MeowDisplay-Logo-512.png",
+    "review": "approved",
+    "sha256": "72fb52fd3d1459d4a2b51116afba5a3a5222ab7ede0496816c9355802f648100",
+    "caption": "Transparent logo \u00b7 512 \u00d7 512",
+    "width": 512,
+    "height": 512
+  },
+  {
+    "file": "Screenshots/MeowDisplay-Devices-Mac.png",
+    "review": "approved",
+    "sha256": "c02cb93bf988f49c8ce9e7c27eeee1b8a4355bd774afa50a247971c04811329b",
+    "caption": "Devices \u00b7 enlarged Mac Settings window",
+    "width": 857,
+    "height": 847,
+    "device": "Mac",
+    "version": "2.0.0",
+    "captured": "2026-11-03",
+    "liveSession": true,
+    "privacyReviewed": true,
+    "visualReviewed": true
+  },
+  {
+    "file": "Screenshots/MeowDisplay-Display-Controls-iPad.png",
+    "review": "approved",
+    "sha256": "ba3c806c4721a1d639b041428e3fd9b63b8d4ede5f89d9139386f6896fca7071",
+    "caption": "Mirror, Extend & Show Mac Windows \u00b7 iPad",
+    "width": 2160,
+    "height": 1620,
+    "device": "iPad",
+    "version": "2.0.0",
+    "captured": "2026-11-03",
+    "liveSession": true,
+    "privacyReviewed": true,
+    "visualReviewed": true
+  },
+  {
+    "file": "Screenshots/MeowDisplay-Window-View-iPad.png",
+    "review": "approved",
+    "sha256": "b70c7e3a8bff889c740cf142c9a92d0ebff9a5e999fcbcb1617293e712bbabce",
+    "caption": "Window view \u00b7 physical iPad \u00b7 landscape",
+    "width": 2160,
+    "height": 1620,
+    "device": "iPad",
+    "version": "2.0.0",
+    "captured": "2026-11-03",
+    "liveSession": true,
+    "privacyReviewed": true,
+    "visualReviewed": true
+  },
+  {
+    "file": "Screenshots/MeowDisplay-Window-View-iPhone.png",
+    "review": "approved",
+    "sha256": "715c3a49f3a22ce949c4ea373255a925347250a3e30a82e5fc5e77f4edcbfe49",
+    "caption": "Window view \u00b7 physical iPhone \u00b7 landscape",
+    "width": 2796,
+    "height": 1290,
+    "device": "iPhone",
+    "version": "2.0.0",
+    "captured": "2026-11-03",
+    "liveSession": true,
+    "privacyReviewed": true,
+    "visualReviewed": true
+  },
+  {
+    "file": "Graphics/MeowDisplay-Social-1200x630.png",
+    "review": "approved",
+    "sha256": "7c177adbfa58c12c0d5d7755438def01393442454b989b8df19979255a5168c3",
+    "caption": "Social preview \u00b7 1200 \u00d7 630",
+    "width": 1200,
+    "height": 630
+  },
+  {
+    "file": "Graphics/MeowDisplay-Square-1080.png",
+    "review": "approved",
+    "sha256": "555b4051dc899a7c7e7e37e22d56a1b654c9f1fa8bc924b08f09fd5bc06d4dad",
+    "caption": "Square promotional graphic \u00b7 1080 \u00d7 1080",
+    "width": 1080,
+    "height": 1080
+  },
+  {
+    "file": "Information/MeowDisplay-Asset-Guidelines.md",
+    "review": "approved",
+    "sha256": "8df625cd0b8e5a4084d0c5eda6a975ab964d72d9edeb6b41569f2a2965efb742",
+    "caption": "MeowDisplay-Asset-Guidelines"
+  },
+  {
+    "file": "Information/MeowDisplay-Capture-Notes.md",
+    "review": "approved",
+    "sha256": "6d11c714dc0f1242473c26ba3fab9d16ada28ab263e6ba226347a17a9ae584ef",
+    "caption": "MeowDisplay-Capture-Notes"
+  },
+  {
+    "file": "Information/MeowDisplay-Product-Information.md",
+    "review": "approved",
+    "sha256": "a106dbdfbd6f624a490f484dac3d1a08bcbd5a6899a91f658a57b617fa83e2c7",
+    "caption": "MeowDisplay-Product-Information"
+  }
+]
