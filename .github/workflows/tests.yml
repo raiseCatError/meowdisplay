@@ -21,12 +21,14 @@ jobs:
   # Classify PR files using the synthetic merge commit's first parent (the base
   # branch). Keep the test jobs present, since the dev/main rulesets require
   # their exact check names; a skipped job reports success for branch protection.
-  # Pushes still run full CI, and any changed non-documentation file fails open
-  # to testing. This intentionally permits only root *.md and docs/**/*.md.
+  # Pushes still run full CI. Doc-only PRs skip all expensive jobs; tests.yml
+  # or pr-title.yml-only changes run release-tooling but skip app builds. All
+  # other changes (including mixed PRs) run full CI.
   changes:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      workflow_only: ${{ steps.classify.outputs.workflow_only }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -39,11 +41,13 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # If the PR merge ref/parent isn't available, run all tests.
           if ! git rev-parse 'HEAD^1' >/dev/null 2>&1; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-pr-paths"
@@ -59,9 +63,14 @@ jobs:
               or (path.startswith("docs/") and path.endswith(".md"))
               for path in paths
           )
+          workflow_only = bool(paths) and all(
+              path in (".github/workflows/tests.yml", ".github/workflows/pr-title.yml")
+              for path in paths
+          )
           with open(sys.argv[2], "a", encoding="utf-8") as out:
               out.write(f"docs_only={str(docs_only).lower()}\n")
-          print(f"Documentation-only PR: {docs_only}; {len(paths)} files")
+              out.write(f"workflow_only={str(workflow_only).lower()}\n")
+          print(f"Documentation-only PR: {docs_only}; workflow-only PR: {workflow_only}; {len(paths)} files")
           PY
 
   # Fast and first: the release and repository workflows stay fail-closed,
@@ -90,7 +99,7 @@ jobs:
   # Runs on every branch; does real work only where the Android app exists.
   android:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -123,7 +132,7 @@ jobs:
 
   mac:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true' }}
     runs-on: xcode-27
     # A hung test must fail the job, not hold a runner for GitHub's six-hour default.
     timeout-minutes: 60
@@ -229,7 +238,7 @@ jobs:
   # were made for. Not a required check yet: the first runs establish it.
   ios-duo:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true' }}
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
