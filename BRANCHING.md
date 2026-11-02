@@ -23,8 +23,8 @@ title).
 ## Historical repository migration snapshot (2026-10-30)
 
 This section records the migration checkpoint, not current branch or release
-availability. `dev` is now the development/default branch; the current
-platform release channels are in [README.md](README.md#platform-availability--november-2-2026).
+availability. Since the 2.0.0 promotion (below), `main` is the default branch
+and `dev` the development branch; the current platform release channels are in [README.md](README.md#platform-availability--november-2-2026).
 
 - `raiseCatError/meowdisplay` is public and a GitHub **network fork** of `peetzweg/opendisplay`.
 - **Default branch: `legacy/dev-opendisplay-next`** (`3f24b51`), the former `dev/opendisplay-next`, renamed so `dev` could exist (Git can't hold `dev` beside `dev/…`). It becomes `dev` once the release workflows' resume and store-safety fixes are on `dev` and the scheduled workflows are confirmed inert.
@@ -34,6 +34,14 @@ platform release channels are in [README.md](README.md#platform-availability--no
 - Open PRs #19, #24–#28 and #30 are all contained in `52727ce` and are closed as included once the integration PR merges.
 - One GitHub Release: **MeowDisplay 1.20.0 for Mac** (Latest), whose assets are the live Sparkle feeds.
 - Rulesets: "Protect Main Branch", "Protect development branch" (now covering both the old and the renamed branch name) and those in `.github/rulesets/` once applied. Required checks: `mac`, `release-tooling`, `conventional`, `android`.
+
+## Stable promotion of 2.0.0 (2026-11-02)
+
+- `v2.0.0` (`3a9bc81`, the merge of `release/2.0.0`) is the published release; the tag is never moved.
+- `main`'s old head `a186369` is already in the ancestry of `v2.0.0` (it entered MeowDisplay's line through early merges), so step 10 needs no `commit-tree`: the promotion branch `promote/2.0.0-main` is `v2.0.0` merged with `dev`'s post-tag documentation, merged into `main` by PR. Every file outside documentation (`*.md`, `assets/readme/`, `.github/FUNDING.yml`) is identical to `v2.0.0`; none of the inherited `release.yml`/`pages.yml` exists in the tree, and upstream history and authors stay in `main`'s ancestry.
+- The same promotion branch is merged into `dev`, which brings the release commits (version, changelog, release configuration) back to development.
+- The default branch is `main`. Development PRs target `dev`; release fixes go to `release/<version>` and are merged back into `dev`; the next release is promoted `release/<version>` → `main`.
+- The `release-stores` environment allows `main` and `release/*` (it allowed `dev` while `dev` was the default branch), matching the workflows' `"$DEFAULT_BRANCH,release/*"` check.
 
 ## Fork relationship: operational independence vs. GitHub metadata
 
@@ -74,8 +82,8 @@ Each step is reversible, rewrites no history and force-pushes nothing. ⚑ = the
 7. ⚑ Default branch → `dev` once the release-tooling fixes are on `dev` and the scheduled workflows are confirmed inert without their variables. Set `EXPECTED_DEFAULT_BRANCH=dev`.
 8. ⚑ Start the reference branch (dispatch **Reference sync** once; `REFERENCE_SYNC=enabled` after reviewing it).
 9. ⚑ Cut `release/2.0.0` from `dev` after the coordinated QA; the release PR and candidate pipeline follow (RELEASE.md).
-10. ⚑ At the approved public launch only, **reconcile `main` without rewriting it**: a promotion branch whose one commit has the `v2.0.0` tree and two parents, `v2.0.0` and `main` (`git commit-tree 'v2.0.0^{tree}' -p v2.0.0 -p main`), merged into `main` by PR. `main`'s tree then equals the tag's, the upstream history stays in `main`'s ancestry with its authors, and none of the inherited workflows exists in the new tree. A plain `--allow-unrelated-histories` merge would conflict and keep `main`-only files; resetting `main` would be a force-push: neither is used. Later releases promote `release/<version>` → `main` normally.
-11. ⚑ Default branch → `main` after the launch; development PRs keep targeting `dev`. Release fixes are made on `release/<version>` and merged back into `dev`.
+10. ✅ ⚑ (done for 2.0.0 by a normal PR merge; see above) At the approved public launch only, **reconcile `main` without rewriting it**: a promotion branch whose one commit has the `v2.0.0` tree and two parents, `v2.0.0` and `main` (`git commit-tree 'v2.0.0^{tree}' -p v2.0.0 -p main`), merged into `main` by PR. `main`'s tree then equals the tag's, the upstream history stays in `main`'s ancestry with its authors, and none of the inherited workflows exists in the new tree. A plain `--allow-unrelated-histories` merge would conflict and keep `main`-only files; resetting `main` would be a force-push: neither is used. Later releases promote `release/<version>` → `main` normally.
+11. ✅ ⚑ Default branch → `main` after the launch; development PRs keep targeting `dev`. Release fixes are made on `release/<version>` and merged back into `dev`.
 12. ⚑ Branch cleanup only from a re-validated manifest and an explicit list: branches whose commits exist nowhere else are archived as tags first; `main`, every tag and `legacy/dev-opendisplay-next` stay.
 
 ## Not changed by this
