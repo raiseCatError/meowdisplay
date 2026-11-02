@@ -427,6 +427,22 @@ if (doc = load("release-monitor.yml"))
   end
 end
 
+# MARK: - The main-branch preflight holds no credential
+
+# release-preflight.yml runs from the default branch, where no signing or store
+# environment releases its secrets; it must stay that way: dispatch-only, no
+# environment, no secret, no App token, read-only permissions.
+if (doc = load("release-preflight.yml"))
+  err("release-preflight.yml", "must be workflow_dispatch only") unless triggers(doc).keys == ["workflow_dispatch"]
+  err("release-preflight.yml", "top-level permissions must be {}") unless doc["permissions"] == {}
+  doc.fetch("jobs", {}).each do |id, job|
+    if env_name(job) || uses_secrets?(job) || job.to_s.include?("create-github-app-token") ||
+       job["permissions"] != { "contents" => "read" }
+      err("release-preflight.yml", "job #{id} must hold no credential: no environment, secret, App token or write permission")
+    end
+  end
+end
+
 # MARK: - Release state is written only with the release App's token
 
 # Only the release App may update the release-state branch (its ruleset), so
