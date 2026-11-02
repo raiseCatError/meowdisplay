@@ -1,5 +1,21 @@
 # MeowDisplay setup guide
 
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
+| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
+stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
+GitHub's Latest links install that stable version. The Mac beta does not get
+beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
+for new betas. It still checks the stable update channel.
+
+
 This covers building MeowDisplay from source, connecting your devices, and
 day-to-day use. See the [README](README.md) for what the project is and its
 current capabilities.
@@ -126,7 +142,10 @@ authentication code (SAS). Confirm it matches on both ends before accepting
 — this is what pins the encrypted session to that specific peer going
 forward. See [PROTOCOL.md](PROTOCOL.md) for the underlying handshake.
 
-## USB setup
+## USB setup (iPhone and iPad)
+
+Android has no USB transport. Use local Wi-Fi or a reachable private network.
+A Mac Receiver uses network routes, including supported cable networking.
 
 Use a cable that supports data (a charge-only cable will not work). Plug in,
 unlock the device, and accept the **Trust This Computer** prompt if it
@@ -211,14 +230,14 @@ between Window view and the whole screen, and its limits are in
 ### Audio
 
 Audio is off by default and started from the receiving device: turn on
-**Audio** in the receiver's settings (iPhone/iPad app or Mac Receiver) and
+**Audio** in the receiver's settings (iPhone/iPad, Android or Mac Receiver) and
 the Mac's system audio plays there too, while the Mac keeps playing it
 locally. The Mac app has no audio toggle of its own. **A/V Sync** and
 **Resync** sit next to that toggle.
 
 ### Input
 
-On iPhone and iPad, touch, pointer, keyboard and supported gestures can
+On iPhone, iPad and Android, touch, pointer, keyboard and supported gestures can
 control the Mac. This requires Accessibility permission, the Mac's
 **Allow Input** master switch, and permission for the current session.
 Connecting alone never grants control: use **Request Control** in receiver

@@ -1,5 +1,25 @@
 # Release process
 
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
+| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
+stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
+GitHub's Latest links install that stable version. The Mac beta does not get
+beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
+for new betas. It still checks the stable update channel.
+
+This is the current public availability snapshot, not a change to the
+coordinated stable publication gate documented below. The Mac beta is a
+prerelease and must not replace stable Latest or its live appcasts.
+
+
 How MeowDisplay releases are built, reviewed and published, as implemented
 in `.github/workflows/release-*.yml`, `scripts/release/` and
 `fastlane/Fastfile`. Branches and the repository migration are in

@@ -1,7 +1,13 @@
 # Contributing to MeowDisplay
 
+The current platform versions and download channels are in
+[README.md](README.md#platform-availability--november-2-2026). Keep documentation
+clear about released iOS features, the Mac artifact's exact status and Android closed testing;
+record source inspection, automated tests and physical-device tests separately.
+
+
 Thanks for your interest in MeowDisplay. Bug reports, testing on different
-Macs, iPhones, iPads and networks, documentation fixes and code changes are all
+Macs, iPhones, iPads, Android devices and networks, documentation fixes and code changes are all
 welcome.
 
 Please read and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -29,8 +35,9 @@ instead (repository → **Security** → **Report a vulnerability**). See
    `feature/*`, `fix/*`, `infra/*`. See [BRANCHING.md](BRANCHING.md).
 2. Make a focused change — one fix or feature per PR, without unrelated
    refactors or formatting churn.
-3. Follow the existing Swift and project style (see [AGENTS.md](AGENTS.md) and
-   [SETUP.md](SETUP.md) for building).
+3. Follow the existing Swift or Kotlin and project style. See [SETUP.md](SETUP.md)
+   for native Apple builds and [AndroidReceiver/README.md](AndroidReceiver/README.md)
+   for Android builds.
 4. Verify your change: run the relevant tests and/or describe how you tested
    it on real devices.
 5. Open a PR describing what changed, why, and how you verified it. PR titles

@@ -1,7 +1,15 @@
 # Receiver feature parity
 
+**MeowDisplay 2.0 is officially released on iPhone/iPad.** Mac 2.0 downloads
+currently carry the public beta 1 artifact label; Android 2.0 is in closed
+testing and requires Mac 2.0. Android requires Android 10+ and has no USB
+transport. See [platform availability](README.md#platform-availability--november-2-2026).
+
+
 What each receiving app can do today: iPhone/iPad (iOS), Android, and Mac Receiver.
-Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code). Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and where each setting lives: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
+Release availability and implementation rows reconciled on 2026-11-02 against
+`dev` and the Mac 2.0 beta source. Physical-test notes below are the existing
+2026-10-29 records; this documentation update did not repeat device QA. Words follow [TERMINOLOGY.md](TERMINOLOGY.md). Controls and where each setting lives: [RECEIVER_CONTROLS.md](RECEIVER_CONTROLS.md).
 
 **Yes** works · **Partial** works with a gap noted · **No** not built yet · **—** not applicable.
 "Verified" says where it was last seen working: physical device, simulator/emulator, or unit tests only.
@@ -35,12 +43,12 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 | --- | --- | --- | --- | --- |
 | Mirror, Extend | Yes | Yes | Yes | |
 | Windows (Window mode) | Yes | Yes | Yes | Android verified physically; iOS/Mac Receiver unit-tested and built |
-| Tiles: 3 on phones, up to 9 on large screens | Yes | Yes | Yes | 9-tile layouts exercised in tests and the tablet emulator |
+| Tiles: up to 9 on every receiver | Yes | Yes | Yes | Minimum pane size and available space decide what fits; existing 9-tile QA record is tests and the tablet emulator |
 | Swap, drag to split, dividers, maximize, undo | Yes | Yes | Yes | Android verified physically (one drag = one undo step) |
 | Per-tile rotation 0/90/180/270 | Yes | Yes | Yes | Android verified physically |
 | Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo simulator |
-| Mirror Display picker, Extend Shape, Use Full Display | Yes | No | Yes | |
-| Video on/off, Streaming Profile, Maximum FPS, Resync | Yes | No | Yes | Android handles the Mac's video state but has no switch; no Streaming Profile/Max FPS messages |
+| Mirror Display picker, Extend Shape, Use Full Display | Yes | Yes | Yes | Android controls depend on the connected Mac's advertised capabilities; source-inspected |
+| Video on/off, Streaming Profile, Priority, Maximum FPS, Resync | Yes | Yes | Yes | Android Display/Streaming controls and Audio Resync implemented; source-inspected, physical QA not added here |
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |
 | Picture in Picture | Yes | Yes | — | Android verified physically |
 | Performance overlay | Yes | Yes | Yes | Android shows fps, bitrate, decode, latency, rtt, drops. Mac Receiver: System → Performance Overlay |
@@ -58,8 +66,8 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 | --- | --- | --- | --- | --- |
 | Touch, trackpad mode, Smart Touch, scrolling, haptics | Yes | Yes | — | |
 | Control tray, Function Tray, profiles | Yes | Yes | — | |
-| Edit Function Tray actions, sequences, names | Yes | No | — | Android: show/hide and order only |
-| Custom Layout editor (drag, corners, preview) | Yes | No | — | Android: create, select, delete, share, import |
+| Edit Function Tray actions, sequences, names | Yes | Yes | — | Android editor implemented; source-inspected, physical QA not added here |
+| Custom Layout editor (drag, corners, preview) | Yes | Yes | — | Android editor implemented; source-inspected, physical QA not added here |
 | Hardware keyboard | Partial | Partial | Yes | not verified with a real keyboard on iOS or Android |
 | Hardware mouse/trackpad: click, drag, hover, right click, scroll | Partial | Partial | Yes | Android: absolute mouse, no pointer capture; not verified physically |
 | Command shortcuts | Yes | Partial | Yes | Android needs Control Key Types ⌘ (Android keeps Meta for itself) |
@@ -89,8 +97,13 @@ Updated 2026-10-29 on `feature/android-secure-core` (reconciled against the code
 
 ## Not on Android yet, by size
 
-Small: Switched Out, Video on/off, Resync, a full Update Required screen. Medium: Streaming Profile and
-Maximum FPS, Mirror Display picker and Extend Shape, App Gesture Commands editing. Large: Custom Layout
-editor, Function Tray editor (actions, chords, sequences, names), a USB transport (Android has no usbmux;
-the planned design is Android Open Accessory, not started). Not planned: automatic tailnet peer listing on
-any platform (it would need Tailscale's local API or tokens).
+Remaining gaps include Switched Out, a full Update Required screen, viewport
+rotation/Snap Rotation, and USB transport. Android has no usbmux; an Android
+Open Accessory transport is not implemented. Hardware keyboard, mouse and
+stylus coverage remains incomplete on physical devices. Automatic tailnet
+peer listing is not implemented on any platform.
+
+Video/streaming controls, Audio Resync, Custom Layout, Function Tray, chord
+palette and App Gesture Commands editors are implemented; the earlier
+October 29 gap list predates those changes. Implementation is not a claim
+that every control has passed physical-device QA.

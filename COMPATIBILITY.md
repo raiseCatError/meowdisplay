@@ -1,8 +1,28 @@
-# Mac ↔ iOS compatibility
+# MeowDisplay platform compatibility
 
-How the two OpenDisplay apps stay compatible when they update on **different
-schedules**, who is responsible for detecting a mismatch, and what pairings we
-support. This is the spec for issues
+## Platform availability — November 2, 2026
+
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
+| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
+stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
+GitHub's Latest links install that stable version. The Mac beta does not get
+beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
+for new betas. It still checks the stable update channel.
+
+New Window mode, Stage Peek, Files and Clipboard capabilities require peers
+that implement them. Protocol version alone is not a promise of identical UI
+or transport support. See [PARITY.md](PARITY.md) for platform differences.
+
+
+How MeowDisplay's Mac and receiver apps stay compatible when they update on
+**different schedules**, who detects a mismatch, and what pairings we support.
+The historical policy below originated with OpenDisplay issues
 [#132](https://github.com/peetzweg/opendisplay/issues/132) (release
 orchestration), [#135](https://github.com/peetzweg/opendisplay/issues/135)
 (force update), and the wire-protocol handshake.
@@ -57,14 +77,14 @@ half of a deliberate two-phase breaking change (§6).
 
 Protocol 11 requires prior pairing and pinned mutual TLS 1.3 for LAN/AWDL
 media. Pairing, TLS negotiation, and pin failures never fall back to the
-historical plaintext Bonjour transport. Older peers can remain usable over
-the loopback-only iOS USB binding, but require an update for wireless use.
+historical plaintext Bonjour transport. Current MeowDisplay also requires
+paired, pinned mutual TLS over iOS USB; there is no plaintext USB exception.
 Bonjour names, addresses, interfaces, and TXT records are discovery hints,
 not identities.
 
 Mac system audio (`pv` 12, PROTOCOL.md section 5A) is media on this same
 single connection: it inherits whatever transport security that connection
-already has — pinned mutual TLS over LAN/AWDL, the usbmux tunnel over USB —
+already has — pinned mutual TLS over LAN/AWDL and over the usbmux USB tunnel —
 with no separate channel, no separate Bonjour service, and no
 authentication of its own to get wrong. There is deliberately no wire path
 for unauthenticated or unencrypted audio at any protocol version.

@@ -17,7 +17,7 @@ with touch, trackpad-style input, gestures and a keyboard.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+**[Download Mac 2.0 (beta 1 artifact)](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
 
 <br>
 
@@ -36,22 +36,29 @@ you control, with devices paired and every session encrypted.
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
 
-**Get MeowDisplay:** the [Mac app](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg) (macOS 14 or later; signed and
-notarized, from [GitHub Releases](https://github.com/raiseCatError/meowdisplay/releases/tag/v1.20.0)) and
-[MeowDisplay for iPhone and iPad on the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) (iOS/iPadOS 16.4 or
-later). Both are free.
+## MeowDisplay 2.0 — official release
 
-**Release status:** The downloads above are the public **1.20.0** apps. This
-`dev` branch also includes **MeowDisplay 2.0** work, including new Window
-view, Stage Peek, Natural Touch, per-device Mirror/Extend, and an Android
-receiver. These upcoming features are documented below but should **not be
-assumed to be in the public 1.20.0 downloads**. Android is currently offered
-to a limited testing group. Check [downloads](https://meowdisplay.app/downloads)
-for each platform's current availability.
+MeowDisplay 2.0 is officially released, with iPhone and iPad available on the
+App Store. Distribution differs by platform as shown below.
 
-## What's new in MeowDisplay 2.0 (in development)
+### Platform availability — November 2, 2026
 
-The **2.0** work is a major expansion of the Mac sender and receiver
+| Platform | Available version | Get it |
+| --- | --- | --- |
+| Mac sender · macOS 14+ | **2.0.0 (current artifact: beta 1)** | [Download Mac 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplay-2.0.0-beta.1.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0-mac-beta.1) |
+| Mac Receiver · macOS 12+ | **2.0.0 (current artifact: beta 1)** | [Download Mac Receiver 2.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0-mac-beta.1/MeowDisplayReceiver-2.0.0-beta.1.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+
+Use the **Mac 2.0 download** for 2.0 features; its current artifact is labeled beta 1. Android 2.0 does not work with the
+stable Mac 1.20.0 sender. Mac 1.20.0 remains the stable channel; Homebrew and
+GitHub's Latest links install that stable version. The Mac beta does not get
+beta updates automatically; check [downloads](https://meowdisplay.app/downloads)
+for new betas. It still checks the stable update channel.
+
+## What's new in MeowDisplay 2.0
+
+**MeowDisplay 2.0** is a major expansion of the Mac sender and receiver
 experience, with an emphasis on making a Mac practical to use from a phone:
 
 - **Window view:** choose and arrange individual Mac windows as tiles on the
@@ -62,13 +69,20 @@ experience, with an emphasis on making a Mac practical to use from a phone:
 - **Per-device display modes:** let different receivers choose Mirror, Extend
   or Window view according to what makes sense for them.
 - **Android receiver:** Android joins the iPhone, iPad and Mac receiver
-  implementations, currently available through limited testing.
+  implementations, currently available through closed testing.
+- **Files and clipboard:** Remote Finder and Unified Clipboard on the mobile
+  receivers, with separate permissions granted by the Mac owner. Clipboard
+  sharing starts off on both sides.
+- **Privacy Shield:** cover the Mac's physical screens while using it remotely.
+  This is a viewing shield, not a lock; its limitations are in [SECURITY.md](SECURITY.md#privacy-shield).
+- **Mac Receiver input:** control the sending Mac with the receiving Mac's
+  keyboard and trackpad after requesting control.
 - **Remote connection improvements:** easier remote access and authenticated
   Tailscale route handling, without claiming unrestricted Internet discovery.
 
-These are **development features**, not a statement that the coordinated 2.0
-release is publicly available. See the [downloads page](https://meowdisplay.app/downloads)
-for the current Mac, iPhone/iPad and Android availability.
+MeowDisplay 2.0 is officially released. The current Mac download retains its
+beta 1 artifact label, and Android 2.0 is in closed testing. See the platform table
+above and [downloads](https://meowdisplay.app/downloads) before installing.
 
 ## At a glance
 
@@ -136,8 +150,9 @@ Besides **Mirror** and **Extend**, a device can choose **Windows**: Mac windows
 you pick, shown side by side as tiles on that device. Each device chooses on
 its own; nothing changes for the others.
 
-- **Tiles.** One window is the default. iPhone shows up to 3, iPad and large
-  Mac Receiver windows up to 9, following the space the app really has.
+- **Tiles.** One window is the default. Every receiver supports up to 9 panes,
+  including phones; the available space and minimum pane size decide how
+  many can be shown.
 - **Choose windows.** Hold three fingers still on the picture, or use
   Settings → Display → **Show Mac Windows…**. On the Mac Receiver, use
   **Windows** in the title bar or ⌃⌥W.
@@ -163,13 +178,17 @@ and permission for the current session. Pausing the stream also pauses input.
 Choose an input mode in the receiver's Settings:
 
 - **Direct Touch** — a touch maps to the matching position on the Mac screen.
-  Choose a **Touch Style**: **Natural Touch** (the default) taps to click,
+  Choose a **Touch Style**: **Natural Touch** taps to click,
   swipes to scroll, presses then moves to drag and touches and holds to
   right-click; **Classic** keeps the finger as the pointer (tap, then hold
   and move, to drag) and is where Smart Touch applies.
 - **Trackpad** — the pointer moves relatively, like a MacBook trackpad.
   Touching doesn't jump the cursor to that spot. **Trackpad Sensitivity** is
   adjustable, and multi-finger gestures keep working.
+
+Phones initially use Trackpad; iPads and Android tablets initially use
+Direct Touch. Classic is the default Direct Touch style; Natural Touch is
+an optional style. Saved choices can differ.
 
 ### Allow Input & control requests
 
@@ -455,11 +474,16 @@ More in [SECURITY.md](SECURITY.md) and the
 | **MeowDisplay** (the Mac app that shares its display) | macOS 14 or later |
 | **MeowDisplay Receiver** (a spare Mac as a display) | macOS 12 or later |
 | **MeowDisplay** for iPhone and iPad | iOS / iPadOS 16.4 or later |
+| **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 sender required |
 
 Remote control of the Mac needs Accessibility permission; capturing a
 display needs Screen Recording.
 
 ## Install
+
+For 2.0, use the version-specific Mac beta links in
+[Platform availability](#platform-availability--november-2-2026). The commands
+and Latest download links below install the stable Mac channel, currently 1.20.0.
 
 **Mac, with Homebrew (optional):** signed and notarized, macOS 14 or later.
 
@@ -508,8 +532,8 @@ echo "DEVELOPMENT_TEAM=YOURTEAMID" > .env
 ```
 
 Open `MeowDisplay.xcodeproj` and run the `OpenSidecarMac` scheme for the Mac
-app, or `OpenSidecariOS` for the iPhone/iPad receiver. The released 1.20.0
-apps (Mac download and App Store) were built from
+app, or `OpenSidecariOS` for the iPhone/iPad receiver. The historical 1.20.0
+apps were built from
 [`release/app-store-rc`](https://github.com/raiseCatError/meowdisplay/tree/release/app-store-rc). Signing, permissions and
 troubleshooting are in [SETUP.md](SETUP.md); release process in
 [RELEASE.md](RELEASE.md).
