@@ -39,6 +39,11 @@ class WorkflowChecksTest < Minitest::Test
     assert ok, out
   end
 
+  def test_secrets_outside_the_release_workflows_are_caught
+    assert_caught("pr-title.yml: uses secrets; only release workflows may",
+                  "pr-title.yml" => ["secrets.GITHUB_TOKEN", "secrets.SPARKLE_PRIVATE_KEY"])
+  end
+
   def test_a_release_from_the_wrong_branch_is_caught
     assert_caught("guard must reject any ref but release/<version>",
                   "release-publish.yml" => ['"refs/heads/release/$VERSION") ;;', 'refs/heads/*) ;;'])

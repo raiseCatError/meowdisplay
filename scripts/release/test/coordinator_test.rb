@@ -188,4 +188,47 @@ class AndroidMonitoringTest < Minitest::Test
     assert c.publish_android
     assert_equal "published", state.stage("android")
   end
+
+  # MARK: - Android as a testing release (crossPlatformReady: false)
+
+  def testing_config
+    config("crossPlatformReady" => false,
+           "android" => { "package" => "com.raisecaterror.meowdisplay.android", "uploadTrack" => "internal",
+                          "reviewTrack" => "alpha",
+                          "storeUrl" => "https://play.google.com/store/apps/details?id=com.raisecaterror.meowdisplay.android" })
+  end
+
+  def test_an_android_testing_candidate_is_sent_to_its_testing_track
+    cfg = testing_config
+    state = uploaded_state(cfg)
+    c = coordinator(state, cfg, google: { observe: [play(play_release("PUBLISHED", track: "internal"))], submit: [true] })
+    c.tick
+    assert_equal "submitted", state.stage("android")
+    call = @play.calls.find { |x| x.first == :submit }
+    assert_equal "alpha", call[3]
+    coordinator(state, cfg, google: { observe: [play(play_release("APPROVED_NOT_PUBLISHED", track: "alpha"))] }).tick
+    assert_equal "approved", state.stage("android")
+  end
+
+  def test_an_android_testing_release_never_holds_mac_and_ios
+    cfg = testing_config
+    state = uploaded_state(cfg)
+    %w[submitted in_review approved].each { |s| state.advance("ios", s, sha: SHA_A, now: NOW) }
+    state.advance("android", "blocked", sha: SHA_A, now: NOW, blockers: ["Play rejected it"])
+    assert_empty state.publication_blockers(branch_head: SHA_A)
+  end
+
+  def test_an_android_testing_release_without_play_credentials_or_with_play_errors_is_only_noted
+    cfg = testing_config
+    state = uploaded_state(cfg)
+    actions = MeowRelease::Coordinator.new(state: state, config: cfg, apple: nil, play: nil, now: NOW).tap do |c|
+      def c.monitor_ios; end
+    end.tick
+    assert(actions.any? { |a| a.include?("Google Play credentials are not configured") }, actions.inspect)
+    assert_equal "uploaded", state.stage("android")
+
+    c = coordinator(state, cfg, google: { observe: [MeowRelease::Error.new("Play is down")] * 6 })
+    actions = c.tick
+    assert(actions.any? { |a| a.include?("android: testing release: ") }, actions.inspect)
+  end
 end
