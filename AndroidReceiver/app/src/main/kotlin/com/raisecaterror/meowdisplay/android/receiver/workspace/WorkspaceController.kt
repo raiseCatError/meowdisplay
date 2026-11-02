@@ -220,6 +220,8 @@ class WorkspaceController(
 
     /** The "Cancel" drop zone shown during a drag (window dp). Dropping there changes nothing. */
     var cancelZone: CGRect = CGRect.zero
+    /** The "Remove from Layout" drop zone (window dp), shown only while [canDropToRemove]. */
+    var removeZone: CGRect = CGRect.zero
 
     private var saved: WLayout = WLayout.of()
     /** The arrangement without local fullscreen: what edits apply to. */
@@ -1202,9 +1204,23 @@ class WorkspaceController(
 
     fun overCancelZone(p: CGPoint): Boolean = !cancelZone.isEmpty && cancelZone.insetBy(-8.0, -8.0).contains(p)
 
+    /**
+     * Remove from Layout is offered only while repositioning a whole pane already in the layout (its
+     * label, not one of its tabs) with another pane left: never for a Stage Peek window or app, a new
+     * pane or a tab. It removes the pane here only; the Mac window is untouched.
+     */
+    val canDropToRemove: Boolean
+        get() {
+            val s = state.value
+            val item = s.drag?.item as? WorkspaceDrag.Item.Pane ?: return false
+            return s.windowMode && item.tab == null && item.tile in arranged.tiles && arranged.tiles.size > 1
+        }
+
+    fun overRemoveZone(p: CGPoint): Boolean = canDropToRemove && !removeZone.isEmpty && removeZone.insetBy(-8.0, -8.0).contains(p)
+
     /** The drop under the finger. Null outside the picture and over Cancel. In Mirror/Extend the desktop counts as one pane. */
     fun dropTarget(p: CGPoint, labelHeight: Double = 30.0): WWindowDrop? {
-        if (overCancelZone(p)) return null
+        if (overCancelZone(p) || overRemoveZone(p)) return null
         val s = state.value
         if (!s.windowMode) {
             if (s.drag?.item !is WorkspaceDrag.Item.Window && s.drag?.item !is WorkspaceDrag.Item.App) return null
@@ -1224,7 +1240,13 @@ class WorkspaceController(
     fun endDrag(): Boolean {
         val d = state.value.drag ?: return false
         val target = dropTarget(d.location)
+        val remove = overRemoveZone(d.location)
         state.update { it.copy(drag = null) }
+        val item = d.item
+        if (remove && item is WorkspaceDrag.Item.Pane && item.tab == null) {
+            removeTile(item.tile)   // one undo step; never a request to close the window on the Mac
+            return true
+        }
         target ?: return false
         return when (val item = d.item) {
             is WorkspaceDrag.Item.Window -> place(item.window, target)
@@ -1313,6 +1335,11 @@ class WorkspaceController(
         if (state.value.localFullscreen == null) return
         state.update { it.copy(localFullscreen = null) }
         publish(); scheduleSend(0)
+    }
+
+    /** A double tap on a pane's label: that pane fills this device, or (already) the layout comes back. */
+    fun toggleLocalFullscreen(tile: String) {
+        if (state.value.localFullscreen == tile) exitLocalFullscreen() else enterLocalFullscreen(tile)
     }
 
     fun noteSurfaceTouch() { if (state.value.localFullscreen != null) state.update { it.copy(touchPulse = it.touchPulse + 1) } }

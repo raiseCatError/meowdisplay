@@ -137,7 +137,7 @@ Two things keep what you type visible. Both work only after the Mac has granted 
 
 Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 
-On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and hold** the title (about 0.4 seconds), then release without dragging, to open its options menu; keep holding and drag to rearrange. The existing **Fullscreen on This Device** action only changes the receiver's view, while **Remove from Layout** doesn't close the Mac window. These gestures should not be confused with the separate **Close Window on Mac…** action.
+On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and hold** the title (about 0.4 seconds), then release without dragging, to open its options menu; keep holding and drag to rearrange (drop on **Cancel** to change nothing, or, when moving a whole pane with others left, on **Remove from Layout**). **Double-tap** the title to toggle Fullscreen on This Device. The **Fullscreen on This Device** action only changes the receiver's view, while **Remove from Layout** doesn't close the Mac window. These gestures should not be confused with the separate **Close Window on Mac…** action.
 
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |

@@ -503,6 +503,8 @@ final class WorkspaceModel: ObservableObject {
     var tabLabelFrames: [String: [Int: CGRect]] = [:]
     /// The "Cancel" drop zone shown during a drag (global). Dropping there changes nothing.
     var cancelZoneGlobal: CGRect = .zero
+    /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
+    var removeZoneGlobal: CGRect = .zero
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -1392,6 +1394,12 @@ final class WorkspaceModel: ObservableObject {
         publish(); scheduleSend(immediately: true)
     }
 
+    /// A double tap on a pane's label: that pane fills this device, or (already) the layout comes back.
+    /// Presentation only, like the menu's Fullscreen on This Device: the saved arrangement is untouched.
+    func toggleLocalFullscreen(_ tile: String) {
+        localFullscreen == tile ? exitLocalFullscreen() : enterLocalFullscreen(tile)
+    }
+
     // MARK: Dragging windows and labels onto panes
 
     func beginDrag(_ item: WorkspaceDrag.Item, at global: CGPoint) { drag = WorkspaceDrag(item: item, location: global) }
@@ -1401,7 +1409,7 @@ final class WorkspaceModel: ObservableObject {
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
-        if overCancelZone(p) { return nil }
+        if overCancelZone(p) || overRemoveZone(p) { return nil }
         if !windowMode {
             switch drag?.item { case .window?, .app?: break; default: return nil }
             guard desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
@@ -1423,13 +1431,30 @@ final class WorkspaceModel: ObservableObject {
 
     func overCancelZone(_ p: CGPoint) -> Bool { cancelZoneGlobal.width > 0 && cancelZoneGlobal.insetBy(dx: -8, dy: -8).contains(p) }
 
+    /// Remove from Layout is offered only while repositioning a whole pane that is already in the
+    /// layout (its label, not one of its tabs), with another pane left: never for a window or app
+    /// from Stage Peek, a new pane or a tab. It removes the pane here only; the Mac window is untouched.
+    var canDropToRemove: Bool {
+        guard windowMode, case .pane(let id, nil)? = drag?.item else { return false }
+        return arranged.tiles[id] != nil && arranged.tiles.count > 1
+    }
+
+    func overRemoveZone(_ p: CGPoint) -> Bool {
+        canDropToRemove && removeZoneGlobal.width > 0 && removeZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
+    }
+
     /// Ends a drag: drops onto the pane under the finger. Dropped on Cancel or outside the
     /// picture: nothing changes. Returns whether anything changed.
     @discardableResult
     func endDrag() -> Bool {
         guard let d = drag else { return false }
         let target = dropTarget(forGlobal: d.location)
+        let remove = overRemoveZone(d.location)
         drag = nil
+        if remove, case .pane(let id, nil) = d.item {
+            removeTile(id)   // one undo step; never a request to close the window on the Mac
+            return true
+        }
         guard let target else { return false }
         switch d.item {
         case .window(let w):
