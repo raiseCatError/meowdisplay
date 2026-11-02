@@ -546,7 +546,7 @@ for MeowDisplay only.
   `generate_keys --account meowdisplay -f <file>` imports it.
 - To confirm which public key the Keychain holds:
   `generate_keys --account meowdisplay -p`. Every release checks the secret
-  against the key the PUBLISHED v1.20.0 apps ship (`check-sparkle-key.sh`).
+  against the key the PUBLISHED baseline apps ship (`baseline.env`, `check-sparkle-key.sh`).
 
 **Feed hosting.** Each release's signed feeds are assets of its GitHub
 Release, with enclosures at that tag's immutable

@@ -2,7 +2,7 @@ name: Release candidate (Mac)
 
 # Both Mac apps of one release candidate, from the exact commit
 # release-candidate.yml was started for: build and Developer ID-sign,
-# notarize, package as DMGs, verify against the PUBLISHED v1.20.0 baseline,
+# notarize, package as DMGs, verify against the PUBLISHED baseline (baseline.env),
 # sign both Sparkle feeds and verify them against the published key. It
 # touches no release, tag or asset: the verified DMGs and feeds are kept as
 # workflow artifacts (30 days, long enough to wait for App Review) for
@@ -57,7 +57,7 @@ jobs:
           # CFBundleVersion); it must be above every build the live feeds offer.
           scripts/release/check-build-number.sh "$VERSION" "$LIVE_FEED_BASE/$SENDER_FEED"
           scripts/release/check-build-number.sh "$VERSION" "$LIVE_FEED_BASE/$RECEIVER_FEED"
-      - name: Published baseline apps (pinned v1.20.0 DMGs)
+      - name: Published baseline apps (pinned baseline.env DMGs)
         run: scripts/release/published-baseline.sh "$RUNNER_TEMP/baseline"
       - name: Sparkle tools (pinned)
         run: |
