@@ -242,6 +242,29 @@ use the stable `latest/download` URLs, which switch with the GitHub
 Release). Until that change lands, `update-website.sh` refuses and the
 website step reports a blocker; nothing else is affected.
 
+## Homebrew
+
+Nothing in this repository updates Homebrew. The
+[`raiseCatError/homebrew-tap`](https://github.com/raiseCatError/homebrew-tap)
+`autobump.yml` runs daily (05:55 UTC), notices the new GitHub Release
+through each cask's `livecheck`, and opens a PR bumping the `meowdisplay`
+and `meowdisplay-receiver` casks (version and SHA-256). The two
+repositories share no token or secret.
+
+The tap's CI runs only style checks and an offline tap audit, so verify a
+bump locally before merging it:
+
+```sh
+brew update
+brew audit --cask --strict --online raiseCatError/tap/meowdisplay raiseCatError/tap/meowdisplay-receiver
+brew upgrade --cask meowdisplay   # or a fresh: brew install --cask raiseCatError/tap/meowdisplay
+spctl -a -vv /Applications/MeowDisplay.app   # "Notarized Developer ID"
+```
+
+Homebrew users get a release only after the bump PR is merged. To hold
+back a bad release, close that PR, or revert the casks' `version` and
+`sha256` in the tap.
+
 ## Credentials
 
 Every secret lives in one protected environment; jobs check the
