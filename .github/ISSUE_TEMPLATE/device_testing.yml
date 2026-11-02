@@ -1,6 +1,7 @@
 name: Device testing / compatibility
 description: Share verified results for real devices, emulators or unusual display/network setups.
 title: "[Compatibility]: "
+labels: ["device-testing"]
 body:
   - type: markdown
     attributes:

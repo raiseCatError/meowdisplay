@@ -1,6 +1,7 @@
 name: Idea / exploration
 description: Share a speculative concept, new platform or direction without assuming it will be built.
 title: "[Idea]: "
+labels: ["idea"]
 body:
   - type: markdown
     attributes:
