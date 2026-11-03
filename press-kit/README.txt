@@ -1,20 +1,13 @@
-MeowDisplay Press Kit
-https://meowdisplay.app
+MeowDisplay 2.0 Press Kit
+https://meowdisplay.app/press
 
-Brand/        Authentic MeowDisplay icon and logo PNGs.
-Screenshots/  Real current app captures, exported without personal metadata.
-Graphics/     Promotional compositions; separate from official screenshots.
-Information/  Descriptions, product facts, links and asset guidelines.
+Screenshots/   Unedited captures of the released 2.0.0 apps (iPhone, iPad, Mac)
+Mockups/       The same screenshots in Apple's iPhone 14 Pro Max and MacBook Air (M2) frames
+Graphics/      Promotional compositions (hero, social, square, widescreen, story, feature)
+Video/         B-roll screen recordings, native and 1080p, with posters
+Brand/         App icon and logo
+Information/   Descriptions, fact sheet, reviewer's guide, usage and brand guidelines,
+               asset provenance and B-roll shot list
 
-Mac and iPhone/iPad 2.0 are released. MeowDisplay is free and open source
-under GPL-3.0. Android remains in closed testing. Remote Access requires
-a reachable private-network route such as Tailscale. MeowDisplay runs no
-cloud relay or account service. See Information for platform requirements.
-
-Screenshots use harmless sample content. Do not add fictional controls or
-present promotional compositions as raw screenshots. Brand assets must not
-be redrawn or distorted. Please link to https://meowdisplay.app.
-
-Public contact: https://github.com/raiseCatError/meowdisplay/issues
-
-No video clips are included. Clean live recordings can be added later.
+Press contact: j@raisecaterror.com
+Issues: https://github.com/raiseCatError/meowdisplay/issues
