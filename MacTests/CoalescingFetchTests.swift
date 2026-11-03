@@ -23,6 +23,23 @@ final class CoalescingFetchTests: XCTestCase {
         }
     }
 
+    /// A stand-in whose requests answer only when the test releases them (by call number), so
+    /// the order requests finish in is the test's choice, not the runner's scheduling.
+    private final class GatedService: @unchecked Sendable {
+        private let state = OSAllocatedUnfairLock(initialState: (calls: 0, gates: [Int: CheckedContinuation<Void, Never>]()))
+        var calls: Int { state.withLock { $0.calls } }
+        func fetch() async -> Int {
+            let n = state.withLock { $0.calls += 1; return $0.calls }
+            await withCheckedContinuation { gate in state.withLock { $0.gates[n] = gate } }
+            return n
+        }
+        /// Returns once request `n` is out and waiting to be released.
+        func waitUntilOut(_ n: Int) async throws {
+            while state.withLock({ $0.gates[n] == nil }) { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        func release(_ n: Int) { state.withLock { $0.gates.removeValue(forKey: n) }?.resume() }
+    }
+
     private func make(_ delay: Duration) -> (CoalescingFetch<Int>, SlowService) {
         let service = SlowService(delay: delay)
         return (CoalescingFetch<Int> { try await service.fetch() }, service)
@@ -52,15 +69,38 @@ final class CoalescingFetchTests: XCTestCase {
     }
 
     func testAnInvalidationDuringARequestWaitsForTheNextOne() async throws {
-        let (fetcher, service) = make(.milliseconds(200))
+        let service = GatedService()
+        let fetcher = CoalescingFetch<Int> { await service.fetch() }
         async let early = fetcher.value(.cachedWithin(.seconds(5)))
-        try await Task.sleep(for: .milliseconds(50))
+        try await service.waitUntilOut(1)
         fetcher.invalidate()   // the virtual display appeared while the request was out
-        let late = try await fetcher.value(.cachedWithin(.seconds(5)))
+        async let late = fetcher.value(.cachedWithin(.seconds(5)))
+        try await service.waitUntilOut(2)
+        service.release(1)
         let first = try await early
         XCTAssertEqual(first.value, 1)
-        XCTAssertEqual(late.value, 2, "the request that started before the display existed can't list it")
-        XCTAssertEqual(service.calls.withLock { $0 }, 2)
+        service.release(2)
+        let second = try await late
+        XCTAssertEqual(second.value, 2, "the request that started before the display existed can't list it")
+        XCTAssertEqual(service.calls, 2)
+    }
+
+    /// CI run 41663143761: on a stalled runner the second request answered first. The early
+    /// caller may take that newer answer; the late one must still never get the stale one.
+    func testAnInvalidationDuringARequestWaitsForTheNextOneWhenAnswersArriveOutOfOrder() async throws {
+        let service = GatedService()
+        let fetcher = CoalescingFetch<Int> { await service.fetch() }
+        async let early = fetcher.value(.cachedWithin(.seconds(5)))
+        try await service.waitUntilOut(1)
+        fetcher.invalidate()
+        async let late = fetcher.value(.cachedWithin(.seconds(5)))
+        try await service.waitUntilOut(2)
+        service.release(2)
+        let (first, second) = try await (early, late)
+        XCTAssertEqual(first.value, 2, "an answer from a request started after the change is good for both")
+        XCTAssertEqual(second.value, 2, "the request that started before the display existed can't list it")
+        service.release(1)
+        XCTAssertEqual(service.calls, 2)
     }
 
     func testStartedAfterNowGetsANewRequestSharedByLateCallers() async throws {
