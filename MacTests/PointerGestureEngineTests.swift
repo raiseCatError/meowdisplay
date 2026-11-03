@@ -1259,6 +1259,36 @@ final class PointerGestureEngineTests: XCTestCase {
         XCTAssertEqual(engine.handle(sample(2, .began, view: CGPoint(x: 60, y: 60), t: 1)), [])
         XCTAssertEqual(engine.mode, .firstTouchPending)
     }
+
+    // MARK: - Fast two-finger double-tap (issue #137)
+
+    /// The precondition the arbitration handles: a second two-finger tap
+    /// 0.1 s after the first is a pending chord continuation until it lifts.
+    func testAFastSecondTwoFingerTapIsAPendingChordContinuation() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 140, y: 100), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 100, y: 100), t: 0.06))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 140, y: 100), t: 0.07))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 102, y: 101), t: 0.17))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 141, y: 101), t: 0.18))
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        XCTAssertTrue(engine.isChordContinuation)
+        XCTAssertTrue(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: engine.mode, isChordContinuation: engine.isChordContinuation, windowMode: true))
+    }
+
+    func testDoubleTapArbitrationOnlyOverridesAnUndecidedContinuationInWindowView() {
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .twoFingerPending, isChordContinuation: true, windowMode: false),
+            "single picture: nothing drops the engine's right-clicks, so keep the veto")
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .rightDragHeld, isChordContinuation: true, windowMode: true),
+            "a committed right-drag keeps its claim")
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .twoFingerPending, isChordContinuation: false, windowMode: true),
+            "a fresh pair isn't vetoed anyway; nothing to override")
+    }
 }
 
 final class AppGestureCommandAccumulatorTests: XCTestCase {
