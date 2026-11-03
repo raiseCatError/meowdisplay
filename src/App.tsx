@@ -6,9 +6,6 @@ const HERO_WORDS = [
   "5K iMac",
   "spare MacBook",
   "iPhone",
-  "girlfriend's iPad",
-  "mother's iPad",
-  "kid's iPad",
   "dusty iPad",
   "iPad",
 ]
