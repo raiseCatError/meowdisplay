@@ -14,6 +14,10 @@ let meowAccent = Color(red: 0.33, green: 0.60, blue: 1.0)
 /// dark surface instead of blur (still not pitch black).
 struct GlassSurface<S: InsettableShape>: View {
     let shape: S
+    /// The black layer over the material. Stage Peek passes
+    /// `StagePeekLegibility.minimumScrimOpacity` so its white labels stay
+    /// legible over a bright window behind.
+    var scrimOpacity: Double = 0.16
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
@@ -22,7 +26,7 @@ struct GlassSurface<S: InsettableShape>: View {
                 shape.fill(Color(white: 0.13).opacity(0.95))
             } else {
                 shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.16))
+                shape.fill(Color.black.opacity(scrimOpacity))
             }
             shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6)
         }
@@ -32,6 +36,11 @@ struct GlassSurface<S: InsettableShape>: View {
 
 extension View {
     func glass<S: InsettableShape>(_ shape: S) -> some View { background(GlassSurface(shape: shape)) }
+    /// Glass for controls drawn over the live Mac picture (Stage Peek), dark
+    /// enough for white labels over any content (issue #121, Workstream D).
+    func legibleGlass<S: InsettableShape>(_ shape: S) -> some View {
+        background(GlassSurface(shape: shape, scrimOpacity: StagePeekLegibility.minimumScrimOpacity))
+    }
 }
 
 // MARK: - Icons
@@ -88,7 +97,7 @@ struct StagePeekSearchPill: View {
         .font(.system(size: 16))
         .padding(.horizontal, 14)
         .frame(height: 42)
-        .glass(Capsule())
+        .legibleGlass(Capsule())
         .contentShape(Capsule())
     }
 }
@@ -175,7 +184,7 @@ struct StagePeekDock: View {
             }
             grabber(layout: layout, shown: shown)
         }
-        .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .legibleGlass(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: shown)
     }
 
@@ -471,7 +480,7 @@ struct StagePeekGallery: View {
                                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                             }
                             .padding(12)
-                            .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .legibleGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
@@ -805,7 +814,7 @@ struct StagePeekGallery: View {
                         .padding(.horizontal, 18).padding(.vertical, 10)
                 }
                 .buttonStyle(.plain).foregroundStyle(.white)
-                .glass(Capsule())
+                .legibleGlass(Capsule())
                 .disabled(!inputAllowed)
                 .opacity(inputAllowed ? 1 : 0.5)
                 .accessibilityIdentifier("stagePeekOpenOnMac")
@@ -861,7 +870,7 @@ struct StagePeekLaunchpad: View {
                 StagePeekSearchPill(query: $query, focused: $searchFocused, placeholder: String(localized: "Search all apps"))
                 Button(action: onClose) {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 42, height: 42).glass(Circle())
+                        .frame(width: 42, height: 42).legibleGlass(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close All Apps")

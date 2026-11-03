@@ -287,7 +287,7 @@ struct StagePeekOverlay: View {
             Text(notice.message).font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .legibleGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: min(460, safe.width - 32))
         .position(x: safe.midX, y: max(toolbarY(safe.midX) - 64, safe.minY + 160))
         .transition(.opacity)
@@ -673,9 +673,13 @@ struct StagePeekOverlay: View {
         }
         .font(.footnote.weight(.semibold))
         .labelStyle(.titleAndIcon)
-        .buttonStyle(.bordered)
+        // A filled dark capsule, not `.bordered` with a white tint: that
+        // drew white labels on a translucent white fill, unreadable over a
+        // bright window (see `StagePeekLegibility`).
+        .buttonStyle(.borderedProminent)
         .buttonBorderShape(.capsule)
-        .tint(.white)
+        .tint(Color.black.opacity(StagePeekLegibility.minimumScrimOpacity))
+        .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .fixedSize()
         .position(x: toolbarX(column), y: toolbarY(column))
