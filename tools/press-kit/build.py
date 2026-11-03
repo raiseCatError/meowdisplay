@@ -21,7 +21,9 @@ CATEGORIES = ["Screenshots", "Mockups", "Graphics", "Video", "Brand", "Informati
 ZIP_NAMES = {c: f"MeowDisplay-Press-Kit-{c}.zip" for c in CATEGORIES}
 ZIP_DATE = (2026, 11, 3, 0, 0, 0)
 # Over Cloudflare Pages' 25 MiB file limit, so it is published as a GitHub Release asset, not on the site.
-COMPLETE_URL = "https://github.com/raiseCatError/meowdisplay/releases/download/press-kit-2.0/MeowDisplay-Press-Kit.zip"
+# Each content revision gets a new asset name on the press-kit-2.0 release; earlier assets stay published unchanged.
+COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r2.zip"
+COMPLETE_URL = f"https://github.com/raiseCatError/meowdisplay/releases/download/press-kit-2.0/{COMPLETE_NAME}"
 
 COLLECTIONS = [
     ("window-view", "Window view and layouts",
@@ -153,7 +155,7 @@ def page(items, zips):
 <p class="eyebrow">Press &amp; creators</p>
 <h1>MeowDisplay Press Kit</h1>
 <p class="pk-lead">MeowDisplay turns an iPhone or iPad into a display for your Mac: the whole desktop, an extended desktop, or individual Mac windows you can control by touch.</p>
-<p class="pk-actions"><a class="button" href="{COMPLETE_URL}">Download complete press kit</a><span class="pk-note">ZIP · {mb(total)} · {len(items)} files · hosted on GitHub</span></p>
+<p class="pk-actions"><a class="button" href="{COMPLETE_URL}">Download complete press kit</a><span class="pk-note">ZIP · {mb(total)} · {len(items)} assets plus README ({len(items) + 1} files) · hosted on GitHub<br>SHA-256 <code class="pk-sha">{hashlib.sha256((KIT / COMPLETE_NAME).read_bytes()).hexdigest()}</code></span></p>
 <nav class="pk-jump" aria-label="Press kit sections"><a href="#features">Features</a><a href="#screenshots">Screenshots</a><a href="#mockups">Device mockups</a><a href="#video">B-roll</a><a href="#graphics">Graphics</a><a href="#text">Text &amp; facts</a><a href="#reviewers">Reviewer's guide</a><a href="#brand">Brand</a><a href="#downloads">Downloads</a><a href="#contact">Contact</a></nav>
 </div>
 <div class="pk-hero-art wrap">{figure(by["Hero-Transparent"], 2000, "pk-plain", "MeowDisplay on a MacBook Air (M2) and an iPhone 14 Pro Max: the Mac app with two devices connected, and Mac windows side by side on the iPhone.", eager=True)}</div></section>''']
@@ -232,7 +234,7 @@ def page(items, zips):
 <h3>Five-minute demo</h3><ol><li>Mirror the Mac on an iPad in landscape.</li><li>Switch the iPad to Extend and drag a window onto it.</li><li>On iPhone, open Window view and add a second window from Stage Peek.</li><li>Use Stage Peek to search and switch a pane, or show Full Desktop.</li><li>Open the keyboard, type in the Text Bar and watch Zoom While Typing.</li></ol></div>
 <div><h3>Connections</h3><p><strong>USB</strong> (iPhone, iPad) needs no network. <strong>Local Wi-Fi</strong> finds devices nearby. <strong>Remote Access</strong> reaches an already paired Mac through a private-network address you provide, such as Tailscale; the address never grants trust.</p>
 <h3>Security</h3><p>Pairing needs a matching code and approval on the Mac. Sessions use TLS 1.3 and pinned device identities. Control is a separate, per-session permission set on the Mac.</p>
-<h3>Worth knowing</h3><p>Android is in closed testing. A window shown on one device isn't offered on another. Keyboard input goes to the Mac's active window, so select the pane first.</p></div></div>
+<h3>Known issues in 2.0.0</h3><p>On iPad with the Custom control layout, rotating can leave Window view panes mis-sized until you relaunch (<a href="https://github.com/raiseCatError/meowdisplay/issues/129">#129</a>). On iPhone in landscape, the default Compact Dock in Stage Peek shows about one window at a time; choose Settings › Controls › Dock › Normal for more (<a href="https://github.com/raiseCatError/meowdisplay/issues/130">#130</a>). Android is in closed testing.</p></div></div>
 <p class="pk-dl"><a href="/press-kit/Information/MeowDisplay-Reviewer-Guide.md" download>Reviewer's guide with story angles (Markdown)</a> · <a href="https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0">2.0.0 release notes</a> · <a href="/support">Troubleshooting</a></p></div></section>''')
 
     icon, logo = by["AppIcon-1024"], by["Logo-512"]
@@ -244,10 +246,10 @@ def page(items, zips):
 
     labels = {"Screenshots": "Original screenshots · PNG", "Mockups": "Device mockups · transparent PNG", "Graphics": "Promotional graphics · PNG",
               "Video": "B-roll · MP4 and posters", "Brand": "Icon and logo · PNG", "Information": "Descriptions, reviewer's guide, guidelines · Markdown, TXT"}
-    rows = "".join(f'<tr><th scope="row">{esc(labels[c])}</th><td>{len(cat(c))} files</td><td>{mb(zips[c])}</td><td><a href="/press-kit/{ZIP_NAMES[c]}" download>Download ZIP</a></td></tr>' for c in CATEGORIES)
+    rows = "".join(f'<tr><th scope="row">{esc(labels[c])}</th><td>{len(cat(c)) + 1} files (incl. README)</td><td>{mb(zips[c])}</td><td><a href="/press-kit/{ZIP_NAMES[c]}" download>Download ZIP</a></td></tr>' for c in CATEGORIES)
     out.append(f'''<section class="section wash" id="downloads"><div class="wrap"><p class="eyebrow">Downloads</p><h2>Take what you need.</h2>
 <table class="pk-table"><thead><tr><th scope="col">Collection</th><th scope="col">Files</th><th scope="col">Size</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead><tbody>
-<tr class="pk-total"><th scope="row">Complete press kit</th><td>{len(items)} files</td><td>{mb(total)}</td><td><a href="{COMPLETE_URL}">Download ZIP</a></td></tr>{rows}</tbody></table></div></section>''')
+<tr class="pk-total"><th scope="row">Complete press kit</th><td>{len(items) + 1} files (incl. README)</td><td>{mb(total)}</td><td><a href="{COMPLETE_URL}">Download ZIP</a></td></tr>{rows}</tbody></table></div></section>''')
 
     out.append('''<section class="section" id="contact"><div class="wrap pk-contact"><p class="eyebrow">Contact</p><h2>Covering MeowDisplay?</h2>
 <p>For interviews, questions or additional screenshots, email <a href="mailto:j@raisecaterror.com">j@raisecaterror.com</a>.</p>
@@ -269,7 +271,7 @@ document.querySelectorAll('.pk-copy-btn').forEach(function(b){b.addEventListener
 STYLE = """
 .pk-hero{padding:72px 0 0;text-align:center}.pk-hero h1{font-size:clamp(2.6rem,6vw,4.5rem);line-height:1.05;letter-spacing:-.045em;margin:0 0 18px}
 .pk-lead{font-size:clamp(1.1rem,2vw,1.35rem);line-height:1.5;color:var(--muted);max-width:44rem;margin:0 auto}
-.pk-actions{display:flex;gap:14px;align-items:center;justify-content:center;flex-wrap:wrap;margin:28px 0 18px}.pk-note{color:var(--muted);font-size:14px}
+.pk-actions{display:flex;gap:14px;align-items:center;justify-content:center;flex-wrap:wrap;margin:28px 0 18px}.pk-note{color:var(--muted);font-size:14px}.pk-sha{font-size:11px;word-break:break-all}
 .pk-jump{display:flex;flex-wrap:wrap;justify-content:center;gap:6px 18px;font-size:14px;margin-bottom:36px}
 .pk-hero-art figcaption{text-align:center;align-items:center}
 .pk-sub{color:var(--muted);max-width:46rem;line-height:1.6;margin-bottom:32px}
@@ -305,7 +307,7 @@ def main():
     for c in CATEGORIES:
         members = [(i["file"], i["path"]) for i in items if i["category"] == c] + [("README.txt", readme)]
         zips[c] = write_zip(ZIP_NAMES[c], members)
-    zips["complete"] = write_zip("MeowDisplay-Press-Kit.zip", [(i["file"], i["path"]) for i in items] + [("README.txt", readme)])
+    zips["complete"] = write_zip(COMPLETE_NAME, [(i["file"], i["path"]) for i in items] + [("README.txt", readme)])
     template = (ROOT / "tools/press-kit/press.template.html").read_text()
     html_out = template.replace("{{STYLE}}", STYLE.strip()).replace("{{CONTENT}}", page(items, zips))
     (ROOT / "press.html").write_text(html_out)

@@ -40,10 +40,13 @@ MeowDisplay is free. You do not need a review code, licence key or account.
 - Sessions are encrypted with TLS 1.3, and each device's identity is pinned after pairing.
 - Input is a separate permission: the Mac's Input settings decide whether each device must ask, is always allowed, or is view-only. A device can request control during a session.
 
-## Known caveats (observed during capture, 3 November 2026)
+## Known issues in 2.0.0 (open, not yet fixed)
+- iPad with the Custom control layout: after rotating between portrait and landscape, Window view panes can stay sized for the previous orientation until MeowDisplay is relaunched. Strip and Overlay layouts are the workaround. Tracked in https://github.com/raiseCatError/meowdisplay/issues/129.
+- iPhone in landscape: Stage Peek's default Compact Dock has room for about one window card at a time. Settings › Controls › Window Switcher › Dock › Normal shows more cards. Tracked in https://github.com/raiseCatError/meowdisplay/issues/130.
+
+## Other behaviour observed during capture (3 November 2026)
 - A window already shown on one device is not offered in another device's Stage Peek.
 - Moving a window that sits on another device's extended display into a pane can take 10–15 seconds to appear.
-- When an iPad rotates to portrait, windows shared with another device keep their size and appear letterboxed.
 - Keyboard input goes to the Mac's key window; select the pane you want before typing.
 
 ## Links

@@ -22,21 +22,21 @@
   {
     "file": "Graphics/MeowDisplay-Feature-Stage-Peek.png",
     "category": "Graphics",
-    "bytes": 1300231,
-    "sha256": "910575df7734a36a1371526f8b5729718e7cc661f7802f6371fcd381737bfc0b",
+    "bytes": 1466070,
+    "sha256": "2539d16890786f6e3aa2bcf4bb2a74549f6dfaf2719f9735f84e2e40ba8d1487",
     "review": "approved",
     "width": 2400,
-    "height": 1500,
+    "height": 1560,
     "caption": "Feature Stage Peek"
   },
   {
     "file": "Graphics/MeowDisplay-Feature-Window-View.png",
     "category": "Graphics",
-    "bytes": 945345,
-    "sha256": "96404e634664a3f63527f8b6b2dd975b897851bc9094020f11e1d3b99e465e55",
+    "bytes": 940833,
+    "sha256": "7be626c2a862b1b89e03eb3a58e3646fc9414ec9604f275829ab2da0c18dcec5",
     "review": "approved",
     "width": 2400,
-    "height": 1500,
+    "height": 1560,
     "caption": "Feature Window View"
   },
   {
@@ -82,8 +82,8 @@
   {
     "file": "Graphics/MeowDisplay-Square-1080-Stage-Peek.png",
     "category": "Graphics",
-    "bytes": 241200,
-    "sha256": "e6dd7b2a0ede9b4053d657ef5893a19f8b4908c9f02e6c7077a16a8102990f5d",
+    "bytes": 544829,
+    "sha256": "178c1bedf477e80abc4470e6c3d2daf171d58e748a4216a675b20e9703b625ee",
     "review": "approved",
     "width": 1080,
     "height": 1080,
@@ -146,16 +146,16 @@
   {
     "file": "Information/MeowDisplay-Reviewer-Guide.md",
     "category": "Information",
-    "bytes": 4309,
-    "sha256": "95e232da62e9362044ba91dea78b5def4dd762359a5e41c9017cd9cb4adc9e1c",
+    "bytes": 4793,
+    "sha256": "f6eddfd5abcda26b36347d1685b0d8ad46058d316ff6d3dd78ffde3aaf93d202",
     "review": "approved",
     "caption": "Reviewer Guide"
   },
   {
     "file": "Information/MeowDisplay-Usage-and-Brand-Guidelines.md",
     "category": "Information",
-    "bytes": 2344,
-    "sha256": "f02bcc2b05fcf580016843faef2f8de0b8afa531c54a0b2a5ca236995762670f",
+    "bytes": 3384,
+    "sha256": "89e740d3cc835f7714cbff5d848cef603b5779a0f2facd10843136f2207263ca",
     "review": "approved",
     "caption": "Usage and Brand Guidelines"
   },
@@ -188,6 +188,16 @@
     "width": 2936,
     "height": 1450,
     "caption": "Mockup iPhone Control Tray"
+  },
+  {
+    "file": "Mockups/iPhone/MeowDisplay-Mockup-iPhone-Stage-Peek-Expanded.png",
+    "category": "Mockups",
+    "bytes": 2544390,
+    "sha256": "fbe061564c5acf9c1e3ef1b63a4715d2d47e9629acca70ffc5640eb38390cba8",
+    "review": "approved",
+    "width": 2936,
+    "height": 1450,
+    "caption": "Mockup iPhone Stage Peek Expanded"
   },
   {
     "file": "Mockups/iPhone/MeowDisplay-Mockup-iPhone-Stage-Peek.png",
