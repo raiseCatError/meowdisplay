@@ -161,17 +161,6 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(arrangement.placements.map(\.id), ["a"])
     }
 
-    // MARK: - Stage Peek Dock default (issue #130)
-
-    func testStagePeekDockDefaultsToNormalAndAStoredCompactIsKept() throws {
-        XCTAssertEqual(ReceiverControlPreferences().stagePeekDock, .normal)
-        var stored = ReceiverControlPreferences()
-        stored.stagePeekDock = .compact
-        let data = try JSONEncoder().encode(stored)
-        XCTAssertEqual(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).stagePeekDock, .compact,
-                       "an existing install's saved Compact is never overwritten")
-    }
-
     // MARK: - Control scale
 
     func testControlScaleIsBoundedWithAClearDefault() {
@@ -184,6 +173,17 @@ final class PadControlLayoutTests: XCTestCase {
         // Never an impractically small hit target.
         XCTAssertGreaterThanOrEqual(PadControlMetrics(scale: 0).item, 37)
         XCTAssertLessThanOrEqual(PadControlMetrics(scale: 99).item, 62)
+    }
+
+    // MARK: - Stage Peek Dock default (issue #130)
+
+    func testStagePeekDockDefaultsToNormalAndAStoredCompactIsKept() throws {
+        XCTAssertEqual(ReceiverControlPreferences().stagePeekDock, .normal)
+        var stored = ReceiverControlPreferences()
+        stored.stagePeekDock = .compact
+        let data = try JSONEncoder().encode(stored)
+        XCTAssertEqual(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).stagePeekDock, .compact,
+                       "an existing install's saved Compact is never overwritten")
     }
 
     // MARK: - Strip / Overlay geometry
