@@ -21,8 +21,8 @@ CATEGORIES = ["Screenshots", "Mockups", "Graphics", "Video", "Brand", "Informati
 ZIP_NAMES = {c: f"MeowDisplay-Press-Kit-{c}.zip" for c in CATEGORIES}
 ZIP_DATE = (2026, 11, 3, 0, 0, 0)
 # Over Cloudflare Pages' 25 MiB file limit, so it is published as a GitHub Release asset, not on the site.
-# Each content revision gets a new asset name on the press-kit-2.0 release; earlier assets stay published unchanged.
-COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r2.zip"
+# Each content revision gets a new asset name on the press-kit-2.0 release; superseded assets are removed.
+COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r3.zip"
 COMPLETE_URL = f"https://github.com/raiseCatError/meowdisplay/releases/download/press-kit-2.0/{COMPLETE_NAME}"
 
 COLLECTIONS = [
@@ -31,7 +31,7 @@ COLLECTIONS = [
      ["iPad-Window-View-Three-Panes", "iPhone-Window-View-Two-Panes", "iPad-Window-Picker", "iPhone-Window-Picker"]),
     ("stage-peek", "Stage Peek",
      "Swipe in from the edge to see running apps, open windows and the Mac's displays, then switch or add a pane.",
-     ["iPad-Stage-Peek", "iPhone-Stage-Peek", "iPhone-Stage-Peek-Expanded"]),
+     ["iPad-Stage-Peek", "iPhone-Stage-Peek"]),
     ("input", "Touch, keyboard and typing",
      "A control tray with modifier keys and shortcuts, three touch modes, a Text Bar and Zoom While Typing.",
      ["iPhone-Typing-Zoom-While-Typing", "iPhone-Control-Tray", "iPad-Settings-Input"]),
@@ -158,7 +158,7 @@ def page(items, zips):
 <p class="pk-actions"><a class="button" href="{COMPLETE_URL}">Download complete press kit</a><span class="pk-note">ZIP · {mb(total)} · {len(items)} assets plus README ({len(items) + 1} files) · hosted on GitHub<br>SHA-256 <code class="pk-sha">{hashlib.sha256((KIT / COMPLETE_NAME).read_bytes()).hexdigest()}</code></span></p>
 <nav class="pk-jump" aria-label="Press kit sections"><a href="#features">Features</a><a href="#screenshots">Screenshots</a><a href="#mockups">Device mockups</a><a href="#video">B-roll</a><a href="#graphics">Graphics</a><a href="#text">Text &amp; facts</a><a href="#reviewers">Reviewer's guide</a><a href="#brand">Brand</a><a href="#downloads">Downloads</a><a href="#contact">Contact</a></nav>
 </div>
-<div class="pk-hero-art wrap">{figure(by["Hero-Transparent"], 2000, "pk-plain", "MeowDisplay on a MacBook Air (M2) and an iPhone 14 Pro Max: the Mac app with two devices connected, and Mac windows side by side on the iPhone.", eager=True)}</div></section>''']
+<div class="pk-hero-art wrap">{figure(by["Hero-Transparent"], 2000, "pk-plain", "The MeowDisplay Mac app with two devices connected, and Mac windows side by side on an iPhone 14 Pro Max.", eager=True)}</div></section>''']
 
     out.append('''<section class="section pk-overview"><div class="wrap">
 <p class="eyebrow">Overview</p><h2>Your Mac, on the screens you already own.</h2>
@@ -190,14 +190,14 @@ def page(items, zips):
     grid = "".join(f'<div class="pk-cell" data-platform="{i["file"].split("/")[1]}">{figure(i, 900)}</div>' for i in shots)
     counts = {p: sum(1 for i in shots if i["file"].split("/")[1] == p) for p in ["iPhone", "iPad", "Mac"]}
     out.append(f'''<section class="section" id="screenshots"><div class="wrap"><p class="eyebrow">Screenshots</p><h2>Original screenshots.</h2>
-<p class="pk-sub">Native-resolution, unedited captures of the released 2.0.0 apps on a physical iPhone 14 Pro Max, iPad (9th generation) and MacBook Air (M2), with demonstration content only. Two window-picker images are cropped.</p>
+<p class="pk-sub">Native-resolution captures of the released 2.0.0 apps on a physical iPhone 14 Pro Max, iPad (9th generation) and MacBook Air (M2), with demonstration content only. The only edits: two window-picker images are cropped, and the external-display thumbnail in the two Stage Peek images is blurred to remove a third-party wallpaper.</p>
 <div class="pk-filter" role="group" aria-label="Filter screenshots by platform"><button type="button" aria-pressed="true" data-filter="all">All {len(shots)}</button><button type="button" aria-pressed="false" data-filter="iPhone">iPhone {counts["iPhone"]}</button><button type="button" aria-pressed="false" data-filter="iPad">iPad {counts["iPad"]}</button><button type="button" aria-pressed="false" data-filter="Mac">Mac {counts["Mac"]}</button></div>
 <div class="pk-grid">{grid}</div>
 <p class="pk-dl"><a href="/press-kit/{ZIP_NAMES["Screenshots"]}" download>Download all screenshots · ZIP · {mb(zips["Screenshots"])}</a></p></div></section>''')
 
     mocks = "".join(figure(i, 1400, "pk-plain") for i in cat("Mockups"))
     out.append(f'''<section class="section wash" id="mockups"><div class="wrap"><p class="eyebrow">Device mockups</p><h2>Real screens, real hardware.</h2>
-<p class="pk-sub">Transparent PNGs: the screenshots above composited into Apple's official iPhone 14 Pro Max and MacBook Air 13-inch (M2) product frames. The plain MacBook shows the desktop with no windows. Apple no longer publishes an iPad (9th generation) frame, so iPad images are supplied as screenshots.</p>
+<p class="pk-sub">Transparent PNGs: iPhone screenshots composited into Apple's official iPhone 14 Pro Max frame. The Mac app is distributed outside the App Store, so it is shown as an unframed window rather than in a MacBook frame. Apple no longer publishes an iPad (9th generation) frame, so iPad images are supplied as screenshots.</p>
 <div class="pk-grid pk-grid-2">{mocks}</div>
 <p class="pk-dl"><a href="/press-kit/{ZIP_NAMES["Mockups"]}" download>Download all mockups · ZIP · {mb(zips["Mockups"])}</a></p></div></section>''')
 

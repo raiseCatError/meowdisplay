@@ -1,8 +1,9 @@
 MeowDisplay 2.0 Press Kit
 https://meowdisplay.app/press
 
-Screenshots/   Unedited captures of the released 2.0.0 apps (iPhone, iPad, Mac)
-Mockups/       The same screenshots in Apple's iPhone 14 Pro Max and MacBook Air (M2) frames
+Screenshots/   Captures of the released 2.0.0 apps (iPhone, iPad, Mac); edits listed
+               in Information/MeowDisplay-Asset-Notes.md
+Mockups/       iPhone screenshots in Apple's iPhone 14 Pro Max frame
 Graphics/      Promotional compositions (hero, social, square, widescreen, story, feature)
 Video/         B-roll screen recordings, native and 1080p, with posters
 Brand/         App icon and logo
