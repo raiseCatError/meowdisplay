@@ -21,7 +21,10 @@ jobs:
   # Classify PR files using the synthetic merge commit's first parent (the base
   # branch). Keep the test jobs present, since the dev/main rulesets require
   # their exact check names; a skipped job reports success for branch protection.
-  # Pushes still run full CI. PRs that only change documentation, press-kit
+  # A push to dev that adds exactly one commit (a PR's merge or squash commit)
+  # is classified the same way against that commit's parent, so merging a
+  # docs-only PR doesn't rebuild the apps; every other push (main, release/**,
+  # several commits, a force-push) runs full CI. PRs that only change documentation, press-kit
   # media or press-kit tooling skip the Mac, iPhone Duo, Android and
   # release-tooling jobs (press-kit changes get the cheap press-kit job); a
   # pr-title.yml-only PR runs release-tooling but skips app builds. Everything
@@ -44,6 +47,8 @@ jobs:
       - name: Classify the pull request's files
         id: classify
         shell: bash
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           full_ci() {
@@ -54,16 +59,22 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             echo "Full CI: $1"
           }
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            full_ci "not a pull request"
-            exit 0
-          fi
           # If the PR merge ref/parent isn't available, run all tests.
           if ! git rev-parse 'HEAD^1' >/dev/null 2>&1; then
             full_ci "no base commit"
             exit 0
           fi
-          # The base branch's classifier, never the PR's own copy.
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/dev" ]]; then
+            # Only when the push added exactly HEAD on top of what dev was.
+            if [[ "$PUSH_BEFORE" != "$(git rev-parse 'HEAD^1')" ]]; then
+              full_ci "the push to dev is not a single commit on its previous head"
+              exit 0
+            fi
+          elif [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            full_ci "not a pull request or a single-commit push to dev"
+            exit 0
+          fi
+          # The base branch's classifier (dev's before the push), never the change's own copy.
           classifier="$RUNNER_TEMP/classify_pr_paths.py"
           if ! git show 'HEAD^1:scripts/ci/classify_pr_paths.py' > "$classifier" 2>/dev/null; then
             full_ci "the base branch has no classifier"
@@ -102,7 +113,7 @@ jobs:
   # Press-kit media and tooling: build.py verifies every file against the
   # reviewed hashes in tools/press-kit/approved-assets.json and rebuilds the
   # page, previews and ZIPs; README and preview images must decode. Not a
-  # required check; runs for press-kit PRs, pushes and whenever classification failed.
+  # required check; runs for press-kit changes, unclassified pushes and whenever classification failed.
   press-kit:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.press_kit == 'true') }}
