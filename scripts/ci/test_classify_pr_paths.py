@@ -556,6 +556,14 @@ def project_targets(text):
     return targets, outside
 
 
+def probes(path):
+    """Paths whose change could change what reading `path` sees: the path itself
+    and, in case it is a directory that is read whole, a document and a source
+    file inside it."""
+    path = path.rstrip("/")
+    return [path] if path in TOP_FILES else [path, f"{path}/guard.md", f"{path}/guard.swift"]
+
+
 class DependencyGraph(unittest.TestCase):
     def test_every_xcode_target_is_mapped_to_its_jobs(self):
         targets, _ = project_targets((ROOT / "project.yml").read_text(encoding="utf-8"))
@@ -588,11 +596,12 @@ class DependencyGraph(unittest.TestCase):
         for name in glob.glob(str(ROOT / "AndroidReceiver/**/*"), recursive=True):
             if name.endswith((".kts", ".gradle", ".kt", ".properties")) and os.path.isfile(name):
                 text = Path(name).read_text(encoding="utf-8", errors="replace")
-                refs |= set(re.findall(r"\"\.\./([\w.-]+)", text))
-        self.assertIn("fixtures", refs)  # the check can see the shared vectors
-        for root in refs:
-            with self.subTest(root=root):
-                self.assertIn("android", jobs([f"{root}/guard"]))
+                refs |= set(re.findall(r"\"\.\./([^\"$]+)\"", text))
+        self.assertIn("fixtures/receiver-protocol", refs)  # the check can see the shared vectors
+        for ref in refs:
+            with self.subTest(ref=ref):
+                for probe in probes(ref):
+                    self.assertIn("android", jobs([probe]), probe)
 
     def test_every_repository_path_the_macos_tests_read_selects_mac(self):
         literal = re.compile(r"\"((?:%s)(?:/[^\"\\\s]*)?)\"" % "|".join(map(re.escape, TOP_DIRS + TOP_FILES)))
@@ -608,9 +617,9 @@ class DependencyGraph(unittest.TestCase):
                     if bare_dir and not re.search(r"repoRoot|root\.appendingPathComponent|for directory in", line):
                         continue  # a word like "Mac" used as data, not a path
                     seen.add(value)
-                    probe = value if value in TOP_FILES else value.split("/")[0] + "/guard.swift"
                     with self.subTest(path=value, file=os.path.basename(name)):
-                        self.assertIn("mac", jobs([probe]))
+                        for probe in probes(value):
+                            self.assertIn("mac", jobs([probe]), probe)
         self.assertTrue({"project.yml", "iOS/PrivacyInfo.xcprivacy"} <= seen, "the scan should find known reads")
 
 
