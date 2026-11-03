@@ -13,9 +13,12 @@ permissions:
   contents: read
 
 # A superseded run tells us nothing, so drop in-flight runs for the same ref.
+# Except pushes to dev: each merge is validated as its own commit (a group per
+# SHA, never cancelled). Otherwise a later docs-only merge, which skips the app
+# jobs, would cancel the only full run of the code merged just before it.
 concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && format('tests-dev-{0}', github.sha) || format('tests-{0}', github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev') }}
 
 jobs:
   # Classify PR files using the synthetic merge commit's first parent (the base
