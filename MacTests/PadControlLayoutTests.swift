@@ -161,6 +161,54 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(arrangement.placements.map(\.id), ["a"])
     }
 
+    // MARK: - Canvas publication (issue #129)
+
+    private let portraitPad = CGSize(width: 810, height: 1080)
+    private let landscapePad = CGSize(width: 1080, height: 810)
+
+    func testACanvasPublishedForTheCurrentContainerIsUsed() {
+        let strip = CGRect(x: 0, y: 0, width: 1000, height: 810)
+        let published = PadCanvasPublication(canvas: strip, containerSize: landscapePad)
+        XCTAssertEqual(PadCanvasPublication.resolved(published, in: landscapePad), strip)
+    }
+
+    func testAPortraitCanvasIsNotReusedAfterRotatingToLandscape() {
+        // The reported shape: Custom published the full portrait container,
+        // then the iPad rotated before anything republished.
+        let portraitCanvas = CGRect(origin: .zero, size: portraitPad)
+        let stale = PadCanvasPublication(canvas: portraitCanvas, containerSize: portraitPad)
+        let resolved = PadCanvasPublication.resolved(stale, in: landscapePad)
+        // The old rule (stale ∩ new screen) gave an 810 × 810 square.
+        XCTAssertEqual(portraitCanvas.intersection(CGRect(origin: .zero, size: landscapePad)).size,
+                       CGSize(width: 810, height: 810))
+        XCTAssertEqual(resolved, CGRect(origin: .zero, size: landscapePad))
+    }
+
+    func testRotatingThereAndBackUsesEachOrientationsOwnCanvas() {
+        let landscapeStrip = CGRect(x: 92, y: 0, width: 988, height: 810)
+        let portraitStrip = CGRect(x: 0, y: 0, width: 810, height: 988)
+        var publication = PadCanvasPublication(canvas: portraitStrip, containerSize: portraitPad)
+        XCTAssertEqual(PadCanvasPublication.resolved(publication, in: portraitPad), portraitStrip)
+        // Rotated, not yet republished: never the portrait rect.
+        XCTAssertEqual(PadCanvasPublication.resolved(publication, in: landscapePad),
+                       CGRect(origin: .zero, size: landscapePad))
+        publication = PadCanvasPublication(canvas: landscapeStrip, containerSize: landscapePad)
+        XCTAssertEqual(PadCanvasPublication.resolved(publication, in: landscapePad), landscapeStrip)
+        // And back again.
+        XCTAssertEqual(PadCanvasPublication.resolved(publication, in: portraitPad),
+                       CGRect(origin: .zero, size: portraitPad))
+    }
+
+    func testMissingOrEmptyCanvasFallsBackToTheWholeContainer() {
+        let full = CGRect(origin: .zero, size: landscapePad)
+        XCTAssertEqual(PadCanvasPublication.resolved(nil, in: landscapePad), full)
+        let empty = PadCanvasPublication(canvas: .zero, containerSize: landscapePad)
+        XCTAssertEqual(PadCanvasPublication.resolved(empty, in: landscapePad), full)
+        let outside = PadCanvasPublication(canvas: CGRect(x: 2000, y: 0, width: 100, height: 100),
+                                           containerSize: landscapePad)
+        XCTAssertEqual(PadCanvasPublication.resolved(outside, in: landscapePad), full)
+    }
+
     // MARK: - Control scale
 
     func testControlScaleIsBoundedWithAClearDefault() {

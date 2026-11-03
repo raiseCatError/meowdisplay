@@ -55,7 +55,7 @@ struct ReceiverScreen: View {
     @State private var occupiedControlFrames: [CGRect] = []
     /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
     /// `nil` means the whole screen.
-    @State private var padCanvas: CGRect?
+    @State private var padCanvas: PadCanvasPublication?
     /// The on-surface Request Control affordance — see `ReceiverInputPrompt`.
     @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
@@ -161,9 +161,8 @@ struct ReceiverScreen: View {
     /// The Mac canvas in screen coordinates: the iPad Strip's remaining
     /// area, or the whole screen.
     private func canvas(in size: CGSize) -> CGRect {
-        let full = CGRect(origin: .zero, size: size)
-        guard controlStore.isPad, let padCanvas, padCanvas.width > 0, padCanvas.height > 0 else { return full }
-        return padCanvas.intersection(full)
+        guard controlStore.isPad else { return CGRect(origin: .zero, size: size) }
+        return PadCanvasPublication.resolved(padCanvas, in: size)
     }
 
     /// Everything outside AVKit that decides whether Picture in Picture may

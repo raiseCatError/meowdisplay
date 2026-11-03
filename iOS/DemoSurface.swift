@@ -17,7 +17,7 @@ struct DemoReceiverScreen: View {
     let haptics: ReceiverHaptics
     let onExit: () -> Void
 
-    @State private var padCanvas: CGRect?
+    @State private var padCanvas: PadCanvasPublication?
     @State private var keyboardRect: CGRect?
     @State private var hint: DemoHint?
     @State private var hintGeneration = 0
@@ -174,9 +174,8 @@ struct DemoReceiverScreen: View {
     }
 
     private func canvas(in size: CGSize) -> CGRect {
-        let full = CGRect(origin: .zero, size: size)
-        guard store.isPad, let padCanvas, padCanvas.width > 0, padCanvas.height > 0 else { return full }
-        return padCanvas.intersection(full)
+        guard store.isPad else { return CGRect(origin: .zero, size: size) }
+        return PadCanvasPublication.resolved(padCanvas, in: size)
     }
 
     /// The surface ignores the safe area, so read the window's real insets
