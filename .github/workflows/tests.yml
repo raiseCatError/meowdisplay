@@ -88,12 +88,16 @@ jobs:
             full_ci "the base branch has no classifier"
             exit 0
           fi
+          if ! grep -q -- '--github' "$classifier"; then
+            full_ci "the base branch's classifier predates per-job selection"
+            exit 0
+          fi
           # It writes its selection only once it has one; any failure is full CI.
           selection="$RUNNER_TEMP/selection"
           if python3 -I "$classifier" --github "$selection"; then
             cat "$selection" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::the base branch's classifier failed (or predates --github): running full CI"
+            echo "::warning::the base branch's classifier failed: running full CI"
             full_ci "the classifier failed"
           fi
 
