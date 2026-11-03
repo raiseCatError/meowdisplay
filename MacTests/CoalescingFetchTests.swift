@@ -220,3 +220,5 @@ final class CoalescingFetchTests: XCTestCase {
         XCTAssertEqual(reported.withLock { $0.count }, 1)
     }
 }
+
+// Temporary: live check of PR #147 job selection. Never merged.
