@@ -9,7 +9,7 @@ MeowDisplay is a free, open-source app that turns an iPhone or iPad into a displ
 MeowDisplay turns an iPhone or iPad into a second screen for a Mac. Mirror the desktop, extend it, or pick individual Mac windows and arrange them side by side. Touch controls, a keyboard with a Text Bar and Stage Peek window switching make it practical on a small screen. It is free and open source.
 
 ## About 150 words
-MeowDisplay is a free, open-source app that brings your Mac to an iPhone or iPad. Mirror an existing display, extend the desktop onto a new virtual display, or use Window view to show individual Mac windows rather than a shrunken copy of the whole screen. On iPhone, two windows sit side by side; on iPad, three or more panes can be arranged together.
+MeowDisplay is a free, open-source app that brings your Mac to an iPhone or iPad. Mirror an existing display, extend the desktop onto a new virtual display, or use Window view to show individual Mac windows rather than a shrunken copy of the whole screen. Panes can be arranged in splits and grids of up to nine windows on iPhone and iPad; on a phone, two or three larger panes are usually easiest to read.
 
 Stage Peek lists open windows and running apps so you can switch, search or add a window to a pane. Touch controls include Direct Touch, Natural Touch and Trackpad modes, a control tray with modifier keys and shortcuts, and a keyboard with a Text Bar. Zoom While Typing keeps the line you are editing large.
 
@@ -32,7 +32,7 @@ MeowDisplay is free, with no subscription, and its source is published under GPL
 
 ## Key capabilities
 1. Mirror, Extend or Window view, chosen per device.
-2. Window view panes: two windows on iPhone, three or more on iPad.
+2. Window view panes: splits and grids of up to nine windows on iPhone and iPad.
 3. Stage Peek for finding, searching and switching Mac windows.
 4. Touch-first control: Direct Touch, Natural Touch and Trackpad, a control tray, keyboard, Text Bar and Zoom While Typing.
 5. USB, local Wi-Fi and private-network Remote Access, with pairing, TLS 1.3 and per-session control permission.

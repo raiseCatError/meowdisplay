@@ -22,12 +22,12 @@ ZIP_NAMES = {c: f"MeowDisplay-Press-Kit-{c}.zip" for c in CATEGORIES}
 ZIP_DATE = (2026, 11, 3, 0, 0, 0)
 # Over Cloudflare Pages' 25 MiB file limit, so it is published as a GitHub Release asset, not on the site.
 # Each content revision gets a new asset name on the press-kit-2.0 release; superseded assets are removed.
-COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r3.zip"
+COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r4.zip"
 COMPLETE_URL = f"https://github.com/raiseCatError/meowdisplay/releases/download/press-kit-2.0/{COMPLETE_NAME}"
 
 COLLECTIONS = [
     ("window-view", "Window view and layouts",
-     "Show individual Mac windows instead of a whole desktop. Two panes fit on iPhone; iPad holds three or more.",
+     "Show individual Mac windows instead of a whole desktop, in splits or grids of up to nine panes on iPhone and iPad. Fewer, larger panes read best on a phone.",
      ["iPad-Window-View-Three-Panes", "iPhone-Window-View-Two-Panes", "iPad-Window-Picker", "iPhone-Window-Picker"]),
     ("stage-peek", "Stage Peek",
      "Swipe in from the edge to see running apps, open windows and the Mac's displays, then switch or add a pane.",
@@ -239,8 +239,9 @@ def page(items, zips):
 
     icon, logo = by["AppIcon-1024"], by["Logo-512"]
     out.append(f'''<section class="section" id="brand"><div class="wrap"><p class="eyebrow">Brand</p><h2>Icon and logo.</h2>
-<div class="pk-brand"><figure class="pk-swatch pk-light"><img src="{url(icon)}" width="160" height="160" alt="MeowDisplay app icon on a light background" loading="lazy"><figcaption>App icon · 1024 × 1024 PNG · <a href="{url(icon)}" download>Download</a></figcaption></figure>
-<figure class="pk-swatch pk-dark"><img src="{url(logo)}" width="160" height="160" alt="MeowDisplay logo on a dark background" loading="lazy"><figcaption>Logo · 512 × 512 transparent PNG · <a href="{url(logo)}" download>Download</a></figcaption></figure></div>
+<p class="pk-sub">Two official files. Use the app icon wherever you would show an app, and the rounded logo where the mark needs to stand on its own, on light or dark backgrounds.</p>
+<div class="pk-brand"><figure class="pk-swatch pk-light"><img src="{url(icon)}" width="160" height="160" alt="MeowDisplay app icon on a light background" loading="lazy"><figcaption><strong>App icon</strong><span>The square master, as submitted to the App Store; platforms apply their own corner mask (shown masked here).</span>1024 × 1024 PNG · <a href="{url(icon)}" download>Download</a></figcaption></figure>
+<figure class="pk-swatch pk-dark"><img src="{url(logo)}" width="160" height="160" alt="MeowDisplay logo on a dark background" loading="lazy"><figcaption><strong>Logo</strong><span>The rounded mark with a transparent background, ready to place on any colour.</span>512 × 512 transparent PNG · <a href="{url(logo)}" download>Download</a></figcaption></figure></div>
 <ul class="pk-rules"><li>Write <strong>MeowDisplay</strong>: one word, capital M and D.</li><li>Use the artwork as supplied; don't redraw, recolour, crop or stretch it.</li><li>Both files work on light and dark backgrounds.</li><li>Don't alter app screens or show features MeowDisplay doesn't have. Describe Android as closed testing.</li></ul>
 <p class="pk-dl"><a href="/press-kit/Information/MeowDisplay-Usage-and-Brand-Guidelines.md" download>Usage permission, brand and trademark notes</a> · <a href="/press-kit/Information/MeowDisplay-Asset-Notes.md" download>Asset provenance</a></p></div></section>''')
 
@@ -289,7 +290,7 @@ STYLE = """
 .pk-copies{display:grid;gap:20px;margin:24px 0 40px}.pk-copy{border:1px solid var(--line);border-radius:14px;padding:20px 22px}.pk-copy-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .pk-copy h3{margin:0;font-size:16px}.pk-copy p{line-height:1.6;margin:10px 0 0}.pk-copy-btn{font:inherit;font-size:13px;border:1px solid var(--line);background:none;color:var(--blue);border-radius:999px;padding:4px 12px;cursor:pointer}
 .pk-two{display:grid;grid-template-columns:1fr 1fr;gap:40px}.pk-two li,.pk-two p{line-height:1.6}.pk-two h3{margin:24px 0 8px}.pk-two h3:first-child{margin-top:0}
-.pk-brand{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:24px 0}.pk-swatch{margin:0;border-radius:16px;padding:48px 24px 24px;text-align:center}.pk-swatch img{width:160px;height:160px}
+.pk-brand{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:24px 0}.pk-swatch{margin:0;border-radius:16px;padding:48px 24px 24px;text-align:center}.pk-swatch img{display:block;margin:0 auto;width:160px;height:160px}.pk-light img{border-radius:22.37%}.pk-swatch figcaption strong{display:block;font-size:17px;margin-bottom:6px}.pk-swatch figcaption span{display:block;max-width:34ch;margin:0 auto 10px;opacity:.75}
 .pk-swatch figcaption{margin-top:24px;font-size:14px}.pk-light{background:#f5f5f7;color:#1d1d1f}.pk-dark{background:#1c1c1e;color:#f5f5f7}.pk-dark a{color:#4da3ff}.pk-light a{color:#0066cc}
 .pk-rules{line-height:1.7;padding-left:1.2em}
 .pk-table{width:100%;border-collapse:collapse;font-size:15px}.pk-table th,.pk-table td{text-align:left;padding:14px 10px;border-bottom:1px solid var(--line)}.pk-table thead th{font-size:13px;color:var(--muted);font-weight:600}.pk-total th,.pk-total td{font-weight:600}
