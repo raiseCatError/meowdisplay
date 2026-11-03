@@ -35,8 +35,10 @@ jobs:
   # ios-duo; iOS UI tests → ios-duo; Android → android; Shared/ (protocol,
   # pairing, encryption) → every app job; fixtures/ → mac and android;
   # project.yml and .xcode-version → every Apple job; release tooling →
-  # release-tooling only; documentation and press-kit media → nothing heavy.
-  # Everything else runs full CI: unknown paths, tests.yml and scripts/ci/.
+  # release-tooling, which (cheap, and it checks these rules) also runs for
+  # everything but documentation and media; documentation and press-kit media
+  # → nothing heavy. Everything else runs full CI: unknown paths, tests.yml
+  # and scripts/ci/.
   # The rules, and tests that check them against project.yml, the Gradle build
   # and the macOS tests' file reads, are scripts/ci/classify_pr_paths.py and
   # test_classify_pr_paths.py; the base branch's copy decides, so a PR can't
