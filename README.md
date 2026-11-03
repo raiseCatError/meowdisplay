@@ -22,7 +22,7 @@ trackpad-style input, gestures and a keyboard.
 
 <br>
 
-<img src="assets/readme/website/social-preview-v3.jpg" alt="Latest MeowDisplay website preview showing Mac settings beside iPhone and iPad receivers" width="760">
+<img src="public/og.png" alt="MeowDisplay. Mac everywhere. On whatever display. Mirror, Extend and Window view: the Mac app Overview beside an iPad showing Mac windows in Window view and an iPhone with its touch controls." width="760">
 
 </div>
 
