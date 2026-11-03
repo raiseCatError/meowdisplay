@@ -3,7 +3,6 @@ import { AnimatePresence, motion } from "motion/react"
 import TextRotate from "./components/TextRotate"
 
 const HERO_WORDS = [
-  "partner's iPad",
   "5K iMac",
   "spare MacBook",
   "iPhone",
@@ -236,7 +235,7 @@ export default function App() {
           <p className="eyebrow">Features</p>
           <h2>A true extended display, the way it should be.</h2>
           <div className="fgrid">
-            <div className="fcell"><span className="n">001</span><h3>No account, ever</h3><p>No sign-up, no email, no login. And unlike Apple Sidecar — which only works between devices on the <em>same</em> Apple ID — MeowDisplay pairs across different Apple IDs, so you can use a partner's or friend's iPad. Download both apps and go.</p></div>
+            <div className="fcell"><span className="n">001</span><h3>No account, ever</h3><p>No sign-up, no email, no login. And unlike Apple Sidecar — which only works between devices on the <em>same</em> Apple ID — MeowDisplay pairs across different Apple IDs, so the iPad doesn't need to be signed in to yours. Download both apps and go.</p></div>
             <div className="fcell"><span className="n">002</span><h3>Low-latency pipeline</h3><p>Up to 60 FPS over USB. Hardware H.264 (VideoToolbox real-time mode), TCP_NODELAY, and frame-dropping backpressure with instant keyframe recovery keep it responsive.</p></div>
             <div className="fcell"><span className="n">003</span><h3>Two, even three screens</h3><p>You're not limited to one device. Run several iPads and iPhones at once, each as its own extended display — up to three has been tested, and you can freely mix iPads and iPhones. Arrange them all in System Settings like real monitors.</p></div>
             <div className="fcell"><span className="n">004</span><h3>Retina sharp</h3><p>Native Retina resolution — the virtual display matches your device panel pixel-for-pixel at HiDPI (@2x), so text looks exactly like it should.</p></div>
