@@ -21,69 +21,64 @@ jobs:
   # Classify PR files using the synthetic merge commit's first parent (the base
   # branch). Keep the test jobs present, since the dev/main rulesets require
   # their exact check names; a skipped job reports success for branch protection.
-  # Pushes still run full CI. Doc-only PRs skip all expensive jobs; a
+  # Pushes still run full CI. PRs that only change documentation, press-kit
+  # media or press-kit tooling skip the Mac, iPhone Duo, Android and
+  # release-tooling jobs (press-kit changes get the cheap press-kit job); a
   # pr-title.yml-only PR runs release-tooling but skips app builds. Everything
-  # else (mixed PRs, and any tests.yml change, which defines these jobs) runs
-  # full CI. Fail closed: the jobs below also run whenever this job didn't
-  # succeed, so a broken classifier never turns into skipped (= passing) checks.
+  # else runs full CI: mixed PRs, unknown paths and any workflow, script or
+  # classifier change. The rules and their tests are scripts/ci/classify_pr_paths.py
+  # and test_classify_pr_paths.py; the base branch's copy decides, so a PR can't
+  # reclassify itself. Fail closed: the jobs below also run whenever this job
+  # didn't succeed, so a broken classifier never turns into skipped (= passing) checks.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
+      docs_media_only: ${{ steps.classify.outputs.docs_media_only }}
       workflow_only: ${{ steps.classify.outputs.workflow_only }}
+      press_kit: ${{ steps.classify.outputs.press_kit }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 2
-      - name: Determine documentation-only PR
+      - name: Classify the pull request's files
         id: classify
         shell: bash
         run: |
           set -euo pipefail
+          full_ci() {
+            {
+              echo "docs_media_only=false"
+              echo "workflow_only=false"
+              echo "press_kit=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "Full CI: $1"
+          }
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
+            full_ci "not a pull request"
             exit 0
           fi
           # If the PR merge ref/parent isn't available, run all tests.
           if ! git rev-parse 'HEAD^1' >/dev/null 2>&1; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
+            full_ci "no base commit"
             exit 0
           fi
-          git diff --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-pr-paths"
-          python3 - "$RUNNER_TEMP/changed-pr-paths" "$GITHUB_OUTPUT" <<'PY'
-          import pathlib
-          import sys
-
-          raw = pathlib.Path(sys.argv[1]).read_bytes()
-          paths = [part.decode("utf-8") for part in raw.split(b"\0") if part]
-          # Only narrow, explicit file sets may skip expensive jobs.
-          docs_only = bool(paths) and all(
-              ("/" not in path and path.endswith(".md"))
-              or (path.startswith("docs/") and path.endswith(".md"))
-              for path in paths
-          )
-          # MacTests/AppStoreTests scans the top-level docs for the upstream
-          # listing ID (built from a number there too, so this file never holds
-          # the literal): a doc that contains it must get the Mac job.
-          upstream_id = str(6_780_264_891)
-          if docs_only and any(upstream_id in pathlib.Path(p).read_text(encoding="utf-8", errors="replace")
-                               for p in paths if pathlib.Path(p).is_file()):
-              docs_only = False
-          workflow_only = bool(paths) and all(path == ".github/workflows/pr-title.yml" for path in paths)
-          with open(sys.argv[2], "a", encoding="utf-8") as out:
-              out.write(f"docs_only={str(docs_only).lower()}\n")
-              out.write(f"workflow_only={str(workflow_only).lower()}\n")
-          print(f"Documentation-only PR: {docs_only}; workflow-only PR: {workflow_only}; {len(paths)} files")
-          PY
+          # The base branch's classifier, never the PR's own copy.
+          classifier="$RUNNER_TEMP/classify_pr_paths.py"
+          if ! git show 'HEAD^1:scripts/ci/classify_pr_paths.py' > "$classifier" 2>/dev/null; then
+            full_ci "the base branch has no classifier"
+            exit 0
+          fi
+          # --no-renames lists both sides of a rename, so code can't leave as a doc.
+          git diff --no-renames --name-only -z 'HEAD^1' HEAD > "$RUNNER_TEMP/changed-pr-paths"
+          git diff --no-renames -U0 'HEAD^1' HEAD -- .gitignore > "$RUNNER_TEMP/gitignore.diff"
+          python3 -I "$classifier" "$RUNNER_TEMP/changed-pr-paths" "$RUNNER_TEMP/gitignore.diff" "$GITHUB_OUTPUT"
 
   # Fast and first: the release and repository workflows stay fail-closed,
   # and the release library behaves (scripts/release/test).
   release-tooling:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_media_only != 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -96,16 +91,50 @@ jobs:
         run: ruby scripts/release/check-release-workflows.rb
       - name: Release library, CLI, state branch and reference sync
         run: ruby -Iscripts/release/lib -e 'Dir["scripts/release/test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
+      - name: Pull request classifier
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Shell scripts
         run: |
           set -euo pipefail
           git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 -n1 bash -n
           git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 shellcheck -S warning
 
+  # Press-kit media and tooling: build.py verifies every file against the
+  # reviewed hashes in tools/press-kit/approved-assets.json and rebuilds the
+  # page, previews and ZIPs; README and preview images must decode. Not a
+  # required check; runs for press-kit PRs, pushes and whenever classification failed.
+  press-kit:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.press_kit == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Pillow
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet 'pillow==12.3.0'
+      - name: Build and verify the press kit
+        if: hashFiles('tools/press-kit/build.py') != ''
+        run: '"$RUNNER_TEMP/venv/bin/python" tools/press-kit/build.py'
+      - name: Images decode
+        run: |
+          set -euo pipefail
+          git ls-files -z assets/press-kit-preview.png 'assets/readme/*.png' 'assets/readme/*.jpg' 'assets/readme/*.jpeg' 'assets/readme/*.webp' 'assets/readme/*.gif' \
+            | xargs -0 -r "$RUNNER_TEMP/venv/bin/python" -c '
+          import sys
+          from PIL import Image
+          for path in sys.argv[1:]:
+              with Image.open(path) as image:
+                  image.load()
+          print(f"{len(sys.argv) - 1} images decode")'
+
   # Runs on every branch; does real work only where the Android app exists.
   android:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_media_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -138,7 +167,7 @@ jobs:
 
   mac:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_media_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
     runs-on: xcode-27
     # A hung test must fail the job, not hold a runner for GitHub's six-hour default.
     timeout-minutes: 60
@@ -244,7 +273,7 @@ jobs:
   # were made for. Not a required check yet: the first runs establish it.
   ios-duo:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_media_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
