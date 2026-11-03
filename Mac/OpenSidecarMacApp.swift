@@ -2781,7 +2781,9 @@ final class SenderController: ObservableObject {
                                customFPS: effectiveCustomFPS,
                                extendShapePreference: extendShapeDefault,
                                streamingPriority: effectiveStreamingPriority,
-                               codecPreference: effectiveCodecPreference)
+                               codecPreference: effectiveCodecPreference,
+                               streamingMode: streamingMode,
+                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let remoteRoute: Bool
         switch target {
@@ -2868,16 +2870,41 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestVideoEnabled(requested)
         }
+        // A receiver's request changes the Mac-wide setting only when it can
+        // take effect and differs from what's in use; otherwise nothing is
+        // stored and nobody's stream restarts, and the asking device gets the
+        // current state back (issue #142).
         sender.onStreamingProfileRequest = { [weak self, weak session] profile, custom in
             guard let self, let session, self.owns(session) else { return }
-            self.streamingProfile = profile
-            self.customFrameRate = custom
-            self.restartAll()
+            let outcome = StreamingModePolicy.remoteProfileRequest(
+                mode: self.streamingMode,
+                stored: StreamingProfileSetting(profile: self.streamingProfile, customFrameRate: self.customFrameRate),
+                requestedProfile: profile, requestedCustomFrameRate: custom)
+            switch outcome {
+            case .apply(let setting):
+                Log.info("streamingSettings: profile request applied profile=\(setting.profile.rawValue) "
+                    + "customFrameRate=\(setting.customFrameRate.rawValue)")
+                self.streamingProfile = setting.profile
+                self.customFrameRate = setting.customFrameRate
+                self.restartAll()
+            case .rejectedAutomatic, .unchanged:
+                Log.info("streamingSettings: profile request not applied outcome=\(outcome) mode=\(self.streamingMode.rawValue)")
+                session.sender.resendStreamingSettingsState()
+            }
         }
         sender.onStreamingPriorityRequest = { [weak self, weak session] priority in
             guard let self, let session, self.owns(session) else { return }
-            self.streamingPriority = priority
-            self.restartAll()
+            let outcome = StreamingModePolicy.remotePriorityRequest(
+                mode: self.streamingMode, stored: self.streamingPriority, requested: priority)
+            switch outcome {
+            case .apply(let priority):
+                Log.info("streamingSettings: priority request applied priority=\(priority.rawValue)")
+                self.streamingPriority = priority
+                self.restartAll()
+            case .rejectedAutomatic, .unchanged:
+                Log.info("streamingSettings: priority request not applied outcome=\(outcome) mode=\(self.streamingMode.rawValue)")
+                session.sender.resendStreamingSettingsState()
+            }
         }
         sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in
             guard let self, let session, self.owns(session) else { return }

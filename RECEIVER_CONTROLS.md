@@ -171,6 +171,12 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
 
+Streaming Profile and Priority are the Mac's settings and apply to every
+connected device. While the Mac's Streaming Mode is **Automatic**, iPhone,
+iPad and Mac Receiver show them read-only with a note to switch the Mac to
+Custom; Android still shows the pickers, and the Mac leaves a request it
+can't apply alone (no restart).
+
 ## Audio and connection
 
 | Control | iPhone | iPad | Android | Mac Receiver |

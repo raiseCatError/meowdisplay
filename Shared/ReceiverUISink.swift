@@ -179,8 +179,8 @@ final class ReceiverUISink: Sendable {
         target?.applyConfirmedExtendShape(preference)
     }
 
-    func publishStreamingProfile(_ profile: StreamingProfile) {
-        target?.applyStreamingProfileUpdate(profile)
+    func publishStreamingProfile(_ update: StreamingProfileStateUpdate) {
+        target?.applyStreamingProfileUpdate(update)
     }
 
     func publishStreamingPriority(_ priority: StreamingPriority) {
