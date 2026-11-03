@@ -43,6 +43,11 @@ body:
     validations:
       required: true
   - type: textarea
+    id: existing-options
+    attributes:
+      label: Existing features or alternatives worth considering (optional)
+      description: Would a smaller improvement to an existing feature accomplish the same task? No competitor comparison is required.
+  - type: textarea
     id: tradeoffs
     attributes:
       label: Tradeoffs or concerns (optional)
