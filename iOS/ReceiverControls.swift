@@ -333,13 +333,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     let onOccupiedFramesChange: ([CGRect]) -> Void
     /// iPad only: where the Mac canvas goes (the Strip reserves rails).
     var onCanvasChange: (CGRect) -> Void = { _ in }
+    /// Where the receiver surface starts in this overlay's coordinates —
+    /// `keyboardVisibleRect` is in the surface's own.
+    var surfaceOrigin: CGPoint = .zero
     /// Present while a live Mac session can be ended from here: touch and
     /// hold Settings then offers Disconnect (issue #121). nil in Demo Mode
     /// and while not connected, where Settings stays a plain button.
     var sessionMenu: ReceiverSessionMenuActions? = nil
-    /// Where the receiver surface starts in this overlay's coordinates —
-    /// `keyboardVisibleRect` is in the surface's own.
-    var surfaceOrigin: CGPoint = .zero
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
