@@ -576,6 +576,30 @@ enum WorkspaceCaptureSizing {
 
     /// `source`: the source in points. `drawScale`: canvas pixels per source point (zoom included).
     /// `backingScale`: the source's pixels per point.
+    /// One active display, as `backingScale(source:displays:)` reads it.
+    struct DisplayScale: Equatable {
+        /// Global points (`CGDisplayBounds`).
+        var bounds: CGRect
+        /// The display mode's width in points and in pixels (`CGDisplayMode.width` / `.pixelWidth`).
+        var modeWidth: Int
+        var modePixelWidth: Int
+    }
+
+    /// Pixels per point of the display holding most of `source` (global points); 2 when unknown.
+    ///
+    /// From the display mode: `CGDisplayPixelsWide` reports the mode's width in points on a
+    /// HiDPI display, so dividing it by the bounds gave 1 on every Retina Mac and each window
+    /// was captured at half its pixels per side, then scaled up to fill the pane (issue #138).
+    static func backingScale(source: CGRect, displays: [DisplayScale]) -> Double {
+        func overlap(_ d: DisplayScale) -> CGFloat {
+            let i = d.bounds.intersection(source)
+            return i.isNull ? 0 : i.width * i.height
+        }
+        guard let display = displays.max(by: { overlap($0) < overlap($1) }),
+              display.modeWidth > 0, display.modePixelWidth > 0 else { return 2 }
+        return max(Double(display.modePixelWidth) / Double(display.modeWidth), 1)
+    }
+
     static func size(source: CGSize, drawScale: Double, backingScale: Double) -> CGSize {
         guard source.width > 0, source.height > 0, drawScale > 0 else { return CGSize(width: 2, height: 2) }
         let native = max(backingScale, 1)

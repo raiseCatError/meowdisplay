@@ -796,7 +796,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let size = captureSize(for: a)
             let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
                                                  streamFPS: streamFPS, available: true)
-            Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
+            Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) srcPt=\(sourceFrame(a).map { "\(Int($0.width))x\(Int($0.height))" } ?? "?") canvas=\(Int(canvas.width))x\(Int(canvas.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
             Task { [weak self] in
                 do {
                     if let display = source.display {
@@ -922,15 +922,28 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// The whole source, at the pixels the pane draws it with (zoom included), up to its own.
     private func captureSize(for a: WorkspaceTileAssignment) -> CGSize {
-        guard let frame = sourceFrame(a)?.size, frame.width > 0, frame.height > 0 else {
+        guard let sourceRect = sourceFrame(a), sourceRect.width > 0, sourceRect.height > 0 else {
             return CGSize(width: max(2, (a.rect.width * canvas.width).rounded()), height: max(2, (a.rect.height * canvas.height).rounded()))
         }
+        let frame = sourceRect.size
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         let t = TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
                                      rotation: a.rotation, fit: a.fit, zoom: a.zoom)
-        let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
-        let backing = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
+        let backing = WorkspaceCaptureSizing.backingScale(source: sourceRect, displays: Self.activeDisplayScales())
         return WorkspaceCaptureSizing.size(source: frame, drawScale: t.scale, backingScale: backing)
+    }
+
+    /// Every active display's bounds and mode, for `WorkspaceCaptureSizing.backingScale`.
+    private static func activeDisplayScales() -> [WorkspaceCaptureSizing.DisplayScale] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).compactMap { id in
+            guard let mode = CGDisplayCopyDisplayMode(id) else { return nil }
+            return WorkspaceCaptureSizing.DisplayScale(bounds: CGDisplayBounds(id), modeWidth: mode.width,
+                                                       modePixelWidth: mode.pixelWidth)
+        }
     }
 
     /// Health of every pane's capture (each refresh and on status changes): live, paused by
