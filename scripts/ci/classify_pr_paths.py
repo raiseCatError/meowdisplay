@@ -6,9 +6,9 @@ of this file from the base branch, so a pull request can't reclassify itself
 by editing it. Tested by scripts/ci/test_classify_pr_paths.py.
 
 Outputs (key=value lines, appended to $GITHUB_OUTPUT):
-  docs_media_only  every path is documentation, press-kit media or press-kit
-                   tooling: the Mac, iPhone Duo, Android and release-tooling
-                   jobs are skipped.
+  docs_media_only  every path is documentation, an issue form, press-kit media
+                   or press-kit tooling: the Mac, iPhone Duo, Android and
+                   release-tooling jobs are skipped.
   workflow_only    only .github/workflows/pr-title.yml changed: release-tooling
                    runs, app builds are skipped.
   press_kit        the press kit, its tooling or its preview image changed:
@@ -36,6 +36,13 @@ MARKDOWN_DIRS = ("docs/", "handoff-2.0/", "launch/", "ux-review/")
 # Markdown directly inside these directories (not their subdirectories, which
 # can hold build or test resources).
 MARKDOWN_SHALLOW_DIRS = ("fastlane/", "AndroidReceiver/")
+
+# GitHub's issue forms and chooser: read only by GitHub's "New issue" page (and
+# the upstream-ID scan). Listed by exact path: a new form, another .github file
+# or a nested path still means full CI.
+ISSUE_FORMS = frozenset(f".github/ISSUE_TEMPLATE/{name}.yml" for name in (
+    "bug_report", "config", "device_testing", "documentation", "feature_request", "idea",
+))
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
 README_IMAGES = "assets/readme/"
@@ -96,7 +103,7 @@ def classify(
     def non_code(path: str) -> bool:
         if path == ".gitignore":
             return gitignore_change_is_safe(gitignore_diff)
-        return is_documentation(path) or is_press_kit(path) or is_readme_image(path)
+        return is_documentation(path) or path in ISSUE_FORMS or is_press_kit(path) or is_readme_image(path)
 
     if not all(non_code(p) for p in paths):
         return result
