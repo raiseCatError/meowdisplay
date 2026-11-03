@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from classify_pr_paths import UPSTREAM_ID, classify  # noqa: E402
+from classify_pr_paths import ISSUE_FORMS, UPSTREAM_ID, classify  # noqa: E402
 
 FULL = {"docs_media_only": False, "workflow_only": False}
 
@@ -127,6 +127,65 @@ class Workflows(unittest.TestCase):
         self.assertTrue(r["workflow_only"])
         self.assertFalse(r["docs_media_only"])
         assert_full_ci(self, run([".github/workflows/pr-title.yml", "Mac/AppDelegate.swift"]))
+
+
+class IssueForms(unittest.TestCase):
+    FORMS = [
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/device_testing.yml",
+        ".github/ISSUE_TEMPLATE/documentation.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/ISSUE_TEMPLATE/idea.yml",
+    ]
+
+    def test_listed_forms_exist(self):
+        root = Path(__file__).resolve().parents[2]
+        for form in ISSUE_FORMS:
+            with self.subTest(form=form):
+                self.assertTrue((root / form).is_file())
+
+    def test_each_form_and_the_chooser(self):
+        for form in self.FORMS:
+            with self.subTest(form=form):
+                r = run([form])
+                self.assertTrue(r["docs_media_only"])
+                self.assertFalse(r["press_kit"])
+
+    def test_forms_with_documentation(self):
+        self.assertTrue(run(self.FORMS + ["CONTRIBUTING.md", "docs/ISSUE_TRIAGE.md"])["docs_media_only"])
+
+    def test_forms_with_code_or_workflows_run_full_ci(self):
+        for other in ["Mac/AppDelegate.swift", "AndroidReceiver/app/build.gradle.kts", ".github/workflows/tests.yml",
+                      ".github/workflows/pr-title.yml", "scripts/ci/classify_pr_paths.py",
+                      "scripts/ci/test_classify_pr_paths.py"]:
+            with self.subTest(other=other):
+                assert_full_ci(self, run([".github/ISSUE_TEMPLATE/bug_report.yml", other]))
+
+    def test_other_github_and_yaml_paths_run_full_ci(self):
+        for path in [
+            ".github/ISSUE_TEMPLATE/new_form.yml",          # a form not on the list
+            ".github/ISSUE_TEMPLATE/bug_report.yaml",       # another extension
+            ".github/ISSUE_TEMPLATE/old/bug_report.yml",    # nested
+            ".github/ISSUE_TEMPLATE.md",
+            ".github/FUNDING.yml",
+            ".github/dependabot.yml",
+            ".github/release-config.json",
+            ".github/rulesets/dev.json",
+            "fastlane/bug_report.yml",
+            "bug_report.yml",
+        ]:
+            with self.subTest(path=path):
+                assert_full_ci(self, run([path]))
+
+    def test_upstream_listing_id_in_a_form_runs_full_ci(self):
+        form = ".github/ISSUE_TEMPLATE/config.yml"
+        assert_full_ci(self, run([form], {form: f"url: https://apps.apple.com/app/id{UPSTREAM_ID}".encode()}))
+
+    def test_forms_with_an_unsafe_gitignore_change_run_full_ci(self):
+        assert_full_ci(self, run([".github/ISSUE_TEMPLATE/idea.yml", ".gitignore"],
+                                 gitignore_diff="@@ -1 +1 @@\n+Shared/Generated/\n"))
+        assert_full_ci(self, run([".github/ISSUE_TEMPLATE/idea.yml", ".gitignore"]))
 
 
 class Gitignore(unittest.TestCase):
