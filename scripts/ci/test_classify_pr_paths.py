@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from classify_pr_paths import (  # noqa: E402
-    ALL, APPLE, APPS, ISSUE_FORMS, JOBS, RELEASE_WORKFLOWS, UPSTREAM_ID, classify, full_ci_reason, select_jobs,
+    ALL, APPLE, APPS, GITHUB_PAGES, ISSUE_FORMS, JOBS, RELEASE_WORKFLOWS, UPSTREAM_ID, classify, full_ci_reason, select_jobs,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,8 +46,16 @@ class DocumentationOnly(Base):
         self.assertJobs(["Mac/NOTES.md"], ["mac", RT])
 
     def test_markdown_elsewhere_runs_full_ci(self):
-        self.assertFull(jobs([".github/pull_request_template.md"]))
+        self.assertFull(jobs([".github/NOTES.md"]))
         self.assertFull(jobs(["Prototypes/NOTES.md"]))
+
+    def test_github_pages_files(self):
+        for path in sorted(GITHUB_PAGES):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file())
+                self.assertJobs([path], [])
+        path = ".github/FUNDING.yml"
+        self.assertJobs([path], ["mac"], contents={path: UPSTREAM_ID.encode()})
 
     def test_non_markdown_docs_files_run_full_ci(self):
         self.assertFull(jobs(["docs/diagram.html"]))
@@ -218,8 +226,9 @@ class Workflows(Base):
                 self.assertFull(jobs([path, "README.md"]))
 
     def test_unlisted_workflows_and_github_files_run_full_ci(self):
-        for path in [".github/workflows/new.yml", ".github/workflows/release-mac.yaml", ".github/FUNDING.yml",
-                     ".github/dependabot.yml", ".github/actions/setup/action.yml", ".github/CODEOWNERS"]:
+        for path in [".github/workflows/new.yml", ".github/workflows/release-mac.yaml", ".github/FUNDING.yaml",
+                     ".github/dependabot.yml", ".github/actions/setup/action.yml", ".github/CODEOWNERS",
+                     ".github/PULL_REQUEST_TEMPLATE/feature.md"]:
             with self.subTest(path=path):
                 self.assertFull(jobs([path]))
 

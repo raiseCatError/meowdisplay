@@ -33,8 +33,9 @@ What each area needs (from the build graph, not from directory names):
   release and repository tooling release_tooling only: scripts/release,
                                  scripts/reference, the listed workflows,
                                  rulesets, fastlane config, Gemfile, versions.
-  documentation, issue forms,    nothing (press-kit paths get the cheap
-  press kit, README images       press-kit job).
+  documentation, README images,  nothing, apart from the cheap press-kit
+  issue forms, PR template,      job for press-kit paths.
+  FUNDING.yml, press kit
 release_tooling also runs for every change that isn't documentation or media:
 it is cheap, and it runs the dependency checks in the tests.
 
@@ -88,6 +89,8 @@ MARKDOWN_SHALLOW_DIRS = ("fastlane/", "AndroidReceiver/")
 ISSUE_FORMS = frozenset(f".github/ISSUE_TEMPLATE/{name}.yml" for name in (
     "bug_report", "config", "device_testing", "documentation", "feature_request", "idea",
 ))
+# Other files only GitHub's web pages read (the PR form, the Sponsor button).
+GITHUB_PAGES = frozenset({".github/pull_request_template.md", ".github/FUNDING.yml"})
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
 README_IMAGES = "assets/readme/"
@@ -172,7 +175,7 @@ def gitignore_change_is_safe(diff: str) -> bool:
 
 def path_jobs(path: str, gitignore_diff: str = "") -> Optional[frozenset]:
     """The jobs one changed path needs, or None for full CI."""
-    if is_documentation(path) or path in ISSUE_FORMS or is_readme_image(path):
+    if is_documentation(path) or path in ISSUE_FORMS or path in GITHUB_PAGES or is_readme_image(path):
         return NOTHING
     if is_press_kit(path):
         return frozenset({"press_kit"})
