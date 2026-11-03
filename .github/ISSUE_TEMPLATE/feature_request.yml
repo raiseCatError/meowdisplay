@@ -39,12 +39,7 @@ body:
     id: alternatives
     attributes:
       label: How do you handle this today?
-      description: Optional existing workflow or workaround.
-  - type: textarea
-    id: simpler-option
-    attributes:
-      label: Could an existing control or workflow solve this? (optional)
-      description: If you have tried Stage Peek, Window view, an existing menu or a workaround, explain what is still missing. No design research is required to submit.
+      description: Optional existing workflow or workaround. If you have tried Stage Peek, Window view or an existing menu, say what is still missing. No design research is required to submit.
   - type: textarea
     id: context
     attributes:

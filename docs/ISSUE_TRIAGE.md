@@ -4,11 +4,21 @@ This is a **maintainer guide**, not extra homework for people reporting a bug. P
 
 ## Intake: keep the question small
 
-1. **Search first** (including closed issues and PRs). Prefer one problem per issue. Link related trackers, but don't merge unrelated symptoms merely because they involve the same screen. Record a report as **reported**, not **verified**, until independently reproduced.
+1. **Search first** (including closed issues and PRs). Prefer one problem per issue. Link related trackers, but don't merge unrelated symptoms merely because they involve the same screen. Record a report as **observed**, not **reproduced** or **verified** (see [Evidence terms](#evidence-terms)).
 2. **Classify by intent:** bug/regression; actionable supported-platform improvement; speculative idea/research; documentation correction; device/compatibility evidence; private security vulnerability (never a public issue). Redirect support requests to the existing support page. Avoid duplicate research trackers that will never be maintained.
 3. **Record user-observable behavior and evidence:** user task, expected/actual result, affected mode/platform/build, route where applicable, repeatable steps, frequency and workaround if known. Do not require a video, logs, exact timings, personally identifying environment information or owning a second test device.
 4. **Establish the baseline:** current shipped release versus `dev`; code inspection versus simulator versus physical device are **different claims**. A regression needs a verified previous working version, not just a feeling that something used to work. Keep unknown values explicitly unknown.
 5. **Route the decision:** can we reproduce it? is there a safe, smaller solution already in the app? What happens if we do nothing? Who can reasonably test it? Avoid turning every idea into an implementation request.
+
+### Evidence terms
+
+| Term | Meaning |
+| --- | --- |
+| Observed | Someone reports seeing it; cause, scope and frequency not established |
+| Reproduced | A maintainer or tester made it happen again, with the build, device, mode and steps recorded |
+| Inferred | A likely cause from code reading or logs, not yet confirmed by a test |
+| Proposed | A suggested change or design; not approved and not shown to work |
+| Verified | A stated check (named test, build, device and OS) confirmed the behavior or the fix; say what was not covered |
 
 ### Internal state vocabulary (written in an issue or comment, not a required GitHub label)
 
@@ -42,17 +52,17 @@ Practical provisional ordering—not a public SLA:
 | P2 / normal | Significant usability, quality or performance issue with a workaround; focused supported-platform enhancement |
 | P3 / explore | Speculative mode, new platform, optional polish, unproven value or maintenance-heavy idea |
 
-**Do not assign P0/P1 from an unmeasured adjective.** An issue can be high priority to **investigate** without its proposed fix being approved. Do not invent percent affected, FPS, latency, quality, tester counts or hardware coverage. Label sparingly: existing kind/platform labels are useful, but an issue body can convey provisional priority until a consistent label taxonomy is deliberately adopted. No new project board or automation is needed merely to record priority.
+**Do not assign P0/P1 from an unmeasured adjective.** An issue can be high priority to **investigate** without its proposed fix being approved. Do not invent percent affected, FPS, latency, quality, tester counts or hardware coverage. Label sparingly: existing kind/platform labels are useful. The existing `priority:high` and `priority:medium` labels correspond roughly to P1 and P2; only the maintainer applies them, as a recorded decision, never inferred from an issue's detail. Otherwise an issue body can convey provisional priority. No new project board or automation is needed merely to record priority.
 
 ## Focused research when a design decision matters
 
 Research depth should be **proportional to risk and reversibility**. A small text or reproducible UI bug does not need a competitor survey. For a new gesture, layout/multitasking mode, image-quality pipeline or permission-affecting feature:
 
 1. **State the user job and current solution.** Trace the actual app path and current gesture/permission defaults. Distinguish shipped behavior from prototypes and user suggestions.
-2. **Check relevant first-party guidance**, not a generic HIG compliance badge: [Apple Gestures](https://developer.apple.com/design/human-interface-guidelines/gestures), [Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility), [Layout](https://developer.apple.com/design/human-interface-guidelines/layout), [Multitasking](https://developer.apple.com/design/human-interface-guidelines/multitasking); [Android accessibility](https://developer.android.com/guide/topics/ui/accessibility) and [Material adaptive design](https://m3.material.io/foundations/layout/understanding-layout/overview) where applicable. Check up-to-date API/platform restrictions separately. Standards are design inputs, not evidence a candidate works.
+2. **Check relevant first-party guidance**, not a generic HIG compliance badge: [Apple Gestures](https://developer.apple.com/design/human-interface-guidelines/gestures), [Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility), [Layout](https://developer.apple.com/design/human-interface-guidelines/layout), [Multitasking](https://developer.apple.com/design/human-interface-guidelines/multitasking); [Android accessibility](https://developer.android.com/guide/topics/ui/accessibility) and [Material adaptive design](https://m3.material.io/foundations/adaptive-design/overview) where applicable. Check up-to-date API/platform restrictions separately. Standards are design inputs, not evidence a candidate works.
 3. **Compare realistic options:** (A) do nothing/document workaround, (B) improve/reuse an existing control, (C) add a small affordance, (D) add new interaction/mode. State benefit, complexity, discoverability, power/performance cost, accessibility and failure modes. Refer to a credible product or OSS implementation **only when the interaction is actually comparable**; record what was observed, its version/date, and where it differs. No competitor-feature copying as a roadmap policy.
 4. **Prototype and validate the smallest option**, ideally on real hardware. Test natural repeated gestures, consecutive fast attempts, cancellation/recognizer conflicts, tap/hold/drag, portrait/landscape, multiple panes, large text, VoiceOver/TalkBack/Touch Accommodations, keyboard/pointer, reduced motion, View Only/Allow Input, and permissions when relevant. Do not equate shorter delay with improved feel.
-5. **Make an explicit decision:** chosen option or no-change, measured outcome and limitations, acceptance tests, affected platforms, rollback/regression plan. Separate what is observed, inferred, proposed and verified. Don't fabricate experiments.
+5. **Make an explicit decision:** chosen option or no-change, measured outcome and limitations, acceptance tests, affected platforms, rollback/regression plan. Separate what is observed, reproduced, inferred, proposed and verified. Don't fabricate experiments.
 
 For gesture shortcuts, preserve an accessible button/menu alternative and avoid hijacking OS-reserved gestures. For Window view quality, compare Mirror/Extend on matched hardware/scene/size/route, trace capture pixels -> compositing canvas -> encoded stream -> decoded presentation, and separate expected multi-pane shrinkage from avoidable blur. See [performance methodology issue #123](https://github.com/raiseCatError/meowdisplay/issues/123).
 
