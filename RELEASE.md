@@ -309,6 +309,14 @@ inputs ask for, so the state token can't open PRs even though the App can.
   allows `main` only and holds nothing but the App key. Run it after changing
   the App, its installation or the ruleset:
   `gh workflow run release-state-access.yml --ref main`.
+- **Release dry run**'s `website-update` job does the same for the website App,
+  read-only (`scripts/release/check-website-app-access.sh`). It mints the
+  website token exactly as the publish step does (Contents and Pull requests
+  write, `MeowDisplayWebsite` only; GitHub refuses permissions the installation
+  lacks), checks that the installation reaches `MeowDisplayWebsite` only, reads
+  the repository, its `main` branch and its pull requests, and checks that the
+  site deploys `release.json`. It pushes nothing and opens no PR, so the publish
+  path itself (push, PR, auto-merge, deploy) is first exercised by a release.
 
 ## Credentials
 

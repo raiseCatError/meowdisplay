@@ -56,6 +56,21 @@ class WorkflowChecksTest < Minitest::Test
                   "release-dry-run.yml" => ["run: scripts/release/check-release-state-access.sh", "run: true"])
   end
 
+  def test_the_dry_run_checks_the_website_app_without_publishing
+    msg = "must prove in a website-update job that the website App's publish token can be minted"
+    f = "release-dry-run.yml"
+    assert_caught(msg, f => ["run: scripts/release/check-website-app-access.sh .github/release-config.json", "run: true"])
+    assert_caught(msg, f => ["permission-pull-requests: write\n      # The whole installation",
+                             "permission-pull-requests: write\n          permission-administration: write\n      # The whole installation"])
+    assert_caught(msg, f => ["repositories: MeowDisplayWebsite\n          permission-contents: write\n          permission-pull-requests: write\n      # The whole",
+                             "repositories: MeowDisplayWebsite,meowdisplay\n          permission-contents: write\n          permission-pull-requests: write\n      # The whole"])
+    assert_caught(msg, f => ["client-id: ${{ vars.WEBSITE_APP_CLIENT_ID }}\n          private-key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}\n          owner: raiseCatError\n          repositories",
+                             "client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}\n          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}\n          owner: raiseCatError\n          repositories"])
+    assert_caught("must not run update-website.sh",
+                  f => ["run: scripts/release/check-website-app-access.sh .github/release-config.json",
+                        "run: scripts/release/check-website-app-access.sh .github/release-config.json && scripts/release/update-website.sh m c 9.9.9"])
+  end
+
   def test_the_access_check_stays_narrow
     f = "release-state-access.yml"
     assert_caught("#{f}: must run only on workflow_dispatch",
