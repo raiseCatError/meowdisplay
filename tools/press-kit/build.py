@@ -22,12 +22,12 @@ ZIP_NAMES = {c: f"MeowDisplay-Press-Kit-{c}.zip" for c in CATEGORIES}
 ZIP_DATE = (2026, 11, 3, 0, 0, 0)
 # Over Cloudflare Pages' 25 MiB file limit, so it is published as a GitHub Release asset, not on the site.
 # Each content revision gets a new asset name on the press-kit-2.0 release; superseded assets are removed.
-COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r3.zip"
+COMPLETE_NAME = "MeowDisplay-Press-Kit-2.0-r4.zip"
 COMPLETE_URL = f"https://github.com/raiseCatError/meowdisplay/releases/download/press-kit-2.0/{COMPLETE_NAME}"
 
 COLLECTIONS = [
     ("window-view", "Window view and layouts",
-     "Show individual Mac windows instead of a whole desktop. Two panes fit on iPhone; iPad holds three or more.",
+     "Show individual Mac windows instead of a whole desktop, in splits or grids of up to nine panes on iPhone and iPad. Fewer, larger panes read best on a phone.",
      ["iPad-Window-View-Three-Panes", "iPhone-Window-View-Two-Panes", "iPad-Window-Picker", "iPhone-Window-Picker"]),
     ("stage-peek", "Stage Peek",
      "Swipe in from the edge to see running apps, open windows and the Mac's displays, then switch or add a pane.",
