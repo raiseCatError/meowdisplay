@@ -528,8 +528,8 @@
   {
     "file": "Video/MeowDisplay-BRoll-iPad-Extend-Touch-Scrolling-1080p-Poster.jpg",
     "category": "Video",
-    "bytes": 132463,
-    "sha256": "3ee015985bacba978ab6b904fdc48aa153749b29b2d836258c6bff005bb6c8bb",
+    "bytes": 173120,
+    "sha256": "f4216724533cc8c9c8fd90533b8e1be55ec5f96927ac9194057bcd260390c7e2",
     "review": "approved",
     "width": 1920,
     "height": 1080,
@@ -538,24 +538,24 @@
   {
     "file": "Video/MeowDisplay-BRoll-iPad-Extend-Touch-Scrolling-1080p.mp4",
     "category": "Video",
-    "bytes": 1479541,
-    "sha256": "bc46d1f44a3e0478a5cf08338926e3d8ff67e2e79db55cf0b7ad4369c0c9e95f",
+    "bytes": 1479505,
+    "sha256": "787f2d3f50bdb4d6de3b409de617580085e2b4222d693457631b0d103f9e8d3d",
     "review": "approved",
     "caption": "BRoll iPad Extend Touch Scrolling 1080p"
   },
   {
     "file": "Video/MeowDisplay-BRoll-iPad-Extend-Touch-Scrolling-Native.mp4",
     "category": "Video",
-    "bytes": 2399486,
-    "sha256": "2e09cd8b6d3a6ce5c2aaa94e7cf08b2176b492148b84390c105afb75b17fc9dc",
+    "bytes": 2399450,
+    "sha256": "5a7bdd7734c451523413820dcd61b312548f332087209f14dad89bfb68223a70",
     "review": "approved",
     "caption": "BRoll iPad Extend Touch Scrolling Native"
   },
   {
     "file": "Video/MeowDisplay-BRoll-iPhone-Typing-Zoom-While-Typing-1080p-Poster.jpg",
     "category": "Video",
-    "bytes": 215076,
-    "sha256": "14046d06ca1e536f95506be1d86d2cc78db86306f894f38415c4198b205d3a50",
+    "bytes": 281245,
+    "sha256": "697a927d11f16003c1a00d6bdfe81cbca58f72254a80e3f7c59b8de74746a3b7",
     "review": "approved",
     "width": 1920,
     "height": 1080,
@@ -564,16 +564,16 @@
   {
     "file": "Video/MeowDisplay-BRoll-iPhone-Typing-Zoom-While-Typing-1080p.mp4",
     "category": "Video",
-    "bytes": 2693552,
-    "sha256": "6363fa9a8e8acb6a2442fa83031b85adc6516c5fb9a0b6392b1c9fa39db5608e",
+    "bytes": 2693516,
+    "sha256": "dde1753f3120fd35957f7a9e9ad12d04487725e0c79f6d74f5c00ac5379469ba",
     "review": "approved",
     "caption": "BRoll iPhone Typing Zoom While Typing 1080p"
   },
   {
     "file": "Video/MeowDisplay-BRoll-iPhone-Typing-Zoom-While-Typing-Native.mp4",
     "category": "Video",
-    "bytes": 4659417,
-    "sha256": "2f264ad4b315555e1b83c6f221f5c0fc85624c85f48a960e6242ed7c64a87c84",
+    "bytes": 4659381,
+    "sha256": "4c70237552ad405821fb47ef4035efe3f1bbe7069579a5da7b687821300758bb",
     "review": "approved",
     "caption": "BRoll iPhone Typing Zoom While Typing Native"
   }
