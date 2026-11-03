@@ -181,6 +181,13 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
 | Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
 | Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
+| Disconnect | **Settings → Connections**, or touch and hold the Settings control → **Disconnect from Mac** (VoiceOver: the Settings control's actions) | Same | Settings | Overview |
+
+Disconnect from the Settings control's menu is the same as Settings →
+Connections → Disconnect. It tells the Mac the goodbye is deliberate, so
+neither side reconnects automatically (the Mac waits until the device leaves
+and returns, or someone presses Connect). The pairing, input grants and the
+Mac app are untouched. A tap on Settings still opens Settings.
 
 ## Gaps
 

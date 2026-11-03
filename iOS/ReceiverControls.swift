@@ -333,6 +333,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     let onOccupiedFramesChange: ([CGRect]) -> Void
     /// iPad only: where the Mac canvas goes (the Strip reserves rails).
     var onCanvasChange: (CGRect) -> Void = { _ in }
+    /// Present while a live Mac session can be ended from here: touch and
+    /// hold Settings then offers Disconnect (issue #121). nil in Demo Mode
+    /// and while not connected, where Settings stays a plain button.
+    var sessionMenu: ReceiverSessionMenuActions? = nil
     /// Where the receiver surface starts in this overlay's coordinates —
     /// `keyboardVisibleRect` is in the surface's own.
     var surfaceOrigin: CGPoint = .zero
@@ -652,6 +656,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .accessibilityLabel(ControlTrayItem.settings.title)
                     .accessibilityInputLabels(ControlTrayItem.settings.spokenNames)
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
+                    .sessionMenuAccessibility(sessionMenu) { disconnectFromSessionMenu() }
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem)
@@ -689,6 +694,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .contentShape(ControlRegionShape(rects: [autoHiding ? .zero : layout.trayFrame]
                                                     + (paletteChord == nil ? [] : [layout.paletteFrame])))
                 .gesture(controlGesture())
+            // The full tray's gear fades out with Auto-hide (a tap there
+            // first reveals it); the collapsed gear never hides.
+            settingsSessionMenu(reachable: collapsed || !autoHiding)
 
             #if DEBUG
             if notchDebugOverlayEnabled {
@@ -922,6 +930,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .accessibilityInputLabels(item.spokenNames)
         .accessibilityValue(item == .keyboard ? (keyboardActive ? Text("On") : Text("Off")) : Text(""))
         .trayButtonAccessibility { activateForAccessibility(item) }
+        .sessionMenuAccessibility(item == .settings ? sessionMenu : nil) { disconnectFromSessionMenu() }
     }
 
     private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool,
@@ -1109,6 +1118,53 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func selectedAction(under point: CGPoint) -> ShortcutItem? {
         guard let under = action(at: point), under.id == interaction.selectedActionID else { return nil }
         return under
+    }
+
+    // MARK: Settings session menu (issue #121)
+
+    /// A native menu over the drawn Settings control: a tap still opens
+    /// Settings; touch and hold opens the system menu, with the system's own
+    /// haptic where the device has one. The controls are drawn shapes routed
+    /// through `controlGesture`, so the menu is a transparent `Menu` placed
+    /// exactly on the gear's frame, above that gesture layer. VoiceOver and
+    /// Voice Control use the chip's own "Disconnect from Mac" action instead,
+    /// and Settings → Connections keeps its Disconnect.
+    @ViewBuilder
+    private func settingsSessionMenu(reachable: Bool) -> some View {
+        if let sessionMenu, reachable, let frame = frames["tray:\(ControlTrayItem.settings.rawValue)"],
+           frame.width > 0, frame.height > 0 {
+            Menu {
+                Button(role: .destructive) {
+                    disconnectFromSessionMenu()
+                } label: {
+                    Label(sessionMenu.disconnectTitle, systemImage: "xmark.circle")
+                }
+            } label: {
+                Color.clear
+                    .frame(width: frame.width, height: frame.height)
+                    .contentShape(Rectangle())
+            } primaryAction: {
+                store.beginAutoHideActivity()
+                perform(.settings)
+                store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+            }
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .frame(width: frame.width, height: frame.height)
+            .position(x: frame.midX, y: frame.midY)
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// Ends the session the way Settings → Connections → Disconnect does.
+    /// Latched modifiers are dropped here; the Mac releases anything this
+    /// device held down when the session ends, and treats the goodbye as
+    /// deliberate, so it doesn't reconnect on its own.
+    private func disconnectFromSessionMenu() {
+        guard let sessionMenu else { return }
+        apply(interaction.resetAll())
+        store.setMoveViewActive(false)
+        sessionMenu.disconnect()
     }
 
     private func perform(_ item: ControlTrayItem) {
@@ -1519,6 +1575,7 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: mainRegion + gearRegion + paletteRegion))
                 .gesture(controlGesture())
+            settingsSessionMenu(reachable: true)   // the iPad gear never auto-hides
         }
         .onAppear {
             onCanvasChange(layout.canvas)
@@ -1683,6 +1740,7 @@ extension ReceiverControlOverlay {
                         + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }
                         + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])))
                 .gesture(controlGesture())
+            settingsSessionMenu(reachable: true)   // Custom keeps Settings through Auto-hide
         }
         .animation(.snappy(duration: 0.22), value: assistState)
         .onAppear {
@@ -1859,6 +1917,7 @@ extension ReceiverControlOverlay {
                 break
             }
         }
+        .sessionMenuAccessibility(kind == .tray(.settings) ? sessionMenu : nil) { disconnectFromSessionMenu() }
     }
 
     private func padSpokenNames(_ kind: CustomControlKind) -> [String] {
@@ -2492,5 +2551,27 @@ private extension View {
     func trayButtonAccessibility(_ action: @escaping () -> Void) -> some View {
         accessibilityAddTraits(.isButton)
             .accessibilityAction { action() }
+    }
+}
+
+/// What the Settings control's long-press menu can do in the current
+/// session (issue #121). Only actions that exist and work today belong here.
+struct ReceiverSessionMenuActions {
+    var disconnectTitle: String = String(localized: "Disconnect from Mac",
+                                         comment: "Settings control long-press menu: ends the session with the Mac.")
+    /// Same as Settings → Connections → Disconnect.
+    let disconnect: () -> Void
+}
+
+private extension View {
+    /// Adds the session menu's Disconnect as a named accessibility action on
+    /// the Settings control, so it never depends on touch and hold.
+    @ViewBuilder
+    func sessionMenuAccessibility(_ menu: ReceiverSessionMenuActions?, disconnect: @escaping () -> Void) -> some View {
+        if let menu {
+            accessibilityAction(named: Text(menu.disconnectTitle)) { disconnect() }
+        } else {
+            self
+        }
     }
 }

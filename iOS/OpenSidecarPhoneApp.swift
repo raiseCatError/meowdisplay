@@ -437,6 +437,8 @@ struct ReceiverScreen: View {
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 },
                         onCanvasChange: { padCanvas = $0 },
+                        sessionMenu: model.receiver.connected
+                            ? ReceiverSessionMenuActions(disconnect: { model.receiver.disconnect() }) : nil,
                         surfaceOrigin: canvas.origin)
                     if let kind = inputPrompt.kind {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
