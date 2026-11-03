@@ -46,6 +46,10 @@ struct ReceiverScreen: View {
     @State private var showOnboarding = false
     @State private var nagDismissed = false
     @State private var keyboardVisibleRect: CGRect?
+    /// The picture's keyboard-adjusted rect in the video surface's
+    /// coordinates while the on-screen keyboard moves it; see
+    /// `workspacePicture(canvas:)`.
+    @State private var keyboardPictureRect: CGRect?
     @State private var runtimeSafeInsets: ControlSafeInsets?
     // Physical notch side (see `PhysicalNotchSide`) derived from
     // `UIInterfaceOrientation`, not from comparing safe-area depths — a real
@@ -156,6 +160,23 @@ struct ReceiverScreen: View {
             inputAllowed: inputReachesMac,
             preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
             voiceOverRunning: voiceOverEnabled) ? .all : []
+    }
+
+    /// Where Window view's chrome goes, in screen coordinates (issue #92).
+    /// `drawn` is where the picture actually is: with the on-screen keyboard
+    /// up, the video slides (and with Zoom While Typing, scales) to keep the
+    /// caret visible, and pane outlines, title pills and divider grips must
+    /// follow it or they sit over the wrong window. `layout` stays the normal
+    /// fit, so opening the keyboard never changes the workspace size sent to
+    /// the Mac.
+    private func workspacePicture(canvas: CGRect) -> (drawn: CGRect, layout: CGRect) {
+        let layout = RemoteViewportCalculator.normal(
+            viewBounds: CGRect(origin: .zero, size: canvas.size),
+            remoteAspectSize: model.receiver.videoSize).displayedRect
+            .offsetBy(dx: canvas.minX, dy: canvas.minY)
+        guard keyboardVisibleRect != nil, let keyboardPictureRect,
+              keyboardPictureRect.width > 0, keyboardPictureRect.height > 0 else { return (layout, layout) }
+        return (keyboardPictureRect.offsetBy(dx: canvas.minX, dy: canvas.minY), layout)
     }
 
     /// The Mac canvas in screen coordinates: the iPad Strip's remaining
@@ -324,6 +345,7 @@ struct ReceiverScreen: View {
                                        haptics: controlStore.preferences.hapticsEnabled,
                                        smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
+                                   onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
                                    onActivityBegan: { controlStore.beginAutoHideActivity() },
                                    onActivityEnded: { controlStore.scheduleAutoHide() },
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
@@ -410,11 +432,9 @@ struct ReceiverScreen: View {
                     .allowsHitTesting(false)
                     // Window mode: tile chrome and the window rail over the picture,
                     // under the MeowDisplay controls (which stay on top).
-                    let picture = RemoteViewportCalculator.normal(
-                        viewBounds: CGRect(origin: .zero, size: canvas.size),
-                        remoteAspectSize: model.receiver.videoSize).displayedRect
-                        .offsetBy(dx: canvas.minX, dy: canvas.minY)
-                    WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
+                    let picture = workspacePicture(canvas: canvas)
+                    WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
+                                        layoutPicture: picture.layout, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
                                         onSettings: { showSettings = true },
@@ -442,9 +462,7 @@ struct ReceiverScreen: View {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
                         // window needs control; the pane, its tabs, zoom and pan stay as they are.
                         let paneAnchor = model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
-                            let pic = RemoteViewportCalculator.normal(viewBounds: CGRect(origin: .zero, size: canvas.size),
-                                                                      remoteAspectSize: model.receiver.videoSize).displayedRect
-                                .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                            let pic = workspacePicture(canvas: canvas).drawn
                             return CGPoint(x: pic.minX + r.midX * pic.width,
                                            y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
                         } : nil
@@ -2208,6 +2226,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// Whether Smart Touch hold feedback plays — see `SmartTouchHapticPolicy`.
     let smartTouchHapticsEnabled: Bool
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
+    /// See `VideoView.onKeyboardPictureRectChange`.
+    var onKeyboardPictureRectChange: (CGRect?) -> Void = { _ in }
     /// See `VideoView.onActivityBegan`/`onActivityEnded` — lets Auto-hide
     /// reveal from any receiver-surface interaction, not only a tray touch.
     let onActivityBegan: () -> Void
@@ -2268,6 +2288,7 @@ struct VideoLayerView: UIViewRepresentable {
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        view.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
@@ -2414,6 +2435,7 @@ struct VideoLayerView: UIViewRepresentable {
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        uiView.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
@@ -2629,6 +2651,12 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
         var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
+        /// The keyboard-adjusted picture rect (this view's coordinates), or
+        /// nil when the normal presentation applies. SwiftUI draws Window
+        /// view's pane chrome over the picture and can't recompute this
+        /// itself: the caret and anchor live here (issue #92).
+        var onKeyboardPictureRectChange: ((CGRect?) -> Void)?
+        private var publishedKeyboardPictureRect: CGRect?
         /// Fired on every new touch beginning on the receiver surface —
         /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
         /// multi-finger/system gestures, and Pencil all route through
@@ -3499,6 +3527,14 @@ struct VideoLayerView: UIViewRepresentable {
             let base = unzoomedBaseTransform()
             currentTransform = VideoInteractionPolicy.viewportTransform(
                 base: base, state: manualZoom, videoEnabled: videoEnabled)
+            let keyboardPicture = keyboardVisibleRect != nil && videoEnabled && base.isValid
+                ? base.displayedRect : nil
+            if keyboardPicture != publishedKeyboardPictureRect {
+                publishedKeyboardPictureRect = keyboardPicture
+                // Layout can run inside a SwiftUI update; publish after it.
+                let publish = onKeyboardPictureRectChange
+                DispatchQueue.main.async { publish?(keyboardPicture) }
+            }
         }
 
         /// The normal or keyboard-adjusted presentation, *before* manual
