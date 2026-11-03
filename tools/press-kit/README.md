@@ -6,4 +6,4 @@ The approved inventory contains final exports only. Raw screenshots, XCTest resu
 
 The live website is maintained separately in the private `raiseCatError/MeowDisplayWebsite` repository. Copy the generated `press.html` and `press-kit/` there on a feature branch; run its validate/package scripts. Production is not deployed by this builder.
 
-Artwork sources: `iOS/Assets.xcassets/AppIcon.appiconset/icon-1024.png` and `public/logo.png`, verified against tag `v2.0.0`. See the capture notes inside the kit for screenshot provenance. No original vector or dark/light variant was verified.
+Artwork sources: `iOS/Assets.xcassets/AppIcon.appiconset/icon-1024.png` and `public/logo.png`, verified against tag `v2.0.0` (the logo is byte-identical to `press-kit/Brand/MeowDisplay-Logo-512.png`; `public/` left the repository with the legacy landing page). See the capture notes inside the kit for screenshot provenance. No original vector or dark/light variant was verified.
