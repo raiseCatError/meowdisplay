@@ -161,6 +161,17 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(arrangement.placements.map(\.id), ["a"])
     }
 
+    // MARK: - Stage Peek Dock default (issue #130)
+
+    func testStagePeekDockDefaultsToNormalAndAStoredCompactIsKept() throws {
+        XCTAssertEqual(ReceiverControlPreferences().stagePeekDock, .normal)
+        var stored = ReceiverControlPreferences()
+        stored.stagePeekDock = .compact
+        let data = try JSONEncoder().encode(stored)
+        XCTAssertEqual(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).stagePeekDock, .compact,
+                       "an existing install's saved Compact is never overwritten")
+    }
+
     // MARK: - Control scale
 
     func testControlScaleIsBoundedWithAClearDefault() {
