@@ -745,4 +745,23 @@ final class StagePeekTests: XCTestCase {
             if n > 1 { XCTAssertGreaterThanOrEqual(card, StagePeekGalleryLayout.minimumRegularCard) }
         }
     }
+
+    // MARK: - Control legibility (issue #121, Workstream D)
+
+    func testWhiteLabelsMeetAAOverAWhiteWindowBehindTheScrim() {
+        let contrast = StagePeekLegibility.whiteTextContrast(scrimOpacity: StagePeekLegibility.minimumScrimOpacity)
+        XCTAssertGreaterThanOrEqual(contrast, 4.5, "worst case: pure white under the control")
+        // The previous glass tint (16% black) did not.
+        XCTAssertLessThan(StagePeekLegibility.whiteTextContrast(scrimOpacity: 0.16), 3)
+        // Over dark content it only gets better.
+        XCTAssertGreaterThan(StagePeekLegibility.whiteTextContrast(scrimOpacity: 0.55, backdropGray: 0.2), contrast)
+    }
+
+    func testRelativeLuminanceMatchesWCAGReferencePoints() {
+        XCTAssertEqual(StagePeekLegibility.relativeLuminance(gray: 0), 0, accuracy: 1e-9)
+        XCTAssertEqual(StagePeekLegibility.relativeLuminance(gray: 1), 1, accuracy: 1e-9)
+        // #767676 is the lightest gray with 4.5:1 for white text.
+        let gray767676 = StagePeekLegibility.relativeLuminance(gray: 118.0 / 255.0)
+        XCTAssertEqual(1.05 / (gray767676 + 0.05), 4.54, accuracy: 0.02)
+    }
 }
