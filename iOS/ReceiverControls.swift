@@ -2500,50 +2500,6 @@ private struct WheelWedge: Shape {
     }
 }
 
-/// Runs a one-tap action over the existing wire in plan order. Single
-/// actions go out at once; a sequence's pauses run on the main actor, and
-/// stop between steps if input is revoked — each step's keys are sent
-/// down and up together, so nothing is left held.
-@MainActor
-enum OneTapActionRunner {
-    static func run(_ action: ControlAction, receiver: some ReceiverControlSource, inputAllowed: @escaping @MainActor () -> Bool) {
-        let operations = ControlActionPlan.operations(for: action)
-        guard !operations.isEmpty, inputAllowed() else { return }
-        let pauses = operations.contains { if case .pause = $0 { return true } else { return false } }
-        guard pauses else {
-            operations.forEach { perform($0, receiver: receiver) }
-            return
-        }
-        Task { @MainActor in
-            for operation in operations {
-                if case .pause(let milliseconds) = operation {
-                    try? await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
-                    continue
-                }
-                guard inputAllowed() else { return }
-                perform(operation, receiver: receiver)
-            }
-        }
-    }
-
-    private static func perform(_ operation: ControlActionOperation, receiver: some ReceiverControlSource) {
-        switch operation {
-        case .press(let usage, let modifiers):
-            receiver.sendKeyboardPress(usage: usage, modifiers: modifiers)
-        case .key(let event):
-            switch event.phase {
-            case .down: receiver.sendKeyboardDown(usage: event.usage, modifiers: event.modifiers)
-            case .up: receiver.sendKeyboardUp(usage: event.usage, modifiers: event.modifiers)
-            }
-        case .gesture(let name):
-            guard ReceiverGesture(rawValue: name) != nil else { return }
-            receiver.sendGesture(name: name)
-        case .pause:
-            break
-        }
-    }
-}
-
 /// The Strip rail: solid black, with a hairline where it meets the canvas.
 private struct PadStripBackground: View {
     let edge: ControlEdge

@@ -134,6 +134,43 @@ enum BlockedInputAttemptPolicy {
     }
 }
 
+/// What a delayed remote action, such as a later step of a one-tap sequence,
+/// was started under. It may go on only while the receiver still reports
+/// the same ticket:
+/// - `controlGeneration` moves on every reset of local control state: Home,
+///   Session Actions, a display-mode switch, the surface closing (the app
+///   not active, Picture in Picture), or the session pausing or ending.
+/// - `connectionGeneration` moves with every new connection: another Mac,
+///   or the same one reconnecting.
+///
+/// There is no ticket while input can't leave this device. The permission
+/// at the moment the action started is never enough on its own.
+struct RemoteInputTicket: Equatable, Sendable {
+    let controlGeneration: Int
+    let connectionGeneration: Int
+
+    static func current(surfaceOpen: Bool, displayRunning: Bool, sessionLive: Bool,
+                        controlGeneration: Int, connectionGeneration: Int?) -> RemoteInputTicket? {
+        guard surfaceOpen, displayRunning, sessionLive, let connectionGeneration else { return nil }
+        return RemoteInputTicket(controlGeneration: controlGeneration, connectionGeneration: connectionGeneration)
+    }
+}
+
+/// The last check before input leaves this device. While the receiver
+/// surface is closed (Home over a kept session, Session Actions, Picture in
+/// Picture, or the app not active), only releases go out. That way nothing
+/// new starts on the Mac, and nothing already pressed stays pressed.
+enum RemoteInputTransmission {
+    /// A touch or Pencil phase that ends contact rather than starting or moving it.
+    static func isRelease(phase: String) -> Bool {
+        phase == "ended" || phase == "cancelled"
+    }
+
+    static func mayLeave(surfaceOpen: Bool, isRelease: Bool) -> Bool {
+        surfaceOpen || isRelease
+    }
+}
+
 /// Whether a blocked touch may send the input request by itself. Only an
 /// explicit, per-Mac, input-specific opt-in counts — never the connection
 /// policy (accepting a Mac's connections with Always Allow says nothing

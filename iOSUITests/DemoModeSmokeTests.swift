@@ -175,6 +175,7 @@ extension DemoModeSmokeTests {
     /// Mac's pointer or focuses a Mac window.
     @MainActor
     func testStagePeekOnALiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let yes = app.buttons["windowModePromptYes"]
@@ -294,11 +295,22 @@ extension DemoModeSmokeTests {
 // MARK: - Live Mac connection (physical iPhone)
 
 extension DemoModeSmokeTests {
+    /// Each live-Mac test otherwise finds out there's no Mac only by waiting out its connection
+    /// timeouts (up to a minute each). A run that can never reach one says so with
+    /// MEOW_NO_LIVE_MAC=1 (pass TEST_RUNNER_MEOW_NO_LIVE_MAC=1 to xcodebuild, as CI does),
+    /// and the tests skip at once.
+    private func skipWithoutLiveMac() throws {
+        if ProcessInfo.processInfo.environment["MEOW_NO_LIVE_MAC"] == "1" {
+            throw XCTSkip("no live Mac for this run (MEOW_NO_LIVE_MAC=1)")
+        }
+    }
+
     /// Physical iPhone + the paired Mac on the same network (skipped otherwise): connects from the
     /// home screen (or the Reconnect button) and waits for the session to leave the home screen.
     /// The Mac's log is the oracle for what the device then shows; this only drives the button.
     @MainActor
     func testConnectsToThePairedMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
@@ -324,6 +336,7 @@ extension DemoModeSmokeTests {
     /// The Mac's log is the oracle for the angle it drew.
     @MainActor
     func testTwistTurnsAPaneAndTheTrackpadCursorShowsOnTheLiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
@@ -360,6 +373,7 @@ extension DemoModeSmokeTests {
     /// Live Mac (skips without one): Rotate from a pane's menu turns that pane's picture.
     @MainActor
     func testRotatesAPaneOnTheLiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
