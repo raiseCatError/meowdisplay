@@ -33,9 +33,15 @@ final class CoalescingFetchTests: XCTestCase {
             await withCheckedContinuation { gate in state.withLock { $0.gates[n] = gate } }
             return n
         }
-        /// Returns once request `n` is out and waiting to be released.
-        func waitUntilOut(_ n: Int) async throws {
-            while state.withLock({ $0.gates[n] == nil }) { try await Task.sleep(for: .milliseconds(5)) }
+        struct NotOut: Error {}
+        /// Returns once request `n` is out and waiting to be released; throws if it isn't
+        /// within `limit`, so a request held back fails the test instead of hanging it.
+        func waitUntilOut(_ n: Int, within limit: Duration = .seconds(10)) async throws {
+            let deadline = ContinuousClock.now + limit
+            while state.withLock({ $0.gates[n] == nil }) {
+                guard ContinuousClock.now < deadline else { throw NotOut() }
+                try await Task.sleep(for: .milliseconds(5))
+            }
         }
         func release(_ n: Int) { state.withLock { $0.gates.removeValue(forKey: n) }?.resume() }
     }
@@ -121,17 +127,24 @@ final class CoalescingFetchTests: XCTestCase {
     /// Regression (2026-10-30 22:39, AltTab flooding replayd): the request out had started just
     /// before the virtual display existed; holding the fresh one back until it answered put it
     /// behind 14 s of other apps' requests.
+    ///
+    /// The fresh request must go out while the stale one is still out. This used to be timed
+    /// with the clock (answered within 450 ms of a 300 ms request), and CI run 41914481225
+    /// missed that by 0.25 ms on a busy runner; holding the answers makes it exact.
     func testAStaleRequestOutDoesNotHoldBackAFreshOne() async throws {
-        let (fetcher, service) = make(.milliseconds(300))
+        let service = GatedService()
+        let fetcher = CoalescingFetch<Int> { await service.fetch() }
         async let stale = fetcher.value(.cachedWithin(.seconds(5)))
-        try await Task.sleep(for: .milliseconds(50))
+        try await service.waitUntilOut(1)
         fetcher.invalidate()
-        let clock = ContinuousClock.now
-        let fresh = try await fetcher.value(.cachedWithin(.seconds(5)))
-        XCTAssertEqual(fresh.value, 2)
-        XCTAssertLessThan(ContinuousClock.now - clock, .milliseconds(450), "sent at once, not after the stale one")
+        async let fresh = fetcher.value(.cachedWithin(.seconds(5)))
+        try await service.waitUntilOut(2)   // sent at once, while the stale one is still out
+        service.release(2)
+        let answer = try await fresh
+        XCTAssertEqual(answer.value, 2)
+        service.release(1)
         _ = try await stale
-        XCTAssertEqual(service.calls.withLock { $0 }, 2)
+        XCTAssertEqual(service.calls, 2)
     }
 
     /// Regression (2026-10-30 22:50): the display was created, a request went out, then macOS's
