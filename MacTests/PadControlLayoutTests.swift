@@ -175,6 +175,38 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertLessThanOrEqual(PadControlMetrics(scale: 99).item, 62)
     }
 
+    // MARK: - Stage Peek Dock default (issue #130)
+
+    func testStagePeekDockDefaultsToNormalAndAStoredCompactIsKept() throws {
+        XCTAssertEqual(ReceiverControlPreferences().stagePeekDock, .normal)
+        var stored = ReceiverControlPreferences()
+        stored.stagePeekDock = .compact
+        let data = try JSONEncoder().encode(stored)
+        XCTAssertEqual(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).stagePeekDock, .compact,
+                       "an existing install's saved Compact is never overwritten")
+    }
+
+    func testStagePeekDockThroughTheRepository() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "PadControlLayoutTests-dock-\(UUID().uuidString)"))
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        // Nothing saved yet (a new install, or one that never changed a setting): Normal.
+        XCTAssertEqual(repository.load(initial: .initial(isPad: false)).stagePeekDock, .normal)
+        // A saved Compact survives load's migrations, from an older schema too.
+        var compact = repository.load()
+        compact.stagePeekDock = .compact
+        repository.save(compact)
+        XCTAssertEqual(repository.load().stagePeekDock, .compact)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: XCTUnwrap(defaults.data(forKey: ReceiverControlPreferencesRepository.defaultsKey))) as? [String: Any])
+        object["version"] = 19
+        defaults.set(try JSONSerialization.data(withJSONObject: object), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        XCTAssertEqual(repository.load().stagePeekDock, .compact)
+        // A blob from before the key existed takes the new default.
+        object["stagePeekDock"] = nil
+        defaults.set(try JSONSerialization.data(withJSONObject: object), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        XCTAssertEqual(repository.load().stagePeekDock, .normal)
+    }
+
     // MARK: - Strip / Overlay geometry
 
     private let railGroups = [3, 7, 2]   // system, keys, view

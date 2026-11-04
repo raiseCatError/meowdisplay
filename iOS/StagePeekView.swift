@@ -34,7 +34,8 @@ struct StagePeekOverlay: View {
     let hapticsEnabled: Bool
     var naturalScrolling = true
     /// Compact: the stack stays in a fading band between the controls above and below.
-    var dock: StagePeekDockStyle = .compact
+    /// Normal by default (issue #130), like `ReceiverControlPreferences.stagePeekDock` and Android.
+    var dock: StagePeekDockStyle = .normal
     /// Whether this session may change the Mac ("Open on Mac", Close Window).
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
@@ -64,6 +65,7 @@ struct StagePeekOverlay: View {
     @State private var haptics = StagePeekHaptics()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     /// The compact stack's windows: the chosen app's, matching the search.
     private var windows: [CatalogWindowItem] {
@@ -287,7 +289,7 @@ struct StagePeekOverlay: View {
             Text(notice.message).font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .legibleGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: min(460, safe.width - 32))
         .position(x: safe.midX, y: max(toolbarY(safe.midX) - 64, safe.minY + 160))
         .transition(.opacity)
@@ -673,9 +675,16 @@ struct StagePeekOverlay: View {
         }
         .font(.footnote.weight(.semibold))
         .labelStyle(.titleAndIcon)
-        .buttonStyle(.bordered)
+        // A filled dark capsule, not `.bordered` with a white tint: that
+        // drew white labels on a translucent white fill, unreadable over a
+        // bright window (see `StagePeekLegibility`).
+        .buttonStyle(.borderedProminent)
         .buttonBorderShape(.capsule)
-        .tint(.white)
+        // Reduce Transparency / Increase Contrast: the same dense fill as `GlassSurface`.
+        .tint(reduceTransparency || colorSchemeContrast == .increased
+              ? Color(white: 0.13).opacity(0.95)
+              : Color.black.opacity(StagePeekLegibility.minimumScrimOpacity))
+        .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .fixedSize()
         .position(x: toolbarX(column), y: toolbarY(column))
