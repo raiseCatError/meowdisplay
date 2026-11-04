@@ -42,18 +42,18 @@ struct StreamingSettingsView: View {
                                 Text(p.label).tag(p)
                             }
                         }
-                        .onChange(of: controller.streamingProfile) { controller.restartAll() }
+                        .onChange(of: controller.streamingProfile) { controller.restartForStreamingSettingChange() }
                         Text(controller.streamingProfile.explanation)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         Picker("Streaming Priority", selection: $controller.streamingPriority) {
-                            ForEach(StreamingPriority.allCases) { p in
+                            ForEach(StreamingPriority.pickerOrder) { p in
                                 Text(p.label).tag(p)
                             }
                         }
-                        .onChange(of: controller.streamingPriority) { controller.restartAll() }
+                        .onChange(of: controller.streamingPriority) { controller.restartForStreamingSettingChange() }
                         Text(controller.streamingPriority.explanation)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -64,7 +64,7 @@ struct StreamingSettingsView: View {
                                 Text(c.label).tag(c)
                             }
                         }
-                        .onChange(of: controller.codecPreference) { controller.restartAll() }
+                        .onChange(of: controller.codecPreference) { controller.restartForStreamingSettingChange() }
                         Text(controller.codecPreference.explanation)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -76,7 +76,7 @@ struct StreamingSettingsView: View {
                                     Text(r.label).tag(r)
                                 }
                             }
-                            .onChange(of: controller.customFrameRate) { controller.restartAll() }
+                            .onChange(of: controller.customFrameRate) { controller.restartForStreamingSettingChange() }
                             Text("Clamped to the connected device's actual maximum refresh rate. "
                                 + "Auto uses the same ceiling as Performance.")
                                 .font(.caption)
@@ -89,7 +89,7 @@ struct StreamingSettingsView: View {
                                 Text(q.label).tag(q)
                             }
                         }
-                        .onChange(of: controller.quality) { controller.restartAll() }
+                        .onChange(of: controller.quality) { controller.restartForStreamingSettingChange() }
                         Text(controller.quality.explanation)
                             .font(.caption)
                             .foregroundStyle(.secondary)

@@ -276,8 +276,11 @@ final class WorkspaceClientTests: XCTestCase {
         m.undo()
         XCTAssertEqual(m.layout.tiles.count, 2)
 
-        // The last pane: no Remove target (its menu still offers Remove from Layout).
+        // The last pane: neither the drop zone nor its menu offers Remove (#120).
+        XCTAssertTrue(m.canRemoveFromLayout(m.layout.orderedTileIDs[0]))
         m.removeTile(m.layout.orderedTileIDs[1])
+        XCTAssertFalse(m.canRemoveFromLayout(m.layout.orderedTileIDs[0]))
+        XCTAssertFalse(m.canRemoveFromLayout("no-such-pane"))
         m.beginDrag(.pane(m.layout.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
         XCTAssertFalse(m.canDropToRemove)
         m.moveDrag(to: onRemove)

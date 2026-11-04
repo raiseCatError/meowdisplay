@@ -110,7 +110,8 @@ enum MobileSettingsSearchIndex {
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),
         .init("surfaceGrid", String(localized: "Show Surface Grid"), .display, keywords: ["video off", "dots"]),
         .init("pictureInPicture", String(localized: "Picture in Picture"), .display, keywords: ["pip", "floating window"]),
-        .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "priority", "fps"]),
+        .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "fps"]),
+        .init("streamingPriority", String(localized: "Streaming Priority"), .display, keywords: ["priority", "latency", "balanced", "smoothness", "smooth", "delay", "lag"]),
         .init("maxFPS", String(localized: "Enforce Maximum FPS"), .display, keywords: ["frame rate", "fps", "limit"]),
         // Input
         .init("control", String(localized: "Control"), .input, keywords: ["request control", "request input", "allow input", "permission"]),

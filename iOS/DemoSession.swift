@@ -13,6 +13,9 @@ protocol ReceiverControlSource: ObservableObject {
     var videoEnabled: Bool { get }
     var inputResetGeneration: Int { get }
     var controlResetGeneration: Int { get }
+    /// What a delayed remote action must still hold before each later step
+    /// (see `OneTapActionRunner`); nil while input can't leave this device.
+    var remoteInputTicket: RemoteInputTicket? { get }
     func sendKeyboardPress(usage: Int, modifiers: [String])
     func sendKeyboardDown(usage: Int, modifiers: [String])
     func sendKeyboardUp(usage: Int, modifiers: [String])
@@ -188,6 +191,8 @@ extension DemoSession: ReceiverControlSource {
     var displayState: DisplayState { .running }
     var inputResetGeneration: Int { 0 }
     var controlResetGeneration: Int { 0 }
+    /// The demo has one session that never changes, and nothing leaves the device.
+    var remoteInputTicket: RemoteInputTicket? { RemoteInputTicket(controlGeneration: 0, connectionGeneration: 0) }
 
     // Every "send" lands on the sample desktop or becomes a preview of what
     // a real session would send. Nothing leaves the device.

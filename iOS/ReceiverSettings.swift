@@ -548,12 +548,19 @@ private struct DisplaySettingsPage: View {
             let priorityBinding = Binding<StreamingPriority>(
                 get: { receiver.streamingPriority },
                 set: { receiver.requestStreamingPriority($0) })
-            Picker("Streaming Priority", selection: priorityBinding) {
-                ForEach(StreamingPriority.allCases) { priority in
-                    Text(priority.label).tag(priority)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Streaming Priority")
+                    .accessibilityHidden(true)   // the picker carries the same label
+                Picker("Streaming Priority", selection: priorityBinding) {
+                    ForEach(StreamingPriority.pickerOrder) { priority in
+                        Text(priority.label).tag(priority)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
             .disabled(macAutomatic)
+            .settingsAnchor("streamingPriority")
             Text(receiver.streamingPriority.explanation).font(.footnote).foregroundStyle(.secondary)
         } header: {
             Text("Streaming")

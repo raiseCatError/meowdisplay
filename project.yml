@@ -298,6 +298,7 @@ targets:
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
       - Mac/DisplayCaptureSettings.swift
+      - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift
       - Mac/InputInjector.swift
       - Mac/AudioCaptureEncoder.swift
@@ -372,6 +373,8 @@ targets:
       # iOS Demo Mode boundary (Foundation only, no UIKit).
       - iOS/DemoSession.swift
       - iOS/DemoDesktop.swift
+      # One-tap actions and sequences (Foundation only): their input isolation is tested.
+      - iOS/OneTapActionRunner.swift
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift

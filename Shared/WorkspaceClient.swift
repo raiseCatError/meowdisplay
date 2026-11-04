@@ -1436,7 +1436,14 @@ final class WorkspaceModel: ObservableObject {
     /// from Stage Peek, a new pane or a tab. It removes the pane here only; the Mac window is untouched.
     var canDropToRemove: Bool {
         guard windowMode, case .pane(let id, nil)? = drag?.item else { return false }
-        return arranged.tiles[id] != nil && arranged.tiles.count > 1
+        return canRemoveFromLayout(id)
+    }
+
+    /// Whether a pane may come off this device's layout (its menu and the drop
+    /// zone agree). Never the last one: that would leave an empty canvas, and
+    /// the pane's menu offers Change Window… instead (#120).
+    func canRemoveFromLayout(_ tile: String) -> Bool {
+        arranged.tiles[tile] != nil && arranged.tiles.count > 1
     }
 
     /// Cancel wins where the two zones' touch margins meet (they sit 12 pt

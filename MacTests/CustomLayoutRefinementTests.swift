@@ -389,7 +389,8 @@ final class CustomLayoutRefinementTests: XCTestCase {
             ("Smart Touch", .input), ("Rotation", .gestures), ("Control Layout", .controls),
             ("Auto-hide", .controls), ("Move View", .gestures), ("Remote Access", .remoteAccess),
             ("QUIC", .connections), ("Control Size", .controls), ("Two-Hand Assist", .controls),
-            ("show desktop", .controls), ("lip sync", .audio), ("Rate MeowDisplay", .about), ("review", .about),
+            ("show desktop", .controls), ("lip sync", .audio), ("Streaming Priority", .display), ("smoothness", .display),
+            ("Rate MeowDisplay", .about), ("review", .about),
         ]
         for (query, category) in expectations {
             XCTAssertEqual(MobileSettingsSearchIndex.search(query, isPad: true, debug: false).first?.category,

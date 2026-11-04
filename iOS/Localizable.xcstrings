@@ -296,7 +296,7 @@
     "Back to Home" : {
 
     },
-    "Balanced default." : {
+    "Balanced" : {
 
     },
     "Block" : {
@@ -719,10 +719,10 @@
     "Fast" : {
 
     },
-    "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency." : {
+    "Favors a smooth, steady frame rate, keeping a little more work in flight at a small cost in delay." : {
 
     },
-    "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+    "Favors the newest frame and the lowest delay, accepting a lower frame rate under load." : {
 
     },
     "File" : {
@@ -1325,12 +1325,6 @@
     "Portrait" : {
 
     },
-    "Prefer FPS" : {
-
-    },
-    "Prefer Latency" : {
-
-    },
     "Prefer MeowDisplay Gestures" : {
 
     },
@@ -1676,6 +1670,9 @@
     "Smart Touch Haptics" : {
       "comment" : "Toggle label. \"Smart Touch\" is the feature's brand name and must stay untranslated; only \"Haptics\" is translatable."
     },
+    "Smoothness" : {
+
+    },
     "Snap Rotation" : {
 
     },
@@ -1791,6 +1788,9 @@
 
     },
     "The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier." : {
+
+    },
+    "The default: a balance of smooth motion and low delay." : {
 
     },
     "The editor opens full screen, with separate landscape and portrait arrangements. Preview lets you try the layout without sending anything to your Mac." : {
