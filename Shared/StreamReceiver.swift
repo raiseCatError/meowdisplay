@@ -3372,6 +3372,14 @@ final class StreamReceiver: ObservableObject {
         sendUIControl(["type": "keyboard", "action": "cancel"])
     }
 
+    /// Releases everything this device holds on the Mac (held keys, modifiers, a drag) and
+    /// resets the local control state, as a display-mode switch does. Home with the session
+    /// kept (#121) leaves nothing pressed behind it.
+    @MainActor func releaseLocalInput() {
+        controlResetGeneration &+= 1
+        sendCancelActiveInput()
+    }
+
     /// `true`: requests control of THIS session — never an assignment, the
     /// Mac may show its owner a prompt, auto-grant, or auto-deny per that
     /// peer's policy, and the confirmed result always arrives back via

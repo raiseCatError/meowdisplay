@@ -446,8 +446,8 @@ stream the receiver is already showing.
 
 - **Automatic or manual.** With **Picture in Picture** on (the default), a
   live session can enter the system floating window when you leave the app,
-  when supported and available. Receiver Settings also offers **Start Picture
-  in Picture** and **Stop Picture in Picture**.
+  when supported and available (not from Home with a session kept). Receiver
+  Settings also offers **Start Picture in Picture** and **Stop Picture in Picture**.
 - **For glancing, not controlling.** The window is View Only: it shows what
   your Mac is doing, but touches in it never reach the Mac. All interaction
   stays in the full receiver.

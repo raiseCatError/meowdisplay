@@ -86,6 +86,8 @@ struct ReceiverScreen: View {
     // control store. Both are nil outside the demo.
     @State private var demo: DemoSession?
     @State private var demoControlStore: ReceiverControlStore?
+    /// The keyboard was open when Home was chosen; Resume reopens it (#121).
+    @State private var keyboardBeforeHome = false
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
@@ -111,17 +113,40 @@ struct ReceiverScreen: View {
     }
 
     private var route: ReceiverPresentationRoute {
-        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface)
+        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface, presentation: model.presentation)
     }
 
     /// Auto-Lock is held off only while the Mac's picture is watched (ScreenAwakePolicy).
     private var screenAwakeInputs: ScreenAwakePolicy.Inputs {
         .init(enabled: keepScreenAwake, foreground: scenePhase == .active,
-              watching: route == .receiver && !showSettings, streaming: isStreaming)
+              watching: route.watchesMac && !showSettings, streaming: isStreaming)
     }
 
-    /// Full-screen chrome rules apply to the demo surface as well.
+    /// Full-screen chrome rules apply to the demo surface as well, and to
+    /// Home over a kept session: nothing under it changes geometry.
     private var fullScreenSurface: Bool { route != .idle }
+
+    /// Back to Home — Keep Connected (#121).
+    private func showHomeKeepingSession() {
+        keyboardBeforeHome = keyboardActive
+        showSettings = false
+        model.showHomeKeepingSession()
+    }
+
+    /// Offered in Settings ▸ Connections only while a real session is on screen.
+    private var keepSessionOnHomeAction: (@MainActor () -> Void)? {
+        guard route == .receiver else { return nil }
+        return { showHomeKeepingSession() }
+    }
+
+    /// What Home shows while the session is kept behind it.
+    private var keptSessionHome: KeptSessionHome? {
+        guard model.presentation.keepsSessionOnHome else { return nil }
+        let host = model.workspace.hostName
+        return KeptSessionHome(macName: host.isEmpty ? String(localized: "your Mac") : host,
+                               interruption: model.receiver.session.interruption,
+                               onResume: { model.resumeSession() })
+    }
 
     private func enterDemo() {
         // A real session always wins (see `route`); never start a demo behind it.
@@ -149,7 +174,8 @@ struct ReceiverScreen: View {
         BlockedInputAttemptPolicy.inputReachesMac(sessionLive: model.receiver.session.allowsLiveInput,
                                                   localAllow: controlStore.preferences.allowInput,
                                                   macPV: model.receiver.macProtocolVersion,
-                                                  macState: controlStore.sessionInputState)
+                                                  macState: controlStore.sessionInputState,
+                                                  surfaceInteractive: model.presentation.surfaceInteractive)
     }
 
     /// Screen edges whose system gestures wait for a second swipe — see
@@ -199,7 +225,8 @@ struct ReceiverScreen: View {
             rendersThroughDisplayLayer: !metalRenderer,
             receiverSurfaceShown: showsReceiverSurface,
             sessionPhase: model.receiver.session.phase,
-            videoEnabled: model.receiver.videoEnabled)
+            videoEnabled: model.receiver.videoEnabled,
+            sessionOnHome: model.presentation.keepsSessionOnHome)
     }
 
     // The floating keyboard button is offered only while keyboard input can
@@ -275,6 +302,7 @@ struct ReceiverScreen: View {
             SettingsView(receiver: model.receiver, controlStore: controlStore,
                          pictureInPicture: model.pictureInPicture, haptics: haptics, clipboard: model.workspace.clipboard)
             .environment(\.lockMacClient, model.workspace)
+            .environment(\.keepSessionOnHome, keepSessionOnHomeAction)
         }
     }
 
@@ -377,7 +405,8 @@ struct ReceiverScreen: View {
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
                                    threeFingerHoldEnabled: model.workspace.available,
                                    onThreeFingerHold: { model.workspace.openOverview() },
-                                   onHardwarePointer: { model.workspace.hover(at: $0) })
+                                   onHardwarePointer: { model.workspace.hover(at: $0) },
+                                   onBackToHome: { showHomeKeepingSession() })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
@@ -530,9 +559,13 @@ struct ReceiverScreen: View {
                                        onExit: { exitDemo() })
                 } else {
                     IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
-                             onExploreDemo: { enterDemo() })
+                             onExploreDemo: { enterDemo() }, keptSession: keptSessionHome)
                 }
             }
+            // Home over a kept session: the surface stays mounted (zoom,
+            // panes, decoder) but takes no touches and is hidden from VoiceOver.
+            .allowsHitTesting(route != .sessionHome)
+            .accessibilityHidden(route == .sessionHome)
             .background(ReceiverWindowPanelProbe { points, scale in
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
@@ -546,6 +579,16 @@ struct ReceiverScreen: View {
         .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
         .statusBarHidden(fullScreenSurface)
         .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
+        .overlay {
+            if route == .sessionHome {
+                ZStack {
+                    Color(horizontalSizeClass == .regular ? .systemGroupedBackground : .systemBackground)
+                        .ignoresSafeArea()
+                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
+                             onExploreDemo: { enterDemo() }, keptSession: keptSessionHome)
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()
@@ -706,6 +749,12 @@ struct ReceiverScreen: View {
         // gets this message).
         .onChange(of: keyboardVisibleRect != nil) { open in
             model.receiver.sendKeyboardState(open: open)
+        }
+        // Resume reopens the keyboard that was open when Home was chosen.
+        .onChange(of: model.presentation.surfaceInteractive) { interactive in
+            guard interactive else { return }
+            if keyboardBeforeHome, keyboardAvailable, inputReachesMac { keyboardActive = true }
+            keyboardBeforeHome = false
         }
         // Allow Input OFF must close the keyboard responder too — it's the
         // one interactive element the video-layer hit-testing gate above
@@ -1135,6 +1184,14 @@ struct OverflowMarqueeText: View {
 
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
+/// What Home shows and does while a session is kept behind it (#121).
+struct KeptSessionHome {
+    let macName: String
+    /// The session's interruption, if any, titles the card instead.
+    let interruption: ReceiverSessionInterruption?
+    let onResume: () -> Void
+}
+
 /// The home screen. Three things, top to bottom: who this is and one short
 /// status line; one card listing Macs (paired, then nearby ones to pair);
 /// and a quiet row of links with Settings & Help beneath it. Everything else
@@ -1145,6 +1202,8 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
     let onExploreDemo: () -> Void
+    /// Home over a kept session: a card to go back to it, and one session at a time.
+    var keptSession: KeptSessionHome?
     @State private var showRemoteAccessSetup = false
     @State private var showRemotePairing = false
     @State private var homeSheet: HomeSheet?
@@ -1193,6 +1252,9 @@ struct IdleView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let keptSession { keptSessionCard(keptSession) }
         }
         .background(horizontalSizeClass == .regular ? Color(.systemGroupedBackground) : Color(.systemBackground))
         .sheet(isPresented: Binding(
@@ -1493,7 +1555,14 @@ struct IdleView: View {
                     macRow(mac)
                 }
             }
-            if demoLivesInCard {
+            if let keptSession, macs.contains(where: { sessionRole($0) == .otherMacInSession }) {
+                Text("Disconnect from \(keptSession.macName) to connect to another.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 8)
+            }
+            if demoLivesInCard, keptSession == nil {
                 Divider()
                 Button(action: onExploreDemo) {
                     Label("Try the Demo", systemImage: "play.rectangle")
@@ -1612,7 +1681,7 @@ struct IdleView: View {
         guard let peerID = mac.peerID else {
             return mac.switchedOut ? String(localized: "Switched Out") : String(localized: "Not paired")
         }
-        if receiver.connected { return String(localized: "Connected") }
+        if sessionRole(mac) == .current { return String(localized: "Connected") }
         // The Mac can see this iPhone but macOS won't let it connect back: say where to fix it.
         if mac.localNetworkBlocked {
             return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
@@ -1625,12 +1694,27 @@ struct IdleView: View {
         return String(localized: "Not found")
     }
 
+    /// One session at a time: only the session's own Mac is Connected.
+    private func sessionRole(_ mac: HomeMac) -> HomeMacSessionRole {
+        .resolve(rowPeerID: mac.peerID, sessionMacPeerID: receiver.connectedMacPeerID,
+                 sessionActive: receiver.connected || keptSession != nil)
+    }
+
     @ViewBuilder
     private func macPrimaryControl(_ mac: HomeMac) -> some View {
+        let role = sessionRole(mac)
         if let peerID = mac.peerID {
-            if receiver.connected || mac.switchedOut {
-                // Connected: nothing to do. Switched out: it can't share, so
-                // there is nothing to connect to until it is in front.
+            if role == .current, let keptSession {
+                Button("Resume", action: keptSession.onResume)
+                    .buttonStyle(.borderedProminent)
+                    .fixedSize()
+                    .accessibilityLabel(Text("Resume session with \(mac.name)"))
+                    .accessibilityInputLabels([Text("Resume session with \(mac.name)"), Text("Resume")])
+                    .accessibilityIdentifier("resumeSessionRow")
+            } else if role != .available || mac.switchedOut {
+                // Connected (or another Mac's session holds this device):
+                // nothing to do. Switched out: it can't share, so there is
+                // nothing to connect to until it is in front.
                 EmptyView()
             } else if wakeConnect.isRunning(forPeerID: peerID) {
                 ProgressView().controlSize(.small)
@@ -1641,7 +1725,7 @@ struct IdleView: View {
             } else {
                 connectButton(for: mac, peerID: peerID)
             }
-        } else if let result = mac.nearby, !mac.switchedOut {
+        } else if let result = mac.nearby, !mac.switchedOut, role == .available {
             Button("Pair") { receiver.pairWithMac(result) }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel(Text("Pair with \(mac.name)"))
@@ -1740,6 +1824,61 @@ struct IdleView: View {
         return String(localized: "Not connected")
     }
 
+    // MARK: Kept session
+
+    /// Pinned above Home while the session is kept: back to it, or end it.
+    private func keptSessionCard(_ kept: KeptSessionHome) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: kept.interruption == nil ? "display" : "exclamationmark.triangle")
+                    .font(.title2)
+                    .foregroundStyle(kept.interruption == nil ? Color.accentColor : Color.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(kept.interruption?.title ?? String(localized: "Connected to \(kept.macName)"))
+                        .font(.headline)
+                    Text(kept.interruption == nil ? String(localized: "The Mac keeps this display. Resume to see and control it.")
+                                                  : kept.macName)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { keptSessionButtons(kept) }
+                VStack(spacing: 8) { keptSessionButtons(kept) }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func keptSessionButtons(_ kept: KeptSessionHome) -> some View {
+        Button(action: kept.onResume) {
+            Text("Resume").frame(maxWidth: .infinity, minHeight: 32)
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityLabel(Text("Resume session with \(kept.macName)"))
+        .accessibilityInputLabels([Text("Resume session with \(kept.macName)"), Text("Resume")])
+        .accessibilityIdentifier("resumeSession")
+        Button(role: .destructive) {
+            receiver.disconnect()
+        } label: {
+            Text("Disconnect").frame(maxWidth: .infinity, minHeight: 32)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(Text("Disconnect from \(kept.macName)"))
+        .accessibilityInputLabels([Text("Disconnect from \(kept.macName)"), Text("Disconnect")])
+        .accessibilityIdentifier("homeDisconnect")
+    }
+
     // MARK: Footer
 
     private var homeFooter: some View {
@@ -1752,7 +1891,7 @@ struct IdleView: View {
     /// How to Connect · Try the Demo · This Device. Wraps to a column when
     /// the three don't fit on one line (small screens, large text).
     private var footerLinks: some View {
-        let demoInFooter = !demoLivesInCard
+        let demoInFooter = !demoLivesInCard && keptSession == nil
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 2) {
                 howToConnectLink
@@ -1980,6 +2119,10 @@ final class ReceiverModel: ObservableObject {
     /// Turns this window's size into the panel the Mac's Extend display takes (iPhone Duo,
     /// Stage Manager, Split View): see `ReceiverPanelGeometry`.
     let panelSettler: ReceiverPanelSettler
+    /// In the session, or on Home with the session kept behind it (#121).
+    @Published private(set) var presentation = ReceiverSessionPresentation.session {
+        didSet { if presentation != oldValue { presentationChanged() } }
+    }
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
@@ -2037,6 +2180,31 @@ final class ReceiverModel: ObservableObject {
             .store(in: &cancellables)
         pictureInPicture.onStartedAfterLinger = { [weak self] in self?.resumeFromLinger() }
         pictureInPicture.onEndedInBackground = { [weak self] in self?.lingerInBackground() }
+        pictureInPicture.onRestoreUserInterface = { [weak self] in self?.resumeSession() }
+        // A window opening or closing over Home changes what plays locally;
+        // in the background the callbacks above own that.
+        pictureInPicture.$lifecycle
+            .removeDuplicates { $0.isEngaged == $1.isEngaged }
+            .dropFirst()
+            .sink { [weak self] lifecycle in
+                guard lifecycle.presence == .foreground else { return }
+                self?.applyLocalMediaPolicy(lifecycle)
+            }
+            .store(in: &cancellables)
+        // A kept session ends with its surface, so a later one never starts hidden behind Home.
+        receiver.$session
+            .map(\.retainsReceiverSurface)
+            .removeDuplicates()
+            .sink { [weak self] retains in self?.followSession(retainsSurface: retains) }
+            .store(in: &cancellables)
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.followSession(retainsSurface: self.receiver.session.retainsReceiverSurface)
+            }
+            .store(in: &cancellables)
     }
 
     func start() {
@@ -2083,13 +2251,13 @@ final class ReceiverModel: ObservableObject {
     func sceneDidActivate() {
         pictureInPicture.sceneDidActivate()
         endBackgroundAssertion()
-        receiver.setRenderingPaused(false)
-        receiver.setLocalAudioSuspended(false)
+        // Home over a kept session stays paused in front too.
+        let media = applyLocalMediaPolicy()
         receiver.ensureListening()
         // Resume a parked recovery run from where it stopped. If the session
         // is healthy this is a no-op; if it is beyond recovery the session
         // state already settled into its failed/disconnected phase.
-        receiver.setAppActive(true)
+        receiver.setAppActive(!media.recoveryParked)
     }
 
     func deviceWillLock() {
@@ -2134,9 +2302,56 @@ final class ReceiverModel: ObservableObject {
     /// keeps the app running, so undo the pause and let recovery continue.
     private func resumeFromLinger() {
         endBackgroundAssertion()
-        receiver.setRenderingPaused(false)
-        receiver.setLocalAudioSuspended(false)
-        receiver.setAppActive(true)
+        let media = applyLocalMediaPolicy()
+        receiver.setAppActive(!media.recoveryParked)
+    }
+
+    // MARK: - Back to Home, Keep Connected (#121)
+
+    /// Home in front, the session kept behind it: the Mac keeps its display
+    /// and keeps encoding, this device stops showing, playing and sending.
+    func showHomeKeepingSession() {
+        let surfaceRetained = receiver.session.retainsReceiverSurface && receiver.videoSize != .zero
+        var next = presentation
+        guard next.showHome(surfaceRetained: surfaceRetained, macPeerID: receiver.connectedMacPeerID) else { return }
+        // Nothing stays pressed on the Mac while nobody can see it.
+        receiver.releaseLocalInput()
+        presentation = next
+        Log.info("session: Home, session kept")
+    }
+
+    func resumeSession() {
+        var next = presentation
+        guard next.resume() else { return }
+        presentation = next
+        Log.info("session: resumed from Home")
+    }
+
+    private func followSession(retainsSurface: Bool) {
+        var next = presentation
+        guard next.sessionChanged(retainsSurface: retainsSurface, macPeerID: receiver.connectedMacPeerID) else { return }
+        presentation = next
+        if !next.keepsSessionOnHome { Log.info("session: kept session ended or replaced, leaving Home") }
+    }
+
+    private func presentationChanged() {
+        // Rotating or resizing on Home doesn't reshape the Mac's display;
+        // the latest size goes out on Resume.
+        panelSettler.setHeld(presentation.keepsSessionOnHome)
+        applyLocalMediaPolicy()
+    }
+
+    /// Rendering and local audio for where the app is, what's in front and
+    /// whether a Picture in Picture window shows the picture. Resuming
+    /// rendering flushes and asks for a keyframe; nothing else reaches the Mac.
+    @discardableResult
+    private func applyLocalMediaPolicy(_ lifecycle: ReceiverPictureInPictureLifecycle? = nil) -> ReceiverLocalMediaPolicy {
+        let lifecycle = lifecycle ?? pictureInPicture.lifecycle
+        let media = ReceiverLocalMediaPolicy.resolve(presence: lifecycle.presence, presentation: presentation,
+                                                     pictureInPictureEngaged: lifecycle.isEngaged)
+        receiver.setRenderingPaused(media.renderingPaused)
+        receiver.setLocalAudioSuspended(media.audioSuspended)
+        return media
     }
 
     private func goToSleep() {
@@ -2263,6 +2478,8 @@ struct VideoLayerView: UIViewRepresentable {
     var onThreeFingerHold: () -> Void = {}
     /// The hardware pointer over the picture (normalized), for tile hover.
     var onHardwarePointer: (CGPoint?) -> Void = { _ in }
+    /// The picture's "Back to Home" accessibility action (keeps the session, #121).
+    var onBackToHome: (() -> Void)?
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
@@ -2272,6 +2489,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.threeFingerHoldEnabled = threeFingerHoldEnabled
         view.onThreeFingerHold = onThreeFingerHold
         view.onHardwarePointer = onHardwarePointer
+        view.onBackToHome = onBackToHome
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
         view.setInputMode(inputMode)
@@ -2448,6 +2666,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.threeFingerHoldEnabled = threeFingerHoldEnabled
         uiView.onThreeFingerHold = onThreeFingerHold
         uiView.onHardwarePointer = onHardwarePointer
+        uiView.onBackToHome = onBackToHome
         uiView.setMoveViewActive(moveViewActive)
         uiView.setViewportResetGeneration(viewportResetGeneration)
         // videoSize arrives after the format description — re-fit the layers.
@@ -2476,6 +2695,9 @@ struct VideoLayerView: UIViewRepresentable {
         var onThreeFingerHold: (() -> Void)?
         /// The hardware pointer, normalized to the picture (nil outside it): the workspace's hover.
         var onHardwarePointer: ((CGPoint?) -> Void)?
+        var onBackToHome: (() -> Void)? {
+            didSet { if (oldValue == nil) != (onBackToHome == nil) { refreshPictureAccessibility() } }
+        }
         var threeFingerHoldEnabled = false {
             didSet { threeFingerHoldRecognizer.isEnabled = threeFingerHoldEnabled && !UIAccessibility.isVoiceOverRunning }
         }
@@ -3225,14 +3447,22 @@ struct VideoLayerView: UIViewRepresentable {
             accessibilityHint = pictureTouch.screenReaderRunning && !pictureTouch.directTouch
                 ? String(localized: "Touches here don't reach the Mac. Use the actions to turn on Direct Touch.")
                 : nil
+            var actions: [UIAccessibilityCustomAction] = []
             if let turnsOn = pictureTouch.directTouchActionTurnsOn {
                 let name = turnsOn ? String(localized: "Turn On Direct Touch") : String(localized: "Turn Off Direct Touch")
-                accessibilityCustomActions = [UIAccessibilityCustomAction(name: name) { [weak self] _ in
+                actions.append(UIAccessibilityCustomAction(name: name) { [weak self] _ in
                     self?.setPictureDirectTouch(turnsOn) ?? false
-                }]
-            } else {
-                accessibilityCustomActions = nil
+                })
             }
+            if onBackToHome != nil {
+                // Keeps the session: Home's Resume comes back to it.
+                actions.append(UIAccessibilityCustomAction(name: String(localized: "Back to Home")) { [weak self] _ in
+                    guard let back = self?.onBackToHome else { return false }
+                    back()
+                    return true
+                })
+            }
+            accessibilityCustomActions = actions.isEmpty ? nil : actions
         }
 
         func installVideoLayer(_ layer: CALayer) {

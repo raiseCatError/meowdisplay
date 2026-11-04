@@ -25,6 +25,9 @@ final class ReceiverPictureInPictureController: NSObject, ObservableObject {
     /// PiP ended while the app is still in the background — apply the linger
     /// that was held off while the window was showing.
     var onEndedInBackground: (() -> Void)?
+    /// The window's restore button: bring the full receiver back, also from
+    /// Home with the session kept behind it (#121).
+    var onRestoreUserInterface: (() -> Void)?
 
     let systemSupported = AVPictureInPictureController.isPictureInPictureSupported()
 
@@ -55,8 +58,8 @@ final class ReceiverPictureInPictureController: NSObject, ObservableObject {
         }
         guard let controller else { return }
         // Only a live session may carry the picture into the background on
-        // its own; an interrupted or Video Off session never auto-starts.
-        controller.canStartPictureInPictureAutomaticallyFromInline = newConditions.showsLiveVideo
+        // its own; an interrupted or Video Off session, or Home, never auto-starts.
+        controller.canStartPictureInPictureAutomaticallyFromInline = newConditions.startsAutomaticallyFromInline
         if playbackSource.setPaused(!newConditions.showsLiveVideo) {
             controller.invalidatePlaybackState()
         }
@@ -175,12 +178,14 @@ extension ReceiverPictureInPictureController: @preconcurrency AVPictureInPicture
         pictureInPictureEnded()
     }
 
-    /// The full receiver is always behind the window while PiP can run, so
-    /// restoring never needs to rebuild anything.
+    /// The full receiver is always behind the window while PiP can run (on
+    /// Home too: the surface stays mounted), so restoring never needs to
+    /// rebuild anything.
     func pictureInPictureController(
         _ controller: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
+        onRestoreUserInterface?()
         completionHandler(true)
     }
 }

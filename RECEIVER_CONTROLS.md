@@ -188,10 +188,26 @@ Mode (Automatic/Custom); that is set on the Mac only.
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
 | Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
 | Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
+| Back to Home — Keep Connected | Yes. Settings → Connections, or the picture's **Back to Home** VoiceOver action | Yes | No | n/a |
+
+**Back to Home — Keep Connected** (iPhone and iPad) shows Home while the session stays up: the
+Mac keeps its display and arrangement, and the picture's zoom, Move View, panes and Stage Peek
+are as you left them. Home's pinned card offers **Resume** (the same session, no reconnect) and
+**Disconnect**; only the session's Mac shows **Connected**, and other Macs can't be connected
+or paired until you disconnect. While on Home nothing reaches the Mac (touch, pointer, scroll,
+either keyboard; anything held is released first), this device stops drawing the picture and
+playing Mac audio (the Mac keeps sending; Resume asks for a fresh frame), and rotating doesn't
+reshape the Mac's display until Resume. Leaving the app from Home never starts Picture in
+Picture; a window already showing keeps playing. **Keep Screen Awake While Streaming** also
+covers Home with a kept session, because a device lock ends the session: that costs battery
+while you sit on Home, so turn it off or disconnect if you won't be back soon. The interruption
+card's **Back to Home** (Connection Lost, Mac Disconnected, Can't Connect) still gives up and
+disconnects.
 
 ## Gaps
 
 **Android compared with iOS**
+- No Back to Home — Keep Connected.
 - Rotation can't target the viewport, and there is no Snap Rotation control (the picture is on a SurfaceView).
 - **Prefer MeowDisplay Gestures** is saved but nothing in the app reads it.
 - The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
