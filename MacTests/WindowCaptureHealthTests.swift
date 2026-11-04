@@ -84,10 +84,12 @@ final class WindowCaptureHealthTests: XCTestCase {
         XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window, displays: [broken]), 2)
     }
 
-    func testAWindowOnNoDisplayFallsBackToTwoNotTheFirstDisplay() {
+    func testAWindowOnNoDisplayTakesTheHighestScaleNotTheFirstDisplay() {
         // Parked offscreen: every display overlaps by 0, so none of them describes it.
         let offscreen = CGRect(x: -5000, y: -5000, width: 800, height: 600)
         XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: offscreen, displays: [external, retina]), 2)
+        // Only 1x displays: 1, as before #138's change; 2 would capture 4x the pixels for nothing.
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: offscreen, displays: [external]), 1)
     }
 
     func testAFullSizePaneOnARetinaMacIsCapturedAtItsRetinaPixels() {

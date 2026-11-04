@@ -583,19 +583,28 @@ enum WorkspaceCaptureSizing {
         var modePixelWidth: Int
     }
 
-    /// Pixels per point of the display holding most of `source` (global points); 2 when unknown.
+    /// Pixels per point of the display holding most of `source` (global points).
     ///
     /// From the display mode: `CGDisplayPixelsWide` reports the mode's width in points on a
     /// HiDPI display, so dividing it by the bounds gave 1 on every Retina Mac and each window
     /// was captured at half its pixels per side, then scaled up to fill the pane (issue #138).
+    ///
+    /// A source on no display (parked offscreen) takes the highest scale among the active
+    /// displays, the most it could have on any of them: a Mac with only 1x displays never
+    /// captures at 2x (4x the pixels, nothing gained). 2 only when no display reports a mode.
     static func backingScale(source: CGRect, displays: [DisplayScale]) -> Double {
         func overlap(_ d: DisplayScale) -> CGFloat {
             let i = d.bounds.intersection(source)
             return i.isNull ? 0 : i.width * i.height
         }
-        guard let display = displays.max(by: { overlap($0) < overlap($1) }), overlap(display) > 0,
-              display.modeWidth > 0, display.modePixelWidth > 0 else { return 2 }
-        return max(Double(display.modePixelWidth) / Double(display.modeWidth), 1)
+        func scale(_ d: DisplayScale) -> Double? {
+            guard d.modeWidth > 0, d.modePixelWidth > 0 else { return nil }
+            return max(Double(d.modePixelWidth) / Double(d.modeWidth), 1)
+        }
+        if let display = displays.max(by: { overlap($0) < overlap($1) }), overlap(display) > 0 {
+            return scale(display) ?? 2
+        }
+        return displays.compactMap(scale).max() ?? 2
     }
 
     /// `source`: the source in points. `drawScale`: canvas pixels per source point (zoom included).
