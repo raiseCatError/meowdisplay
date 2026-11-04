@@ -99,6 +99,7 @@ ignore Touch Style.
 | Chord palettes (hold a modifier for shortcuts) | Yes. Editable | Yes | Yes. Not editable | n/a |
 | Function tray (Zoom In/Out, Undo, Redo by default) | Yes | Yes, as **Function Controls** | Yes | n/a |
 | Function tray editor (add, rename, sequences, faces) | Yes | Yes | Yes | n/a |
+| Calculator (on the device; never sent to the Mac; works in View Only) | Yes. Off by default; **Edit Function Tray** → Utilities. Upper-left corner | Yes. Same switch for Strip and Overlay (first on the Function edge); Custom: **Add Control** → Calculator | No | n/a |
 | Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Tray Side**, **Function Tray Position**, **Avoid Cutouts** | n/a |
 | Layouts: Strip / Overlay / Custom | n/a | Yes | Yes on large windows (tablet, unfolded) | n/a |
 | Edges, Palette Style (Keys / Wheel), Control Size, Control Hints, Standard Controls | n/a | Yes | Yes (Tablet Layout page) | n/a |

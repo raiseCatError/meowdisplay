@@ -141,7 +141,7 @@ enum MobileSettingsSearchIndex {
         .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("controlProfile", String(localized: "Control Profile"), .controls, keywords: ["active profile", "shortcuts", "palette", "modifier"]),
-        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),
+        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji", "calculator"]),
         .init("paletteStyle", String(localized: "Palette Style"), .controls, keywords: ["wheel", "chord", "keys"], availability: .padOnly),
         // Audio
         .init("audio", String(localized: "Audio"), .audio, keywords: ["sound"]),

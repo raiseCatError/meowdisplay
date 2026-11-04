@@ -983,6 +983,12 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// creates one — see `createCustomLayout`.
     var customLayouts: [CustomControlLayout] = []
     var activeCustomLayoutID: String?
+    /// The receiver-local Calculator's button (iPhone, and the iPad Strip
+    /// and Overlay), added from the Function Tray editor. Off until the
+    /// person adds it; a Custom layout places its own. Not a Function Tray
+    /// item: it sends nothing to the Mac, so it lives beside the profiles
+    /// rather than in them, and older builds see only a key they ignore.
+    var showsCalculatorButton = false
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -1102,6 +1108,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
             .elements.prefix(CustomControlLayout.maximumCount))
         activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
+        // Absent (added 2026-11-05): not shown. Nothing to migrate.
+        showsCalculatorButton = try value(.showsCalculatorButton, fallback.showsCalculatorButton)
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
