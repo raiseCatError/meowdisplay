@@ -452,7 +452,11 @@ struct ReceiverScreen: View {
                                        smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
                                    onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
-                                   onActivityBegan: { controlStore.beginAutoHideActivity() },
+                                   onActivityBegan: {
+                                       controlStore.beginAutoHideActivity()
+                                       // A touch on the Mac closes the arrow keypad; the touch still goes through.
+                                       controlStore.noteSurfaceTouch()
+                                   },
                                    onActivityEnded: { controlStore.scheduleAutoHide() },
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: controlStore.moveViewActive,
