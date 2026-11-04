@@ -661,6 +661,8 @@ struct ReceiverScreen: View {
         .onChange(of: showSettings) { shown in
             if shown, sessionActions.isPresented { dismissSessionActions() }
         }
+        // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
+        .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()

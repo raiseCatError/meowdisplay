@@ -623,6 +623,17 @@ enum ControlAutoHidePolicy {
     static func applies(isPad: Bool, layout: PadControlLayoutMode) -> Bool {
         !(isPad && layout == .strip)
     }
+
+    /// Whether the controls may fade now. Never while they are collapsed or
+    /// can't show, while Move View needs its controls to be left, or while
+    /// Session Actions is open: the overlay sits over the session, and the
+    /// controls must still be there when it is cancelled.
+    static func mayHide(enabled: Bool, trayCanBeShown: Bool, trayCollapsed: Bool,
+                        moveViewActive: Bool, sessionActionsOpen: Bool,
+                        isPad: Bool, layout: PadControlLayoutMode) -> Bool {
+        enabled && trayCanBeShown && !trayCollapsed && !moveViewActive && !sessionActionsOpen
+            && applies(isPad: isPad, layout: layout)
+    }
 }
 
 // MARK: - Standard rail controls
