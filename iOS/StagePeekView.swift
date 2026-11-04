@@ -34,7 +34,8 @@ struct StagePeekOverlay: View {
     let hapticsEnabled: Bool
     var naturalScrolling = true
     /// Compact: the stack stays in a fading band between the controls above and below.
-    var dock: StagePeekDockStyle = .compact
+    /// Normal by default (issue #130), like `ReceiverControlPreferences.stagePeekDock` and Android.
+    var dock: StagePeekDockStyle = .normal
     /// Whether this session may change the Mac ("Open on Mac", Close Window).
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
