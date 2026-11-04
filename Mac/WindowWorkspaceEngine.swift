@@ -616,6 +616,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         followApps(snap)
         var frames: [UInt32: CGRect] = [:]
         let previousFrames = inputLock.withLock { targeting.windowFrames }
+        let previousStates = tileState
         let displayFrames = browser.displayFrames()
         for a in assignments {
             if let display = a.displayID {
@@ -659,6 +660,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
         ensureCaptures()
+        if WorkspaceCaptureRetune.needed(oldFrames: previousFrames, newFrames: frames,
+                                         oldStates: previousStates, newStates: tileState) {
+            retuneCaptures()
+        }
         watchCaptures()
         sendState()
     }
