@@ -1439,8 +1439,12 @@ final class WorkspaceModel: ObservableObject {
         return arranged.tiles[id] != nil && arranged.tiles.count > 1
     }
 
+    /// Cancel wins where the two zones' touch margins meet (they sit 12 pt
+    /// apart with 8 pt of slop each), so the highlight, the haptic and the
+    /// drop always agree, and the uncertain case removes nothing.
     func overRemoveZone(_ p: CGPoint) -> Bool {
         canDropToRemove && removeZoneGlobal.width > 0 && removeZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
+            && !overCancelZone(p)
     }
 
     /// Ends a drag: drops onto the pane under the finger. Dropped on Cancel or outside the
