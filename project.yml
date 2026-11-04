@@ -240,6 +240,7 @@ targets:
       - Mac/SenderSessionAuthorization.swift
       - Mac/CaptureOwnership.swift
       - Mac/CanonicalRuntimeStatus.swift
+      - Mac/PendingConnectPolicy.swift
       - Mac/KeepMacAvailable.swift
       - Mac/SettingsCategory.swift
       - Mac/ForgetDeviceAction.swift
