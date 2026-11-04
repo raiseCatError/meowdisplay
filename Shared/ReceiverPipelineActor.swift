@@ -403,8 +403,7 @@ actor ReceiverPipelineActor {
     /// longer resolves to a pinned peer at all, is cancelled here instead of
     /// being left to prove itself and replace the session. The Mac stops
     /// being a recovery target, and the current connection ends when it is
-    /// that Mac's — after Forget always, since it may have authenticated
-    /// before the pin was removed.
+    /// that Mac's (`revocationEndsCurrentConnection`).
     func revokePeer(_ peerID: String, trustRemoved: Bool) {
         let revoked = pendingConnections.filter { candidate in
             let owner = hostEffects.resolvePinnedPeerID(candidate)
@@ -425,10 +424,27 @@ actor ReceiverPipelineActor {
         }
         if recoveryPeerID == peerID { recoveryPeerID = nil }
         if remoteRecovery.run?.peerID == peerID { stopRemoteRecovery(reason: "Mac forgotten or blocked") }
-        let currentIsPeer = connection.map { hostEffects.resolvePinnedPeerID($0) == peerID } ?? false
-        if trustRemoved || currentIsPeer {
+        if Self.revocationEndsCurrentConnection(hasConnection: connection != nil,
+                                                owner: connection.flatMap { hostEffects.resolvePinnedPeerID($0) },
+                                                revokedPeerID: peerID, trustRemoved: trustRemoved) {
             disconnectCurrentConnection(reason: .explicitDisconnect)
         }
+    }
+
+    /// Whether Forget/Block of `revokedPeerID` ends the current session,
+    /// given the pinned peer the live connection resolves to now (`owner`).
+    /// Block ends only that Mac's connection. Forget removes the pin before
+    /// this runs, so the forgotten Mac's own connection no longer resolves to
+    /// it: one that resolves to no pinned peer ends too, as the
+    /// parked-candidate filter above does, and with no live connection
+    /// (connecting or recovering) Forget still stops what is in progress. A
+    /// live connection that still resolves to another pinned Mac carries none
+    /// of the forgotten Mac's authority and keeps its session: forgetting
+    /// another Mac from Home or Settings mustn't end this one.
+    nonisolated static func revocationEndsCurrentConnection(hasConnection: Bool, owner: String?,
+                                                            revokedPeerID: String, trustRemoved: Bool) -> Bool {
+        guard hasConnection, let owner else { return trustRemoved }
+        return owner == revokedPeerID
     }
 
     // MARK: - Another Mac waits (F2, make-before-break)

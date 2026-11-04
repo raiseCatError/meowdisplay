@@ -1744,8 +1744,9 @@ final class StreamReceiver: ObservableObject {
     /// token, requested mode and manual recovery run), its prompts (answered
     /// `declined`/`blocked`), its current and remembered admission, its
     /// parked candidate connections and its place as a recovery target. The
-    /// current connection ends when it is that Mac's — after Forget always,
-    /// since it may have authenticated before the pin was removed.
+    /// current connection ends when it is that Mac's; after Forget, also when
+    /// it no longer resolves to any pinned Mac (the pin is already gone). A
+    /// session with another, still-pinned Mac carries on.
     private func revokeSessionAuthority(peerID: String, trustRemoved: Bool) {
         let withdrawnRequestID = withdrawManualConnectRequest(covering: peerID)
         let pipeline = self.pipeline

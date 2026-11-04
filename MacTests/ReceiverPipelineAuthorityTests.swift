@@ -302,6 +302,57 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
         await close(rig)
     }
 
+    /// Forgetting another Mac (Home's row menu, Settings → Paired Macs, or
+    /// the old-entries cleanup) must not end the session with this one.
+    func testForgetOfAnotherMacKeepsTheCurrentSession() async throws {
+        let rig = try await makeParkedCandidateRig()
+        rig.host.unpin(peerID: "mac-A")   // Forget removes the pin first
+
+        await rig.pipeline.revokePeer("mac-A", trustRemoved: true)
+
+        let cancelled = await eventually { rig.candidate.state == .cancelled }
+        XCTAssertTrue(cancelled, "the forgotten Mac's parked candidate is still cancelled")
+        let current = await rig.pipeline.connection
+        XCTAssertTrue(current === rig.incumbent, "Forget of mac-A must not end mac-B's session")
+        let phase = await rig.pipeline.currentPhase
+        XCTAssertEqual(phase, .connected)
+        XCTAssertNotEqual(rig.incumbent.state, .cancelled)
+        await close(rig)
+    }
+
+    /// Forgetting the Mac of the current session still ends it, although its
+    /// connection no longer resolves to a pinned peer once the pin is gone.
+    func testForgetOfTheCurrentMacEndsTheSession() async throws {
+        let rig = try await makeParkedCandidateRig()
+        rig.host.unpin(peerID: "mac-B")
+
+        await rig.pipeline.revokePeer("mac-B", trustRemoved: true)
+
+        let ended = await eventually { await rig.pipeline.connection == nil }
+        XCTAssertTrue(ended, "Forget of the current Mac must end its session")
+        let phase = await rig.pipeline.currentPhase
+        XCTAssertNotEqual(phase, .connected)
+        await close(rig)
+    }
+
+    func testRevocationEndsOnlyTheRevokedOrUnresolvableConnection() {
+        func ends(_ hasConnection: Bool, _ owner: String?, trustRemoved: Bool) -> Bool {
+            ReceiverPipelineActor.revocationEndsCurrentConnection(hasConnection: hasConnection, owner: owner,
+                                                                  revokedPeerID: "A", trustRemoved: trustRemoved)
+        }
+        // Forget: the forgotten Mac's own connection no longer resolves to a pin.
+        XCTAssertTrue(ends(true, nil, trustRemoved: true))
+        XCTAssertTrue(ends(true, "A", trustRemoved: true))
+        XCTAssertFalse(ends(true, "B", trustRemoved: true), "another pinned Mac's session carries on")
+        // Forget with no live connection (connecting or recovering) stops it, as before.
+        XCTAssertTrue(ends(false, nil, trustRemoved: true))
+        // Block keeps the pin: only that Mac's connection ends.
+        XCTAssertTrue(ends(true, "A", trustRemoved: false))
+        XCTAssertFalse(ends(true, "B", trustRemoved: false))
+        XCTAssertFalse(ends(true, nil, trustRemoved: false))
+        XCTAssertFalse(ends(false, nil, trustRemoved: false))
+    }
+
     func testBlockCancelsThatMacsParkedCandidateAndKeepsAnotherMacsSession() async throws {
         let rig = try await makeParkedCandidateRig()
 
