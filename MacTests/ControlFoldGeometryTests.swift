@@ -95,6 +95,21 @@ final class ControlFoldGeometryTests: XCTestCase {
         XCTAssertTrue(layout.cells.allSatisfy { !$0.intersects(laptopFold) })
     }
 
+    func testABookFoldKeepsTheArrowKeypadOnItsOwnHalf() {
+        // Bar order: four modifiers, Esc, Tab, Return, Arrow Keys, Hide.
+        let layout = bar(book, keyboardTop: 400, folds: [bookFold])
+        let arrowCell = layout.cells[7]
+        let centre = CGPoint(x: arrowCell.midX, y: arrowCell.midY)
+        let piece = ControlFoldGeometry.pieces(of: book, divisions: [bookFold]).first { $0.contains(centre) }
+        XCTAssertNotNil(piece)
+        let keypad = ControlTrayGeometry.keyboardBarKeypadFrame(
+            safe: piece ?? book, bar: layout.bars[1], item: arrowCell,
+            keypadSize: ArrowKeypadGeometry.size(key: 42, gap: 4), palette: nil)
+        XCTAssertFalse(keypad.intersects(bookFold), "\(keypad) is on the crease")
+        XCTAssertTrue((piece ?? book).contains(keypad))
+        XCTAssertLessThanOrEqual(keypad.maxY, layout.bars[1].minY, "above its bar")
+    }
+
     func testALaptopFoldFarFromTheKeyboardChangesNothing() {
         let layout = bar(laptop, keyboardTop: 900, folds: [laptopFold])
         let plain = bar(laptop, keyboardTop: 900, folds: [])
