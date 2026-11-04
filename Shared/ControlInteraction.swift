@@ -24,6 +24,8 @@ enum ControlHapticEvent: String, Equatable {
     case profileChange
     case reset
     case settings
+    /// A touch and hold on Settings opened Session Actions.
+    case sessionActions
 }
 
 enum ControlHapticPolicy {

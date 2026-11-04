@@ -307,6 +307,7 @@ targets:
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift
       - Shared/ReceiverSessionPresentation.swift
+      - Shared/ReceiverSessionActions.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift

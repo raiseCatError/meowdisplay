@@ -84,6 +84,8 @@ struct ReceiverScreen: View {
     @State private var demoControlStore: ReceiverControlStore?
     /// The keyboard was open when Home was chosen; Resume reopens it (#121).
     @State private var keyboardBeforeHome = false
+    /// Touch and hold Settings: Back to Home or Disconnect, over the session.
+    @State private var sessionActions = ReceiverSessionActionsState()
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
@@ -135,6 +137,55 @@ struct ReceiverScreen: View {
         return { showHomeKeepingSession() }
     }
 
+    /// A connected session on screen: the Settings control's hold opens Session Actions.
+    private var sessionActionsAvailable: Bool {
+        ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
+                                               sessionOnScreen: route == .receiver)
+    }
+
+    private var sessionActionsAnimation: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .easeOut(duration: 0.22)
+    }
+
+    /// Nothing reaches the Mac while the overlay is up (see `inputReachesMac`);
+    /// anything held is released first, as Home does.
+    private func openSessionActions() {
+        guard sessionActionsAvailable else { return }
+        var next = sessionActions
+        guard next.open(keyboardActive: keyboardActive) else { return }
+        model.receiver.releaseLocalInput()
+        keyboardActive = false
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+    }
+
+    /// Cancel, a tap outside or escape: the session exactly as it was.
+    private func dismissSessionActions() {
+        var next = sessionActions
+        let reopenKeyboard = next.dismiss()
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+        if reopenKeyboard, keyboardAvailable, inputReachesMac { keyboardActive = true }
+        UIAccessibility.post(notification: .screenChanged, argument: nil)
+    }
+
+    private func chooseSessionAction(_ action: ReceiverSessionAction) {
+        var next = sessionActions
+        guard let outcome = next.choose(action) else { return }
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+        switch outcome {
+        case .backToHome(let reopenKeyboard):
+            showHomeKeepingSession()
+            // The overlay already closed the keyboard; Resume reopens what was open before it.
+            if model.presentation.keepsSessionOnHome {
+                keyboardBeforeHome = reopenKeyboard
+            } else if reopenKeyboard, keyboardAvailable, inputReachesMac {
+                keyboardActive = true
+            }
+        case .disconnect:
+            // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
+            model.receiver.disconnect()
+        }
+    }
+
     /// What Home shows while the session is kept behind it.
     private var keptSessionHome: KeptSessionHome? {
         guard model.presentation.keepsSessionOnHome else { return nil }
@@ -171,7 +222,7 @@ struct ReceiverScreen: View {
                                                   localAllow: controlStore.preferences.allowInput,
                                                   macPV: model.receiver.macProtocolVersion,
                                                   macState: controlStore.sessionInputState,
-                                                  surfaceInteractive: model.presentation.surfaceInteractive)
+                                                  surfaceInteractive: sessionActions.surfaceInteractive(model.presentation))
     }
 
     /// Screen edges whose system gestures wait for a second swipe — see
@@ -467,8 +518,7 @@ struct ReceiverScreen: View {
                         onOccupiedFramesChange: { occupiedControlFrames = $0 },
                         onCanvasChange: { padCanvas = $0 },
                         surfaceOrigin: canvas.origin,
-                        sessionMenu: model.receiver.connected
-                            ? ReceiverSessionMenuActions(disconnect: { model.receiver.disconnect() }) : nil)
+                        onSessionActions: sessionActionsAvailable ? { openSessionActions() } : nil)
                     if let kind = inputPrompt.kind {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
                         // window needs control; the pane, its tabs, zoom and pan stay as they are.
@@ -569,6 +619,27 @@ struct ReceiverScreen: View {
                              onExploreDemo: { enterDemo() }, keptSession: keptSessionHome)
                 }
             }
+        }
+        .overlay {
+            if sessionActions.isPresented {
+                let host = model.workspace.hostName
+                SessionActionsOverlay(
+                    macName: host.isEmpty ? String(localized: "your Mac") : host,
+                    actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
+                                                                  presentation: model.presentation),
+                    onAction: { chooseSessionAction($0) },
+                    onCancel: { dismissSessionActions() })
+                .transition(.opacity)
+            }
+        }
+        // The session ended or left the screen under the overlay: close it, restore nothing.
+        .onChange(of: sessionActionsAvailable) { available in
+            guard !available, sessionActions.isPresented else { return }
+            withAnimation(sessionActionsAnimation) { sessionActions.sessionEnded() }
+        }
+        // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
+        .onChange(of: showSettings) { shown in
+            if shown, sessionActions.isPresented { dismissSessionActions() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
