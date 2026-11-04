@@ -696,23 +696,31 @@ final class ReceiverControlsTests: XCTestCase {
     /// While typing, Return sits in the keyboard bar beside Escape and Tab.
     func testKeyboardBarOffersReturnBeforeHideKeyboard() {
         let items = KeyboardBarItem.defaultItems
-        XCTAssertEqual(Array(items.suffix(4)), [.escape, .tab, .returnKey, .dismissKeyboard])
+        XCTAssertEqual(Array(items.suffix(5)), [.escape, .tab, .returnKey, .arrowKeys, .dismissKeyboard])
         XCTAssertEqual(items.filter { $0 == .returnKey }.count, 1)
+        XCTAssertEqual(items.filter { $0 == .arrowKeys }.count, 1, "one Arrow Keys item, never four keys")
     }
 
-    /// The eight-key bar (same metrics as `keyboardBarBody`) fits a 375pt
-    /// and 390pt iPhone inside the layout margins, shrinking only as far as
-    /// it must and never below the 30pt floor.
-    func testEightKeyKeyboardBarFitsCompactIPhones() {
-        let count = KeyboardBarItem.defaultItems.count
-        XCTAssertEqual(count, 8)
-        let gap: CGFloat = 8, padding: CGFloat = 6
-        for (width, expected) in [(CGFloat(375), CGFloat(35)), (390, 37), (402, 38), (440, 38)] {
-            let item = ControlTrayGeometry.fittedChipDiameter(count: count, length: width, preferred: 38,
-                                                              gap: gap, slack: padding * 2)
-            XCTAssertEqual(item, expected, "\(width)pt")
-            let barWidth = CGFloat(count) * item + CGFloat(count - 1) * gap + padding * 2
-            XCTAssertLessThanOrEqual(barWidth, width - 24, "\(width)pt")
+    /// The bar (same metrics as `keyboardBarBody`) fits a 375pt and 390pt
+    /// iPhone inside the layout margins, shrinking only as far as it must
+    /// and never below the 30pt floor: eight keys with the arrow keys off,
+    /// nine with them on.
+    func testKeyboardBarFitsCompactIPhones() {
+        let padding: CGFloat = 6
+        let cases: [(count: Int, sizes: [(CGFloat, CGFloat)])] = [
+            (8, [(375, 35), (390, 37), (402, 38), (440, 38)]),
+            (9, [(375, 32), (390, 34), (402, 35), (440, 38)]),
+        ]
+        XCTAssertEqual(KeyboardBarItem.defaultItems.count, 9)
+        for (count, sizes) in cases {
+            let gap = KeyboardBarItem.gap(count: count)
+            for (width, expected) in sizes {
+                let item = ControlTrayGeometry.fittedChipDiameter(count: count, length: width, preferred: 38,
+                                                                  gap: gap, slack: padding * 2)
+                XCTAssertEqual(item, expected, "\(count) keys at \(width)pt")
+                let barWidth = CGFloat(count) * item + CGFloat(count - 1) * gap + padding * 2
+                XCTAssertLessThanOrEqual(barWidth, width - 24, "\(count) keys at \(width)pt")
+            }
         }
     }
 

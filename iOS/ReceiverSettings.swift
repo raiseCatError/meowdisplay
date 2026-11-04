@@ -907,6 +907,17 @@ private struct ControlSettingsPage: View {
                     .pickerStyle(.segmented)
                     .settingsAnchor("trayPlacement")
                     VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Show Arrow Keys", isOn: preferenceBinding(controlStore, \.arrowKeysEnabled))
+                        SettingNote("Tap the arrow button for ↑ ← ↓ →, or swipe it for one press.")
+                    }
+                    .settingsAnchor("arrowKeys")
+                    if controlStore.preferences.arrowKeysEnabled {
+                        Picker("Arrow Keys Side", selection: preferenceBinding(controlStore, \.arrowKeysSide)) {
+                            ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
                         Toggle("Avoid Notch", isOn: preferenceBinding(controlStore, \.avoidNotch))
                         SettingNote("Keeps controls clear of the iPhone's notch or Dynamic Island in landscape.")
                         Text("Experimental").font(.caption2).foregroundStyle(.tertiary)

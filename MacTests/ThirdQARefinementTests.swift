@@ -102,7 +102,8 @@ final class ThirdQARefinementTests: XCTestCase {
         XCTAssertEqual(ReceiverControlPresentation.mode(softwareKeyboardVisible: true), .keyboardBar)
         XCTAssertEqual(ReceiverControlPresentation.mode(softwareKeyboardVisible: false), .normal)
         XCTAssertEqual(KeyboardBarItem.defaultItems, [.modifier(.command), .modifier(.option), .modifier(.control),
-                                                      .modifier(.shift), .escape, .tab, .returnKey, .dismissKeyboard])
+                                                      .modifier(.shift), .escape, .tab, .returnKey, .arrowKeys,
+                                                      .dismissKeyboard])
     }
 
     func testNormalControlsReturnUnchangedAfterTheKeyboard() {

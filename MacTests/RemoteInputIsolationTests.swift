@@ -29,6 +29,9 @@ final class RemoteInputIsolationTests: XCTestCase {
 
         func sendKeyboardPress(usage: Int, modifiers: [String]) { record("press \(usage)") }
         func sendKeyboardDown(usage: Int, modifiers: [String]) { record("down \(usage)") }
+        func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
+            record(isRepeat ? "repeat \(usage)" : "down \(usage)")
+        }
         func sendKeyboardUp(usage: Int, modifiers: [String]) { record("up \(usage)") }
         func sendModifier(_ modifier: ControlModifier, down: Bool) { record("modifier \(modifier.rawValue) \(down)") }
         func sendGesture(name: String) { record("gesture \(name)") }
