@@ -26,6 +26,12 @@ enum AppStore {
     /// while there is no listing.
     static var webURL: URL? { listingURL(appID: iOSAppID, scheme: "https") }
 
+    /// The listing's Write a Review page, for the iPhone and iPad app's Rate
+    /// MeowDisplay link. Nil while there is no listing. Only a link: the app
+    /// never asks for a review itself and never records whether one was left.
+    /// The Mac apps are downloaded directly, so they have no listing to rate.
+    static var writeReviewURL: URL? { writeReviewURL(appID: iOSAppID) }
+
     /// Where an out-of-date iOS receiver is sent: the listing when there is
     /// one, otherwise the project page. Never nil, so the Mac always puts a
     /// `store` in `updateRequired` — an older receiver that finds none falls
@@ -54,6 +60,11 @@ enum AppStore {
     static func listingURL(appID: String?, scheme: String) -> URL? {
         guard let appID, isListingID(appID) else { return nil }
         return URL(string: "\(scheme)://apps.apple.com/app/id\(appID)")
+    }
+
+    static func writeReviewURL(appID: String?) -> URL? {
+        guard let listing = listingURL(appID: appID, scheme: "https") else { return nil }
+        return URL(string: listing.absoluteString + "?action=write-review")
     }
 
     static func updateDestination(appID: String?) -> URL {

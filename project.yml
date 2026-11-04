@@ -350,6 +350,7 @@ targets:
       - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift
       - Shared/AppStore.swift
+      - Shared/AppVersion.swift
       - Shared/ProjectLinks.swift
       - Shared/RemoteViewport.swift
       - Shared/ReceiverPanelGeometry.swift
