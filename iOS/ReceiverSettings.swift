@@ -893,6 +893,14 @@ private struct ControlSettingsPage: View {
                 Toggle("Collapse Control Tray", isOn: preferenceBinding(controlStore, \.trayCollapsed))
                 Toggle("Auto-hide Control Trays", isOn: preferenceBinding(controlStore, \.autoHideEnabled))
                     .settingsAnchor("autoHide")
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Hold Response", selection: preferenceBinding(controlStore, \.modifierHoldResponse)) {
+                        ForEach(ModifierHoldResponse.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    SettingNote("How long to touch ⌘ ⌥ ⌃ ⇧ before their shortcuts appear. A quick tap still latches the key; sliding opens the shortcuts at once. Standard is the default.")
+                }
+                .settingsAnchor("holdResponse")
                 if visibility.showsPhoneTrayPlacement {
                     Picker("Landscape Tray Side", selection: preferenceBinding(controlStore, \.preferredLandscapeSide)) {
                         ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }

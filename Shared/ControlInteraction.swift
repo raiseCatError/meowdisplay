@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum ControlInteractionPhase: Equatable {
@@ -42,6 +43,48 @@ enum ControlHapticPolicy {
 enum SmartTouchHapticPolicy {
     static func isEnabled(haptics: Bool, smartTouchHaptics: Bool) -> Bool {
         haptics && smartTouchHaptics
+    }
+}
+
+/// How long a modifier (⌘ ⌥ ⌃ ⇧) is touched before its shortcut palette
+/// opens (#131). Only this hold: Stage Peek, Window view and Natural Touch
+/// keep their own timings, which mean different things. A lift before it is
+/// a tap and latches the modifier, so a shorter hold leaves less time for a
+/// slow tap.
+enum ModifierHoldResponse: String, Codable, CaseIterable, Identifiable {
+    case fast
+    case standard
+    case deliberate
+
+    var id: String { rawValue }
+
+    /// Seconds. Standard was 0.35 before #131.
+    var delay: TimeInterval {
+        switch self {
+        case .fast: return 0.18
+        case .standard: return 0.25
+        case .deliberate: return 0.4
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .fast: return String(localized: "Fast")
+        case .standard: return String(localized: "Standard")
+        case .deliberate: return String(localized: "Deliberate")
+        }
+    }
+}
+
+/// When a press on a modifier stops waiting for the hold.
+enum ModifierPressPolicy {
+    /// A finger that slides this far from where it touched down is reaching
+    /// for the palette: open it now rather than wait out the hold, and never
+    /// treat the lift as a latching tap.
+    static let slideDistance: CGFloat = 10
+
+    static func slideOpensPalette(translation: CGSize) -> Bool {
+        (translation.width * translation.width + translation.height * translation.height).squareRoot() > slideDistance
     }
 }
 
@@ -139,6 +182,18 @@ struct ControlInteractionState: Equatable {
         selectedActionID = nil
         phase = latchedModifiers.isEmpty ? .idle : .latched(ModifierChord(latchedModifiers))
         return effects
+    }
+
+    /// The system took the touch (Control Center, a notification, an
+    /// alert): a press that never became a hold or tap leaves nothing
+    /// latched, and a hold lets go of what it held. Never executes.
+    mutating func cancelPress() -> [ControlInteractionEffect] {
+        if case .pressed = phase {
+            selectedActionID = nil
+            phase = latchedModifiers.isEmpty ? .idle : .latched(ModifierChord(latchedModifiers))
+            return []
+        }
+        return cancelTemporary()
     }
 
     mutating func cancelTemporary() -> [ControlInteractionEffect] {

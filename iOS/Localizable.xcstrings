@@ -4,6 +4,18 @@
     "" : {
 
     },
+    "Deliberate" : {
+
+    },
+    "Hold Response" : {
+
+    },
+    "How long to touch ⌘ ⌥ ⌃ ⇧ before their shortcuts appear. A quick tap still latches the key; sliding opens the shortcuts at once. Standard is the default." : {
+
+    },
+    "Standard" : {
+
+    },
     "· Sample session" : {
 
     },

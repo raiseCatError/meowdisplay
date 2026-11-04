@@ -907,6 +907,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// earlier `.sameSide` (see `init(from:)`).
     var functionTrayPosition = FunctionTrayPosition.oppositeSide
     var functionTrayProfiles: [FunctionTrayProfile]
+    /// How long a modifier is touched before its shortcuts appear (#131).
+    var modifierHoldResponse = ModifierHoldResponse.standard
     /// Global (never profile-specific) layout preference: whether tray/
     /// control geometry conditionally shifts inward to clear the notch/
     /// Dynamic Island/home-indicator strip when a frame would actually
@@ -1048,6 +1050,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Older saves predate the opposite-side default: keep what they had.
         functionTrayPosition = try value(.functionTrayPosition, FunctionTrayPosition.sameSide)
         functionTrayProfiles = try value(.functionTrayProfiles, fallback.functionTrayProfiles)
+        // Absent (added 2026-11-05): Standard. No schema bump.
+        // Lenient: a value a later build adds falls back here instead of
+        // failing the whole blob.
+        modifierHoldResponse = (try? value(.modifierHoldResponse, fallback.modifierHoldResponse))
+            ?? fallback.modifierHoldResponse
         // Absent (schema < 7) means "written before Avoid Notch existed" —
         // default true, matching a brand-new install (and the explicit
         // "old settings migrate to ON" requirement).
