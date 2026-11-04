@@ -1131,7 +1131,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// and Settings → Connections keeps its Disconnect.
     @ViewBuilder
     private func settingsSessionMenu(reachable: Bool) -> some View {
-        if let sessionMenu, reachable, let frame = frames["tray:\(ControlTrayItem.settings.rawValue)"],
+        // Not while a shortcut palette is open: a wheel segment can be drawn over the gear,
+        // and this layer sits above the palette, so it would take that tap as Settings.
+        if let sessionMenu, reachable, interaction.paletteChord == nil,
+           let frame = frames["tray:\(ControlTrayItem.settings.rawValue)"],
            frame.width > 0, frame.height > 0 {
             Menu {
                 Button(role: .destructive) {
