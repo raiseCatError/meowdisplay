@@ -40,7 +40,9 @@ final class LiveSessionHomeTests: XCTestCase {
         snapshot(app, "home-03-after-wait")
 
         resume.tap()
-        XCTAssertTrue(waitUntil(5) { surface.exists && surface.isHittable }, "Resume returns to the session")
+        // Window view lays its panes over the surface, so "hittable" isn't a
+        // reliable signal; the card going and the surface being exposed again is.
+        XCTAssertTrue(waitUntil(5) { !resume.exists && surface.exists }, "Resume returns to the session")
         XCTAssertFalse(resume.exists)
         XCTAssertFalse(app.buttons["Reconnect"].exists, "the same session, not a new connection")
         XCTAssertFalse(app.staticTexts["Reconnecting…"].exists)
