@@ -94,8 +94,10 @@ final class ModifierHoldResponseTests: XCTestCase {
         _ = state.selectAction("copy")
         let effects = state.cancelPress()
         XCTAssertFalse(effects.contains { if case .execute = $0 { return true } else { return false } })
-        XCTAssertEqual(Set(effects.compactMap { if case .modifierUp(let m) = $0 { return m } else { return nil } }),
-                       [.command, .shift])
+        let released: Set<ControlModifier> = Set(effects.compactMap { effect -> ControlModifier? in
+            if case .modifierUp(let modifier) = effect { return modifier } else { return nil }
+        })
+        XCTAssertEqual(released, [.command, .shift])
         XCTAssertTrue(state.temporaryModifiers.isEmpty)
         XCTAssertNil(state.selectedActionID)
         XCTAssertEqual(state.phase, .idle)
