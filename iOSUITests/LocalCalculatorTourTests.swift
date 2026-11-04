@@ -123,9 +123,20 @@ final class LocalCalculatorTourTests: XCTestCase {
         let control = toggle.switches.firstMatch
         (control.exists ? control : toggle).tap()
         XCTAssertEqual(toggle.value as? String, "1")
-        for _ in 0..<3 where !app.buttons["Exit Demo"].isHittable {
+        // Back out of the pushed pages (Edit Function Tray, then Controls), then close Settings.
+        // The system Back button is found by its identifier: on current iOS it isn't a child of
+        // the navigation bar's element (see DemoModeSmokeTests).
+        for _ in 0..<4 where !app.buttons["Exit Demo"].isHittable {
             let done = app.buttons["Done"].firstMatch
-            if done.exists { done.tap() } else { app.navigationBars.firstMatch.buttons.firstMatch.tap() }
+            let back = app.buttons["BackButton"].firstMatch
+            if done.exists && done.isHittable {
+                done.tap()
+            } else if back.exists {
+                back.tap()
+            } else {
+                XCTFail("Neither Done nor Back is available to leave Settings")
+                break
+            }
             sleep(1)
         }
         XCTAssertTrue(app.buttons["Exit Demo"].waitForExistence(timeout: 5), "back on the stream")
