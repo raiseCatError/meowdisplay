@@ -235,6 +235,7 @@ targets:
       - Shared/QUICTransportProtocol.swift
       - Shared/QUICReceiverSession.swift
       - Mac/AutoConnectPolicy.swift
+      - Mac/KnownDeviceTargetPolicy.swift
       - Mac/ReconnectPolicy.swift
       - Mac/AuthenticatedSessionState.swift
       - Mac/SenderSessionAuthorization.swift

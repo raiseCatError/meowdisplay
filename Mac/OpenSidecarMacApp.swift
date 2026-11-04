@@ -2582,7 +2582,15 @@ final class SenderController: ObservableObject {
     func connect(to target: ConnectionTarget, userInitiated: Bool = false,
                  awaitingWake: Bool = false, initiator: SessionRole = .sender,
                  needsSenderApproval: Bool = false, continuation: SessionContinuation? = nil) -> Bool {
-        if let existing = session(for: target.sessionID), !existing.failed { return true }
+        if let existing = session(for: target.sessionID), !existing.failed {
+            // Already dialling or connected: a repeated tap changes nothing,
+            // so say so in the log the issue asks testers to capture.
+            if userInitiated {
+                Log.info("connectDebug: explicitConnectAbsorbedByExistingSession session=\(existing.id) "
+                    + "authenticated=\(existing.applicationAuthenticated)")
+            }
+            return true
+        }
         let logicalID = logicalID(for: target)
         let targetIdentifiers = identifiers(for: target)
         let attempt: AutoConnectPolicy.Attempt
@@ -3813,13 +3821,14 @@ final class SenderController: ObservableObject {
     /// peer, so its row can offer Connect without waiting for it to also
     /// appear as a Nearby row.
     private func resolvedTarget(forPeerID peerID: String) -> ConnectionTarget? {
-        if let udid = installIDByUDID.first(where: { $0.value == peerID })?.key {
-            return .usb(udid: udid)
+        switch KnownDeviceTargetPolicy.resolve(
+            peerID: peerID, installIDByUDID: installIDByUDID,
+            attachedUDIDs: Set(usbDevices.map(\.udid)), discovered: discovered,
+            txtID: { txtID(of: $0) }) {
+        case .usb(let udid)?: return .usb(udid: udid)
+        case .wifi(let result)?: return .wifi(result)
+        case nil: return nil
         }
-        if let result = discovered.first(where: { txtID(of: $0) == peerID }) {
-            return .wifi(result)
-        }
-        return nil
     }
 
     func session(for entry: DeviceEntry) -> DeviceSession? {
