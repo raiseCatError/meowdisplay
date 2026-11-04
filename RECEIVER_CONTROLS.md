@@ -175,7 +175,8 @@ Streaming Profile and Priority are the Mac's settings and apply to every
 connected device. While the Mac's Streaming Mode is **Automatic**, iPhone,
 iPad and Mac Receiver show them read-only with a note to switch the Mac to
 Custom; Android still shows the pickers, and the Mac leaves a request it
-can't apply alone (no restart).
+can't apply alone (no restart). No receiver can change the Mac's Streaming
+Mode (Automatic/Custom); that is set on the Mac only.
 
 ## Audio and connection
 
