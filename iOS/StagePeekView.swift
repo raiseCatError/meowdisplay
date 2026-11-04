@@ -64,6 +64,7 @@ struct StagePeekOverlay: View {
     @State private var haptics = StagePeekHaptics()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     /// The compact stack's windows: the chosen app's, matching the search.
     private var windows: [CatalogWindowItem] {
@@ -678,7 +679,10 @@ struct StagePeekOverlay: View {
         // bright window (see `StagePeekLegibility`).
         .buttonStyle(.borderedProminent)
         .buttonBorderShape(.capsule)
-        .tint(Color.black.opacity(StagePeekLegibility.minimumScrimOpacity))
+        // Reduce Transparency / Increase Contrast: the same dense fill as `GlassSurface`.
+        .tint(reduceTransparency || colorSchemeContrast == .increased
+              ? Color(white: 0.13).opacity(0.95)
+              : Color.black.opacity(StagePeekLegibility.minimumScrimOpacity))
         .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .fixedSize()

@@ -19,16 +19,19 @@ struct GlassSurface<S: InsettableShape>: View {
     /// legible over a bright window behind.
     var scrimOpacity: Double = 0.16
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         ZStack {
-            if reduceTransparency {
+            // Increase Contrast takes the same dense surface as Reduce Transparency: the
+            // label contrast then no longer depends on what the Mac shows behind it.
+            if reduceTransparency || contrast == .increased {
                 shape.fill(Color(white: 0.13).opacity(0.95))
             } else {
                 shape.fill(.ultraThinMaterial)
                 shape.fill(Color.black.opacity(scrimOpacity))
             }
-            shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6)
+            shape.strokeBorder(Color.white.opacity(contrast == .increased ? 0.5 : 0.22), lineWidth: contrast == .increased ? 1 : 0.6)
         }
         .shadow(color: .black.opacity(0.30), radius: 14, x: 0, y: 6)
     }
