@@ -154,7 +154,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Pane options (Fullscreen on This Device, Fit/Fill, Change Window…, Rotate, Arrange Panes, Remove from Layout, Close Window on Mac…) | Yes. Hold title, then release | Yes | Yes | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
-| Hinge-aware tiles on foldables | Yes. Simulator only | n/a | Yes. Emulator only | n/a |
+| Hinge-aware tiles on foldables | Yes. Geometry unit-tested only; not yet run on a half-open iPhone Duo or a posed simulator | n/a | Yes. Emulator only | n/a |
 | **Hidden on this screen** when space shrinks | Yes | Yes | Yes | Yes |
 | **Typing paused** when another app is in front on the Mac | Yes | Yes | Yes | Yes |
 
