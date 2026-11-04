@@ -201,6 +201,23 @@ final class QUICReceiverAuthorityTests: XCTestCase {
         await pipeline.teardownForStop()
     }
 
+    /// Forget/Block while a connection waits for the Mac to read the goodbye:
+    /// it is no longer the session's, so it closes at once.
+    func testForgetClosesAConnectionWaitingForTheMac() async throws {
+        let registry = QUICReceiverGroupRegistry()
+        let pipeline = makeActor(registry: registry)
+        let group = try XCTUnwrap(admitGroup(registry))
+        let control = makeStream()
+        group.register(control, channel: .control)
+        await pipeline.handleIncomingConnection(control)
+        await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect, goodbyeSentOn: control)
+        XCTAssertTrue(group.isAwaitingGoodbyeDelivery)
+        await pipeline.revokePeer("mac-A", trustRemoved: true)
+        XCTAssertFalse(group.isAwaitingGoodbyeDelivery, "Forget/Block must not leave it open")
+        XCTAssertEqual(registry.liveCount, 0)
+        await pipeline.teardownForStop()
+    }
+
     /// A goodbye sent on one connection never delays the close of another:
     /// if a different connection is live by the time the teardown runs, it
     /// is closed at once, exactly as before.

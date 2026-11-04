@@ -2227,6 +2227,9 @@ final class StreamReceiver: ObservableObject {
             StreamReceiver.sendControl(["type": WireMessage.closing], on: conn, sendTargetBox: sendTargetBox) {
                 queue.async { finishAfterGoodbye() }
             }
+            // `closing` is queued from here on: a Connect/Reconnect that
+            // finishes this early still lets the Mac read it.
+            pendingDisconnectFinishBox.set(finishAfterGoodbye)
             // The send completion may never fire on a dying link — don't
             // let that keep this session looking connected after going dark.
             queue.asyncAfter(deadline: .now() + 1) { finishAfterGoodbye() }

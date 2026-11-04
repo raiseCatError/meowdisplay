@@ -870,9 +870,9 @@ receiving them (a cut cable produces neither).
 Over QUIC (2.4), closing the connection discards stream data the sender
 has not read yet, and the end of Video or Audio is not ordered with data
 on Control. A receiver that sends `closing` for a deliberate Disconnect
-therefore SHOULD finish its Control stream after it and leave the
-connection open, Video and Audio included, until the sender closes it,
-for a bounded time (the official receivers wait up to 3 s). A sender ends
+therefore SHOULD leave the connection and all its streams open until the
+sender closes it, for a bounded time (the iPhone, iPad and Mac receivers
+wait up to 3 s; the Android receiver has no QUIC listener). A sender ends
 the session on `closing`, which closes the connection. Nothing on the wire
 changes; a receiver that closes at once only risks the sender reading
 the goodbye as a dropped link.

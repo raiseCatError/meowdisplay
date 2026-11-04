@@ -43,12 +43,17 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
     /// What the Mac saw, in order.
     private enum MacEvent: Equatable {
         case control(String)
+        /// The Control read ended (EOF or error) — `MacSender.receiveControl`
+        /// treats that as the link dying unless it was its own cancel.
         case controlEnded(String)
         case failure(String)
+        /// The Mac ended the session itself (after `closing`).
+        case macClosed
     }
 
     /// The Mac-side delegate: reads the Control stream exactly the way
-    /// `MacSender.receiveControl` does (4-byte length, then the payload).
+    /// `MacSender.receiveControl` does (4-byte length, then the payload),
+    /// re-arming the read right after `closing` as it does.
     private final class MacSide: MacSenderTransportDelegate, @unchecked Sendable {
         private let lock = NSLock()
         private let transport: SenderTransport
@@ -129,6 +134,21 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
             guard let closing = events.firstIndex(of: .control(WireMessage.closing)) else { return true }
             return failure < closing
         }
+        /// Anything `MacSender` would take for a dying link (a transport
+        /// failure, or the Control read ending) before the Mac ended the
+        /// session itself. Even after `closing` was read, that runs
+        /// `linkDied` on the sender queue ahead of the main-actor goodbye
+        /// handling: a "Connection lost" status, a queued redial and, under
+        /// Auto, an early-loss QUIC cooldown.
+        var sawDropBeforeOwnClose: Bool {
+            let ownClose = events.firstIndex(of: .macClosed) ?? events.count
+            return events[..<ownClose].contains {
+                switch $0 {
+                case .failure, .controlEnded: return true
+                default: return false
+                }
+            }
+        }
     }
 
     /// How the receiver end leaves the live session.
@@ -181,7 +201,18 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
         let mac = MacSide(transport: .tcp(endpoint, tls: tls))
         if macEndsSessionOnClosing {
             // `publishPeerClosed` hops to the main actor, which then stops the sender.
-            mac.onClosing = { DispatchQueue.main.async { controllerQueue.async { controller.cancelAndClearConnection() } } }
+            mac.onClosing = {
+                // `publishPeerClosed` runs on the main actor, which can be
+                // busy (SwiftUI, capture callbacks): model a slow hop, so
+                // anything the receiver ends meanwhile reaches the sender
+                // queue first, as it can on a real Mac.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    controllerQueue.async {
+                        mac.record(.macClosed)
+                        controller.cancelAndClearConnection()
+                    }
+                }
+            }
         }
         controller.delegate = mac
         defer { controllerQueue.sync { controller.cancelAndClearConnection() } }
@@ -250,13 +281,16 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
                                 server: server, client: client))
         }
         let bad = runs.filter(\.failedBeforeGoodbye)
+        let dropped = runs.filter(\.sawDropBeforeOwnClose)
         let missed = runs.filter { !$0.readClosing }
         let timedOut = runs.filter { ($0.receiverClosedAfter ?? .infinity) >= QUICReceiverLimits.goodbyeDeliveryTimeout }
         print("quicGoodbye: runs=\(runs.count) failedBeforeGoodbye=\(bad.count) closingNeverRead=\(missed.count)"
+              + " dropBeforeOwnClose=\(dropped.count)"
               + " receiverTimedOut=\(timedOut.count)"
               + " maxCloseSeconds=\(runs.compactMap(\.receiverClosedAfter).max() ?? -1)")
         XCTAssertEqual(bad.count, 0, "the Mac took a deliberate Disconnect for a drop: \(bad.map(\.events))")
         XCTAssertEqual(missed.count, 0, "the goodbye was lost: \(missed.map(\.events))")
+        XCTAssertEqual(dropped.count, 0, "the Mac saw the link die before it ended the session: \(dropped.map(\.events))")
         XCTAssertEqual(timedOut.count, 0, "the receiver had to give up waiting for the Mac's close")
     }
 
@@ -274,8 +308,8 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
         XCTAssertLessThan(closedAfter, 3)
     }
 
-    /// Stop, Forget or Block while the receiver still waits for the Mac:
-    /// the connection closes at once.
+    /// Stop (`closeAll`) while the receiver still waits for the Mac: the
+    /// connection closes at once.
     func testStoppingWhileWaitingForTheMacClosesAtOnce() throws {
         let server = try makeIdentity()
         let client = try makeIdentity()

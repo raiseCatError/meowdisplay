@@ -212,12 +212,14 @@ final class QUICReceiverGroupRegistry: @unchecked Sendable {
 
     /// Forget/Block: every QUIC connection that has not yet handed a Control
     /// stream to the session (so carries no application authority yet) is
-    /// closed; handed-off ones are revoked through the pipeline like TCP.
+    /// closed; handed-off ones are revoked through the pipeline like TCP. A
+    /// connection only kept open for the Mac to read a goodbye
+    /// (`closeAfterGoodbye`) is no longer the session's, so it closes too.
     func closeUnboundGroups(error: QUICApplicationError) {
         lock.lock()
         let all = Array(groups.values)
         lock.unlock()
-        for group in all where !group.hasHandedOffControl { group.close(error) }
+        for group in all where !group.hasHandedOffControl || group.isAwaitingGoodbyeDelivery { group.close(error) }
     }
 
     func closeAll(error: QUICApplicationError?) {
@@ -512,12 +514,14 @@ final class QUICReceiverGroup: @unchecked Sendable {
     ///
     /// So the connection is closed for the application at once (`isClosed`:
     /// nothing more is read, accepted or attached), but the transport stays
-    /// open: the Control stream is finished after the goodbye and the Mac
-    /// closes the connection once it has read it (every Mac ends the session
-    /// on `closing`, PROTOCOL.md 6.1). Media streams are left alone so their
-    /// end can't overtake the goodbye. `timeout` bounds a Mac that never
-    /// closes; `close(_:)` (the Mac's close, stop, Forget/Block) finishes
-    /// it early. Idempotent; no-op on an already closed connection.
+    /// open, every stream included, and the Mac closes the connection once
+    /// it has read the goodbye (every Mac ends the session on `closing`,
+    /// PROTOCOL.md 6.1). Nothing is ended from this side: neither a media
+    /// stream's end nor the Control stream's (an EOF there sends the Mac
+    /// down its dropped-link path before its goodbye handling has run).
+    /// `timeout` bounds a Mac that never closes; `close(_:)` (the Mac's
+    /// close, stop, Forget/Block) finishes it early. Idempotent; no-op on an
+    /// already closed connection.
     func closeAfterGoodbye(timeout: TimeInterval = QUICReceiverLimits.goodbyeDeliveryTimeout) {
         lock.lock()
         guard !closed else {
@@ -526,12 +530,9 @@ final class QUICReceiverGroup: @unchecked Sendable {
         }
         closed = true
         awaitingGoodbyeDelivery = true
-        let controlStream = control
         pendingMedia.removeAll()
         lock.unlock()
         Log.info("quicListener: connection \(id) goodbye queued — waiting for the Mac to close")
-        controlStream?.send(content: nil, contentContext: .finalMessage, isComplete: true,
-                            completion: .contentProcessed { _ in })
         queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self, self.isAwaitingGoodbyeDelivery else { return }
             Log.info("quicListener: connection \(self.id) — the Mac did not close after the goodbye; closing")
