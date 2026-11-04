@@ -366,6 +366,7 @@ targets:
       - Shared/UnifiedClipboard.swift
       - Shared/ControlInteraction.swift
       - Shared/ControlTrayGeometry.swift
+      - Shared/ControlFoldGeometry.swift
       - Shared/PadControlLayout.swift
       - Shared/CustomControlLayout.swift
       - Shared/MobileSettingsCategory.swift

@@ -96,6 +96,20 @@ struct ReceiverScreen: View {
     }
 
     /// Banners slide in from an edge; with Reduce Motion they only fade.
+    /// A centred prompt or hint moved wholly to one side of a fold (iPhone
+    /// Duo) when it would straddle it; unchanged on every other device.
+    /// `size` is the overlay's approximate size.
+    private func clearOfFolds(_ centre: CGPoint, size: CGSize, container: CGSize,
+                              regions: [ControlReservedRegion]) -> CGPoint {
+        let divisions = ControlReservedRegion.frames(of: .division, in: regions)
+        guard !divisions.isEmpty else { return centre }
+        let frame = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
+                           width: size.width, height: size.height)
+        let moved = ControlFoldGeometry.clearOfFolds(frame, in: CGRect(origin: .zero, size: container),
+                                                     divisions: divisions)
+        return CGPoint(x: moved.midX, y: moved.midY)
+    }
+
     private func slideTransition(from edge: Edge) -> AnyTransition {
         reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
@@ -560,19 +574,28 @@ struct ReceiverScreen: View {
                             return CGPoint(x: pic.minX + r.midX * pic.width,
                                            y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
                         } : nil
+                        let promptCentre = clearOfFolds(
+                            CGPoint(x: paneAnchor?.x ?? canvas.midX,
+                                    y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76),
+                            size: CGSize(width: 260, height: 44), container: geo.size,
+                            regions: reservedRegions)
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
-                            .position(x: paneAnchor?.x ?? canvas.midX,
-                                      y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
-                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76)
+                            .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                     }
                     if inputReachesMac, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
                        !controlStore.preferences.naturalTouchHintShown, !showSettings {
+                        // Narrower than a Duo half, so it fits beside the crease.
+                        let hintWidth: CGFloat = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+                            .isEmpty ? 460 : 400
                         NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
                             .padding(.horizontal, 16)
-                            .frame(maxWidth: 460)
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
+                            .frame(maxWidth: hintWidth)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60),
+                                                   size: CGSize(width: min(hintWidth, canvas.width), height: 96),
+                                                   container: geo.size, regions: reservedRegions))
                             .transition(.opacity)
                     }
                     if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
@@ -606,7 +629,8 @@ struct ReceiverScreen: View {
                         WindowModePrompt(
                             onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
                             onNo: { windowPromptAnswered = true })
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
+                                                   size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
                             .transition(slideTransition(from: .top))
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
