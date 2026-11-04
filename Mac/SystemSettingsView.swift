@@ -37,10 +37,6 @@ struct SystemSettingsView: View {
         }
     }
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
     var body: some View {
         Form {
             Section("Permissions") {
@@ -165,7 +161,7 @@ struct SystemSettingsView: View {
                     .help(showUserName
                           ? "Paired devices show \(NSFullUserName()) next to this Mac, from their next connection. It's sent only to paired devices over their secure connection, never on the network for discovery."
                           : "Paired devices show only this Mac's name and ID. Each forgets your name the next time it connects.")
-                LabeledContent("Version", value: appVersion)
+                LabeledContent("Version", value: AppVersion.current)
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance
                     // before unlock — this reads like an ordinary,
