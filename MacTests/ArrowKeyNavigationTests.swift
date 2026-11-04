@@ -364,6 +364,57 @@ final class ArrowKeyNavigationTests: XCTestCase {
         }
     }
 
+    // MARK: - Keyboard bar item
+
+    private static let barKeypad = ArrowKeypadGeometry.size(key: 42, gap: 4)
+
+    func testWithTheKeyboardUpTheKeypadOpensAboveTheBarItem() {
+        // A 6.1" iPhone in portrait with the keyboard and typing strip up.
+        let safe = CGRect(x: 0, y: 59, width: 393, height: 759)
+        let bar = CGRect(x: 23, y: 400, width: 347, height: 44)
+        let item = CGRect(x: 290, y: 406, width: 32, height: 32)
+        let keypad = ControlTrayGeometry.keyboardBarKeypadFrame(safe: safe, bar: bar, item: item,
+                                                                 keypadSize: Self.barKeypad, palette: nil)
+        XCTAssertEqual(keypad.maxY, bar.minY - 10, accuracy: 0.5)
+        XCTAssertTrue(safe.insetBy(dx: 12, dy: 12).contains(keypad))
+        XCTAssertLessThanOrEqual(keypad.minX, item.midX)
+        XCTAssertGreaterThanOrEqual(keypad.maxX, item.midX)
+    }
+
+    func testAnOpenPaletteAboveTheBarPushesTheKeypadHigher() {
+        let safe = CGRect(x: 0, y: 59, width: 393, height: 759)
+        let bar = CGRect(x: 23, y: 400, width: 347, height: 44)
+        let item = CGRect(x: 290, y: 406, width: 32, height: 32)
+        let palette = CGRect(x: 20, y: 300, width: 353, height: 90)
+        let keypad = ControlTrayGeometry.keyboardBarKeypadFrame(safe: safe, bar: bar, item: item,
+                                                                 keypadSize: Self.barKeypad, palette: palette)
+        XCTAssertFalse(keypad.intersects(palette))
+        XCTAssertEqual(keypad.maxY, palette.minY - 10, accuracy: 0.5)
+    }
+
+    func testInLandscapeWithTheKeyboardUpTheKeypadSitsBesideTheBar() {
+        // iPhone landscape: the keyboard leaves about 90 pt above the bar.
+        let safe = CGRect(x: 59, y: 0, width: 734, height: 372)
+        let bar = CGRect(x: 225, y: 89, width: 402, height: 44)
+        let item = CGRect(x: 540, y: 95, width: 38, height: 38)
+        let keypad = ControlTrayGeometry.keyboardBarKeypadFrame(safe: safe, bar: bar, item: item,
+                                                                 keypadSize: Self.barKeypad, palette: nil)
+        XCTAssertFalse(keypad.intersects(bar))
+        XCTAssertEqual(keypad.maxY, bar.maxY, accuracy: 0.5, "bottoms aligned, never over the keyboard")
+        XCTAssertEqual(keypad.minX, bar.maxX + 10, accuracy: 0.5)
+        XCTAssertTrue(safe.contains(keypad))
+    }
+
+    func testTheKeyboardBarKeypadNeverGoesBelowTheBar() {
+        // No room above or beside: it may overlap the picture, never the keyboard.
+        let safe = CGRect(x: 0, y: 0, width: 400, height: 140)
+        let bar = CGRect(x: 0, y: 40, width: 400, height: 44)
+        let item = CGRect(x: 300, y: 46, width: 32, height: 32)
+        let keypad = ControlTrayGeometry.keyboardBarKeypadFrame(safe: safe, bar: bar, item: item,
+                                                                 keypadSize: Self.barKeypad, palette: nil)
+        XCTAssertLessThanOrEqual(keypad.maxY, bar.maxY)
+    }
+
     func testReservedRegionsAreAvoided() {
         let container = CGRect(x: 0, y: 0, width: 852, height: 393)
         // A system-reserved occlusion right where the button would go.

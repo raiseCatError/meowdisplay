@@ -276,6 +276,36 @@ extension ControlTrayGeometry {
     }
 }
 
+extension ControlTrayGeometry {
+    /// The keypad for the keyboard bar's Arrow Keys item: above the item
+    /// (and above an open shortcut palette there), else beside the bar with
+    /// bottoms aligned (iPhone landscape, where the keyboard leaves little
+    /// room above), never lower than the bar, so never over the keyboard.
+    ///
+    /// - Parameter safe: the safe area of the container.
+    static func keyboardBarKeypadFrame(safe: CGRect, bar: CGRect, item: CGRect, keypadSize: CGSize,
+                                       palette: CGRect?, spacing: CGFloat = 10) -> CGRect {
+        let bounds = safe.insetBy(dx: 12, dy: 12)
+        let size = keypadSize
+        let x = clampValue(item.midX - size.width / 2, bounds.minX, bounds.maxX - size.width)
+        var ceiling = bar.minY
+        if let palette, palette.minX < x + size.width + spacing, palette.maxX > x - spacing {
+            ceiling = min(ceiling, palette.minY)
+        }
+        let above = CGRect(x: x, y: ceiling - spacing - size.height, width: size.width, height: size.height)
+        if above.minY >= bounds.minY { return above }
+        let beside = [
+            CGRect(x: bar.maxX + spacing, y: bar.maxY - size.height, width: size.width, height: size.height),
+            CGRect(x: bar.minX - spacing - size.width, y: bar.maxY - size.height, width: size.width, height: size.height),
+        ]
+        if let fits = beside.first(where: { bounds.contains($0) && !(palette?.intersects($0) ?? false) }) {
+            return fits
+        }
+        // No room anywhere: as high as it goes, its bottom no lower than the bar's.
+        return CGRect(x: x, y: min(bounds.minY, bar.maxY - size.height), width: size.width, height: size.height)
+    }
+}
+
 private func clampValue(_ value: CGFloat, _ lower: CGFloat, _ upper: CGFloat) -> CGFloat {
     max(lower, min(value, max(lower, upper)))
 }

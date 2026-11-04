@@ -187,11 +187,17 @@ enum KeyboardBarItem: Hashable {
     case tab
     /// One Return press, beside Escape and Tab for ⌘↵ and ⇧↵.
     case returnKey
+    /// Opens the arrow keypad (#179); shown only while the arrow keys are.
+    case arrowKeys
     /// Dismisses the software keyboard.
     case dismissKeyboard
 
     static let defaultItems: [KeyboardBarItem] = ControlModifier.allCases.map(KeyboardBarItem.modifier)
-        + [.escape, .tab, .returnKey, .dismissKeyboard]
+        + [.escape, .tab, .returnKey, .arrowKeys, .dismissKeyboard]
+
+    /// Points between keys. A ninth key tightens it a little, so a 375pt
+    /// iPhone keeps 32pt keys instead of dropping to the 30pt floor.
+    static func gap(count: Int) -> CGFloat { count > 8 ? 6 : 8 }
 }
 
 

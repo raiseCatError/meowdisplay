@@ -1250,15 +1250,23 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     /// A tap opens or closes the keypad; a swipe sends one arrow press; the
     /// face previews the arrow a release would send.
-    private func arrowKeysButton(frame: CGRect) -> some View {
+    /// `onBar`: the keyboard bar's item, drawn like the bar's other keys.
+    private func arrowKeysButton(frame: CGRect, onBar: Bool = false) -> some View {
         let preview = arrowButtonDrag.flatMap(ArrowButtonGesture.direction(of:))
         let open = store.arrowKeypadOpen
         let pressed = arrowButtonDrag != nil
+        let diameter = onBar ? min(frame.width, frame.height) : Metrics.trayItem
         return Image(systemName: preview?.symbol ?? "arrow.up.and.down.and.arrow.left.and.right")
-            .font(.system(size: preview == nil ? 15 : 18, weight: .semibold))
+            .font(.system(size: (preview == nil ? 15 : 18) * diameter / Metrics.trayItem, weight: .semibold))
             .foregroundStyle(open ? Color.black : Color.white)
-            .frame(width: Metrics.trayItem, height: Metrics.trayItem)
-            .background(chip(selected: open))
+            .frame(width: diameter, height: diameter)
+            .background(Group {
+                if onBar {
+                    PadChip(selected: open, onRail: true)
+                } else {
+                    chip(selected: open)
+                }
+            })
             .scaleEffect(pressed && !reduceMotion ? 0.92 : 1)
             .animation(.snappy(duration: 0.12), value: pressed)
             .frame(width: frame.width, height: frame.height)
@@ -1534,6 +1542,8 @@ extension ReceiverControlOverlay {
             case .tab: return .tab
             // Not a tray item; `controlGesture` tracks it by its frame.
             case .returnKey: return nil
+            // Its own button, drawn above the bar's gesture layer.
+            case .arrowKeys: return nil
             case .dismissKeyboard: return .keyboard
             }
         }
@@ -1542,6 +1552,7 @@ extension ReceiverControlOverlay {
     private var keyboardBarItems: [KeyboardBarItem] {
         KeyboardBarItem.defaultItems.filter { item in
             if case .modifier = item { return capabilityAllows(.command) }
+            if item == .arrowKeys { return arrowKeysShown }
             return true
         }
     }
@@ -1556,7 +1567,7 @@ extension ReceiverControlOverlay {
     var keyboardBarBody: some View {
         let keyboardTop = (keyboardVisibleRect?.maxY ?? containerSize.height) + surfaceOrigin.y
         let items = keyboardBarItems
-        let gap: CGFloat = 8
+        let gap = KeyboardBarItem.gap(count: items.count)
         let padding: CGFloat = 6
         let preferredItem: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
         // Eight keys need a little more than a 375pt iPhone offers at 38pt.
@@ -1616,9 +1627,28 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: [bar] + (paletteChord == nil ? [] : [paletteFrame])))
                 .gesture(controlGesture())
+            // Arrow keys (#179): the bar item is its own button, above the
+            // bar's gesture layer; the keypad opens above it or beside the bar.
+            if let arrowIndex = items.firstIndex(of: .arrowKeys) {
+                let cell = cells[arrowIndex]
+                let computed = ArrowKeysLayout(
+                    toggle: cell,
+                    keypad: store.arrowKeypadOpen ? ControlTrayGeometry.keyboardBarKeypadFrame(
+                        safe: safeInsets.safeRect(in: containerSize), bar: bar, item: cell,
+                        keypadSize: ArrowKeypadGeometry.size(key: Metrics.arrowKey, gap: Metrics.arrowGap),
+                        palette: paletteChord == nil ? nil : paletteFrame) : nil)
+                let arrows = heldArrowLayout ?? computed
+                arrowKeysButton(frame: arrows.toggle, onBar: true)
+                if let keypad = arrows.keypad {
+                    arrowKeypad(frame: keypad, frozen: computed)
+                        .transition(reduceMotion ? .opacity
+                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
+                }
+            }
         }
         .coordinateSpace(name: "receiverControls")
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
+        .animation(reduceMotion ? .easeInOut(duration: 0.12) : .snappy(duration: 0.2), value: store.arrowKeypadOpen)
         .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
         .onAppear { onOccupiedFramesChange([bar]) }
     }
@@ -1663,6 +1693,9 @@ extension ReceiverControlOverlay {
                 .position(x: frame.midX, y: frame.midY)
                 .accessibilityLabel(Text("Hide Keyboard"))
                 .trayButtonAccessibility { activateForAccessibility(.keyboard) }
+        case .arrowKeys:
+            // Drawn in `keyboardBarBody`, above the bar's gesture layer.
+            EmptyView()
         case .returnKey:
             Image(systemName: "return")
                 .font(.system(size: frame.width * 0.38, weight: .semibold))

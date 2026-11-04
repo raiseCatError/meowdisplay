@@ -168,6 +168,34 @@ final class ReceiverControlsTourTests: XCTestCase {
         }
     }
 
+    /// With the keyboard up, the companion bar's one Arrow Keys item opens
+    /// the same keypad, and its keys send arrows.
+    @MainActor
+    func testArrowKeysFromTheKeyboardBar() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let keyboard = element("Keyboard")
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 3))
+        revealControls(keyboard)
+        keyboard.tap()
+        sleep(2)
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); sleep(1) }
+        let button = app.buttons["arrowKeysButton"].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 3), "the keyboard bar has no Arrow Keys item")
+        XCTAssertFalse(app.keyboards.firstMatch.frame.intersects(button.frame))
+        button.tap()
+        let down = app.buttons["arrowKey.down"].firstMatch
+        XCTAssertTrue(down.waitForExistence(timeout: 2), "the bar item did not open the keypad")
+        XCTAssertFalse(app.keyboards.firstMatch.frame.intersects(down.frame), "the keypad covers the keyboard")
+        down.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '↓' OR label BEGINSWITH 'Selected'"))
+            .firstMatch.waitForExistence(timeout: 3), "↓ sent nothing")
+        snapshot("arrows-keyboard-bar-keypad")
+        let hide = element("Hide Keyboard")
+        if hide.waitForExistence(timeout: 3) { hide.tap() }
+        app.buttons["Exit Demo"].tap()
+    }
+
     @MainActor
     private func waitForAbsence(_ element: XCUIElement, _ message: String) {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
