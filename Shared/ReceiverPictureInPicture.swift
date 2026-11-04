@@ -37,6 +37,8 @@ struct ReceiverPictureInPictureConditions: Equatable {
     var sessionPhase: ReceiverSessionPhase
     /// Mac-confirmed Video On/Off.
     var videoEnabled: Bool
+    /// Home is in front with the session kept behind it (#121).
+    var sessionOnHome = false
 
     static let inactive = ReceiverPictureInPictureConditions(
         preferenceEnabled: false, systemSupported: false, rendersThroughDisplayLayer: false,
@@ -53,6 +55,12 @@ struct ReceiverPictureInPictureConditions: Equatable {
     var showsLiveVideo: Bool {
         sessionPhase == .connected && videoEnabled
     }
+
+    /// Leaving the app may carry the picture into a window on its own only
+    /// from the session itself. From Home the person chose not to watch, so a
+    /// window appearing on the way out would be a surprise; one already up
+    /// stays (`sustainsActiveWindow`).
+    var startsAutomaticallyFromInline: Bool { showsLiveVideo && !sessionOnHome }
 
     /// Whether an already-running Picture in Picture window stays up. A pause
     /// or an automatic recovery (including a transport migration passing

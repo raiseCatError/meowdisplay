@@ -309,6 +309,7 @@ targets:
       - Shared/MirrorUnavailableOfferPolicy.swift
       - Shared/ReceiverPanelPresentation.swift
       - Shared/ReceiverPictureInPicture.swift
+      - Shared/ReceiverSessionPresentation.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift

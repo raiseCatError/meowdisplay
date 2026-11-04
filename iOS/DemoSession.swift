@@ -30,11 +30,20 @@ enum ReceiverPresentationRoute: Equatable {
     case idle
     case demo
     case receiver
+    /// Home over a real session kept behind it (#121). The surface stays
+    /// mounted underneath; the demo can't start (see `canEnterDemo`).
+    case sessionHome
 
-    static func resolve(demoActive: Bool, realSurfaceShown: Bool) -> ReceiverPresentationRoute {
-        if realSurfaceShown { return .receiver }
+    static func resolve(demoActive: Bool, realSurfaceShown: Bool,
+                        presentation: ReceiverSessionPresentation = .session) -> ReceiverPresentationRoute {
+        if realSurfaceShown { return presentation.keepsSessionOnHome ? .sessionHome : .receiver }
         return demoActive ? .demo : .idle
     }
+
+    /// Whether the Mac's picture counts as watched for Keep Screen Awake. A
+    /// kept session counts too: Auto-Lock would lock the device, and a lock
+    /// ends the session the person chose to keep.
+    var watchesMac: Bool { self == .receiver || self == .sessionHome }
 
     /// The demo only starts from the home screen. While a real session's
     /// surface is up, entering would leave a hidden demo that appears once

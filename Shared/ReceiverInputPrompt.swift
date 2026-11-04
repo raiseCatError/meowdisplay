@@ -125,9 +125,11 @@ enum BlockedInputAttemptPolicy {
     /// (pv 8+) must have granted it: View Only forwards nothing, and a touch meant for the Mac
     /// offers Request Control instead (found 2026-10-30: in Window mode the touch went out, the
     /// Mac dropped it, and no prompt appeared). Older Macs never report it, so only the live
-    /// session and this device's own switch count there.
-    static func inputReachesMac(sessionLive: Bool, localAllow: Bool, macPV: Int, macState: SessionInputWireState) -> Bool {
-        guard sessionLive, localAllow else { return false }
+    /// session and this device's own switch count there. `surfaceInteractive` is false while
+    /// Home covers a kept session (#121): nothing on that hidden surface may reach the Mac.
+    static func inputReachesMac(sessionLive: Bool, localAllow: Bool, macPV: Int, macState: SessionInputWireState,
+                                surfaceInteractive: Bool = true) -> Bool {
+        guard sessionLive, localAllow, surfaceInteractive else { return false }
         return macPV < WireProtocol.allowInputWireVersion || macState == .allowed
     }
 }
