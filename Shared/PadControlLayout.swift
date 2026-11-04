@@ -7,6 +7,29 @@
 import CoreGraphics
 import Foundation
 
+/// The Mac canvas an iPad control layout published, together with the
+/// container size it laid out for (issue #129).
+///
+/// The receiver reads the canvas back while laying out the next pass. After
+/// a rotation the container has a new size before the layout republishes,
+/// and intersecting the previous orientation's rect with the new screen gave
+/// a canvas of the wrong shape: panes sized for one screen, the picture
+/// squeezed into another. A publication only counts for the size it was made
+/// for; any other size uses the whole container until the layout catches up.
+struct PadCanvasPublication: Equatable {
+    var canvas: CGRect
+    var containerSize: CGSize
+
+    /// The canvas to lay the Mac surface out in, inside a container of `size`.
+    static func resolved(_ publication: PadCanvasPublication?, in size: CGSize) -> CGRect {
+        let full = CGRect(origin: .zero, size: size)
+        guard let publication, publication.containerSize == size,
+              publication.canvas.width > 0, publication.canvas.height > 0 else { return full }
+        let canvas = publication.canvas.intersection(full)
+        return canvas.isNull || canvas.isEmpty ? full : canvas
+    }
+}
+
 /// The iPad `Control Layout` setting.
 enum PadControlLayoutMode: String, Codable, CaseIterable, Identifiable {
     /// A solid edge rail; the Mac canvas fits beside it.

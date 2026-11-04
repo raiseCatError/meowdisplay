@@ -334,8 +334,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     let reservedRegions: [ControlReservedRegion]
     let haptics: ReceiverHaptics
     let onOccupiedFramesChange: ([CGRect]) -> Void
-    /// iPad only: where the Mac canvas goes (the Strip reserves rails).
-    var onCanvasChange: (CGRect) -> Void = { _ in }
+    /// iPad only: where the Mac canvas goes (the Strip reserves rails),
+    /// with the container size it was laid out for.
+    var onCanvasChange: (PadCanvasPublication) -> Void = { _ in }
     /// Where the receiver surface starts in this overlay's coordinates —
     /// `keyboardVisibleRect` is in the surface's own.
     var surfaceOrigin: CGPoint = .zero
@@ -1443,6 +1444,7 @@ extension ReceiverControlOverlay {
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
         let layout = keyboardTop == nil ? firstPass : pass(keyboardTop)
+        let canvasPublication = PadCanvasPublication(canvas: layout.canvas, containerSize: containerSize)
         // Collapsed (or the tray can't show): only the gear, floating at the
         // Main edge, never a rail.
         let gearFrame: CGRect? = padCollapsed ? PadEdgeGeometry.layout(
@@ -1573,10 +1575,10 @@ extension ReceiverControlOverlay {
             settingsHoldTarget(reachable: padCollapsed || !autoHiding)
         }
         .onAppear {
-            onCanvasChange(layout.canvas)
+            onCanvasChange(canvasPublication)
             onOccupiedFramesChange(occupied)
         }
-        .onChange(of: layout.canvas) { onCanvasChange($0) }
+        .onChange(of: canvasPublication) { onCanvasChange($0) }
         .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
@@ -1620,6 +1622,11 @@ extension ReceiverControlOverlay {
     private func customLayoutContent(_ layout: CustomControlLayout, container: CGRect) -> some View {
         let portrait = containerSize.height > containerSize.width
         let arrangement = customArrangementWithSettings(layout.arrangement(portrait: portrait))
+        // Custom controls float over a full-container canvas. Republish it
+        // whenever the container changes: a rotation keeps this view's
+        // identity, so `onAppear` alone left the previous orientation's
+        // canvas in place (issue #129).
+        let canvasPublication = PadCanvasPublication(canvas: container, containerSize: containerSize)
         let metrics = PadControlMetrics(scale: padMetricsScale)
         // With the software keyboard up, the whole layout compresses into the
         // space above it, so every control stays reachable, then returns.
@@ -1739,9 +1746,10 @@ extension ReceiverControlOverlay {
         }
         .animation(.snappy(duration: 0.22), value: assistState)
         .onAppear {
-            onCanvasChange(container)
+            onCanvasChange(canvasPublication)
             onOccupiedFramesChange(occupied)
         }
+        .onChange(of: canvasPublication) { onCanvasChange($0) }
         .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
