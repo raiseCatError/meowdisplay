@@ -199,4 +199,68 @@ final class AutoConnectPolicyTests: XCTestCase {
         XCTAssertNotNil(policy.beginAutomaticAttempt(
             logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false))
     }
+
+    // MARK: - Explicit attempt beside a live owner (issue #128)
+
+    /// Connect for a device another session already owns on a different
+    /// route: the owner must keep its attempt, or every one of its controller
+    /// callbacks (hello, approval, failure, disconnect) is ignored and it
+    /// blocks the device forever without ever showing up.
+    func testExplicitAttemptBesideOwnerLeavesOwnerCurrent() throws {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        let owner = try XCTUnwrap(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, usb], hasSessionOwner: false))
+
+        let explicit = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, wifi],
+                                                   besideOwner: owner)
+
+        XCTAssertTrue(policy.isCurrent(owner))
+        XCTAssertFalse(policy.isCurrent(explicit))
+        XCTAssertNotEqual(explicit, owner)
+    }
+
+    /// The owner ignored or migrated the request; finishing the explicit
+    /// attempt must not release the owner's slot either.
+    func testFinishingExplicitAttemptBesideOwnerKeepsOwner() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        let owner = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, usb])
+        let explicit = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, wifi],
+                                                   besideOwner: owner)
+
+        policy.finish(explicit)
+
+        XCTAssertTrue(policy.isCurrent(owner))
+        XCTAssertNil(policy.beginAutomaticAttempt(
+            logicalID: receiver, identifiers: [receiver, wifi], hasSessionOwner: false),
+            "the owner's attempt still blocks a duplicate automatic attempt")
+    }
+
+    func testExplicitAttemptBesideOwnerStillClearsSuppression() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        let owner = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, usb])
+        policy.suppress([receiver, wifi])
+
+        _ = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver, wifi], besideOwner: owner)
+
+        XCTAssertTrue(policy.suppressedIdentifiers.isDisjoint(with: [receiver, wifi]))
+    }
+
+    /// Without a current owner for the same logical receiver it is an
+    /// ordinary explicit attempt that takes the slot.
+    func testExplicitAttemptWithoutCurrentOwnerTakesTheSlot() {
+        var policy = AutoConnectPolicy(knownIdentifiers: [receiver])
+        let noOwner = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver], besideOwner: nil)
+        XCTAssertTrue(policy.isCurrent(noOwner))
+
+        let otherDevice = policy.beginExplicitAttempt(logicalID: "install:other", identifiers: ["install:other"])
+        let beside = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver],
+                                                 besideOwner: otherDevice)
+        XCTAssertTrue(policy.isCurrent(beside))
+        XCTAssertTrue(policy.isCurrent(otherDevice))
+
+        policy.finish(beside)
+        let stale = beside
+        let fresh = policy.beginExplicitAttempt(logicalID: receiver, identifiers: [receiver], besideOwner: stale)
+        XCTAssertTrue(policy.isCurrent(fresh), "a finished owner no longer holds the slot")
+    }
 }

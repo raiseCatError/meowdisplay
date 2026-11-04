@@ -83,7 +83,7 @@ struct DevicesSettingsView: View {
                             } label: {
                                 Text("Connect")
                             } primaryAction: {
-                                controller.connect(to: target, userInitiated: true)
+                                controller.explicitConnect(to: target)
                             }
                             .menuStyle(.button)
                             .fixedSize()
@@ -168,7 +168,7 @@ struct DevicesSettingsView: View {
                                     .controlSize(.small)
                             } else {
                                 Button("Connect") {
-                                    controller.connect(to: target, userInitiated: true)
+                                    controller.explicitConnect(to: target)
                                 }
                                 .controlSize(.small)
                             }
