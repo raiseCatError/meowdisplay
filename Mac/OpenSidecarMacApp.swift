@@ -691,9 +691,9 @@ final class SenderController: ObservableObject {
     @Published var customFrameRate = CustomFrameRateSelection(rawValue: UserDefaults.standard.string(forKey: "customFrameRate") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(customFrameRate.rawValue, forKey: "customFrameRate") }
     }
-    // Streaming Priority: bounded encoder-pipelining depth (Auto/Prefer FPS/
-    // Prefer Latency — see StreamingPriorityPolicy). Default Auto so an
-    // existing user with no stored value keeps today's balanced 2-deep
+    // Streaming Priority: bounded encoder-pipelining depth (Balanced/Smoothness/
+    // Latency, raw values auto/preferFPS/preferLatency — see StreamingPriorityPolicy). Default
+    // Balanced (`auto`) so an existing user with no stored value keeps today's balanced 2-deep
     // pipeline exactly as before this feature existed.
     @Published var streamingPriority = StreamingPriority(rawValue: UserDefaults.standard.string(forKey: "streamingPriority") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(streamingPriority.rawValue, forKey: "streamingPriority") }

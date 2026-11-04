@@ -23,6 +23,18 @@ final class StreamingPriorityTests: XCTestCase {
 
     // MARK: - Enum/default parsing
 
+    /// The pickers read Latency | Balanced | Smoothness, Balanced the default.
+    /// Only the names and order changed: the raw values are what the wire and
+    /// every saved setting carry, so an existing choice keeps its meaning.
+    func testPickersShowLatencyBalancedSmoothnessOverUnchangedRawValues() {
+        XCTAssertEqual(StreamingPriority.pickerOrder.map(\.label), ["Latency", "Balanced", "Smoothness"])
+        XCTAssertEqual(StreamingPriority.pickerOrder.map(\.rawValue), ["preferLatency", "auto", "preferFPS"])
+        XCTAssertEqual(Set(StreamingPriority.pickerOrder), Set(StreamingPriority.allCases))
+        XCTAssertEqual(StreamingPriority.pickerOrder.count, StreamingPriority.allCases.count)
+        XCTAssertEqual(StreamingPriority(rawValue: "") ?? .auto, .auto)
+        XCTAssertEqual(StreamingPriority.auto.label, "Balanced")
+    }
+
     func testAllCasesHaveNonEmptyLabelAndExplanation() {
         for priority in StreamingPriority.allCases {
             XCTAssertFalse(priority.label.isEmpty)
