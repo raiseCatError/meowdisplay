@@ -181,17 +181,26 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
 | Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
 | Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
-| Disconnect | **Settings → Connections**, or touch and hold the Settings control → **Disconnect from Mac** (VoiceOver: the Settings control's actions) | Same | Settings | Overview |
-| Back to Home — Keep Connected | Yes. Settings → Connections, or the picture's **Back to Home** VoiceOver action | Yes | No | n/a |
+| Disconnect | **Settings → Connections**, or **Session Actions** → **Disconnect from Mac** | Same | Settings | Overview |
+| Back to Home — Keep Connected | Yes. Settings → Connections, **Session Actions**, or the picture's **Back to Home** VoiceOver action | Yes | No | n/a |
 
-Disconnect from the Settings control's menu is the same as Settings →
-Connections → Disconnect. It tells the Mac the goodbye is deliberate, so
-neither side reconnects automatically (the Mac waits until the device leaves
-and returns, or someone presses Connect). The pairing and the Mac app are
-untouched; the next session starts View Only, like every session. A tap on
-Settings still opens Settings. The menu is there only while connected, and
-not while a modifier is latched or its palette is open, or while Auto-hide has
-faded the control that holds Settings.
+**Session Actions** (iPhone and iPad): touch and hold the Settings control (a
+haptic confirms) to blur and dim the session under a modal with **Back to Home —
+Keep Connected**, **Disconnect from Mac** and **Cancel**. A tap on Settings still
+opens Settings. VoiceOver and Voice Control: the Settings control's **Session
+Actions** action; the escape gesture, Esc or a tap outside cancels. On iOS 26 and
+later a thin red outline follows the screen's corners; earlier versions show no
+outline. While it is up nothing reaches the Mac (touch, pointer, scroll, either
+keyboard) and anything held is released, so latched modifiers drop; Cancel brings
+back the keyboard if it was open and changes nothing else. It is offered only
+while connected with the session on screen, and not while a modifier's palette
+is open or while Auto-hide has faded the control that holds Settings.
+
+Disconnect from Mac there is the same as Settings → Connections → Disconnect.
+It tells the Mac the goodbye is deliberate, so neither side reconnects
+automatically (the Mac waits until the device leaves and returns, or someone
+presses Connect). The pairing and the Mac app are untouched; the next session
+starts View Only, like every session.
 
 **Back to Home — Keep Connected** (iPhone and iPad) shows Home while the session stays up: the
 Mac keeps its display and arrangement, and the picture's zoom, Move View, panes and Stage Peek
@@ -211,6 +220,7 @@ disconnects.
 
 **Android compared with iOS**
 - No Back to Home — Keep Connected.
+- No Session Actions (touch and hold Settings); Disconnect is in Settings and the Overview.
 - Rotation can't target the viewport, and there is no Snap Rotation control (the picture is on a SurfaceView).
 - **Prefer MeowDisplay Gestures** is saved but nothing in the app reads it.
 - The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
