@@ -131,30 +131,43 @@ extension DemoModeSmokeTests {
         for _ in 0..<6 where !rail.isHittable { app.swipeUp() }
         // The default itself is unit-tested (StagePeekTests); a run that failed
         // mid-way may have left Rail selected, so start from Stage Peek.
-        if !stagePeek.isSelected { stagePeek.tap() }
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: stagePeek)
-        waitForExpectations(timeout: 3)
+        select(stagePeek)
         XCTAssertTrue(app.otherElements["stagePeekEdgePicker"].exists || app.buttons["stagePeekEdgePicker"].exists
                       || app.staticTexts["Stage Peek Edge"].exists, "the edge choice shows for Stage Peek")
         snapshot(app, "window-switcher-stage-peek")
 
-        rail.tap()
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: rail)
-        waitForExpectations(timeout: 3)
+        select(rail)
         XCTAssertFalse(app.staticTexts["Stage Peek Edge"].exists, "no edge choice for the Rail")
         snapshot(app, "window-switcher-rail")
 
         app.terminate()
         app.launch()
         openControlsSettings(app)
-        XCTAssertTrue(app.buttons["Rail"].firstMatch.waitForExistence(timeout: 5))
-        for _ in 0..<6 where !app.buttons["Rail"].firstMatch.isHittable { app.swipeUp() }
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Rail"].firstMatch)
-        waitForExpectations(timeout: 3)   // Rail is remembered
+        let railAfterRelaunch = app.buttons["Rail"].firstMatch
+        XCTAssertTrue(railAfterRelaunch.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !railAfterRelaunch.isHittable { app.swipeUp() }
+        XCTAssertTrue(becomesSelected(railAfterRelaunch, within: 10), "Rail is remembered")
 
-        app.buttons["Stage Peek"].firstMatch.tap()   // leave the simulator on the default
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Stage Peek"].firstMatch)
-        waitForExpectations(timeout: 3)
+        select(app.buttons["Stage Peek"].firstMatch)   // leave the simulator on the default
+    }
+
+    /// Taps a segment until it reads as selected. On a loaded CI simulator the selection
+    /// can take more than 3 s to reach the accessibility tree, and a tap can land while
+    /// the list is still settling after a scroll, so one retry is allowed.
+    @MainActor
+    private func select(_ segment: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        for timeout: TimeInterval in [6, 10] {
+            if segment.isSelected { return }
+            segment.tap()
+            if becomesSelected(segment, within: timeout) { return }
+        }
+        XCTFail("\(segment.label) never read as selected", file: file, line: line)
+    }
+
+    @MainActor
+    private func becomesSelected(_ element: XCUIElement, within timeout: TimeInterval) -> Bool {
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isSelected == true"), object: element)
+        return XCTWaiter.wait(for: [selected], timeout: timeout) == .completed
     }
 
     /// Physical iPhone + a live Mac that offers Window mode (skipped otherwise).
