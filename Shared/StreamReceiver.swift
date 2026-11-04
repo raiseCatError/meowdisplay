@@ -791,6 +791,12 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
     @MainActor @Published private(set) var inputResetGeneration = 0
     @MainActor @Published private(set) var controlResetGeneration = 0
+    /// Whether the receiver surface can be used right now, as the app sees
+    /// it. It's false while Home covers a kept session, while Session Actions
+    /// is open, while the picture is in Picture in Picture, or while the app
+    /// isn't active. While it's false, only releases leave this device (see
+    /// `RemoteInputTransmission`). The Mac Receiver never closes it.
+    @MainActor private(set) var localInputSurfaceOpen = true
     @MainActor @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var displayModeConfirmationGeneration = 0
@@ -3244,7 +3250,8 @@ final class StreamReceiver: ObservableObject {
     /// Stamped in *Mac* clock time (our clock + sync offset) so the Mac can
     /// measure touch→injection latency without doing its own clock sync.
     @MainActor func sendTouch(phase: String, x: Double, y: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running,
+              remoteInputMayLeave(isRelease: RemoteInputTransmission.isRelease(phase: phase)) else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = presentationTiming.clockOffsetMs { msg["t"] = nowMs + offset }
         sendUIControl(msg)
@@ -3252,12 +3259,13 @@ final class StreamReceiver: ObservableObject {
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
     @MainActor func sendScroll(dx: Double, dy: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave() else { return }
         sendUIControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
     /// Send a semantic gesture without changing the meaning of touch/scroll input.
     @MainActor func sendGesture(name: String) {
+        guard remoteInputMayLeave() else { return }
         sendUIControl(["type": "gesture", "name": name])
     }
 
@@ -3268,14 +3276,14 @@ final class StreamReceiver: ObservableObject {
     /// Absolute cursor move: `x`/`y` normalized [0,1] in video space, no
     /// button implied.
     @MainActor func sendPointerMove(x: Double, y: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave() else { return }
         sendUIControl(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
     /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
     /// `scroll`), no button implied.
     @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave() else { return }
         sendUIControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
     }
 
@@ -3283,7 +3291,7 @@ final class StreamReceiver: ObservableObject {
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
     @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave() else { return }
         sendUIControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
     }
 
@@ -3300,7 +3308,7 @@ final class StreamReceiver: ObservableObject {
     /// `macSupportsSmartTouch` first. `x`/`y` normalized [0,1] in video
     /// space; the reply arrives via `onSmartTouchProbeResult`.
     @MainActor func sendSmartTouchProbe(id: Int, x: Double, y: Double) {
-        guard displayState == .running, macSupportsSmartTouch else { return }
+        guard displayState == .running, macSupportsSmartTouch, remoteInputMayLeave() else { return }
         sendUIControl(["type": WireMessage.smartTouchProbe, "id": id, "x": x, "y": y])
     }
 
@@ -3308,7 +3316,8 @@ final class StreamReceiver: ObservableObject {
     /// rotation is always 0 until Apple Pencil Pro barrel roll is wired up.
     @MainActor func sendPencil(phase: String, x: Double, y: Double,
                     pressure: Double, azimuth: Double, altitude: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running,
+              remoteInputMayLeave(isRelease: RemoteInputTransmission.isRelease(phase: phase)) else { return }
         var msg: [String: Any] = [
             "type": "pencil",
             "phase": phase,
@@ -3323,7 +3332,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func sendProximity(entering: Bool, x: Double, y: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave(isRelease: !entering) else { return }
         sendUIControl(["type": "proximity", "entering": entering, "x": x, "y": y])
     }
 
@@ -3331,7 +3340,7 @@ final class StreamReceiver: ObservableObject {
     /// (M4). Never carries marked/IME-intermediate text — callers commit
     /// only finished text (see `RemoteKeyboardInputView`).
     @MainActor func sendKeyboardText(_ text: String) {
-        guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
+        guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty, remoteInputMayLeave() else { return }
         sendUIControl(["type": "keyboard", "action": "text", "text": text])
     }
 
@@ -3348,7 +3357,7 @@ final class StreamReceiver: ObservableObject {
     /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
     /// keyboard-page usage number.
     @MainActor func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
-        guard displayState == .running, macSupportsKeyboardWire else { return }
+        guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
         #if DEBUG
         // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
         // value) — this file also compiles into the macOS receiver, which
@@ -3363,7 +3372,8 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func sendModifier(_ modifier: ControlModifier, down: Bool) {
         guard displayState == .running,
-              macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
+              macProtocolVersion >= WireProtocol.receiverControlsWireVersion,
+              remoteInputMayLeave(isRelease: !down) else { return }
         sendUIControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
                      "modifier": modifier.rawValue])
     }
@@ -3379,6 +3389,33 @@ final class StreamReceiver: ObservableObject {
     @MainActor func releaseLocalInput() {
         controlResetGeneration &+= 1
         sendCancelActiveInput()
+    }
+
+    /// Opens or closes the receiver surface for input (see
+    /// `localInputSurfaceOpen`). Closing it releases everything held, as
+    /// Home does, and ends every delayed remote action started before (its
+    /// `RemoteInputTicket` no longer matches). Opening it again starts
+    /// nothing by itself.
+    @MainActor func setLocalInputSurfaceOpen(_ open: Bool) {
+        guard open != localInputSurfaceOpen else { return }
+        localInputSurfaceOpen = open
+        if !open { releaseLocalInput() }
+    }
+
+    /// The ticket a delayed remote action must still hold before each later
+    /// step goes out. It's nil while input can't leave this device.
+    @MainActor var remoteInputTicket: RemoteInputTicket? {
+        RemoteInputTicket.current(surfaceOpen: localInputSurfaceOpen,
+                                  displayRunning: displayState == .running,
+                                  sessionLive: session.allowsLiveInput,
+                                  controlGeneration: controlResetGeneration,
+                                  connectionGeneration: sendTargetBox.current()?.generation)
+    }
+
+    /// Whether input that starts or continues something may leave now. A
+    /// release always may (see `RemoteInputTransmission`).
+    @MainActor private func remoteInputMayLeave(isRelease: Bool = false) -> Bool {
+        RemoteInputTransmission.mayLeave(surfaceOpen: localInputSurfaceOpen, isRelease: isRelease)
     }
 
     /// `true`: requests control of THIS session — never an assignment, the
@@ -3460,7 +3497,8 @@ final class StreamReceiver: ObservableObject {
                               phase: NativeAppGesturePhase,
                               delta: Double) {
         guard displayState == .running,
-              macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion else { return }
+              macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion,
+              remoteInputMayLeave(isRelease: phase == .ended || phase == .cancelled) else { return }
         sendUIControl(["type": WireMessage.nativeAppGesture,
                      "kind": kind.rawValue,
                      "phase": phase.rawValue,
@@ -3690,7 +3728,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
-        guard displayState == .running, macSupportsKeyboardWire else { return }
+        guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
         var message: [String: Any] = ["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers]
         if isRepeat { message["repeat"] = true }
         sendUIControl(message)
@@ -5826,7 +5864,10 @@ final class StreamReceiver: ObservableObject {
     /// Same single assignment `publishSessionSnapshot` above does, just
     /// reachable from `ReceiverUISink`.
     @MainActor func applyUISessionSnapshot(_ snapshot: ReceiverSessionState) {
+        let endsLiveInput = session.allowsLiveInput && !snapshot.allowsLiveInput
         session = snapshot
+        // A pause, recovery or end: nothing started before it carries on afterwards.
+        if endsLiveInput { controlResetGeneration &+= 1 }
     }
 
     /// The `authenticatedPeerID` UI-publish half of the former
@@ -6066,7 +6107,10 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func applyDisplayStateUpdate(_ state: DisplayState) {
+        let stopsRunning = displayState == .running && state != .running
         displayState = state
+        // Nothing started before a pause carries on after it.
+        if stopsRunning { controlResetGeneration &+= 1 }
         onDisplayStateChange?(state)
     }
 }

@@ -226,7 +226,18 @@ struct ReceiverScreen: View {
                                                   localAllow: controlStore.preferences.allowInput,
                                                   macPV: model.receiver.macProtocolVersion,
                                                   macState: controlStore.sessionInputState,
-                                                  surfaceInteractive: sessionActions.surfaceInteractive(model.presentation))
+                                                  surfaceInteractive: localInputSurfaceOpen)
+    }
+
+    /// Whether the receiver surface can be used at all: the app is active,
+    /// Home and Session Actions don't cover it, and the picture isn't in
+    /// Picture in Picture (which is view-only). Mirrored into the receiver
+    /// (`StreamReceiver.setLocalInputSurfaceOpen`), which releases what's
+    /// held, ends delayed actions and lets only releases out while it's false.
+    private var localInputSurfaceOpen: Bool {
+        scenePhase == .active
+            && sessionActions.surfaceInteractive(model.presentation)
+            && !model.pictureInPicture.isShowingWindow
     }
 
     /// Screen edges whose system gestures wait for a second swipe — see
@@ -806,6 +817,10 @@ struct ReceiverScreen: View {
             // M4: never hold the keyboard responder while backgrounded.
             if phase != .active { keyboardActive = false }
         }
+        // Input stops while the surface can't be used: the app inactive or in
+        // the background, Home or Session Actions over it, or Picture in Picture.
+        .onAppear { model.receiver.setLocalInputSurfaceOpen(localInputSurfaceOpen) }
+        .onChange(of: localInputSurfaceOpen) { model.receiver.setLocalInputSurfaceOpen($0) }
         .onAppear { model.pictureInPicture.update(pictureInPictureConditions) }
         .onChange(of: pictureInPictureConditions) { model.pictureInPicture.update($0) }
         // The receiver surface is covered while the picture is in the
@@ -3747,6 +3762,13 @@ struct VideoLayerView: UIViewRepresentable {
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
             lastAnchor = nil
+            // A whole right-click still waiting for a possible second tap
+            // (Window view) is dropped, not sent: input is stopping. This
+            // must come before `resetPointerEngine`, whose releases would
+            // otherwise flush it to the Mac first.
+            heldRightTapWork?.cancel()
+            heldRightTapWork = nil
+            heldRightTaps.removeAll()
             resetPointerEngine()
             cancelScrollMomentum()
             activeFingerTouchIDs.removeAll()
