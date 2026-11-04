@@ -65,7 +65,7 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Tiles: up to 9 on every receiver | Yes | Yes | Yes | Minimum pane size and available space decide what fits; existing 9-tile QA record is tests and the tablet emulator |
 | Swap, drag to split, dividers, maximize, undo | Yes | Yes | Yes | Android verified physically (one drag = one undo step) |
 | Per-tile rotation 0/90/180/270 | Yes | Yes | Yes | Android verified physically |
-| Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo simulator |
+| Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo: geometry unit tests only (CI has only run the folded cover screen) |
 | Mirror Display picker, Extend Shape, Use Full Display | Yes | Yes | Yes | Android controls depend on the connected Mac's advertised capabilities; source-inspected |
 | Video on/off, Streaming Profile, Priority, Maximum FPS, Resync | Yes | Yes | Yes | Android Display/Streaming controls and Audio Resync implemented; source-inspected, physical QA not added here |
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |

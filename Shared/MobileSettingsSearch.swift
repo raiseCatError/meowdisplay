@@ -165,6 +165,7 @@ enum MobileSettingsSearchIndex {
         .init("metalRenderer", String(localized: "Metal Renderer"), .diagnostics, keywords: ["experimental", "rendering"]),
         // About
         .init("version", String(localized: "Version"), .about, keywords: ["about", "github", "mac app"]),
+        .init("rate", String(localized: "Rate MeowDisplay"), .about, keywords: ["review", "app store", "stars"]),
         // Developer (DEBUG builds only — filtered with its category)
         .init("notchDebug", String(localized: "Notch Debug Overlay"), .developer, keywords: ["debug"]),
         .init("audioDiagnostics", String(localized: "Audio Diagnostics"), .developer, keywords: ["aac", "pcm"]),

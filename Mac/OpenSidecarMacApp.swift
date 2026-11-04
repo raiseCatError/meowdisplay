@@ -3272,8 +3272,25 @@ final class SenderController: ObservableObject {
 
     /// Streaming settings apply per-pipeline at construction — rebuild every
     /// session. (Mode no longer goes through here: see `rebuild(_:)`.)
+    /// What the running sessions were last rebuilt with (see `StreamingRestartLedger`).
+    private var streamingRestartLedger = StreamingRestartLedger()
+
+    private var streamingRestartSettings: StreamingRestartLedger.Settings {
+        StreamingRestartLedger.Settings(mode: streamingMode, profile: streamingProfile, customFrameRate: customFrameRate,
+                                        priority: streamingPriority, codec: codecPreference, quality: quality)
+    }
+
+    /// A Streaming setting changed in Settings ▸ Streaming. Restarts unless
+    /// the sessions already run with it (a receiver's request that already
+    /// restarted them).
+    func restartForStreamingSettingChange() {
+        guard streamingRestartLedger.needsRestart(for: streamingRestartSettings) else { return }
+        restartAll()
+    }
+
     func restartAll() {
         guard running else { return }
+        streamingRestartLedger.restarted(with: streamingRestartSettings)
         let rebuilds = sessions.map { ($0.target, $0.failed ? nil : continuation(of: $0)) }
         sessions.forEach { $0.sender.stop() }
         sessions.removeAll()

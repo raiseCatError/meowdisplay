@@ -154,7 +154,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Pane options (Fullscreen on This Device, Fit/Fill, Change Window…, Rotate, Arrange Panes, Remove from Layout, Close Window on Mac…) | Yes. Hold title, then release | Yes | Yes | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
-| Hinge-aware tiles on foldables | Yes. Simulator only | n/a | Yes. Emulator only | n/a |
+| Hinge-aware tiles on foldables | Yes. Geometry unit-tested only; not yet run on a half-open iPhone Duo or a posed simulator | n/a | Yes. Emulator only | n/a |
 | **Hidden on this screen** when space shrinks | Yes | Yes | Yes | Yes |
 | **Typing paused** when another app is in front on the Mac | Yes | Yes | Yes | Yes |
 
@@ -224,6 +224,21 @@ covers Home with a kept session, because a device lock ends the session: that co
 while you sit on Home, so turn it off or disconnect if you won't be back soon. The interruption
 card's **Back to Home** (Connection Lost, Mac Disconnected, Can't Connect) still gives up and
 disconnects.
+
+**When input stops** (iPhone and iPad). Input stops in these cases:
+- Home covers a kept session.
+- Session Actions is open.
+- The picture is in Picture in Picture, which is view-only.
+- The app isn't active, for example in the background or under Control Center.
+- Allow Input is off, or the Mac takes control back.
+- The session pauses, ends, reconnects or becomes another Mac's.
+
+Then nothing new reaches the Mac: touch, pointer, scroll, Pencil, gestures, the keyboards and
+the tray's keys. Anything held is released: keys, latched modifiers, mouse buttons and drags.
+A Window view right-click still waiting for a second tap is dropped. A one-tap sequence that
+is still running stops for good, and its remaining steps are never sent, even if input comes
+back before the next step. A step's keys always go out together, so stopping never leaves a
+key down.
 
 ## Gaps
 

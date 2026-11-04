@@ -298,6 +298,7 @@ targets:
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
       - Mac/DisplayCaptureSettings.swift
+      - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift
       - Mac/InputInjector.swift
       - Mac/AudioCaptureEncoder.swift
@@ -352,6 +353,7 @@ targets:
       - Shared/PreAuthSlots.swift
       - Shared/LocalOwnerAuthenticator.swift
       - Shared/AppStore.swift
+      - Shared/AppVersion.swift
       - Shared/ProjectLinks.swift
       - Shared/RemoteViewport.swift
       - Shared/ReceiverPanelGeometry.swift
@@ -374,6 +376,8 @@ targets:
       - iOS/DemoDesktop.swift
       # iPhone/iPad Remote Access setup and status wording (Foundation only).
       - iOS/RemoteAccessGuidance.swift
+      # One-tap actions and sequences (Foundation only): their input isolation is tested.
+      - iOS/OneTapActionRunner.swift
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift
