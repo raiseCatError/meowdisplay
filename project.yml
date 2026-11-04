@@ -298,6 +298,7 @@ targets:
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
       - Mac/DisplayCaptureSettings.swift
+      - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift
       - Mac/InputInjector.swift
       - Mac/AudioCaptureEncoder.swift
