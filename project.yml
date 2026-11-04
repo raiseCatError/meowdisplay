@@ -257,6 +257,7 @@ targets:
       - Mac/HiDPIEnforcementBackoff.swift
       - Mac/ListenerRetryBackoff.swift
       - Mac/RouteArbitration.swift
+      - Mac/ExplicitConnectAdmission.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
       - Shared/RemoteEndpointStore.swift
