@@ -880,7 +880,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// windows below (like a feed). Off: the older scrub-wheel direction.
     var stagePeekNaturalScrolling = true
     /// Compact (a bounded, fading column between the controls) or Normal (the open column).
-    var stagePeekDock = StagePeekDockStyle.compact
+    /// Normal for new installs (issue #130): Compact's band fades and clips so tightly on a
+    /// phone in landscape that about one window shows. A stored choice, Compact included,
+    /// is kept: every saved blob carries this key.
+    var stagePeekDock = StagePeekDockStyle.normal
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults on (schema 16).

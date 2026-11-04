@@ -43,9 +43,10 @@ enum StagePeekEdge: String, Codable, CaseIterable, Identifiable {
 /// How the compact peek's window Dock sits on screen. Persisted as `stagePeekDock`.
 enum StagePeekDockStyle: String, Codable, CaseIterable, Identifiable {
     /// A bounded column between the search and app carousel above and the buttons below:
-    /// cards fade and clip at its edges and never pass under those controls (the default).
+    /// cards fade and clip at its edges and never pass under those controls.
     case compact
-    /// The open column across the whole edge (cards may pass behind the controls, which stay on top).
+    /// The open column across the whole edge (cards may pass behind the controls, which stay
+    /// on top). The default for new installs (issue #130).
     case normal
 
     var id: String { rawValue }
