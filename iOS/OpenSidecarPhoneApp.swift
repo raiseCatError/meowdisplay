@@ -174,7 +174,10 @@ struct ReceiverScreen: View {
             viewBounds: CGRect(origin: .zero, size: canvas.size),
             remoteAspectSize: model.receiver.videoSize).displayedRect
             .offsetBy(dx: canvas.minX, dy: canvas.minY)
-        guard keyboardVisibleRect != nil, let keyboardPictureRect,
+        // No `keyboardVisibleRect` check: while the picture slides back after
+        // the keyboard closes, the surface keeps publishing where it is, and
+        // publishes nil once it is home.
+        guard let keyboardPictureRect,
               keyboardPictureRect.width > 0, keyboardPictureRect.height > 0 else { return (layout, layout) }
         return (keyboardPictureRect.offsetBy(dx: canvas.minX, dy: canvas.minY), layout)
     }
@@ -2503,7 +2506,7 @@ struct VideoLayerView: UIViewRepresentable {
         let hardwareKeyboard = HardwareKeyboardForwarder()
 
         private func normalizedPicturePoint(_ p: CGPoint) -> CGPoint? {
-            guard let n = currentTransform.remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
+            guard let n = presentedTransform().remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
             return n
         }
 
@@ -2657,6 +2660,15 @@ struct VideoLayerView: UIViewRepresentable {
         /// itself: the caret and anchor live here (issue #92).
         var onKeyboardPictureRectChange: ((CGRect?) -> Void)?
         private var publishedKeyboardPictureRect: CGRect?
+        private var keyboardPicturePublishedOnce = false
+        /// Runs only while the content layer animates in Window view: the
+        /// chrome follows the picture's presentation frame by frame instead
+        /// of jumping to where the animation will end.
+        private var keyboardPictureLink: CADisplayLink?
+        /// Where Window view's chrome belongs once the picture settles: the
+        /// keyboard-adjusted rect before manual zoom (Window view drops
+        /// whole-picture zoom), or nil for the normal fit.
+        private var keyboardPictureTarget: CGRect?
         /// Fired on every new touch beginning on the receiver surface —
         /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
         /// multi-finger/system gestures, and Pencil all route through
@@ -3527,14 +3539,57 @@ struct VideoLayerView: UIViewRepresentable {
             let base = unzoomedBaseTransform()
             currentTransform = VideoInteractionPolicy.viewportTransform(
                 base: base, state: manualZoom, videoEnabled: videoEnabled)
-            let keyboardPicture = keyboardVisibleRect != nil && videoEnabled && base.isValid
+            keyboardPictureTarget = keyboardVisibleRect != nil && videoEnabled && base.isValid
                 ? base.displayedRect : nil
-            if keyboardPicture != publishedKeyboardPictureRect {
-                publishedKeyboardPictureRect = keyboardPicture
-                // Layout can run inside a SwiftUI update; publish after it.
-                let publish = onKeyboardPictureRectChange
-                DispatchQueue.main.async { publish?(keyboardPicture) }
+            // Inside `animateTransformChange` the content layer is about to
+            // animate: in Window view, follow it frame by frame (the first
+            // tick runs after this transaction commits its animations).
+            if animatingKeyboardTransition, workspacePinch != nil, keyboardPictureTarget != publishedKeyboardPictureRect {
+                startKeyboardPictureLink()
+            } else if keyboardPictureLink == nil {
+                publishKeyboardPicture(keyboardPictureTarget)
             }
+        }
+
+        private func publishKeyboardPicture(_ rect: CGRect?) {
+            guard !keyboardPicturePublishedOnce || rect != publishedKeyboardPictureRect else { return }
+            keyboardPicturePublishedOnce = true
+            publishedKeyboardPictureRect = rect
+            // Layout can run inside a SwiftUI update; publish after it.
+            let publish = onKeyboardPictureRectChange
+            DispatchQueue.main.async { publish?(rect) }
+        }
+
+        private var contentIsAnimating: Bool {
+            !(videoContentView.layer.animationKeys() ?? []).isEmpty
+        }
+
+        private func startKeyboardPictureLink() {
+            guard keyboardPictureLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tickKeyboardPicture))
+            link.add(to: .main, forMode: .common)
+            keyboardPictureLink = link
+        }
+
+        @objc private func tickKeyboardPicture() {
+            guard contentIsAnimating, manualZoom.isIdentity, workspacePinch != nil else {
+                keyboardPictureLink?.invalidate()
+                keyboardPictureLink = nil
+                publishKeyboardPicture(keyboardPictureTarget)
+                return
+            }
+            publishKeyboardPicture(presentedTransform().displayedRect)
+        }
+
+        /// The picture as it is on screen right now: while the content layer
+        /// animates, rebuilt from its presentation layer (the inverse of
+        /// `applyContentGeometry`); otherwise `currentTransform`.
+        private func presentedTransform() -> RemoteViewportTransform {
+            guard videoEnabled, currentTransform.isValid, contentIsAnimating,
+                  let layer = videoContentView.layer.presentation() else { return currentTransform }
+            return RemoteViewportTransform.presented(
+                position: layer.position, boundsSize: layer.bounds.size,
+                transform: layer.affineTransform(), remoteCrop: currentTransform.remoteCrop) ?? currentTransform
         }
 
         /// The normal or keyboard-adjusted presentation, *before* manual
@@ -3716,7 +3771,10 @@ struct VideoLayerView: UIViewRepresentable {
         // tapped while zoomed/panned still receives input at that precise
         // Mac location.
         fileprivate func normalized(_ point: CGPoint) -> (x: Double, y: Double)? {
-            guard let remote = currentTransform.remotePoint(forView: point) else { return nil }
+            // Mid-animation (keyboard, caret or anchor re-target, zoom reset)
+            // the model value is already the end state while the picture is
+            // still sliding: map through what the finger is actually on.
+            guard let remote = presentedTransform().remotePoint(forView: point) else { return nil }
             return (Double(remote.x), Double(remote.y))
         }
 
@@ -4664,7 +4722,10 @@ struct VideoLayerView: UIViewRepresentable {
             let touches = touches.subtracting(pointer)
             guard !touches.isEmpty else { return }
             if let workspaceTouch, let first = touches.first {
-                let base = unzoomedBaseTransform().displayedRect
+                // The pane under the finger as drawn, mid-slide too, so the
+                // pane this selects is the one the click lands in.
+                let base = manualZoom.isIdentity ? presentedTransform().displayedRect
+                    : unzoomedBaseTransform().displayedRect
                 if base.width > 0, base.height > 0 {
                     let p = first.location(in: self)
                     if workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)) {
