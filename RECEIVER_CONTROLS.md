@@ -216,7 +216,9 @@ are as you left them. Home's pinned card offers **Resume** (the same session, no
 or paired until you disconnect. While on Home nothing reaches the Mac (touch, pointer, scroll,
 either keyboard; anything held is released first), this device stops drawing the picture and
 playing Mac audio (the Mac keeps sending; Resume asks for a fresh frame), and rotating doesn't
-reshape the Mac's display until Resume. Leaving the app from Home never starts Picture in
+reshape the Mac's display until Resume. **Unified Clipboard** keeps working on Home while
+MeowDisplay is open: copies from the Mac still arrive, and what you copy elsewhere is offered or
+sent as usual. Leaving the app from Home never starts Picture in
 Picture; a window already showing keeps playing. **Keep Screen Awake While Streaming** also
 covers Home with a kept session, because a device lock ends the session: that costs battery
 while you sit on Home, so turn it off or disconnect if you won't be back soon. The interruption
