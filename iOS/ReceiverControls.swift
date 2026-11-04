@@ -1142,6 +1142,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 } label: {
                     Label(sessionMenu.disconnectTitle, systemImage: "xmark.circle")
                 }
+                // The hold never reaches `controlGesture`, so nothing else pauses
+                // Auto-hide: without this the tray (and this layer) can go away
+                // under an open menu.
+                .onAppear { store.beginAutoHideActivity() }
+                .onDisappear { store.scheduleAutoHide(interactionIdle: interaction.phase == .idle) }
             } label: {
                 Color.clear
                     .frame(width: frame.width, height: frame.height)
@@ -1578,7 +1583,9 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: mainRegion + gearRegion + paletteRegion))
                 .gesture(controlGesture())
-            settingsSessionMenu(reachable: true)   // the iPad gear never auto-hides
+            // Overlay's rail gear fades with Auto-hide like the rest of the rail (a tap
+            // there reaches the Mac and reveals it); the collapsed gear and the Strip never hide.
+            settingsSessionMenu(reachable: padCollapsed || !autoHiding)
         }
         .onAppear {
             onCanvasChange(layout.canvas)

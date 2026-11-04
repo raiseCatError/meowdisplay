@@ -186,8 +186,11 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 Disconnect from the Settings control's menu is the same as Settings →
 Connections → Disconnect. It tells the Mac the goodbye is deliberate, so
 neither side reconnects automatically (the Mac waits until the device leaves
-and returns, or someone presses Connect). The pairing, input grants and the
-Mac app are untouched. A tap on Settings still opens Settings.
+and returns, or someone presses Connect). The pairing and the Mac app are
+untouched; the next session starts View Only, like every session. A tap on
+Settings still opens Settings. The menu is there only while connected, and
+not while a modifier is latched or its palette is open, or while Auto-hide has
+faded the control that holds Settings.
 
 ## Gaps
 
