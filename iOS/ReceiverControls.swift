@@ -391,6 +391,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// Down while a finger is on the controls. Resets on a cancelled touch
     /// too, where `onEnded` never runs (see `cancelControlGesture`).
     @GestureState private var controlTouchDown = false
+    /// The controls moved under a finger that is still down (a fold, a
+    /// rotation, the keyboard): the rest of that touch is ignored, so it can
+    /// never land on whatever moved under it.
+    @State private var controlTouchAbandoned = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if DEBUG
     /// Visual diagnostic for the Avoid Notch runtime path (see the
@@ -556,8 +560,15 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             guard !down else { return }
             DispatchQueue.main.async {
                 if gestureActive { cancelControlGesture() }
+                controlTouchAbandoned = false
             }
         }
+        // Targets are hit-tested against live frames: when the controls'
+        // geometry changes under a held touch, drop the touch rather than
+        // let it finish on a different key.
+        .onChange(of: containerSize) { _ in abandonControlTouch() }
+        .onChange(of: reservedRegions) { _ in abandonControlTouch() }
+        .onChange(of: presentation) { _ in abandonControlTouch() }
         .onDisappear { store.projectChord([]) }
         .onPreferenceChange(WheelHitPreference.self) { wheelHit = $0 }
     }
@@ -1053,6 +1064,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("receiverControls"))
             .updating($controlTouchDown) { _, down, _ in down = true }
             .onChanged { value in
+                guard !controlTouchAbandoned else { return }
                 if !gestureActive {
                     gestureActive = true
                     // A touch is down on the tray: reveal immediately (a
@@ -1106,6 +1118,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             }
             .onEnded { value in
                 holdTask?.cancel()
+                guard !controlTouchAbandoned else {
+                    controlTouchAbandoned = false
+                    return
+                }
                 let finishedOn = selectedAction(under: value.location)
                 if let modifier = initiatingModifier {
                     // A press that never became a hold is a latch toggle;
@@ -1158,6 +1174,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         lastHoveredModifier = nil
         gestureActive = false
         store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+    }
+
+    private func abandonControlTouch() {
+        guard gestureActive else { return }
+        cancelControlGesture()
+        controlTouchAbandoned = controlTouchDown
     }
 
     private func trayItem(at point: CGPoint) -> ControlTrayItem? {
