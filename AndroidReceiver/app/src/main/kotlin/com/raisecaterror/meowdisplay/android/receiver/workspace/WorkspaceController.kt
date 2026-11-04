@@ -1216,7 +1216,9 @@ class WorkspaceController(
             return s.windowMode && item.tab == null && item.tile in arranged.tiles && arranged.tiles.size > 1
         }
 
-    fun overRemoveZone(p: CGPoint): Boolean = canDropToRemove && !removeZone.isEmpty && removeZone.insetBy(-8.0, -8.0).contains(p)
+    /** Cancel wins where the two zones' touch margins meet, so the highlight, haptic and drop agree and the uncertain case removes nothing. */
+    fun overRemoveZone(p: CGPoint): Boolean =
+        canDropToRemove && !removeZone.isEmpty && removeZone.insetBy(-8.0, -8.0).contains(p) && !overCancelZone(p)
 
     /** The drop under the finger. Null outside the picture and over Cancel. In Mirror/Extend the desktop counts as one pane. */
     fun dropTarget(p: CGPoint, labelHeight: Double = 30.0): WWindowDrop? {
