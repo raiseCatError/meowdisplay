@@ -52,6 +52,8 @@ struct WorkspaceChromeView: View {
     @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
+    /// The last label tap, for telling a double tap (fullscreen toggle) from two single taps.
+    @State private var lastLabelTap: (target: PaneMenuTarget, at: Date)?
     @State private var stripVisible = true
     @State private var stripHideTask: Task<Void, Never>?
     /// The pane whose tabs are all shown while the menu bar shares their row; the others show
@@ -64,6 +66,8 @@ struct WorkspaceChromeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     struct PaneMenuTarget: Equatable { var tile: String; var tab: Int? }
+    /// Matches UIKit's default double-tap timing.
+    static let doubleTapInterval: TimeInterval = 0.35
 
     private var layoutRect: CGRect { layoutPicture ?? picture }
     private var size: WorkspaceSize { WorkspaceSize(width: layoutRect.width, height: layoutRect.height) }
@@ -525,6 +529,16 @@ struct WorkspaceChromeView: View {
         .onTapGesture {
             // A tap selects the pane (typing goes there) or shows that tab. Never a click on the Mac.
             guard heldLabel == nil else { return }
+            // A second tap on the same label: this pane fills the device, or the layout comes back.
+            // The first tap acts at once (no waiting to see whether another follows).
+            let now = Date()
+            if let last = lastLabelTap, last.target == target, now.timeIntervalSince(last.at) < Self.doubleTapInterval {
+                lastLabelTap = nil
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) { model.toggleLocalFullscreen(id) }
+                Self.haptic(.drop)
+                return
+            }
+            lastLabelTap = (target, now)
             if let tab, !shown { model.switchTab(id, to: tab) } else { model.focus(id) }
             // Working with tabs: keep them all shown for a while (only matters beside the menu bar).
             if tab != nil { expandTabs(id) }
@@ -551,9 +565,12 @@ struct WorkspaceChromeView: View {
                     heldLabel = nil
                 })
         .accessibilityLabel(text + (shown ? "" : ", tab"))
-        .accessibilityHint(shown ? "Selects this pane for typing. Hold for options or to move it." : "Shows this tab.")
+        .accessibilityHint(shown ? "Selects this pane for typing. Fullscreen and other options are in Actions." : "Shows this tab.")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: "Options") { menu = target }
+        .accessibilityAction(named: model.localFullscreen == id ? "Exit Fullscreen" : "Fullscreen on This Device") {
+            model.toggleLocalFullscreen(id)
+        }
     }
 
     // MARK: The label menu
@@ -582,7 +599,8 @@ struct WorkspaceChromeView: View {
         let isWindow = tile.source != nil && !isDesktop
         return VStack(alignment: .leading, spacing: 0) {
             menuRow(full ? "Exit Fullscreen" : "Fullscreen on This Device",
-                    full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
+                    full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    hint: full ? "Brings back the other panes." : "Shows only this pane on this device. The Mac is unchanged. Double-tap the pane title to toggle.") {
                 full ? model.exitLocalFullscreen() : model.enterLocalFullscreen(m.tile)
             }
             if isDesktop, let onViewFullScreen {
@@ -602,7 +620,8 @@ struct WorkspaceChromeView: View {
             if let tab = m.tab {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
             }
-            menuRow("Remove from Layout", "rectangle.badge.minus") { model.removeTile(m.tile) }
+            menuRow("Remove from Layout", "rectangle.badge.minus",
+                    hint: "Takes this pane off this device's layout. The window stays open on the Mac.") { model.removeTile(m.tile) }
             if isWindow, model.menus.available, inputAllowed {
                 menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
             }
@@ -624,8 +643,8 @@ struct WorkspaceChromeView: View {
         .frame(width: 252, alignment: .leading)
     }
 
-    private func menuRow(_ title: LocalizedStringKey, _ symbol: String, destructive: Bool = false, enabled: Bool = true,
-                         action: @escaping () -> Void) -> some View {
+    private func menuRow(_ title: LocalizedStringKey, _ symbol: String, hint: LocalizedStringKey? = nil,
+                         destructive: Bool = false, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button {
             withAnimation(.easeOut(duration: 0.15)) { menu = nil }
             action()
@@ -643,6 +662,7 @@ struct WorkspaceChromeView: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.45)
+        .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
     }
 
     // MARK: Fullscreen on This Device
@@ -1179,6 +1199,7 @@ struct WorkspaceAppDropDialogs: ViewModifier {
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).
+/// Moving a whole pane that is already in the layout also offers Remove from Layout beside Cancel.
 struct WorkspaceDropOverlay: View {
     @ObservedObject var model: WorkspaceModel
     /// The picture, in this view's coordinates.
@@ -1191,7 +1212,14 @@ struct WorkspaceDropOverlay: View {
             if let d = model.drag {
                 let target = model.dropTarget(forGlobal: d.location)
                 if let target { preview(target, item: d.item) }
-                cancelZone(over: model.overCancelZone(d.location))
+                let removable = model.canDropToRemove
+                HStack(spacing: 12) {
+                    cancelZone(over: model.overCancelZone(d.location), short: removable)
+                    if removable { removeZone(over: model.overRemoveZone(d.location)) }
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: picture.width)
+                .position(x: picture.midX, y: picture.maxY - 64)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1200,13 +1228,14 @@ struct WorkspaceDropOverlay: View {
             if !k.isEmpty, k != lastKey { Self.tick() }
             lastKey = k
         }
-        .onChange(of: model.drag == nil) { ended in if ended { model.cancelZoneGlobal = .zero } }
+        .onChange(of: model.drag == nil) { ended in if ended { model.cancelZoneGlobal = .zero; model.removeZoneGlobal = .zero } }
     }
 
     /// Changes whenever the landing under the finger changes (one haptic tick each).
     private var key: String {
         guard let d = model.drag else { return "" }
         if model.overCancelZone(d.location) { return "cancel" }
+        if model.overRemoveZone(d.location) { return "remove" }
         return model.dropTarget(forGlobal: d.location).map { "\($0)" } ?? ""
     }
 
@@ -1238,21 +1267,43 @@ struct WorkspaceDropOverlay: View {
             .accessibilityHidden(true)
     }
 
-    private func cancelZone(over: Bool) -> some View {
-        Label(over ? String(localized: "Release to Cancel") : String(localized: "Drop Here to Cancel"), systemImage: "xmark.circle.fill")
+    /// `short`: beside Remove from Layout, so both fit a narrow phone.
+    private func cancelZone(over: Bool, short: Bool) -> some View {
+        let text = over ? String(localized: "Release to Cancel")
+            : (short ? String(localized: "Cancel") : String(localized: "Drop Here to Cancel"))
+        // Beside Remove, Cancel lights neutral so the two never look alike.
+        return dropZone(text, symbol: "xmark.circle.fill", over: over,
+                        fill: over ? (short ? Color(white: 0.42, opacity: 0.92) : Color.red.opacity(0.85)) : Color.black.opacity(0.62)) {
+            model.cancelZoneGlobal = $0
+        }
+    }
+
+    /// Takes the pane out of this device's layout. Never closes, minimizes or quits the Mac window.
+    private func removeZone(over: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Remove") : String(localized: "Remove from Layout"),
+                 symbol: "rectangle.badge.minus", over: over,
+                 fill: over ? Color.red.opacity(0.85) : Color(red: 0.35, green: 0.06, blue: 0.06, opacity: 0.72)) {
+            model.removeZoneGlobal = $0
+        }
+    }
+
+    private func dropZone(_ text: String, symbol: String, over: Bool, fill: Color,
+                          frame report: @escaping (CGRect) -> Void) -> some View {
+        Label(text, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
+            .lineLimit(1).minimumScaleFactor(0.85)
             .foregroundStyle(.white)
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .background(Capsule().fill(over ? Color.red.opacity(0.85) : Color.black.opacity(0.62)))
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .frame(minHeight: 44)
+            .background(Capsule().fill(fill))
             .overlay(Capsule().stroke(Color.white.opacity(over ? 0.9 : 0.35), lineWidth: 1))
-            .scaleEffect(over ? 1.08 : 1)
+            .scaleEffect(over && !reduceMotion ? 1.08 : 1)
             .animation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.8), value: over)
             .background(GeometryReader { g in
                 Color.clear
-                    .onAppear { model.cancelZoneGlobal = g.frame(in: .global) }
-                    .onChange(of: g.frame(in: .global)) { model.cancelZoneGlobal = $0 }
+                    .onAppear { report(g.frame(in: .global)) }
+                    .onChange(of: g.frame(in: .global)) { report($0) }
             })
-            .position(x: picture.midX, y: picture.maxY - 64)
             .accessibilityHidden(true)
     }
 
