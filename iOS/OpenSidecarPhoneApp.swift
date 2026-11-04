@@ -2349,10 +2349,10 @@ struct VideoLayerView: UIViewRepresentable {
 
         // Two-finger double-tap resets manual zoom/pan. `require(toFail:)`
         // isn't needed against the pan/pinch recognizer above — it needs
-        // real movement to begin, which a tap by definition doesn't have —
-        // but a *future* single two-finger tap (right-click) recognizer
-        // should `require(toFail: viewportDoubleTap)` so a fast double-tap
-        // is never swallowed as two single taps.
+        // real movement to begin, which a tap by definition doesn't have.
+        // Two-finger right-click comes from the pointer engine, not a
+        // recognizer; its claim on a fast second tap is arbitrated in
+        // `gestureRecognizerShouldBegin` (`ViewportDoubleTapArbitration`).
         let viewportDoubleTap = UITapGestureRecognizer(
             target: view, action: #selector(VideoView.didViewportDoubleTap(_:)))
         viewportDoubleTap.numberOfTapsRequired = 2
@@ -4121,6 +4121,12 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if gestureRecognizer === viewportDoubleTapRecognizer,
+               ViewportDoubleTapArbitration.mayBeginOverEngine(
+                   engineMode: pointerEngine.mode, isChordContinuation: pointerEngine.isChordContinuation,
+                   windowMode: workspacePinch != nil) {
+                return true
+            }
             if pointerEngineOwnsAnchor { return false }
             if gestureRecognizer === threeFingerPanRecognizer {
                 return gestureRecognizer.numberOfTouches == 3

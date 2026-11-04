@@ -332,3 +332,23 @@ struct ScreenReaderPictureTouch: Equatable {
         return true
     }
 }
+
+/// Whether Window view's two-finger double-tap may begin while the pointer
+/// engine holds the touch sequence (issue #137).
+///
+/// A second two-finger tap that lands within the engine's `tapChainWindow`
+/// (0.22 s) after the first is still undecided (`.twoFingerPending`) but
+/// counts as continuing the first tap's right-click, and the surface vetoes
+/// every recognizer while the engine owns a sequence. UIKit's double-tap
+/// allows a longer gap, so a natural fast double-tap failed while a slightly
+/// slower one (past the chain window) reset the pane. The claim exists to
+/// keep scroll/pinch off a possible right-drag, which has already left
+/// `.twoFingerPending` by the time it moves or holds; a tap that is still
+/// undecided can be the double-tap. Window view's reset then drops the
+/// right-clicks the engine sends for those taps. Elsewhere (a single
+/// picture) nothing would drop them, so the veto stays.
+enum ViewportDoubleTapArbitration {
+    static func mayBeginOverEngine(engineMode: PointerEngineMode, isChordContinuation: Bool, windowMode: Bool) -> Bool {
+        windowMode && engineMode == .twoFingerPending && isChordContinuation
+    }
+}
