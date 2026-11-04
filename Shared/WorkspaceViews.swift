@@ -620,8 +620,10 @@ struct WorkspaceChromeView: View {
             if let tab = m.tab {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
             }
-            menuRow("Remove from Layout", "rectangle.badge.minus",
-                    hint: "Takes this pane off this device's layout. The window stays open on the Mac.") { model.removeTile(m.tile) }
+            if model.canRemoveFromLayout(m.tile) {
+                menuRow("Remove from Layout", "rectangle.badge.minus",
+                        hint: "Takes this pane off this device's layout. The window stays open on the Mac.") { model.removeTile(m.tile) }
+            }
             if isWindow, model.menus.available, inputAllowed {
                 menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
             }

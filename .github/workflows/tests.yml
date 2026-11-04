@@ -304,6 +304,10 @@ jobs:
   # iPhone Duo: the receiver's UI tests on the Duo simulator, so adaptive layouts (the
   # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
   # were made for. Not a required check yet: the first runs establish it.
+  #
+  # The build runs before the simulator boots. With the Duo booted first, starting xcodebuild,
+  # fetching the packages and compiling took several times as long as the same work in the
+  # `mac` job on the same runner image; the booted simulator kept this runner busy throughout.
   ios-duo:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
@@ -319,12 +323,27 @@ jobs:
         run: brew install xcodegen
       - name: Generate project
         run: xcodegen generate
-      - name: Boot an iPhone Duo simulator
+      - name: Create an iPhone Duo simulator
         id: duo
         run: echo "udid=$(scripts/ci/duo-simulator.sh)" >> "$GITHUB_OUTPUT"
-      - name: UI tests on iPhone Duo
+      - name: Build the receiver and its UI tests
         run: |
-          xcodebuild test \
+          xcodebuild build-for-testing \
+            -project MeowDisplay.xcodeproj \
+            -scheme OpenSidecariOS \
+            -destination "id=${{ steps.duo.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+      - name: Boot the iPhone Duo simulator
+        run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
+      # No paired Mac is ever reachable here, so the live-Mac tests in DemoModeSmokeTests skip
+      # at once (MEOW_NO_LIVE_MAC) instead of first waiting out their connection timeouts.
+      - name: UI tests on iPhone Duo
+        env:
+          TEST_RUNNER_MEOW_NO_LIVE_MAC: "1"
+        run: |
+          xcodebuild test-without-building \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination "id=${{ steps.duo.outputs.udid }}" \
@@ -333,6 +352,4 @@ jobs:
             -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
             -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
             -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY=""
+            -default-test-execution-time-allowance 300

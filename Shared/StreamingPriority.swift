@@ -17,19 +17,25 @@ enum StreamingPriority: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// What the pickers call it. The raw values (wire and saved settings)
+    /// keep their original names: `auto` is Balanced, `preferFPS` is
+    /// Smoothness, `preferLatency` is Latency.
     var label: String {
         switch self {
-        case .auto: return String(localized: "Auto")
-        case .preferFPS: return String(localized: "Prefer FPS")
-        case .preferLatency: return String(localized: "Prefer Latency")
+        case .auto: return String(localized: "Balanced")
+        case .preferFPS: return String(localized: "Smoothness")
+        case .preferLatency: return String(localized: "Latency")
         }
     }
 
+    /// The order every picker shows, from lowest delay to smoothest motion.
+    static let pickerOrder: [StreamingPriority] = [.preferLatency, .auto, .preferFPS]
+
     var explanation: String {
         switch self {
-        case .auto: return String(localized: "Balanced default.")
-        case .preferFPS: return String(localized: "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency.")
-        case .preferLatency: return String(localized: "Favors the newest frame and bounded latency, accepting lower frame rate under pressure.")
+        case .auto: return String(localized: "The default: a balance of smooth motion and low delay.")
+        case .preferFPS: return String(localized: "Favors a smooth, steady frame rate, keeping a little more work in flight at a small cost in delay.")
+        case .preferLatency: return String(localized: "Favors the newest frame and the lowest delay, accepting a lower frame rate under load.")
         }
     }
 }
