@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Prints the UDID of a booted iPhone Duo simulator, creating it from the newest iOS runtime
+# Prints the UDID of a new, shut-down iPhone Duo simulator, created from the newest iOS runtime
 # and the first device type whose name contains "Duo". Fails, listing what this Xcode has,
 # when there is no such device type: a missing Duo must never pass as "tests skipped".
+# `duo-simulator.sh boot UDID` then boots it and waits until it has finished booting. The
+# ios-duo job builds in between: a booted simulator slows everything else on the runner down.
 set -euo pipefail
+if [ "${1:-}" = boot ]; then
+  xcrun simctl boot "${2:?usage: duo-simulator.sh boot UDID}"
+  xcrun simctl bootstatus "$2" -b >&2
+  exit 0
+fi
 types=$(xcrun simctl list devicetypes -j)
 type_id=$(jq -r '[.devicetypes[] | select(.name | test("Duo"; "i"))][0].identifier // empty' <<< "$types")
 if [ -z "$type_id" ]; then
@@ -14,7 +21,4 @@ runtime=$(xcrun simctl list runtimes -j |
   jq -r '[.runtimes[] | select(.isAvailable and .platform == "iOS")] | sort_by(.version | split(".") | map(tonumber)) | last.identifier // empty')
 [ -n "$runtime" ] || { echo "::error::no available iOS simulator runtime" >&2; exit 1; }
 echo "device type: $type_id; runtime: $runtime" >&2
-udid=$(xcrun simctl create "CI iPhone Duo" "$type_id" "$runtime")
-xcrun simctl boot "$udid"
-xcrun simctl bootstatus "$udid" -b >&2
-echo "$udid"
+xcrun simctl create "CI iPhone Duo" "$type_id" "$runtime"
