@@ -1181,6 +1181,7 @@ private struct AudioSettingsPage: View {
 
 private struct ConnectionSettingsPage: View {
     @ObservedObject var receiver: StreamReceiver
+    @Environment(\.keepSessionOnHome) private var keepSessionOnHome
 
     var body: some View {
         SettingsForm {
@@ -1191,6 +1192,13 @@ private struct ConnectionSettingsPage: View {
                 if receiver.videoSize != .zero {
                     LabeledContent("Stream",
                                    value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
+                }
+                if let keepSessionOnHome {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button("Back to Home — Keep Connected") { keepSessionOnHome() }
+                            .accessibilityIdentifier("homeKeepConnected")
+                        SettingNote("The Mac keeps this display while you're on Home. Resume from Home.")
+                    }
                 }
                 if receiver.connected {
                     Button("Disconnect", role: .destructive) {
@@ -1605,6 +1613,17 @@ private struct DeveloperSettingsPage: View {
     }
 }
 #endif
+
+/// Back to Home — Keep Connected (#121): set only while a real session is on screen.
+private struct KeepSessionOnHomeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor () -> Void)? = nil
+}
+extension EnvironmentValues {
+    var keepSessionOnHome: (@MainActor () -> Void)? {
+        get { self[KeepSessionOnHomeKey.self] }
+        set { self[KeepSessionOnHomeKey.self] = newValue }
+    }
+}
 
 /// The connected Mac's client, for Lock This Mac in Settings (absent in the demo).
 private struct LockMacClientKey: EnvironmentKey { static let defaultValue: WorkspaceModel? = nil }
