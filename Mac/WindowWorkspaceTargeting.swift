@@ -574,8 +574,6 @@ enum WorkspaceCaptureSizing {
     static let maxSide = 4096.0
     static let maxPixels = 12_000_000.0
 
-    /// `source`: the source in points. `drawScale`: canvas pixels per source point (zoom included).
-    /// `backingScale`: the source's pixels per point.
     /// One active display, as `backingScale(source:displays:)` reads it.
     struct DisplayScale: Equatable {
         /// Global points (`CGDisplayBounds`).
@@ -595,11 +593,13 @@ enum WorkspaceCaptureSizing {
             let i = d.bounds.intersection(source)
             return i.isNull ? 0 : i.width * i.height
         }
-        guard let display = displays.max(by: { overlap($0) < overlap($1) }),
+        guard let display = displays.max(by: { overlap($0) < overlap($1) }), overlap(display) > 0,
               display.modeWidth > 0, display.modePixelWidth > 0 else { return 2 }
         return max(Double(display.modePixelWidth) / Double(display.modeWidth), 1)
     }
 
+    /// `source`: the source in points. `drawScale`: canvas pixels per source point (zoom included).
+    /// `backingScale`: the source's pixels per point.
     static func size(source: CGSize, drawScale: Double, backingScale: Double) -> CGSize {
         guard source.width > 0, source.height > 0, drawScale > 0 else { return CGSize(width: 2, height: 2) }
         let native = max(backingScale, 1)

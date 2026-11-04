@@ -84,6 +84,12 @@ final class WindowCaptureHealthTests: XCTestCase {
         XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window, displays: [broken]), 2)
     }
 
+    func testAWindowOnNoDisplayFallsBackToTwoNotTheFirstDisplay() {
+        // Parked offscreen: every display overlaps by 0, so none of them describes it.
+        let offscreen = CGRect(x: -5000, y: -5000, width: 800, height: 600)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: offscreen, displays: [external, retina]), 2)
+    }
+
     func testAFullSizePaneOnARetinaMacIsCapturedAtItsRetinaPixels() {
         // 1512x945 pt window filling a 2388x1668 px iPad canvas: draw scale ~1.58.
         let window = CGRect(x: 0, y: 0, width: 1512, height: 945)
