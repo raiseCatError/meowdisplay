@@ -341,6 +341,7 @@ targets:
       - Shared/PinSnapshotState.swift
       - Shared/TLSConfigurator.swift
       - Shared/RemoteKnock.swift
+      - Shared/RemoteKnockOutcomes.swift
       - Shared/RemoteRecoveryPolicy.swift
       - Shared/TailnetEndpointFilter.swift
       - Shared/TailnetInterfaces.swift
@@ -371,6 +372,8 @@ targets:
       # iOS Demo Mode boundary (Foundation only, no UIKit).
       - iOS/DemoSession.swift
       - iOS/DemoDesktop.swift
+      # iPhone/iPad Remote Access setup and status wording (Foundation only).
+      - iOS/RemoteAccessGuidance.swift
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift
