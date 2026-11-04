@@ -186,9 +186,6 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertFalse(types.contains(WireMessage.windowAction))
     }
 
-    /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
-    /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
-    /// removal is one undo step and never closes or minimizes the Mac window.
     /// The zones sit 12 pt apart (HStack spacing) with 8 pt of touch slop
     /// each, so their margins overlap: there Cancel lights, the haptic says
     /// Cancel, and a release must not remove the pane.
@@ -223,6 +220,9 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(m.layout.tiles.count, 1)
     }
 
+    /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
+    /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
+    /// removal is one undo step and never closes or minimizes the Mac window.
     func testDraggingAPaneToRemoveTakesItOutOfTheLayoutOnly() {
         var sent: [[String: Any]] = []
         let m = model { sent.append($0) }
