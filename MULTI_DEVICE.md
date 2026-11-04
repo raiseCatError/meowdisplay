@@ -45,7 +45,7 @@ only and run in the hostless `OpenSidecarMacTests` bundle.
 | Connect with Mirror / Connect with Extend | That device only; remembered for it. |
 | Session approval (Allow & Mirror / Allow & Extend) | That device only. |
 | Video Off (Mac-wide) | With a physical display: every Extend device moves to Mirror in place (no reconnect), the default becomes Mirror, and a device whose own choice was Extend now remembers Mirror. Video On never restores Extend. Headless: nothing changes mode. |
-| Streaming profile, priority, codec, quality | Still Mac-wide `restartAll()`; each device keeps its own mode across it. |
+| Streaming profile, priority, codec, quality | Mac-wide `restartAll()` when changed on the Mac, or when a receiver's profile/priority request applies (Mac in Custom, a different value). A receiver's request while the Mac is in Automatic, or for the value already in use, restarts nothing. Each device keeps its own mode across a restart. A receiver cannot change the Mac's Streaming Mode. |
 | Forget | Removes the device's display mode with its other per-device state. |
 
 A rejected request (Mirror without a usable physical display, Extend while

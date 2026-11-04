@@ -328,11 +328,32 @@ private struct PairingPanelView: View {
                         Text(PairingCopy.sasHelper).font(.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
+                    if prompt.panelPhase == .authenticatingOwner {
+                        // The system's Touch ID / password prompt is open: say
+                        // so, rather than leave the code up with a disabled
+                        // button that looks stuck. Cancel still rejects and
+                        // invalidates the authentication.
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(PairingCopy.ownerAuthTitle).font(.subheadline.weight(.semibold))
+                                Text(PairingCopy.ownerAuthHelper).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
                     HStack {
                         Button("Cancel", role: .cancel) { prompt.decide(accept: false) }
                             .keyboardShortcut(.cancelAction)
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
-                            if ConsentGrant.allowed() { prompt.decide(accept: true) }
+                            guard ConsentGrant.allowed() else { return }
+                            // Only now, after a hardware press on the grant
+                            // itself, does MeowDisplay come forward, so the
+                            // owner-authentication prompt that may follow
+                            // isn't left behind other apps' windows. The panel
+                            // still never takes focus on its own appearance.
+                            NSApp.activate(ignoringOtherApps: true)
+                            prompt.decide(accept: true)
                         }
                         .disabled(prompt.isAuthenticating || !armed)
                     }

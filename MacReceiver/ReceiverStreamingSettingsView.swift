@@ -20,8 +20,14 @@ private struct ReceiverStreamingPage: View {
     @ObservedObject var controller: ReceiverController
 
     var body: some View {
+        // In Automatic the other Mac applies a fixed profile and priority
+        // (issue #142).
+        let macAutomatic = receiver.macStreamingMode == .automatic
         ReceiverSettingsForm {
             Section {
+                if let note = ReceiverStreamingModeNote.text(for: receiver.macStreamingMode) {
+                    ReceiverCaption(verbatim: note)
+                }
                 VStack(alignment: .leading, spacing: 4) {
                     Picker("Streaming Profile", selection: Binding(
                         get: { receiver.streamingProfile },
@@ -30,6 +36,7 @@ private struct ReceiverStreamingPage: View {
                             Text(profile.label).tag(profile)
                         }
                     }
+                    .disabled(macAutomatic)
                     ReceiverCaption(verbatim: receiver.streamingProfile.explanation)
                 }
                 if receiver.streamingProfile == .custom {
@@ -40,6 +47,7 @@ private struct ReceiverStreamingPage: View {
                             Text(frameRate.label).tag(frameRate)
                         }
                     }
+                    .disabled(macAutomatic)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Picker("Streaming Priority", selection: Binding(
@@ -49,6 +57,7 @@ private struct ReceiverStreamingPage: View {
                             Text(priority.label).tag(priority)
                         }
                     }
+                    .disabled(macAutomatic)
                     ReceiverCaption(verbatim: receiver.streamingPriority.explanation)
                 }
                 ReceiverValueRow("Codec", value: receiver.connected

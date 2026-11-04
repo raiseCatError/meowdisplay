@@ -127,7 +127,7 @@ struct OverviewSettingsView: View {
                         Text(entry.name)
                         Spacer()
                         if let target = entry.resolvedTarget {
-                            Button("Connect") { controller.connect(to: target, userInitiated: true) }
+                            Button("Connect") { controller.explicitConnect(to: target) }
                                 .controlSize(.small)
                         }
                     }
@@ -151,7 +151,7 @@ struct OverviewSettingsView: View {
                                 Button("Pair") { controller.pair(result) }
                                     .controlSize(.small)
                             } else {
-                                Button("Connect") { controller.connect(to: target, userInitiated: true) }
+                                Button("Connect") { controller.explicitConnect(to: target) }
                                     .controlSize(.small)
                             }
                         }

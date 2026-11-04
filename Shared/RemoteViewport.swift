@@ -128,6 +128,25 @@ struct RemoteViewportTransform: Equatable {
         return displayedRect.contains(unrotated)
     }
 
+    /// The transform a content layer placed by `VideoView.applyContentGeometry`
+    /// is showing, read back from its (presentation) geometry: the layer is
+    /// sized at the unzoomed fit, anchored at the crop's middle, positioned
+    /// at the displayed rect's center, and scaled then rotated. Lets input
+    /// mapping and Window view chrome follow the picture mid-animation.
+    /// nil when the geometry is degenerate.
+    static func presented(position: CGPoint, boundsSize: CGSize, transform: CGAffineTransform,
+                          remoteCrop: CGRect) -> RemoteViewportTransform? {
+        let scale = hypot(transform.a, transform.b)
+        let width = boundsSize.width * scale * remoteCrop.width
+        let height = boundsSize.height * scale * remoteCrop.height
+        guard scale.isFinite, width.isFinite, height.isFinite, width > 0, height > 0,
+              position.x.isFinite, position.y.isFinite else { return nil }
+        return RemoteViewportTransform(
+            remoteCrop: remoteCrop,
+            displayedRect: CGRect(x: position.x - width / 2, y: position.y - height / 2, width: width, height: height),
+            rotationRadians: atan2(transform.b, transform.a))
+    }
+
     private static func rotated(_ point: CGPoint, around center: CGPoint,
                                 radians: CGFloat) -> CGPoint {
         guard radians.isFinite else { return point }
