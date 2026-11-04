@@ -2163,7 +2163,10 @@ final class StreamReceiver: ObservableObject {
             // `StreamReceiver`. It is stored into `pendingDisconnectFinishBox`
             // and passed to both `NWConnection.send`'s completion and
             // `queue.asyncAfter`, both of which require exactly that.
-            let finish: @Sendable () -> Void = {
+            //
+            // `goodbyeConnection` is the connection `closing` was queued on
+            // (the send completion and its 1 s fallback), nil otherwise.
+            let teardown: @Sendable (_ goodbyeConnection: NWConnection?) -> Void = { goodbyeConnection in
                 guard finishedOnce.fireOnce() else { return }
                 pendingDisconnectFinishBox.clear()
                 reconnectContext.update { $0.manualConnectPeerID = nil }
@@ -2181,8 +2184,15 @@ final class StreamReceiver: ObservableObject {
                 // after this `await` completes, so the ordering the C1 fix
                 // established — actor teardown status first, "Disconnected"
                 // after — is unchanged.
+                //
+                // Issue #162: after the goodbye, a QUIC connection stays
+                // open until the Mac has read `closing` (it closes it
+                // then), so the goodbye can't be lost behind the stream
+                // ends or the connection close. The session itself ends
+                // here, now.
                 Task {
-                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect,
+                                                               goodbyeSentOn: goodbyeConnection)
                     await uiSink.publishTeardownUIReset(status: "Disconnected")
                     // `resetAudioPlayback()` still needs `self` — it mutates
                     // `audioFormatDescription`/`audioCodecKind` and calls
@@ -2205,19 +2215,24 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             }
+            let finish: @Sendable () -> Void = { teardown(nil) }
             pendingDisconnectFinishBox.set(finish)
             guard let conn = sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
                 return
             }
+            let finishAfterGoodbye: @Sendable () -> Void = { teardown(conn) }
             Log.info("disconnecting — announcing closing to the Mac")
             StreamReceiver.sendControl(["type": WireMessage.closing], on: conn, sendTargetBox: sendTargetBox) {
-                queue.async { finish() }
+                queue.async { finishAfterGoodbye() }
             }
+            // `closing` is queued from here on: a Connect/Reconnect that
+            // finishes this early still lets the Mac read it.
+            pendingDisconnectFinishBox.set(finishAfterGoodbye)
             // The send completion may never fire on a dying link — don't
             // let that keep this session looking connected after going dark.
-            queue.asyncAfter(deadline: .now() + 1) { finish() }
+            queue.asyncAfter(deadline: .now() + 1) { finishAfterGoodbye() }
         }
     }
 
