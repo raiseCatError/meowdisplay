@@ -3113,6 +3113,9 @@ final class SenderController: ObservableObject {
         sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
         }
+        if PendingConnectPolicy.boundsFirstConnect(userInitiated: userInitiated, awaitingWake: awaitingWake) {
+            scheduleFirstConnectDeadline(for: session)
+        }
         // A request that needs this Mac's approval gets its prompt from
         // `onHello`, once the connection proved who is asking — never here,
         // where the only name for the peer is unauthenticated discovery
@@ -3149,6 +3152,28 @@ final class SenderController: ObservableObject {
             }
         }
         return true
+    }
+
+    /// An explicit Connect that never reaches the application hello (a stale
+    /// address, Local Network denied, the receiver app suspended or closed)
+    /// would otherwise redial forever with no row, no status and no Cancel,
+    /// and absorb every later Connect for the device (issue #128). At the
+    /// deadline it fails with its last status on the device's Known Devices
+    /// row, which offers Connect again; auto-connect stays off for it until
+    /// the device's availability changes, as after a decline.
+    private func scheduleFirstConnectDeadline(for session: DeviceSession) {
+        Task { @MainActor [weak self, weak session] in
+            try? await Task.sleep(for: .seconds(PendingConnectPolicy.explicitFirstConnectLimit))
+            guard let self, let session, self.owns(session),
+                  PendingConnectPolicy.shouldGiveUp(authenticated: session.applicationAuthenticated,
+                                                    failed: session.failed) else { return }
+            Log.info("connectDebug: explicitConnectTimedOut session=\(session.id) "
+                + "limit=\(Int(PendingConnectPolicy.explicitFirstConnectLimit))s beforeHello=true")
+            self.autoConnectPolicy.suppress(self.identifiers(for: session))
+            session.status = PendingConnectPolicy.timeoutStatus(name: session.name, lastStatus: session.status)
+            session.failed = true
+            session.sender.stop()
+        }
     }
 
     /// User-initiated disconnect: also opt the device out of auto-connect.
@@ -3399,16 +3424,27 @@ final class SenderController: ObservableObject {
     struct KnownDeviceEntry: Identifiable {
         let id: String   // peerID
         let name: String
+        /// The session holding this row (`KnownDeviceConnection.occupyingSessionID`):
+        /// connected, waiting for approval, or still dialing. Nil when idle or failed.
         let activeSessionID: String?
+        let connection: KnownDeviceConnection
         let resolvedTarget: ConnectionTarget?
         let inputPolicy: PeerInputRequestPolicy
     }
 
     var knownDeviceEntries: [KnownDeviceEntry] {
-        TrustStore.shared.pinnedPeers().map { peer in
-            let active = sessions.first { $0.deviceID == peer.peerID && $0.applicationAuthenticated }
+        let snapshots = sessions.map { session in
+            PendingConnectPolicy.SessionSnapshot(
+                id: session.id, deviceID: session.deviceID, intendedPeerID: session.intendedPeerID,
+                authenticated: session.applicationAuthenticated, admitted: session.invitationAdmitted,
+                failed: session.failed, status: session.status,
+                automatic: session.invitation.initiator == .sender && session.invitation.intent == .automatic)
+        }
+        return TrustStore.shared.pinnedPeers().map { peer in
+            let connection = PendingConnectPolicy.connection(forPeerID: peer.peerID, sessions: snapshots)
+            let active = connection.occupyingSessionID
             return KnownDeviceEntry(
-                id: peer.peerID, name: peer.displayName, activeSessionID: active?.id,
+                id: peer.peerID, name: peer.displayName, activeSessionID: active, connection: connection,
                 resolvedTarget: active == nil ? resolvedTarget(forPeerID: peer.peerID) : nil,
                 inputPolicy: ReceiverInputAuthorizationStore.policy(peerID: peer.peerID))
         }
