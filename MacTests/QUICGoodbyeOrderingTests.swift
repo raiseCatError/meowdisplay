@@ -338,7 +338,9 @@ final class QUICGoodbyeOrderingTests: XCTestCase {
         for _ in 0..<5 {
             let result = try run(.unexpectedFailure, server: server, client: client)
             XCTAssertFalse(result.readClosing, "\(result.events)")
-            XCTAssertNotNil(result.firstFailure, "the Mac must notice the broken link: \(result.events)")
+            // Either signal is the link dying to `MacSender`: an abrupt close can
+            // end the Control read (EOF) before the controller reports a failure.
+            XCTAssertTrue(result.sawDropBeforeOwnClose, "the Mac must notice the broken link: \(result.events)")
         }
     }
 }
