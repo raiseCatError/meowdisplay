@@ -51,6 +51,7 @@ sentences where one is shown. Where an app differs today, the
 | **Settings & Help** | the settings entry on a home screen. Inside a session the same screen is titled **Settings** | Preferences, Options |
 | **Macs** · **How to Connect** · **This Device** | the home screen: one **Macs** card, then the links **How to Connect** · **Try the Demo** (iPhone/iPad) · **This Device**. This Device shows the name Macs list (and, on Android, the security key) | Your Macs, Nearby Devices, Device Details |
 | **Demo** (**Try the Demo** on iPhone/iPad Home) | a sample session with no Mac | tutorial, preview mode |
+| **Back to Home — Keep Connected** · **Resume** | iPhone/iPad: show Home while the session stays up behind it; Home's card offers **Resume** (back to the same session) and **Disconnect**. The interruption card's **Back to Home** still ends the session | Minimize, Background, Hide Session |
 | **paused** | the Mac paused the picture | frozen, suspended |
 
 ### Display and Window mode
