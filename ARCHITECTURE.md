@@ -55,8 +55,10 @@ tracked — edit `project.yml`, never the generated project.
 | `OpenSidecarMacTests` | `MacTests/` plus selected pure-logic files | Hostless unit tests (run by `.github/workflows/tests.yml`) |
 
 The `OpenSidecar*` names are inherited from OpenDisplay and are kept for
-compatibility; the product name is MeowDisplay. `src/`, `public/` and
-`tools/` are the project website, not app code.
+compatibility; the product name is MeowDisplay. `tools/press-kit/` builds
+the press kit and is not app code. The website, https://meowdisplay.app, is
+maintained in [MeowDisplayWebsite](https://github.com/raiseCatError/MeowDisplayWebsite),
+not in this repository.
 
 Android's Kotlin/Compose app is built separately from the Xcode targets;
 see [AndroidReceiver/README.md](AndroidReceiver/README.md).

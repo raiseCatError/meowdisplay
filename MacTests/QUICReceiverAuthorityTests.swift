@@ -170,6 +170,89 @@ final class QUICReceiverAuthorityTests: XCTestCase {
         await pipeline.teardownForStop()
     }
 
+    /// Issue #162: after `disconnect()` queued `closing`, the session ends at
+    /// once but the QUIC transport stays open (and its slot taken) until the
+    /// Mac closes it — closing it here would discard the goodbye.
+    func testDisconnectAfterGoodbyeEndsTheSessionButKeepsTheTransportForTheMac() async throws {
+        let registry = QUICReceiverGroupRegistry()
+        let pipeline = makeActor(registry: registry)
+        let group = try XCTUnwrap(admitGroup(registry))
+        let control = makeStream()
+        group.register(control, channel: .control)
+        group.register(makeStream(), channel: .video)
+        await pipeline.handleIncomingConnection(control)
+        let adopted = await pipeline.connection
+        XCTAssertTrue(adopted === control)
+
+        await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect, goodbyeSentOn: control)
+        let afterDisconnect = await pipeline.connection
+        XCTAssertNil(afterDisconnect, "the session ends now, not when the Mac answers")
+        let phase = await pipeline.currentPhase
+        XCTAssertEqual(phase, .disconnected)
+        XCTAssertTrue(group.isClosed, "nothing more is read from or attached to it")
+        XCTAssertTrue(group.isAwaitingGoodbyeDelivery, "the transport waits for the Mac to read the goodbye")
+        XCTAssertTrue(group.takePendingMedia().isEmpty)
+        XCTAssertEqual(registry.liveCount, 1)
+
+        // The Mac's close (or stop, Forget/Block) ends it.
+        group.close(nil)
+        XCTAssertFalse(group.isAwaitingGoodbyeDelivery)
+        XCTAssertEqual(registry.liveCount, 0)
+        await pipeline.teardownForStop()
+    }
+
+    /// Forget/Block while a connection waits for the Mac to read the goodbye:
+    /// it is no longer the session's, so it closes at once.
+    func testForgetClosesAConnectionWaitingForTheMac() async throws {
+        let registry = QUICReceiverGroupRegistry()
+        let pipeline = makeActor(registry: registry)
+        let group = try XCTUnwrap(admitGroup(registry))
+        let control = makeStream()
+        group.register(control, channel: .control)
+        await pipeline.handleIncomingConnection(control)
+        await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect, goodbyeSentOn: control)
+        XCTAssertTrue(group.isAwaitingGoodbyeDelivery)
+        await pipeline.revokePeer("mac-A", trustRemoved: true)
+        XCTAssertFalse(group.isAwaitingGoodbyeDelivery, "Forget/Block must not leave it open")
+        XCTAssertEqual(registry.liveCount, 0)
+        await pipeline.teardownForStop()
+    }
+
+    /// A goodbye sent on one connection never delays the close of another:
+    /// if a different connection is live by the time the teardown runs, it
+    /// is closed at once, exactly as before.
+    func testGoodbyeOnAnotherConnectionClosesTheLiveOneAtOnce() async throws {
+        let registry = QUICReceiverGroupRegistry()
+        let pipeline = makeActor(registry: registry)
+        let group = try XCTUnwrap(admitGroup(registry))
+        let control = makeStream()
+        group.register(control, channel: .control)
+        await pipeline.handleIncomingConnection(control)
+        await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect, goodbyeSentOn: makeStream())
+        XCTAssertTrue(group.isClosed)
+        XCTAssertFalse(group.isAwaitingGoodbyeDelivery)
+        XCTAssertEqual(registry.liveCount, 0)
+        await pipeline.teardownForStop()
+    }
+
+    /// The wait is bounded: a Mac that never closes gets the abrupt close.
+    func testGoodbyeWaitIsBounded() throws {
+        let registry = QUICReceiverGroupRegistry()
+        let group = try XCTUnwrap(admitGroup(registry))
+        let control = makeStream()
+        group.register(control, channel: .control)
+        XCTAssertTrue(registry.retireAfterGoodbye(controlStream: control, timeout: 0.2))
+        XCTAssertTrue(group.isAwaitingGoodbyeDelivery)
+        group.closeAfterGoodbye(timeout: 0.2)   // idempotent
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, group.isAwaitingGoodbyeDelivery {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertFalse(group.isAwaitingGoodbyeDelivery, "closed by the timeout")
+        XCTAssertEqual(registry.liveCount, 0)
+        XCTAssertFalse(registry.retireAfterGoodbye(controlStream: makeStream()), "not a QUIC Control stream")
+    }
+
     func testReplacingTheSessionRetiresTheSupersededQUICConnection() async throws {
         let registry = QUICReceiverGroupRegistry()
         let pipeline = makeActor(registry: registry)

@@ -277,6 +277,10 @@ actor ReceiverFramePipeline {
     private func handleReceiveCompletion(
         on connection: NWConnection, data: Data?, isComplete: Bool, error: NWError?, generation: Int
     ) async {
+        // A closed QUIC connection delivers nothing more: a protocol
+        // violation closed it, or this device already said goodbye on it and
+        // only waits for the Mac to close it (`closeAfterGoodbye`).
+        if generation == self.generation, let quicConnection, quicConnection.isClosed { return }
         ingest(data, generation: generation)
         guard generation == self.generation else { return }
         if tcpFrameTooLarge {
@@ -287,8 +291,6 @@ actor ReceiverFramePipeline {
             outputEffects.connectionClosedByPeer(generation)
             return
         }
-        // A QUIC protocol violation already closed the connection: stop.
-        if let quicConnection, quicConnection.isClosed { return }
         if let error {
             outputEffects.connectionFailed(error, generation)
             return

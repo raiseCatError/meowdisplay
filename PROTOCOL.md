@@ -867,6 +867,16 @@ the session, stop redialing). Both are courtesy messages sent best-effort
 right before the receiver closes the connection; senders MUST NOT rely on
 receiving them (a cut cable produces neither).
 
+Over QUIC (2.4), closing the connection discards stream data the sender
+has not read yet, and the end of Video or Audio is not ordered with data
+on Control. A receiver that sends `closing` for a deliberate Disconnect
+therefore SHOULD leave the connection and all its streams open until the
+sender closes it, for a bounded time (the iPhone, iPad and Mac receivers
+wait up to 3 s; the Android receiver has no QUIC listener). A sender ends
+the session on `closing`, which closes the connection. Nothing on the wire
+changes; a receiver that closes at once only risks the sender reading
+the goodbye as a dropped link.
+
 ### 6.2 Sender to receiver
 
 These ride the same connection as video and MUST satisfy the demux rule of
@@ -1122,6 +1132,33 @@ would offer.
 * **Efficiency** requests at most 60.
 * **Performance** and **Custom "Auto"** request up to 120.
 * **Custom** with a manual pick (30/60/90/120) requests that number.
+
+#### Receiver-requested profile and priority
+
+A receiver asks with `{"type":"streamingProfileRequest","profile":…,
+"customFrameRate":…}` (pv ≥ 21) or `{"type":"streamingPriorityRequest",
+"priority":…}`. The Mac is authoritative and these are Mac-wide settings:
+
+* While the Mac's **Streaming Mode is Automatic** it applies a fixed policy
+  (Performance, Auto priority), so a request is **not applied**: nothing is
+  stored and no stream restarts. The Mac re-sends its state to the asking
+  receiver.
+* A request for what the Mac already uses is likewise not applied and
+  restarts nothing.
+* Otherwise the Mac stores it and rebuilds every session. `customFrameRate`
+  only matters for the Custom profile: a request for another profile keeps
+  the Mac's stored frame-rate pick.
+
+The Mac reports `{"type":"streamingProfileState","profile":…}` after every
+hello and after a declined request. A Mac with the issue #142 change also
+sends two optional, additive keys (no `pv` bump; receivers ignore
+unknown keys):
+
+* `mode`: `"automatic"` or `"custom"`. A receiver SHOULD disable its profile,
+  frame-rate and priority pickers while it is `"automatic"` and say why. When
+  it is absent (older Mac), receivers keep their controls as before.
+* `customFrameRate`: in Custom, the stored frame-rate pick
+  (`auto`/`fps30`/`fps60`/`fps90`/`fps120`).
 
 120 is a hard product ceiling for this milestone regardless of what a
 receiver advertises or Custom requests. A receiver that omits `maxFPS`

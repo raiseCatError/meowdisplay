@@ -755,6 +755,11 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published var fps = 0
     @MainActor @Published private(set) var streamingProfile: StreamingProfile = .performance
     @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
+    /// The Mac's Streaming Mode, as it last reported it; nil when the Mac
+    /// doesn't report it (older Macs). In Automatic the Mac applies a fixed
+    /// profile and priority, so the receiver's pickers can't change them
+    /// (issue #142).
+    @MainActor @Published private(set) var macStreamingMode: StreamingMode?
     /// Mac-authoritative Streaming Priority mirror. Default `.auto` matches
     /// the Mac's own default so an old-peer/pre-hello receiver never assumes
     /// a different bounded encode depth than the Mac is actually running.
@@ -2163,7 +2168,10 @@ final class StreamReceiver: ObservableObject {
             // `StreamReceiver`. It is stored into `pendingDisconnectFinishBox`
             // and passed to both `NWConnection.send`'s completion and
             // `queue.asyncAfter`, both of which require exactly that.
-            let finish: @Sendable () -> Void = {
+            //
+            // `goodbyeConnection` is the connection `closing` was queued on
+            // (the send completion and its 1 s fallback), nil otherwise.
+            let teardown: @Sendable (_ goodbyeConnection: NWConnection?) -> Void = { goodbyeConnection in
                 guard finishedOnce.fireOnce() else { return }
                 pendingDisconnectFinishBox.clear()
                 reconnectContext.update { $0.manualConnectPeerID = nil }
@@ -2181,8 +2189,15 @@ final class StreamReceiver: ObservableObject {
                 // after this `await` completes, so the ordering the C1 fix
                 // established — actor teardown status first, "Disconnected"
                 // after — is unchanged.
+                //
+                // Issue #162: after the goodbye, a QUIC connection stays
+                // open until the Mac has read `closing` (it closes it
+                // then), so the goodbye can't be lost behind the stream
+                // ends or the connection close. The session itself ends
+                // here, now.
                 Task {
-                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect,
+                                                               goodbyeSentOn: goodbyeConnection)
                     await uiSink.publishTeardownUIReset(status: "Disconnected")
                     // `resetAudioPlayback()` still needs `self` — it mutates
                     // `audioFormatDescription`/`audioCodecKind` and calls
@@ -2205,19 +2220,24 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             }
+            let finish: @Sendable () -> Void = { teardown(nil) }
             pendingDisconnectFinishBox.set(finish)
             guard let conn = sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
                 return
             }
+            let finishAfterGoodbye: @Sendable () -> Void = { teardown(conn) }
             Log.info("disconnecting — announcing closing to the Mac")
             StreamReceiver.sendControl(["type": WireMessage.closing], on: conn, sendTargetBox: sendTargetBox) {
-                queue.async { finish() }
+                queue.async { finishAfterGoodbye() }
             }
+            // `closing` is queued from here on: a Connect/Reconnect that
+            // finishes this early still lets the Mac read it.
+            pendingDisconnectFinishBox.set(finishAfterGoodbye)
             // The send completion may never fire on a dying link — don't
             // let that keep this session looking connected after going dark.
-            queue.asyncAfter(deadline: .now() + 1) { finish() }
+            queue.asyncAfter(deadline: .now() + 1) { finishAfterGoodbye() }
         }
     }
 
@@ -2800,9 +2820,8 @@ final class StreamReceiver: ObservableObject {
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
             DispatchQueue.main.async { uiSink.publishConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
-            guard let raw = obj["profile"] as? String,
-                  let profile = StreamingProfile(rawValue: raw) else { return }
-            DispatchQueue.main.async { uiSink.publishStreamingProfile(profile) }
+            guard let update = StreamingProfileStateUpdate(message: obj) else { return }
+            DispatchQueue.main.async { uiSink.publishStreamingProfile(update) }
         case WireMessage.streamingPriorityState:
             guard let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
@@ -5881,6 +5900,8 @@ final class StreamReceiver: ObservableObject {
             // Same reasoning again: only ever known from a live Mac.
             self.confirmedMaxFPS = nil
             self.lastMaxFPSState = nil
+            // Same reasoning: the next Mac reports its own mode.
+            self.macStreamingMode = nil
             // The offer belonged to a specific attempt on a specific
             // connection — any disconnect (deliberate or not) ends it;
             // a fresh one arrives on the Mac's own next attempt, if any.
@@ -5946,8 +5967,10 @@ final class StreamReceiver: ObservableObject {
         mirrorDisplayState = update
     }
 
-    @MainActor func applyStreamingProfileUpdate(_ profile: StreamingProfile) {
-        streamingProfile = profile
+    @MainActor func applyStreamingProfileUpdate(_ update: StreamingProfileStateUpdate) {
+        streamingProfile = update.profile
+        macStreamingMode = update.mode
+        if let rate = update.customFrameRate { customFrameRate = rate }
     }
 
     @MainActor func applyStreamingPriorityUpdate(_ priority: StreamingPriority) {

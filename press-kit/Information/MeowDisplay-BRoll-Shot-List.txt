@@ -1,0 +1,8 @@
+MeowDisplay 2.0 — B-roll shot list
+No music, voice, captions or logos. Native = device resolution; 1080p = 1920x1080 with neutral bars.
+
+1. MeowDisplay-BRoll-iPhone-Typing-Zoom-While-Typing (17 s)
+   iPhone 14 Pro Max, Window view with Safari and TextEdit panes. The control tray opens, the keyboard appears, a sentence is typed into the Text Bar while Zoom While Typing enlarges the TextEdit line, then Done sends it to the Mac document.
+
+2. MeowDisplay-BRoll-iPad-Extend-Touch-Scrolling (15 s)
+   iPad (9th generation) as an extended Mac display with its own menu bar, showing the MeowDisplay Setup page in Safari. Touch drags scroll the page down and back up; the on-screen controls appear while touching.

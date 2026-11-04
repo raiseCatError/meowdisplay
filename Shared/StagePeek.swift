@@ -43,9 +43,10 @@ enum StagePeekEdge: String, Codable, CaseIterable, Identifiable {
 /// How the compact peek's window Dock sits on screen. Persisted as `stagePeekDock`.
 enum StagePeekDockStyle: String, Codable, CaseIterable, Identifiable {
     /// A bounded column between the search and app carousel above and the buttons below:
-    /// cards fade and clip at its edges and never pass under those controls (the default).
+    /// cards fade and clip at its edges and never pass under those controls.
     case compact
-    /// The open column across the whole edge (cards may pass behind the controls, which stay on top).
+    /// The open column across the whole edge (cards may pass behind the controls, which stay
+    /// on top). The default for new installs (issue #130).
     case normal
 
     var id: String { rawValue }
@@ -660,5 +661,28 @@ enum StagePeekGalleryLayout {
         guard compactSize else { return min(max(fit, 1), maximumColumns) }
         if usable < 2 * smallestPhoneCard + spacing { return 1 }
         return min(max(fit, 2), maximumCompactColumns)
+    }
+}
+
+/// Legibility of Stage Peek's white controls over whatever the Mac shows
+/// behind them (issue #121, Workstream D). The controls are translucent, so
+/// their contrast depends on the streamed content: over a white window a
+/// thin material with a light tint left white text below 2:1. A black scrim
+/// of at least `minimumScrimOpacity` keeps white text at WCAG AA (4.5:1)
+/// even if everything under the scrim were pure white, the worst case, and
+/// over dark content it is simply darker.
+enum StagePeekLegibility {
+    static let minimumScrimOpacity: Double = 0.55
+
+    /// WCAG 2.x relative luminance of an sRGB gray level in 0...1.
+    static func relativeLuminance(gray v: Double) -> Double {
+        v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+    }
+
+    /// Contrast of white text over a black scrim of `opacity` composited on
+    /// a gray backdrop (1 = white), blended in display (sRGB) space.
+    static func whiteTextContrast(scrimOpacity opacity: Double, backdropGray: Double = 1) -> Double {
+        let composite = backdropGray * (1 - opacity)
+        return 1.05 / (relativeLuminance(gray: composite) + 0.05)
     }
 }

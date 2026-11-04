@@ -1,8 +1,0 @@
-# MeowDisplay — free, open-source Sidecar/Duet alternative
-# Allow all crawlers full access.
-User-agent: *
-Allow: /
-
-# No Sitemap directive yet: MeowDisplay doesn't have its own hosted domain
-# (the previous opendisplay.app CNAME was removed). Add sitemap.xml back and
-# point this at it once the site is deployed to a MeowDisplay-owned domain.

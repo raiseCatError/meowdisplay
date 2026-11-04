@@ -9,7 +9,8 @@ name: Release dry run
 #    no value is ever printed);
 #  - read-only credential checks: Sparkle-key continuity with the PUBLISHED
 #    baseline apps (baseline.env), the Developer ID certificate in match, App Store Connect
-#    and Google Play API access.
+#    and Google Play API access, and the website App's token and installation
+#    (check-website-app-access.sh: reads only, never pushes or opens a PR).
 # Manual only, from release/<version>. GitHub can dispatch it once this file
 # is on the default branch.
 on:
@@ -298,3 +299,30 @@ jobs:
           WEBSITE_APP_PRIVATE_KEY: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
           WEBSITE_APP_CLIENT_ID: ${{ vars.WEBSITE_APP_CLIENT_ID }}
         run: scripts/release/report-missing.sh --fail WEBSITE_APP_PRIVATE_KEY WEBSITE_APP_CLIENT_ID
+      # Minted exactly as release-publish.yml's site token: GitHub refuses to mint one with
+      # permissions the installation lacks, so getting it proves both grants. Used read-only.
+      - name: Website token (as the publish step mints it)
+        id: site-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.WEBSITE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+          owner: raiseCatError
+          repositories: MeowDisplayWebsite
+          permission-contents: write
+          permission-pull-requests: write
+      # The whole installation, metadata only: lists every repository the App can reach.
+      - name: Website App installation scope (metadata only)
+        id: site-scope-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.WEBSITE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+          owner: raiseCatError
+          permission-metadata: read
+      - name: The website App can reach the site (read-only)
+        env:
+          SITE_TOKEN: ${{ steps.site-token.outputs.token }}
+          INSTALLATION_SCOPE_TOKEN: ${{ steps.site-scope-token.outputs.token }}
+          APP_SLUG: ${{ steps.site-token.outputs.app-slug }}
+        run: scripts/release/check-website-app-access.sh .github/release-config.json

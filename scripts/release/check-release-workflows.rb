@@ -368,6 +368,20 @@ if (doc = load("release-dry-run.yml"))
   unless rs && env_name(rs) == "release-state" && steps(rs).any? { |s| run_text(s).include?("check-release-state-access.sh") }
     err(name, "must prove in a release-state job that only the release App writes release-state")
   end
+  # The website App: minted as release-publish.yml mints it, then used read-only.
+  wu = doc.dig("jobs", "website-update")
+  site = wu && steps(wu).find { |s| s["id"] == "site-token" }
+  unless wu && env_name(wu) == "website-update" && steps(wu).any? { |s| run_text(s).include?("check-website-app-access.sh") } &&
+         site && site["uses"].to_s.start_with?("actions/create-github-app-token@") &&
+         site["with"] == { "client-id" => "${{ vars.WEBSITE_APP_CLIENT_ID }}",
+                           "private-key" => "${{ secrets.WEBSITE_APP_PRIVATE_KEY }}",
+                           "owner" => "raiseCatError", "repositories" => "MeowDisplayWebsite",
+                           "permission-contents" => "write", "permission-pull-requests" => "write" }
+    err(name, "must prove in a website-update job that the website App's publish token can be minted (check-website-app-access.sh)")
+  end
+  if doc.to_s.include?("update-website.sh")
+    err(name, "must not run update-website.sh: the dry run never publishes to the website")
+  end
 end
 
 # The access check runs one job, from the default branch, in its own environment, whose
