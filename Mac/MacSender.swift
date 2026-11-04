@@ -794,6 +794,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var capturePixelsWide = 0
     private var capturePixelsHigh = 0
+    /// What the live display stream is configured with (`queue` only), kept
+    /// with the stream it belongs to. A live change edits a copy and applies
+    /// every field (see `DisplayCaptureSettings`).
+    private struct LiveCaptureConfiguration {
+        /// Weak, so a stopped stream isn't kept alive by its settings.
+        weak var stream: SCStream?
+        var settings: DisplayCaptureSettings
+    }
+    private var liveCapture: LiveCaptureConfiguration?
+    /// The last configuration update sent to ScreenCaptureKit. The next one
+    /// waits for it, so updates land in the order they were asked for and the
+    /// newest settings are the ones that stick.
+    private var pendingCaptureUpdate: Task<Void, Error>?
     private let authenticatedSession = AuthenticatedSessionState()
     private var activeConnectionGeneration: UInt64 = 0
     /// `remoteEndpoints` (PROTOCOL.md 6.17), `queue` only.
@@ -1359,6 +1372,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendMaxFPSState()
     }
 
+    /// `queue` only. Changes the live display stream's settings and sends all
+    /// of them to ScreenCaptureKit, after any update already in flight (see
+    /// `DisplayCaptureSettings`: a configuration with one field set would
+    /// reset the rest). Nil when `stream` isn't the stream they belong to.
+    private func updateLiveCapture(_ stream: SCStream,
+                                   _ change: (inout DisplayCaptureSettings) -> Void) -> Task<Void, Error>? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard var live = liveCapture, live.stream === stream else {
+            Log.info("capture: no settings for the live stream, update skipped")
+            return nil
+        }
+        change(&live.settings)
+        liveCapture = live
+        let config = live.settings.configuration
+        let previous = pendingCaptureUpdate
+        let update = Task {
+            _ = await previous?.result
+            try await stream.updateConfiguration(config)
+        }
+        pendingCaptureUpdate = update
+        return update
+    }
+
     /// Re-derives the effective FPS for the live pipeline's current encode
     /// size (a profile/user-ceiling/receiver-capability change, never a
     /// resolution change — resolution changes already go through
@@ -1378,12 +1414,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard rebuildEncoder || fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
         needsKeyframe = true
-        let config = SCStreamConfiguration()
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fpsResult.fps * 2))
+        let update = updateLiveCapture(stream) { $0.targetFPS = fpsResult.fps }
         let selfBox = self.selfBox
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("FPS reconfigure failed: \(error)")
             }
@@ -1574,17 +1609,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sendAudioState()
             return
         }
-        let config = SCStreamConfiguration()
-        config.capturesAudio = enabled
-        config.sampleRate = 48_000
-        config.channelCount = 2
-        config.excludesCurrentProcessAudio = true
+        let update = updateLiveCapture(stream) { $0.capturesAudio = enabled }
         let selfBox = self.selfBox
         let queue = self.queue
         let audioCaptureEncoder = self.audioCaptureEncoder
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("audio reconfigure failed: \(error)")
             }
@@ -2703,10 +2734,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let ticket: CaptureStartTicket
         let sessionGeneration: UInt64
         let captureGeneration: UInt64
-        let pixelsWide: Int
-        let pixelsHigh: Int
-        let targetFPS: Int
-        let capturesAudio: Bool
+        let capture: DisplayCaptureSettings
     }
 
     private enum CaptureCommitOutcome: Sendable {
@@ -2760,45 +2788,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             startTrace?.mark("filterReady", "excluded=\(shield.count)")
             let filter = SCContentFilter(display: display, excludingWindows: shield)
-            let config = SCStreamConfiguration()
-            config.width = plan.pixelsWide
-            config.height = plan.pixelsHigh
-            // Ask for double the target even though the source may run slower:
-            // requesting exactly 1/fps makes SCK's rate limiter skip frames that
-            // arrive a hair early (beat frequency) — measured ~51fps instead of
-            // 60 at parity. Same headroom, generalized to the target rate.
-            config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(plan.targetFPS * 2))
-            // 420v matches the encoder's native input — skips a BGRA→YUV conversion
-            // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
-            config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
-                ? kCVPixelFormatType_32BGRA
-                : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            // One buffer is held permanently (keyframe replay) and one sits in
-            // the encoder for ~13ms — headroom prevents SCK starvation drops.
-            config.queueDepth = 8
-            config.showsCursor = !localCursor
-            // Mac system audio (M-audio): a copy of system audio, never a
-            // reroute of the Mac's physical output. `capturesAudio` gates SCK's
-            // own audio capture work — off means SCK does none of it, not just
-            // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
-            // one SCStream; audio's actual on/off is toggled later at runtime
-            // via `stream.updateConfiguration` rather than tearing this stream
-            // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
-            // (there is none today, but excluding it is the documented,
-            // future-proof way to avoid a feedback loop).
-            if mode == .window {
-                // Window mode: this display stream only carries Mac audio and
-                // keeps the capture lifecycle; video comes from the window
-                // compositor. Tiny and slow, so it costs next to nothing.
-                config.width = 64
-                config.height = 36
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
-                config.showsCursor = false
-            }
-            config.capturesAudio = plan.capturesAudio
-            config.sampleRate = 48_000
-            config.channelCount = 2
-            config.excludesCurrentProcessAudio = true
+            // Window view: this display stream only carries Mac audio and keeps
+            // the capture lifecycle; video comes from the window compositor.
+            let config = plan.capture.configuration
 
             let audioClock = ContinuousClock.now
             await audioCaptureEncoder.reset()
@@ -3011,8 +3003,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         return .stream(CaptureStreamPlan(
             ticket: reservation.ticket, sessionGeneration: sessionGeneration, captureGeneration: generation,
-            pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, targetFPS: targetFPS,
-            capturesAudio: desiredAudioEnabled))
+            capture: DisplayCaptureSettings(pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, targetFPS: targetFPS,
+                                            capturesAudio: desiredAudioEnabled, showsCursor: !localCursor,
+                                            audioCarrierOnly: mode == .window,
+                                            pixelFormat: DisplayCaptureSettings.pixelFormat())))
     }
 
     /// `queue` only: the start's stream exists and is about to start;
@@ -3059,7 +3053,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         _ = captureOwnership.commit(plan.ticket)
         // What the stream was built with. An audio toggle while it was
         // starting only recorded `desiredAudioEnabled`; apply it now.
-        audioEnabled = plan.capturesAudio
+        audioEnabled = plan.capture.capturesAudio
+        liveCapture = LiveCaptureConfiguration(stream: stream, settings: plan.capture)
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         lastCursorPane = nil
@@ -3085,12 +3080,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         sendExtendShapeState()
         applyEffectiveFPSChange()   // a max-FPS change while it was starting
-        Log.info("capture started: \(plan.pixelsWide)x\(plan.pixelsHigh) display \(displayID) "
+        Log.info("capture started: \(plan.capture.pixelsWide)x\(plan.capture.pixelsHigh) display \(displayID) "
             + "generation \(plan.captureGeneration) mode \(mode.rawValue) localCursor=\(localCursor) "
             + "video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
         return .committed(status: "\(mode == .extend ? "Extending to" : mode == .window ? "Showing windows on" : "Mirroring to") \(kind) "
-            + "(\(plan.pixelsWide)×\(plan.pixelsHigh))")
+            + "(\(plan.capture.pixelsWide)×\(plan.capture.pixelsHigh))")
     }
 
     // PHASE-1 NOTE: this used to read `connection`/`connectionReady`
@@ -3818,13 +3813,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             + "attempts at \(capturePixelsWide)x\(capturePixelsHigh)@\(captureTargetFPS) — "
             + "recovering once at \(downgraded) FPS")
         needsKeyframe = true
-        let config = SCStreamConfiguration()
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(downgraded * 2))
+        let update = updateLiveCapture(stream) { $0.targetFPS = downgraded }
         let selfBox = self.selfBox
         let queue = self.queue
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("failure-streak SCK reconfigure failed: \(error)")
             }
