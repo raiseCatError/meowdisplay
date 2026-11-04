@@ -215,6 +215,7 @@ targets:
       - MacReceiver/ReceiverOwnership.swift
       - Shared/ReceiverRoleConfiguration.swift
       - Mac/MacAppRole.swift
+      - Mac/SecurityPanelPlacement.swift
       - Mac/LoginSession.swift
       - Shared/ReceiverGesture.swift
       - Mac/Log.swift
