@@ -2327,6 +2327,7 @@ final class ReceiverModel: ObservableObject {
         endBackgroundAssertion()
         // Home over a kept session stays paused in front too.
         let media = applyLocalMediaPolicy()
+        receiver.resumeAudioAfterInterruption(reason: "back in the app")
         receiver.ensureListening()
         // Resume a parked recovery run from where it stopped. If the session
         // is healthy this is a no-op; if it is beyond recovery the session

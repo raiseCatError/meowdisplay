@@ -2118,6 +2118,17 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    /// The person came back to the app or turned Audio on: audio the system
+    /// interrupted, without permission to resume, may play again. No effect
+    /// when nothing was interrupted, and none on macOS.
+    func resumeAudioAfterInterruption(reason: String) {
+        #if os(iOS)
+        let queue = self.queue
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.clearAudioInterruption(reason: reason) }
+        #endif
+    }
+
     /// The device locked — nobody can see the stream, so tell the Mac and go
     /// silent. Sends "sleeping" (the Mac drops its virtual display so the
     /// cursor isn't stranded on an invisible screen and arms a reconnect),
@@ -3428,6 +3439,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestAudioEnabled(_ enabled: Bool) {
         let box = audioPreferredBox
         queue.async { box.set(enabled) }
+        if enabled { resumeAudioAfterInterruption(reason: "Audio turned on") }
         guard connected, macSupportsAudio else { return }
         sendUIControl(["type": WireMessage.audioRequest, "enabled": enabled])
     }
@@ -4020,9 +4032,9 @@ final class StreamReceiver: ObservableObject {
                 // NOT blindly resume stale audio otherwise (GOAL: "Do not
                 // blindly resume stale audio after an interruption").
                 if type == .began {
-                    receiver.handleAudioSessionDisruption(reactivateSession: false)
+                    receiver.audioInterruptionBegan()
                 } else if type == .ended, shouldResume {
-                    receiver.handleAudioSessionDisruption(reactivateSession: true)
+                    receiver.clearAudioInterruption(reason: "the system allows resuming")
                 }
             }
         }
@@ -4061,6 +4073,34 @@ final class StreamReceiver: ObservableObject {
             activateAudioSessionIfNeeded()
         }
         resetAudioPlayback(keepingFormat: true)
+    }
+
+    /// `queue` only. The system silenced the session: stop playback and drop
+    /// packets until the interruption clears (see `ReceiverLocalAudioSuspension`).
+    private func audioInterruptionBegan() {
+        // The system has already deactivated the session; activate it anew when resuming.
+        audioSessionActive = false
+        if localAudioSuspension.interruptionBegan() == .stopPlayback {
+            Log.info("audio: local playback stopped (audio session interrupted)")
+            resetAudioPlayback(keepingFormat: true)
+        }
+    }
+
+    /// `queue` only.
+    private func clearAudioInterruption(reason: String) {
+        guard localAudioSuspension.isInterrupted else { return }
+        if !localAudioSuspension.isSuspended {
+            activateAudioSessionIfNeeded()
+            // Still interrupted (a call in progress): the session won't activate yet.
+            guard audioSessionActive else {
+                Log.info("audio: still interrupted, playback stays stopped (\(reason))")
+                return
+            }
+        }
+        let change = localAudioSuspension.interruptionCleared(hasAudioFormat: audioFormatDescription != nil)
+        guard case .resumePlayback(let rebuildChain) = change else { return }
+        Log.info("audio: local playback resumed after an interruption (\(reason))")
+        if rebuildChain { ensureAudioPlaybackChain() }
     }
 
     private func deactivateAudioSessionIfNeeded() {

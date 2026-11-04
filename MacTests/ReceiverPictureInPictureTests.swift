@@ -264,6 +264,44 @@ final class ReceiverPictureInPictureTests: XCTestCase {
         XCTAssertTrue(audio.reactivatesSession(afterDisruption: true))
     }
 
+    // MARK: - Audio session interruptions (a call, Siri, an alarm)
+
+    func testAnInterruptionStopsPlaybackAndDropsPackets() {
+        var audio = ReceiverLocalAudioSuspension()
+        XCTAssertEqual(audio.interruptionBegan(), .stopPlayback)
+        XCTAssertFalse(audio.admitsPackets, "packets must not each try to restart playback")
+        XCTAssertFalse(audio.mayStartPlayback)
+        XCTAssertFalse(audio.reactivatesSession(afterDisruption: true), "a route change mid-call doesn't resume")
+        XCTAssertEqual(audio.interruptionBegan(), .none)
+    }
+
+    func testClearingTheInterruptionResumesPlayback() {
+        var audio = ReceiverLocalAudioSuspension()
+        _ = audio.interruptionBegan()
+        XCTAssertEqual(audio.interruptionCleared(hasAudioFormat: true), .resumePlayback(rebuildChain: true))
+        XCTAssertTrue(audio.admitsPackets)
+        XCTAssertEqual(audio.interruptionCleared(hasAudioFormat: true), .none)
+
+        _ = audio.interruptionBegan()
+        XCTAssertEqual(audio.interruptionCleared(hasAudioFormat: false), .resumePlayback(rebuildChain: false))
+    }
+
+    func testAnInterruptionAndABackgroundLingerBothHaveToEndBeforePlaying() {
+        var audio = ReceiverLocalAudioSuspension()
+        _ = audio.interruptionBegan()
+        XCTAssertEqual(audio.setSuspended(true, hasAudioFormat: true), .none, "already stopped")
+        XCTAssertEqual(audio.interruptionCleared(hasAudioFormat: true), .none, "still lingering in the background")
+        XCTAssertFalse(audio.admitsPackets)
+        XCTAssertEqual(audio.setSuspended(false, hasAudioFormat: true), .resumePlayback(rebuildChain: true))
+
+        _ = audio.setSuspended(true, hasAudioFormat: true)
+        XCTAssertEqual(audio.interruptionBegan(), .none, "already stopped")
+        XCTAssertEqual(audio.setSuspended(false, hasAudioFormat: true), .none, "still interrupted")
+        XCTAssertFalse(audio.admitsPackets)
+        XCTAssertEqual(audio.interruptionCleared(hasAudioFormat: true), .resumePlayback(rebuildChain: true))
+        XCTAssertTrue(audio.admitsPackets)
+    }
+
     /// Drives the lifecycle and the audio suspension together exactly as
     /// `ReceiverModel` does: linger suspends, resume/foreground unsuspends.
     private struct BackgroundAudioHarness {
