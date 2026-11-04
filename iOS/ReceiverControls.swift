@@ -86,6 +86,18 @@ final class ReceiverControlStore: ObservableObject {
         if active { beginAutoHideActivity() } else { scheduleAutoHide() }
     }
 
+    /// Session Actions (touch and hold Settings): the controls stay up while
+    /// it is open, and the countdown starts over when it closes, whichever
+    /// way it closes (Cancel, a tap outside, escape, an action, the session
+    /// ending, Settings opening).
+    private(set) var sessionActionsOpen = false
+
+    func setSessionActionsOpen(_ open: Bool) {
+        guard sessionActionsOpen != open else { return }
+        sessionActionsOpen = open
+        if open { beginAutoHideActivity() } else { scheduleAutoHide() }
+    }
+
     func requestViewportReset() {
         viewportResetGeneration &+= 1
     }
@@ -118,11 +130,15 @@ final class ReceiverControlStore: ObservableObject {
         }
     }
 
-    /// Move View keeps its controls up so the mode can always be left.
+    /// Move View keeps its controls up so the mode can always be left;
+    /// Session Actions keeps them up so they are there after Cancel.
     private var autoHideAllowed: Bool {
-        preferences.autoHideEnabled && preferences.trayCanBeShown && !preferences.trayCollapsed
-            && !moveViewActive
-            && ControlAutoHidePolicy.applies(isPad: isPad, layout: effectivePadLayout)
+        ControlAutoHidePolicy.mayHide(enabled: preferences.autoHideEnabled,
+                                      trayCanBeShown: preferences.trayCanBeShown,
+                                      trayCollapsed: preferences.trayCollapsed,
+                                      moveViewActive: moveViewActive,
+                                      sessionActionsOpen: sessionActionsOpen,
+                                      isPad: isPad, layout: effectivePadLayout)
     }
 
     /// Cancels any pending countdown and clears auto-hidden state, then

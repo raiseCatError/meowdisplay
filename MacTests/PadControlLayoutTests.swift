@@ -540,6 +540,30 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertTrue(ControlAutoHidePolicy.applies(isPad: false, layout: .strip))
     }
 
+    func testAutoHideWaitsWhileSessionActionsIsOpen() {
+        func mayHide(moveView: Bool = false, sessionActions: Bool = false, collapsed: Bool = false,
+                     isPad: Bool = false, layout: PadControlLayoutMode = .overlay) -> Bool {
+            ControlAutoHidePolicy.mayHide(enabled: true, trayCanBeShown: true, trayCollapsed: collapsed,
+                                          moveViewActive: moveView, sessionActionsOpen: sessionActions,
+                                          isPad: isPad, layout: layout)
+        }
+        XCTAssertTrue(mayHide())
+        XCTAssertTrue(mayHide(isPad: true, layout: .overlay))
+        // The countdown re-checks this when it fires, so a countdown started
+        // before the hold can't fade the controls behind the overlay.
+        XCTAssertFalse(mayHide(sessionActions: true), "the tray stays up behind Session Actions")
+        XCTAssertFalse(mayHide(sessionActions: true, isPad: true, layout: .overlay))
+        XCTAssertFalse(mayHide(moveView: true))
+        XCTAssertFalse(mayHide(collapsed: true))
+        XCTAssertFalse(mayHide(isPad: true, layout: .strip))
+        XCTAssertFalse(ControlAutoHidePolicy.mayHide(enabled: false, trayCanBeShown: true, trayCollapsed: false,
+                                                     moveViewActive: false, sessionActionsOpen: false,
+                                                     isPad: false, layout: .overlay))
+        XCTAssertFalse(ControlAutoHidePolicy.mayHide(enabled: true, trayCanBeShown: false, trayCollapsed: false,
+                                                     moveViewActive: false, sessionActionsOpen: false,
+                                                     isPad: false, layout: .overlay))
+    }
+
     // MARK: - Custom layouts
 
     func testAtMostFiveCustomLayouts() {

@@ -46,14 +46,15 @@ final class AdaptiveLayoutTests: XCTestCase {
             keep(app, "demo-\(orientation.rawValue)")
         }
 
-        // The tray may have hidden itself while the orientations were checked: bring it back
-        // with a touch, as a person would, and wait until Settings can be tapped.
+        // Auto-hide fades the tray 9 s after the last touch, and the orientation checks above
+        // can take longer than that on a slow simulator. A tray that is still showing can fade
+        // between a hittability check and the tap (the tap then lands on the stream), so touch
+        // the stream first, as a person would: that always reveals the tray and restarts the
+        // countdown. Then tap Settings as soon as it can be reached.
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        for _ in 0..<3 where !settings.isHittable {
-            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
-            _ = XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: settings)],
-                               timeout: 2)
-        }
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
+        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable after a touch")
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))

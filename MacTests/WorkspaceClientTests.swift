@@ -186,6 +186,40 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertFalse(types.contains(WireMessage.windowAction))
     }
 
+    /// The zones sit 12 pt apart (HStack spacing) with 8 pt of touch slop
+    /// each, so their margins overlap: there Cancel lights, the haptic says
+    /// Cancel, and a release must not remove the pane.
+    func testCancelWinsWhereTheCancelAndRemoveMarginsMeet() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.cancelZoneGlobal = CGRect(x: 40, y: 720, width: 120, height: 44)    // ends at x 160
+        m.removeZoneGlobal = CGRect(x: 172, y: 720, width: 160, height: 44)   // 12 pt later
+        let before = m.layout
+        let between = CGPoint(x: 166, y: 740)   // inside both 8 pt margins
+
+        m.beginDrag(.pane(before.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
+        m.moveDrag(to: between)
+        XCTAssertTrue(m.overCancelZone(between))
+        XCTAssertFalse(m.overRemoveZone(between), "only one zone lights at a time")
+        XCTAssertFalse(m.endDrag())
+        XCTAssertEqual(m.layout, before, "released between the zones: nothing removed")
+
+        // Just past Cancel's margin, Remove still works.
+        let onRemoveEdge = CGPoint(x: 170, y: 740)
+        m.beginDrag(.pane(before.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
+        m.moveDrag(to: onRemoveEdge)
+        XCTAssertTrue(m.overRemoveZone(onRemoveEdge))
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.tiles.count, 1)
+    }
+
     /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
     /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
     /// removal is one undo step and never closes or minimizes the Mac window.
