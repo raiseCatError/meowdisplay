@@ -190,6 +190,16 @@ actor ReceiverPipelineActor {
         quicGroups.retire(controlStream: conn, error: error)
     }
 
+    /// `retire` for a connection that was just handed a goodbye: a QUIC
+    /// connection stays open until the Mac has read it
+    /// (`QUICReceiverGroup.closeAfterGoodbye`, issue #162). TCP delivers
+    /// queued data before its close, so a TCP connection is cancelled as
+    /// before.
+    private func retireAfterGoodbye(_ conn: NWConnection) {
+        guard !quicGroups.retireAfterGoodbye(controlStream: conn) else { return }
+        conn.cancel()
+    }
+
     /// Permanent facade/UI-mirror outputs: every call here means "publish
     /// this to the UI," nothing more. Each closure hops onto
     /// `DispatchQueue.main` (via the host's `publishToUI`) before touching
@@ -1177,8 +1187,18 @@ actor ReceiverPipelineActor {
     /// explicit-pairing suppression, the Mac's own `closing` message, the
     /// watchdog's stale-link drop): cancel it, clear the field, cancel any
     /// scheduled retry, then run it through the same `setConnected` funnel.
-    func disconnectCurrentConnection(reason: ReceiverSessionLossReason) {
-        if let connection { retire(connection) }
+    /// `goodbyeSentOn`: the connection this device just queued `closing` on
+    /// (`StreamReceiver.disconnect()`). If it is still the live one, its
+    /// transport closes only once the Mac has had the goodbye
+    /// (`retireAfterGoodbye`); the session ends here at once either way.
+    func disconnectCurrentConnection(reason: ReceiverSessionLossReason, goodbyeSentOn: NWConnection? = nil) {
+        if let connection {
+            if let goodbyeSentOn, goodbyeSentOn === connection {
+                retireAfterGoodbye(connection)
+            } else {
+                retire(connection)
+            }
+        }
         connection = nil
         cancelReconnect()
         setConnected(false, reason: reason)
