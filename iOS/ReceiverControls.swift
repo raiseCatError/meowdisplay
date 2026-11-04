@@ -214,6 +214,9 @@ final class ReceiverHaptics {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .confirmation, .reset:
             UINotificationFeedbackGenerator().notificationOccurred(.success)
+        case .sessionActions:
+            // A firmer tap than Settings: the hold was recognized and a modal opened.
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 }
@@ -336,6 +339,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// Where the receiver surface starts in this overlay's coordinates —
     /// `keyboardVisibleRect` is in the surface's own.
     var surfaceOrigin: CGPoint = .zero
+    /// Opens Session Actions (Back to Home, Disconnect from Mac) on a touch
+    /// and hold of Settings. nil in Demo Mode and while no session is on
+    /// screen, where Settings stays a plain button.
+    var onSessionActions: (() -> Void)? = nil
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
@@ -652,6 +659,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .accessibilityLabel(ControlTrayItem.settings.title)
                     .accessibilityInputLabels(ControlTrayItem.settings.spokenNames)
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
+                    .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem)
@@ -689,6 +697,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .contentShape(ControlRegionShape(rects: [autoHiding ? .zero : layout.trayFrame]
                                                     + (paletteChord == nil ? [] : [layout.paletteFrame])))
                 .gesture(controlGesture())
+            // The full tray's gear fades out with Auto-hide (a tap there
+            // first reveals it); the collapsed gear never hides.
+            settingsHoldTarget(reachable: collapsed || !autoHiding)
 
             #if DEBUG
             if notchDebugOverlayEnabled {
@@ -922,6 +933,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .accessibilityInputLabels(item.spokenNames)
         .accessibilityValue(item == .keyboard ? (keyboardActive ? Text("On") : Text("Off")) : Text(""))
         .trayButtonAccessibility { activateForAccessibility(item) }
+        .sessionActionsAccessibility(item == .settings && onSessionActions != nil ? { openSessionActions() } : nil)
     }
 
     private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool,
@@ -1109,6 +1121,43 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func selectedAction(under point: CGPoint) -> ShortcutItem? {
         guard let under = action(at: point), under.id == interaction.selectedActionID else { return nil }
         return under
+    }
+
+    // MARK: Settings hold → Session Actions
+
+    /// A transparent layer exactly on the drawn Settings control, above
+    /// `controlGesture`: a tap still opens Settings; a touch and hold plays a
+    /// haptic and opens Session Actions, which ReceiverScreen draws over
+    /// everything. VoiceOver and Voice Control get a named action on the chip
+    /// instead (`sessionActionsAccessibility`).
+    @ViewBuilder
+    private func settingsHoldTarget(reachable: Bool) -> some View {
+        if ReceiverSessionActionsPolicy.holdOpens(available: onSessionActions != nil,
+                                                  paletteOpen: interaction.paletteChord != nil,
+                                                  settingsControlVisible: reachable),
+           let frame = frames["tray:\(ControlTrayItem.settings.rawValue)"],
+           frame.width > 0, frame.height > 0 {
+            Color.clear
+                .frame(width: frame.width, height: frame.height)
+                .contentShape(Rectangle())
+                // The hold wins once it reaches its duration (while the finger is
+                // still down); lifting earlier is an ordinary tap on Settings.
+                .gesture(LongPressGesture(minimumDuration: 0.5)
+                    .onEnded { _ in openSessionActions() }
+                    .exclusively(before: TapGesture().onEnded {
+                        store.beginAutoHideActivity()
+                        perform(.settings)
+                        store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+                    }))
+                .position(x: frame.midX, y: frame.midY)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func openSessionActions() {
+        guard let onSessionActions else { return }
+        haptics.play(.sessionActions)
+        onSessionActions()
     }
 
     private func perform(_ item: ControlTrayItem) {
@@ -1519,6 +1568,9 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: mainRegion + gearRegion + paletteRegion))
                 .gesture(controlGesture())
+            // Overlay's rail gear fades with Auto-hide like the rest of the rail (a tap
+            // there reaches the Mac and reveals it); the collapsed gear and the Strip never hide.
+            settingsHoldTarget(reachable: padCollapsed || !autoHiding)
         }
         .onAppear {
             onCanvasChange(layout.canvas)
@@ -1683,6 +1735,7 @@ extension ReceiverControlOverlay {
                         + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }
                         + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])))
                 .gesture(controlGesture())
+            settingsHoldTarget(reachable: true)   // Custom keeps Settings through Auto-hide
         }
         .animation(.snappy(duration: 0.22), value: assistState)
         .onAppear {
@@ -1859,6 +1912,7 @@ extension ReceiverControlOverlay {
                 break
             }
         }
+        .sessionActionsAccessibility(kind == .tray(.settings) && onSessionActions != nil ? { openSessionActions() } : nil)
     }
 
     private func padSpokenNames(_ kind: CustomControlKind) -> [String] {
@@ -2492,5 +2546,19 @@ private extension View {
     func trayButtonAccessibility(_ action: @escaping () -> Void) -> some View {
         accessibilityAddTraits(.isButton)
             .accessibilityAction { action() }
+    }
+}
+
+private extension View {
+    /// Session Actions as a named accessibility action on the Settings
+    /// control, so it never depends on touch and hold.
+    @ViewBuilder
+    func sessionActionsAccessibility(_ open: (() -> Void)?) -> some View {
+        if let open {
+            accessibilityAction(named: Text("Session Actions",
+                                            comment: "Accessibility action on the Settings control: opens Back to Home and Disconnect from Mac.")) { open() }
+        } else {
+            self
+        }
     }
 }
