@@ -378,6 +378,7 @@ targets:
       - Shared/MobileSettingsSearch.swift
       - Shared/CustomLayoutSharing.swift
       - Shared/ReceiverInputPrompt.swift
+      - Shared/ArrowKeyNavigation.swift
       - Shared/Pairing.swift
       - Shared/PairingPromptModel.swift
       - Shared/RemotePairing.swift

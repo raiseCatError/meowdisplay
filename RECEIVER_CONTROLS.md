@@ -116,8 +116,23 @@ ignore Touch Style.
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
 | Hold Response (how long ⌘ ⌥ ⌃ ⇧ are touched before their shortcuts appear: Fast 0.18 s, Standard 0.25 s, Deliberate 0.4 s) | Yes | Yes | No (fixed) | n/a |
+| Arrow keys (button and ↑ ← ↓ → keypad) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Compact windows only (roomy layouts: planned) | No | n/a |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
+
+### Arrow keys (#179)
+
+One small button gives the arrow keys. **Tap** it to open an inverted-T keypad (↑ above ← ↓ →) and tap it again to close it. **Swipe** it in a direction to send one arrow without opening anything. A touch that is neither a tap nor a clear swipe (a diagonal, a short drag, a touch the system cancelled) sends nothing.
+
+On the keypad a touch is a real key press: key down, then the Mac's own autorepeat after 0.4 s at 12.5 a second while the finger stays, then key up on lift. Sliding to another key releases the first; sliding off the keypad releases it too. The receiver times the repeats, because the Mac never repeats a key it was sent. A late timer sends one repeat, never a catch-up burst. Each message carries the tray's latched or held modifiers, so ⇧ latched and → selects. A modifier still in its first moments of a press is held first, the way a long press holds it. Haptics: one tick when a key goes down, none per repeat, and the usual open/close tap for the keypad, all under **Haptics**.
+
+The keypad stays open while you use Return, modifiers, the Function Tray and shortcuts. It closes when you tap the button, touch the Mac's picture (the touch still goes to the Mac), open or close the keyboard, open Settings, or when input stops reaching the Mac: Allow Input off, a disconnect, paused capture, a view change, leaving the app. Each of those also sends key up for a held key. The button follows the keyboard's gates: Allow Input, a Mac that understands keyboard messages, and its own switch.
+
+**With the keyboard up**, the companion bar gains one **Arrow Keys** item between Return and Hide Keyboard. It is the same button: a tap opens the same keypad, a swipe sends one arrow. The keypad opens above the item, above an open shortcut palette, or beside the bar when the keyboard leaves no room above it (iPhone landscape). It never covers the keyboard. Nine keys tighten the bar's gaps from 8 to 6 pt, so a 375 pt iPhone keeps 32 pt keys. Turning **Show Arrow Keys** off brings back the eight-key bar.
+
+**Where it sits.** On iPhone in landscape it sits on the bottom edge on the chosen side (Right by default), stepping inward past whatever already holds that corner. With the default trays the Main Tray is on the right and Return is bottom-left, so on the right the button sits just inside the Main Tray, and on the left it sits beside Return. Return is never on the right by default, so "right side, next to Return" can't both hold. In portrait it sits at the chosen end of the row above the Main Tray. The keypad opens above the button and moves inward or up to clear the other controls and system-reserved areas. The button never moves when the keypad opens. A shortcut palette can push both aside while it is open. They are not tray items, so tray chips keep their size, and saved profiles, Function Tray layouts and share codes are unchanged. Older builds ignore the two new preferences.
+
+**Accessibility.** The button is **Arrow Keys** (Shown/Hidden), with **Up Arrow**, **Down Arrow**, **Left Arrow** and **Right Arrow** as named actions, so VoiceOver, Voice Control and Switch Control can send arrows without a swipe. Each keypad key is a button of the same name. Reduce Motion turns the keypad's scale into a fade.
 
 ## Typing
 

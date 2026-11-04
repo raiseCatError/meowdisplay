@@ -141,6 +141,15 @@ struct ControlInteractionState: Equatable {
         return effects
     }
 
+    /// A key from elsewhere (an on-screen arrow) while a modifier is still in
+    /// its first moments of being pressed: nothing is down on the Mac yet, so
+    /// hold it now, exactly as a long press would, rather than send the key
+    /// unmodified and latch the modifier on lift. A no-op otherwise.
+    mutating func promotePressedModifier() -> [ControlInteractionEffect] {
+        guard case .pressed(let modifier) = phase else { return [] }
+        return beginPalette(with: modifier)
+    }
+
     mutating func updateTemporaryChord(_ touched: Set<ControlModifier>) -> [ControlInteractionEffect] {
         let desired = touched.subtracting(latchedModifiers)
         var effects = ordered(temporaryModifiers.subtracting(desired)).map(ControlInteractionEffect.modifierUp)

@@ -909,6 +909,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var functionTrayProfiles: [FunctionTrayProfile]
     /// How long a modifier is touched before its shortcuts appear (#131).
     var modifierHoldResponse = ModifierHoldResponse.standard
+    /// The compact arrow button and its keypad (#179) on iPhone and compact
+    /// windows. Its own switch, like the Function Tray's; only Allow Input
+    /// and the keyboard wire also gate it. On for everyone, upgraded
+    /// installs included: it is part of the default layout.
+    var arrowKeysEnabled = true
+    /// Which side the arrow button sits on: the lower-right corner area by
+    /// default, or the lower left.
+    var arrowKeysSide = LandscapeTraySide.trailing
     /// Global (never profile-specific) layout preference: whether tray/
     /// control geometry conditionally shifts inward to clear the notch/
     /// Dynamic Island/home-indicator strip when a frame would actually
@@ -1055,6 +1063,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // failing the whole blob.
         modifierHoldResponse = (try? value(.modifierHoldResponse, fallback.modifierHoldResponse))
             ?? fallback.modifierHoldResponse
+        // Absent (added 2026-11-05): a new install's values. No schema bump.
+        arrowKeysEnabled = try value(.arrowKeysEnabled, fallback.arrowKeysEnabled)
+        arrowKeysSide = try value(.arrowKeysSide, fallback.arrowKeysSide)
         // Absent (schema < 7) means "written before Avoid Notch existed" —
         // default true, matching a brand-new install (and the explicit
         // "old settings migrate to ON" requirement).
