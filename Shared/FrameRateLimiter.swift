@@ -66,3 +66,87 @@ struct FrameRateLimiter {
         return true
     }
 }
+
+extension FrameRateLimiter {
+    /// When the next frame may be admitted; nil when one would be admitted now.
+    var nextAdmission: TimeInterval? { nextDeadline }
+
+    /// One frame interval at the current rate.
+    var frameInterval: TimeInterval { interval }
+}
+
+/// Frame admission for one stream: the rate limit plus its trailing edge (#123).
+///
+/// The limit turns away a frame that comes too soon. While the picture keeps
+/// changing that's right, because a newer frame follows within an interval.
+/// When the picture stops, the frame turned away was the last change and
+/// nothing follows it: ScreenCaptureKit sends no frame for an unchanged
+/// screen, and Window view composes only when a window changed. The receiver
+/// then shows a stale picture until something else moves. Measured on an M2
+/// with a 60 Hz display (2026-11-05): at 30 FPS, 16 of 40 animations ended
+/// with their final frame turned away.
+///
+/// So a frame turned away is held. If nothing newer goes out by one frame
+/// interval after the limit's next deadline, the picture has stopped and the
+/// held frame goes out then. During continuous motion a newer frame always
+/// arrives before that, so pacing and latency stay as they were.
+struct FrameAdmission {
+    enum Decision: Equatable {
+        /// Encode the frame now.
+        case send
+        /// Keep the frame as the latest one. `retryAt`: arm a retry for that
+        /// time (the same clock as `now`); nil when one is already armed.
+        case hold(retryAt: TimeInterval?)
+    }
+
+    private var limiter: FrameRateLimiter
+    /// When the held frame goes out if nothing newer does; nil when nothing is held.
+    private(set) var retryAt: TimeInterval?
+
+    init(fps: Int) {
+        limiter = FrameRateLimiter(fps: fps)
+    }
+
+    var isHolding: Bool { retryAt != nil }
+
+    /// A rate change: the limit resyncs (see `FrameRateLimiter.reconfigure`).
+    /// A held frame stays held; its retry admits it at the new rate.
+    mutating func reconfigure(fps: Int) {
+        limiter.reconfigure(fps: fps)
+    }
+
+    /// A new frame, or a held one whose retry came due.
+    mutating func offer(now: TimeInterval) -> Decision {
+        if limiter.shouldAdmit(now: now) {
+            retryAt = nil
+            return .send
+        }
+        return hold(now: now)
+    }
+
+    /// The limit admitted a frame but the encoder was too busy to take it:
+    /// hold it like one the limit turned away.
+    mutating func encoderBusy(now: TimeInterval) -> Decision {
+        hold(now: now)
+    }
+
+    /// A retry fired: whether a frame is still held. Either way nothing is
+    /// held afterwards; offer the frame again to send it (or hold it anew).
+    mutating func retryFired() -> Bool {
+        defer { retryAt = nil }
+        return retryAt != nil
+    }
+
+    /// The latest frame went out some other way (a replay), or nothing may go
+    /// out any more.
+    mutating func clearHold() {
+        retryAt = nil
+    }
+
+    private mutating func hold(now: TimeInterval) -> Decision {
+        guard retryAt == nil else { return .hold(retryAt: nil) }
+        let at = max(limiter.nextAdmission ?? now, now) + limiter.frameInterval
+        retryAt = at
+        return .hold(retryAt: at)
+    }
+}

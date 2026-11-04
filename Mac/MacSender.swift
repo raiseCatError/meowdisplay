@@ -460,10 +460,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `minimumFrameInterval`/`ExpectedFrameRate` alone are requests/hints,
     /// not proof VideoToolbox receives no more than that rate (see
     /// `FrameRateLimiter`). Reconfigured from `setupEncoder`, the one choke
-    /// point every FPS change already goes through. Mutated only from
-    /// `queue` (both `setupEncoder` and the capture callback run there), so
-    /// this needs no lock of its own.
-    private var frameRateLimiter = FrameRateLimiter(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
+    /// point every FPS change already goes through. Also holds the frame the
+    /// limit turned away, so the last change on screen still goes out (see
+    /// `FrameAdmission`). Mutated only from `queue` (both `setupEncoder` and
+    /// the capture callback run there), so this needs no lock of its own.
+    private var frameAdmission = FrameAdmission(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
+    /// `queue` only: the frame `frameAdmission` holds, and its retry.
+    private var heldFrame: HeldFrame?
+    private var heldFrameTimer: DispatchSourceTimer?
     /// Set by Extend setup and reconfiguration (this class's nonisolated `async` methods), cleared by
     /// `stop()` on the main thread, read on `queue` and by `SenderController`: locked (audit C8). The
     /// display a write replaces is released after the lock, since releasing it removes the display.
@@ -3188,6 +3192,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         activeUSBBridgeTLS = nil
         videoEncoder.invalidate()
         cancelDropReplayTimer()
+        cancelHeldFrame()
         // Unblock a start() that is still waiting for the hello or admission.
         helloContinuation?.resume(throwing: CancellationError())
         helloContinuation = nil
@@ -6244,7 +6249,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // single choke point to resync frame ADMISSION to match, so
         // VideoToolbox never actually receives more than `fps` submissions/
         // sec regardless of how fast ScreenCaptureKit delivers frames.
-        frameRateLimiter.reconfigure(fps: fps)
+        frameAdmission.reconfigure(fps: fps)
         Log.info("receiver codecs: \(lastHello?.codecs?.joined(separator: ", ") ?? "h264") "
             + "codec preference: \(codecPreference.rawValue) effective codec: \(codec.wireValue) reason: \(reason)")
         Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
@@ -6335,24 +6340,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // so this guard — not stream teardown — is what makes "no
             // encoding, no network video packets" true then.
             guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
-            // Rate-gate BEFORE backpressure: SCK's capture headroom means
-            // frames can arrive up to ~2x the target rate, and neither
-            // `minimumFrameInterval` nor `kVTCompressionPropertyKey_
-            // ExpectedFrameRate` stops VideoToolbox from being handed more
-            // than the authoritative effective FPS — see `FrameRateLimiter`.
-            // A frame the limiter would reject anyway was never going to be
-            // encoded, so it must not count as an enc↓/net↓ backpressure
-            // drop (that mislabels normal rate-limiting as a stalled
-            // pipeline) or arm the drop-replay timer for a frame nobody
-            // wanted in the first place.
-            guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
-            #if DEBUG
-            debugAdmittedWindow += 1
-            #endif
-            if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
-            if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
-
-            encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation, connectionGeneration: activeConnectionGeneration)
+            offerLatestFrame(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                             generation: generation, source: .display)
 
         case .audio:
             guard transportController.isReady, audioEnabled, sessionAuthorization.isAdmitted else { return }
@@ -6402,6 +6391,89 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Where a held frame came from, so its retry passes the same gates the original did.
+    private enum FrameSource { case display, workspace }
+
+    /// The frame `frameAdmission` holds. Its pixels are `lastPixelBuffer`.
+    private struct HeldFrame {
+        let pts: CMTime
+        let generation: UInt64
+        let source: FrameSource
+    }
+
+    /// `queue` only. The newest captured frame, past its source's own gates:
+    /// through the rate limit and the pipeline's backpressure to the encoder.
+    ///
+    /// Rate-gate BEFORE backpressure: SCK's capture headroom means frames can
+    /// arrive up to ~2x the target rate, and neither `minimumFrameInterval`
+    /// nor `kVTCompressionPropertyKey_ExpectedFrameRate` stops VideoToolbox
+    /// from being handed more than the authoritative effective FPS (see
+    /// `FrameRateLimiter`). A frame the limit turns away must not count as an
+    /// enc↓/net↓ backpressure drop (that mislabels normal rate limiting as a
+    /// stalled pipeline) or arm the drop-replay timer. It is held instead,
+    /// and goes out if nothing newer does (see `FrameAdmission`).
+    private func offerLatestFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, source: FrameSource) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let held = HeldFrame(pts: pts, generation: generation, source: source)
+        if case .hold(let retryAt) = frameAdmission.offer(now: now) {
+            return holdLatestFrame(held, retryAt: retryAt, now: now)
+        }
+        cancelHeldFrame()
+        #if DEBUG
+        debugAdmittedWindow += 1
+        #endif
+        if shouldDropFrame(reason: "pending_encode") {  // encoder busy
+            // The next captured frame would take its place, but there may be
+            // none: this one may be the last change on screen.
+            if case .hold(let retryAt) = frameAdmission.encoderBusy(now: now) {
+                holdLatestFrame(held, retryAt: retryAt, now: now)
+            }
+            return
+        }
+        if shouldDropFrame(reason: "pending_sends") { return }  // TCP send queue full; the drop replay retries
+        encode(pixelBuffer, pts: pts, generation: generation, connectionGeneration: activeConnectionGeneration)
+    }
+
+    /// `queue` only. Keeps `frame` as the one to send if nothing newer goes
+    /// out, and arms its retry unless one is armed already.
+    private func holdLatestFrame(_ frame: HeldFrame, retryAt: TimeInterval?, now: TimeInterval) {
+        heldFrame = frame
+        guard let retryAt else { return }
+        heldFrameTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + max(retryAt - now, 0), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.retryHeldFrame() }
+        timer.resume()
+        heldFrameTimer = timer
+    }
+
+    /// `queue` only. Nothing newer went out since the frame was held: the
+    /// picture stopped changing. Offers it again through its source's gates.
+    private func retryHeldFrame() {
+        heldFrameTimer = nil
+        let held = heldFrame
+        heldFrame = nil
+        guard frameAdmission.retryFired(), let held, let pixelBuffer = lastPixelBuffer, !stopped,
+              transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
+        switch held.source {
+        case .display:
+            guard mode != .window, !PrivacyShieldWindows.isUnlocking else { return }
+        case .workspace:
+            guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
+                  captureStateSnapshot().phase == .running else { return }
+        }
+        offerLatestFrame(pixelBuffer, pts: held.pts, generation: held.generation, source: held.source)
+    }
+
+    /// `queue` only. The latest frame went out, or nothing may go out any
+    /// more: nothing is held and no retry is armed.
+    private func cancelHeldFrame() {
+        frameAdmission.clearHold()
+        heldFrame = nil
+        heldFrameTimer?.cancel()
+        heldFrameTimer = nil
+    }
+
     private func isPipelineBackedUp() -> Bool {
         pipelineState.isBackedUp()
     }
@@ -6445,10 +6517,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Only arm the replay for genuine network backpressure. With
         // `maxPendingEncodes` now a real (>1) pipeline and the
         // FrameRateLimiter already gating admission upstream, an
-        // encoder-busy drop here means the next rate-eligible SCK sample —
-        // due in a few ms, not 30 — will simply flow through normally once
-        // a slot frees. Replaying it too would bypass the limiter and
-        // inject an extra, arbitrarily-timed frame outside its cadence.
+        // encoder-busy drop here is usually followed by the next
+        // rate-eligible frame once a slot frees. Replaying it too would
+        // bypass the limiter and inject an extra, arbitrarily-timed frame
+        // outside its cadence; if no frame follows, `offerLatestFrame`
+        // holds this one and sends it through the limiter instead.
         // A send-queue drop is different: TCP backpressure on a real link
         // can outlast a frame interval, so proactively retrying once it
         // clears (rather than waiting on the limiter's next tick) still
@@ -6570,6 +6643,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Encode submission commits this frame to the pipeline; stale in-flight
             // encodes started before a drop won't reach here again, so cancel replay.
             cancelDropReplayTimer()
+            // Every encode is of the newest frame, so nothing older stays held.
+            cancelHeldFrame()
             #if DEBUG
             pipelineState.incrementDebugVTSubmitted()
             #endif
@@ -7482,11 +7557,10 @@ extension MacSender {
         lastCaptureAt = Date()
         capFrames += 1
         guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
-        guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
-        if shouldDropFrame(reason: "pending_encode") { return }
-        if shouldDropFrame(reason: "pending_sends") { return }
-        encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()), generation: captureGenerationNow,
-               connectionGeneration: activeConnectionGeneration)
+        // The engine composes only when a window changed, so a composed frame
+        // the limit turns away may be the last one for a while: it is held.
+        offerLatestFrame(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
+                         generation: captureGenerationNow, source: .workspace)
     }
 
     /// The receiver rotated or resized: same tiles and windows, a new
