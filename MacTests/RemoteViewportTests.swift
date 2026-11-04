@@ -1053,4 +1053,36 @@ final class HighMagnificationViewportTests: XCTestCase {
             XCTAssertNotEqual(staleCenter?.y ?? lowerPane.midY, lowerPane.midY, accuracy: 0.01)
         }
     }
+
+    /// `presented(...)` must invert the content-layer placement exactly, so a
+    /// touch mid-slide maps to the Mac point under the finger.
+    func testPresentedTransformInvertsContentLayerPlacement() {
+        let normal = CGRect(x: 0, y: 171, width: 390, height: 243.75)
+        let cases = [
+            RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                    displayedRect: CGRect(x: -40, y: -120, width: 470, height: 293.75)),
+            RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                    displayedRect: CGRect(x: 10, y: 60, width: 780, height: 487.5),
+                                    rotationRadians: .pi / 2),
+        ]
+        for t in cases {
+            // Same math as `VideoView.applyContentGeometry`.
+            let scale = t.displayedRect.width / (t.remoteCrop.width * normal.width)
+            let position = t.viewPoint(forRemote: CGPoint(x: t.remoteCrop.midX, y: t.remoteCrop.midY))
+            let affine = CGAffineTransform(scaleX: scale, y: scale).rotated(by: t.rotationRadians)
+            let back = RemoteViewportTransform.presented(position: position, boundsSize: normal.size,
+                                                         transform: affine, remoteCrop: t.remoteCrop)
+            XCTAssertNotNil(back)
+            XCTAssertEqual(back?.displayedRect.minX ?? .nan, t.displayedRect.minX, accuracy: 0.001)
+            XCTAssertEqual(back?.displayedRect.minY ?? .nan, t.displayedRect.minY, accuracy: 0.001)
+            XCTAssertEqual(back?.displayedRect.width ?? .nan, t.displayedRect.width, accuracy: 0.001)
+            XCTAssertEqual(back?.displayedRect.height ?? .nan, t.displayedRect.height, accuracy: 0.001)
+            XCTAssertEqual(back?.rotationRadians ?? .nan, t.rotationRadians, accuracy: 0.0001)
+            let finger = CGPoint(x: 200, y: 150)
+            XCTAssertEqual(back?.remotePoint(forView: finger)?.x ?? -1, t.remotePoint(forView: finger)?.x ?? -2, accuracy: 0.0001)
+            XCTAssertEqual(back?.remotePoint(forView: finger)?.y ?? -1, t.remotePoint(forView: finger)?.y ?? -2, accuracy: 0.0001)
+        }
+        XCTAssertNil(RemoteViewportTransform.presented(position: .zero, boundsSize: .zero,
+                                                       transform: .identity, remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1)))
+    }
 }
