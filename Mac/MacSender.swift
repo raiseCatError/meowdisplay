@@ -348,7 +348,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
-    @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection) -> Void)?
+    /// The frame rate is nil when the receiver sent none.
+    @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection?) -> Void)?
     /// A receiver asked to change Streaming Priority. Handed to
     /// `SenderController`, which owns the canonical `streamingPriority`
     /// setting (same one its own Settings picker writes) and rebuilds the
@@ -508,6 +509,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // session (see SenderController.restartAll).
     private let streamingProfile: StreamingProfile
     private let customFPS: Int?
+    /// Reported to the receiver with the profile (issue #142): the Mac's
+    /// Streaming Mode, and in Custom the stored frame-rate pick, so the
+    /// receiver can tell when its profile controls can't take effect. nil
+    /// keeps them out of the message.
+    private let reportedStreamingMode: StreamingMode?
+    private let reportedCustomFrameRate: CustomFrameRateSelection?
     /// Streaming Priority (bounded encoder-pipelining depth, see
     /// `StreamingPriorityPolicy`): like `streamingProfile`, applies per-
     /// pipeline at construction — a change rebuilds the session (see
@@ -1110,7 +1117,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          extendShapePreference: ExtendDisplayShapePreference = .standard,
          receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard,
          streamingPriority: StreamingPriority = .auto,
-         codecPreference: CodecPreference = .auto) {
+         codecPreference: CodecPreference = .auto,
+         streamingMode: StreamingMode? = nil,
+         customFrameRateSelection: CustomFrameRateSelection? = nil) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -1122,6 +1131,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.desiredVideoEnabled = videoEnabled
         self.streamingProfile = streamingProfile
         self.customFPS = customFPS
+        self.reportedStreamingMode = streamingMode
+        self.reportedCustomFrameRate = customFrameRateSelection
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
@@ -5725,7 +5736,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   info.protocolVersion >= WireProtocol.streamingProfileRequestWireVersion,
                   let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
-            let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
+            let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:))
             let streamingProfileSelfBox = self.selfBox
             Task { @MainActor in
                 guard let self = streamingProfileSelfBox.resolve() else { return }
@@ -6833,7 +6844,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendStreamingProfileState() {
-        sendJSONFrame("{\"type\":\"\(WireMessage.streamingProfileState)\",\"profile\":\"\(streamingProfile.rawValue)\"}")
+        sendJSONFrame(StreamingProfileStateUpdate(
+            profile: streamingProfile, mode: reportedStreamingMode,
+            customFrameRate: reportedCustomFrameRate).wireJSON)
+    }
+
+    /// Re-reports the streaming settings this session runs with, after the
+    /// Mac declined or didn't need to apply a receiver's request: the
+    /// receiver's picker returns to what is actually in effect, without
+    /// rebuilding anyone's stream (issue #142).
+    func resendStreamingSettingsState() {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let sender = selfBox.currentOnQueue(), sender.lastHello != nil else { return }
+            sender.sendStreamingProfileState()
+            sender.sendStreamingPriorityState()
+        }
     }
 
     private func sendStreamingPriorityState() {

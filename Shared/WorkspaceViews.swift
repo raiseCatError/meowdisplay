@@ -24,6 +24,12 @@ private extension WorkspaceRect {
 struct WorkspaceChromeView: View {
     @ObservedObject var model: WorkspaceModel
     let picture: CGRect
+    /// The picture's normal fit, when it differs from where it's drawn: the
+    /// on-screen keyboard can slide or zoom the picture (`picture` follows,
+    /// so outlines stay on their windows), but the workspace size and hinge
+    /// sent to the Mac come from this, so typing never relayouts the panes
+    /// (issue #92). nil: `picture`.
+    var layoutPicture: CGRect? = nil
     let inputAllowed: Bool
     /// Separating folds/hinges in this view's coordinates: nothing interactive is placed inside them.
     var divisions: [CGRect] = []
@@ -59,7 +65,8 @@ struct WorkspaceChromeView: View {
 
     struct PaneMenuTarget: Equatable { var tile: String; var tab: Int? }
 
-    private var size: WorkspaceSize { WorkspaceSize(width: picture.width, height: picture.height) }
+    private var layoutRect: CGRect { layoutPicture ?? picture }
+    private var size: WorkspaceSize { WorkspaceSize(width: layoutRect.width, height: layoutRect.height) }
 
     private func normalized(_ p: CGPoint) -> WorkspacePoint {
         WorkspacePoint(x: (p.x - picture.minX) / max(picture.width, 1), y: (p.y - picture.minY) / max(picture.height, 1))
@@ -67,6 +74,7 @@ struct WorkspaceChromeView: View {
 
     /// The first division that crosses the picture, as a hinge in canvas coordinates.
     private var hinge: WorkspaceHinge? {
+        let picture = layoutRect
         guard picture.width > 0, picture.height > 0, let d = divisions.first?.intersection(picture), !d.isNull else { return nil }
         let r = WorkspaceRect(x: (d.minX - picture.minX) / picture.width, y: (d.minY - picture.minY) / picture.height,
                               width: d.width / picture.width, height: d.height / picture.height)
@@ -82,7 +90,7 @@ struct WorkspaceChromeView: View {
             Color.clear
                 .allowsHitTesting(false)
                 .onAppear { model.updateSpace(size, hinge: hinge) }
-                .onChange(of: picture) { _ in model.updateSpace(size, hinge: hinge) }
+                .onChange(of: layoutRect) { _ in model.updateSpace(size, hinge: hinge) }
                 .onChange(of: divisions) { _ in model.updateSpace(size, hinge: hinge) }
             chrome
         }

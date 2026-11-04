@@ -418,6 +418,8 @@ enum PairingCopy {
     static let sasHelper = "If the codes match, confirm on both devices to finish pairing."
     static let connectingTitle = "Pairing…"
     static let waitingTitle = "Waiting for confirmation…"
+    static let ownerAuthTitle = "Confirm it's you…"
+    static let ownerAuthHelper = "Use Touch ID or enter your password to finish pairing."
 
     static func connectingHelper(target: RemotePairingTarget) -> String {
         "Make sure Pair Over Remote is turned on on the \(target.noun)."

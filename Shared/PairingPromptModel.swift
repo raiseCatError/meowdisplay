@@ -279,3 +279,27 @@ final class PairingPromptModel: ObservableObject {
         current.resume(returning: value)
     }
 }
+
+/// What the pairing confirmation panel is showing. Derived only from the
+/// model, so a step can never look like a different one: after Codes Match a
+/// new trust decision waits for Touch ID or the Mac's password, and the panel
+/// used to show the unchanged code with a greyed-out button meanwhile, which
+/// read as stuck. Nothing here changes what is approved or when.
+enum PairingPanelPhase: Equatable {
+    /// The codes are on screen and the owner hasn't answered.
+    case confirmCode
+    /// Codes Match was pressed; the system's owner authentication is open.
+    case authenticatingOwner
+    /// Confirmed here; the other device must still confirm.
+    case waitingForPeer(canCancel: Bool)
+    /// Nothing pending: the panel closes.
+    case closed
+}
+
+extension PairingPromptModel {
+    var panelPhase: PairingPanelPhase {
+        if pending != nil { return isAuthenticating ? .authenticatingOwner : .confirmCode }
+        if confirmedLocally != nil { return .waitingForPeer(canCancel: !isCommitting) }
+        return .closed
+    }
+}

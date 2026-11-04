@@ -317,6 +317,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// This logical session's invitation (pv 21) — see `SessionInvitation`.
     /// Fixed for the session's lifetime; `MacSender` owns the live copy.
     var invitation = SessionInvitation(initiator: .sender, intent: .automatic, mode: .extend)
+    /// Started from another session's invitation (`SessionContinuation`):
+    /// a Mac-wide rebuild or the wait for a locked device to wake.
+    var isContinuation = false
     /// A receiver-initiated request still waiting for this Mac's user.
     var awaitingLocalApproval = false
     /// Whether this session's approval prompt is up. It is raised only once
@@ -2550,8 +2553,10 @@ final class SenderController: ObservableObject {
     /// other connected device changes.
     func connect(to target: ConnectionTarget, mode requested: CaptureMode) {
         if let live = session(for: target.sessionID) ?? owningSession(for: target), !live.failed {
-            requestMode(requested, for: live)
-            return
+            guard endAutomaticAttemptForExplicitConnect(live) else {
+                requestMode(requested, for: live)
+                return
+            }
         }
         if canEnterMode(requested) {
             if let peerID = intendedPeerID(for: target, logicalID: logicalID(for: target)) {
@@ -2562,6 +2567,34 @@ final class SenderController: ObservableObject {
         }
         connect(to: target, userInitiated: true)
         displayModes.retain(sessionIDs: Set(sessions.map(\.id)))
+    }
+
+    /// A Mac-side Connect tap (Known Devices, Overview, Remote Access): the
+    /// user's own request, so an automatic attempt this Mac started on its
+    /// own must not absorb it (`ExplicitConnectAdmission`).
+    @discardableResult
+    func explicitConnect(to target: ConnectionTarget) -> Bool {
+        let sameRoute = session(for: target.sessionID).flatMap { $0.failed ? nil : $0 }
+        if let existing = sameRoute ?? owningSession(for: target),
+           !endAutomaticAttemptForExplicitConnect(existing) {
+            Log.info("connectDebug: explicitConnectKeptExistingSession session=\(existing.id) "
+                + "authenticated=\(existing.applicationAuthenticated) admitted=\(existing.invitationAdmitted)")
+        }
+        return connect(to: target, userInitiated: true)
+    }
+
+    /// Ends `existing` when it is an unadmitted automatic attempt of this
+    /// Mac's own, so an explicit Connect starts a manual invitation in its
+    /// place. Returns whether it was ended.
+    private func endAutomaticAttemptForExplicitConnect(_ existing: DeviceSession) -> Bool {
+        let decision = ExplicitConnectAdmission.decide(existing: .init(
+            failed: existing.failed, admitted: existing.invitationAdmitted,
+            invitation: existing.invitation, isContinuation: existing.isContinuation))
+        guard decision == .replace else { return false }
+        Log.info("connectDebug: explicitConnectReplacedAutomaticAttempt session=\(existing.id) "
+            + "authenticated=\(existing.applicationAuthenticated)")
+        end(existing)
+        return true
     }
 
     /// The receiver's install id when it is known before dialing — the key
@@ -2598,8 +2631,11 @@ final class SenderController: ObservableObject {
             if !autoConnectPolicy.suppressedIdentifiers.isDisjoint(with: targetIdentifiers) {
                 Log.info("connectDebug: explicitConnectClearedSuppression peer=\(logicalID)")
             }
+            // A live owner on another route keeps its attempt: it, not this
+            // call, decides between migrating and ignoring (`startSession`).
             attempt = autoConnectPolicy.beginExplicitAttempt(
-                logicalID: logicalID, identifiers: targetIdentifiers)
+                logicalID: logicalID, identifiers: targetIdentifiers,
+                besideOwner: owningSession(for: target)?.attempt)
             persistKnownIdentifiers()
         } else {
             attempt = autoConnectPolicy.beginContinuationAttempt(logicalID: logicalID)
@@ -2789,7 +2825,9 @@ final class SenderController: ObservableObject {
                                customFPS: effectiveCustomFPS,
                                extendShapePreference: extendShapeDefault,
                                streamingPriority: effectiveStreamingPriority,
-                               codecPreference: effectiveCodecPreference)
+                               codecPreference: effectiveCodecPreference,
+                               streamingMode: streamingMode,
+                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let remoteRoute: Bool
         switch target {
@@ -2816,6 +2854,7 @@ final class SenderController: ObservableObject {
             session.wifiServiceName = serviceName(of: result)
         }
         session.invitation = invitation
+        session.isContinuation = continuation != nil && !userInitiated
         session.awaitingLocalApproval = needsApproval
         sender.onInvitationProgress = { [weak self, weak session] progress in
             guard let self, let session, self.owns(session) else { return }
@@ -2876,16 +2915,41 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestVideoEnabled(requested)
         }
+        // A receiver's request changes the Mac-wide setting only when it can
+        // take effect and differs from what's in use; otherwise nothing is
+        // stored and nobody's stream restarts, and the asking device gets the
+        // current state back (issue #142).
         sender.onStreamingProfileRequest = { [weak self, weak session] profile, custom in
             guard let self, let session, self.owns(session) else { return }
-            self.streamingProfile = profile
-            self.customFrameRate = custom
-            self.restartAll()
+            let outcome = StreamingModePolicy.remoteProfileRequest(
+                mode: self.streamingMode,
+                stored: StreamingProfileSetting(profile: self.streamingProfile, customFrameRate: self.customFrameRate),
+                requestedProfile: profile, requestedCustomFrameRate: custom)
+            switch outcome {
+            case .apply(let setting):
+                Log.info("streamingSettings: profile request applied profile=\(setting.profile.rawValue) "
+                    + "customFrameRate=\(setting.customFrameRate.rawValue)")
+                self.streamingProfile = setting.profile
+                self.customFrameRate = setting.customFrameRate
+                self.restartAll()
+            case .rejectedAutomatic, .unchanged:
+                Log.info("streamingSettings: profile request not applied outcome=\(outcome) mode=\(self.streamingMode.rawValue)")
+                session.sender.resendStreamingSettingsState()
+            }
         }
         sender.onStreamingPriorityRequest = { [weak self, weak session] priority in
             guard let self, let session, self.owns(session) else { return }
-            self.streamingPriority = priority
-            self.restartAll()
+            let outcome = StreamingModePolicy.remotePriorityRequest(
+                mode: self.streamingMode, stored: self.streamingPriority, requested: priority)
+            switch outcome {
+            case .apply(let priority):
+                Log.info("streamingSettings: priority request applied priority=\(priority.rawValue)")
+                self.streamingPriority = priority
+                self.restartAll()
+            case .rejectedAutomatic, .unchanged:
+                Log.info("streamingSettings: priority request not applied outcome=\(outcome) mode=\(self.streamingMode.rawValue)")
+                session.sender.resendStreamingSettingsState()
+            }
         }
         sender.onMirrorDisplayRequest = { [weak self, weak session] requestedUUID in
             guard let self, let session, self.owns(session) else { return }
@@ -3086,6 +3150,9 @@ final class SenderController: ObservableObject {
         sessionObservations[ObjectIdentifier(session)] = session.objectWillChange.sink { [weak self] in
             self?.objectWillChange.send()
         }
+        if PendingConnectPolicy.boundsFirstConnect(userInitiated: userInitiated, awaitingWake: awaitingWake) {
+            scheduleFirstConnectDeadline(for: session)
+        }
         // A request that needs this Mac's approval gets its prompt from
         // `onHello`, once the connection proved who is asking — never here,
         // where the only name for the peer is unauthenticated discovery
@@ -3122,6 +3189,28 @@ final class SenderController: ObservableObject {
             }
         }
         return true
+    }
+
+    /// An explicit Connect that never reaches the application hello (a stale
+    /// address, Local Network denied, the receiver app suspended or closed)
+    /// would otherwise redial forever with no row, no status and no Cancel,
+    /// and absorb every later Connect for the device (issue #128). At the
+    /// deadline it fails with its last status on the device's Known Devices
+    /// row, which offers Connect again; auto-connect stays off for it until
+    /// the device's availability changes, as after a decline.
+    private func scheduleFirstConnectDeadline(for session: DeviceSession) {
+        Task { @MainActor [weak self, weak session] in
+            try? await Task.sleep(for: .seconds(PendingConnectPolicy.explicitFirstConnectLimit))
+            guard let self, let session, self.owns(session),
+                  PendingConnectPolicy.shouldGiveUp(authenticated: session.applicationAuthenticated,
+                                                    failed: session.failed) else { return }
+            Log.info("connectDebug: explicitConnectTimedOut session=\(session.id) "
+                + "limit=\(Int(PendingConnectPolicy.explicitFirstConnectLimit))s beforeHello=true")
+            self.autoConnectPolicy.suppress(self.identifiers(for: session))
+            session.status = PendingConnectPolicy.timeoutStatus(name: session.name, lastStatus: session.status)
+            session.failed = true
+            session.sender.stop()
+        }
     }
 
     /// User-initiated disconnect: also opt the device out of auto-connect.
@@ -3372,16 +3461,27 @@ final class SenderController: ObservableObject {
     struct KnownDeviceEntry: Identifiable {
         let id: String   // peerID
         let name: String
+        /// The session holding this row (`KnownDeviceConnection.occupyingSessionID`):
+        /// connected, waiting for approval, or still dialing. Nil when idle or failed.
         let activeSessionID: String?
+        let connection: KnownDeviceConnection
         let resolvedTarget: ConnectionTarget?
         let inputPolicy: PeerInputRequestPolicy
     }
 
     var knownDeviceEntries: [KnownDeviceEntry] {
-        TrustStore.shared.pinnedPeers().map { peer in
-            let active = sessions.first { $0.deviceID == peer.peerID && $0.applicationAuthenticated }
+        let snapshots = sessions.map { session in
+            PendingConnectPolicy.SessionSnapshot(
+                id: session.id, deviceID: session.deviceID, intendedPeerID: session.intendedPeerID,
+                authenticated: session.applicationAuthenticated, admitted: session.invitationAdmitted,
+                failed: session.failed, status: session.status,
+                automatic: session.invitation.initiator == .sender && session.invitation.intent == .automatic)
+        }
+        return TrustStore.shared.pinnedPeers().map { peer in
+            let connection = PendingConnectPolicy.connection(forPeerID: peer.peerID, sessions: snapshots)
+            let active = connection.occupyingSessionID
             return KnownDeviceEntry(
-                id: peer.peerID, name: peer.displayName, activeSessionID: active?.id,
+                id: peer.peerID, name: peer.displayName, activeSessionID: active, connection: connection,
                 resolvedTarget: active == nil ? resolvedTarget(forPeerID: peer.peerID) : nil,
                 inputPolicy: ReceiverInputAuthorizationStore.policy(peerID: peer.peerID))
         }

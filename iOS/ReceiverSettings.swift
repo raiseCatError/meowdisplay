@@ -519,7 +519,10 @@ private struct DisplaySettingsPage: View {
 
     @ViewBuilder
     private var streamingProfileSection: some View {
-        Section("Streaming") {
+        // In Automatic the Mac applies a fixed profile and priority, so these
+        // pickers couldn't change anything (issue #142).
+        let macAutomatic = receiver.macStreamingMode == .automatic
+        Section {
             let profileBinding = Binding<StreamingProfile>(
                 get: { receiver.streamingProfile },
                 set: { receiver.requestStreamingProfile($0, customFrameRate: receiver.customFrameRate) })
@@ -528,6 +531,7 @@ private struct DisplaySettingsPage: View {
                     Text(profile.label).tag(profile)
                 }
             }
+            .disabled(macAutomatic)
             .settingsAnchor("streamingProfile")
             Text(receiver.streamingProfile.explanation).font(.footnote).foregroundStyle(.secondary)
             if receiver.streamingProfile == .custom {
@@ -539,6 +543,7 @@ private struct DisplaySettingsPage: View {
                         Text(frameRate.label).tag(frameRate)
                     }
                 }
+                .disabled(macAutomatic)
             }
             let priorityBinding = Binding<StreamingPriority>(
                 get: { receiver.streamingPriority },
@@ -548,7 +553,14 @@ private struct DisplaySettingsPage: View {
                     Text(priority.label).tag(priority)
                 }
             }
+            .disabled(macAutomatic)
             Text(receiver.streamingPriority.explanation).font(.footnote).foregroundStyle(.secondary)
+        } header: {
+            Text("Streaming")
+        } footer: {
+            if let note = ReceiverStreamingModeNote.text(for: receiver.macStreamingMode) {
+                Text(note)
+            }
         }
     }
 

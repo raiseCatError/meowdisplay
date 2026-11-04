@@ -755,6 +755,11 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published var fps = 0
     @MainActor @Published private(set) var streamingProfile: StreamingProfile = .performance
     @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
+    /// The Mac's Streaming Mode, as it last reported it; nil when the Mac
+    /// doesn't report it (older Macs). In Automatic the Mac applies a fixed
+    /// profile and priority, so the receiver's pickers can't change them
+    /// (issue #142).
+    @MainActor @Published private(set) var macStreamingMode: StreamingMode?
     /// Mac-authoritative Streaming Priority mirror. Default `.auto` matches
     /// the Mac's own default so an old-peer/pre-hello receiver never assumes
     /// a different bounded encode depth than the Mac is actually running.
@@ -2815,9 +2820,8 @@ final class StreamReceiver: ObservableObject {
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
             DispatchQueue.main.async { uiSink.publishConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
-            guard let raw = obj["profile"] as? String,
-                  let profile = StreamingProfile(rawValue: raw) else { return }
-            DispatchQueue.main.async { uiSink.publishStreamingProfile(profile) }
+            guard let update = StreamingProfileStateUpdate(message: obj) else { return }
+            DispatchQueue.main.async { uiSink.publishStreamingProfile(update) }
         case WireMessage.streamingPriorityState:
             guard let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
@@ -5904,6 +5908,8 @@ final class StreamReceiver: ObservableObject {
             // Same reasoning again: only ever known from a live Mac.
             self.confirmedMaxFPS = nil
             self.lastMaxFPSState = nil
+            // Same reasoning: the next Mac reports its own mode.
+            self.macStreamingMode = nil
             // The offer belonged to a specific attempt on a specific
             // connection — any disconnect (deliberate or not) ends it;
             // a fresh one arrives on the Mac's own next attempt, if any.
@@ -5969,8 +5975,10 @@ final class StreamReceiver: ObservableObject {
         mirrorDisplayState = update
     }
 
-    @MainActor func applyStreamingProfileUpdate(_ profile: StreamingProfile) {
-        streamingProfile = profile
+    @MainActor func applyStreamingProfileUpdate(_ update: StreamingProfileStateUpdate) {
+        streamingProfile = update.profile
+        macStreamingMode = update.mode
+        if let rate = update.customFrameRate { customFrameRate = rate }
     }
 
     @MainActor func applyStreamingPriorityUpdate(_ priority: StreamingPriority) {
