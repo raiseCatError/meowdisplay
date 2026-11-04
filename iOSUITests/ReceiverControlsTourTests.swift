@@ -31,7 +31,8 @@ final class ReceiverControlsTourTests: XCTestCase {
     func testTrayControlsAreAccessibilityButtons() {
         XCUIDevice.shared.orientation = .portrait
         enterDemo()
-        for label in ["Command", "Option", "Control", "Shift", "Escape", "Tab", "Toggle Dock", "Settings", "Return"] {
+        for label in ["Command", "Option", "Control", "Shift", "Escape", "Tab", "Toggle Dock", "Settings", "Return",
+                      "Arrow Keys"] {
             XCTAssertTrue(app.buttons[label].firstMatch.exists, "\(label) is not exposed as a button")
         }
         app.buttons["Exit Demo"].tap()
@@ -122,6 +123,55 @@ final class ReceiverControlsTourTests: XCTestCase {
             if hide.waitForExistence(timeout: 3) { hide.tap() }
         }
         app.buttons["Exit Demo"].tap()
+    }
+
+    /// The arrow button (#179) in both orientations: a tap opens the
+    /// keypad, a key sends its arrow, Return leaves it open, a touch on the
+    /// desktop closes it, and a swipe on the button sends one arrow without
+    /// opening it.
+    @MainActor
+    func testArrowKeysOpenSendAndClose() {
+        for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
+            XCUIDevice.shared.orientation = orientation
+            enterDemo()
+            let button = app.buttons["arrowKeysButton"].firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 3), "no arrow button")
+            revealControls(button)
+            XCTAssertEqual(button.value as? String, "Hidden")
+            button.tap()
+            let right = app.buttons["arrowKey.right"].firstMatch
+            XCTAssertTrue(right.waitForExistence(timeout: 2), "a tap did not open the keypad")
+            XCTAssertEqual(button.value as? String, "Shown")
+            for key in ["arrowKey.up", "arrowKey.left", "arrowKey.down"] {
+                XCTAssertTrue(app.buttons[key].firstMatch.isHittable, "\(key) is not reachable")
+            }
+            right.tap()
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '→'")).firstMatch
+                .waitForExistence(timeout: 3), "→ sent nothing")
+            let trayReturn = app.buttons["Return"].firstMatch
+            if trayReturn.isHittable {
+                trayReturn.tap()
+                XCTAssertTrue(right.exists, "Return closed the keypad")
+            }
+            snapshot("arrows-\(orientation == .portrait ? "portrait" : "landscape")-keypad")
+
+            element("Sample Mac desktop").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+            waitForAbsence(right, "a touch on the desktop did not close the keypad")
+
+            revealControls(button)
+            let centre = button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            centre.press(forDuration: 0.05, thenDragTo: centre.withOffset(CGVector(dx: -60, dy: 0)))
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '←'")).firstMatch
+                .waitForExistence(timeout: 3), "a swipe left sent nothing")
+            XCTAssertFalse(right.exists, "a swipe opened the keypad")
+            app.buttons["Exit Demo"].tap()
+        }
+    }
+
+    @MainActor
+    private func waitForAbsence(_ element: XCUIElement, _ message: String) {
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 3), .completed, message)
     }
 
     @MainActor
