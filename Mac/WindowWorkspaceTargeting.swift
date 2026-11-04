@@ -479,6 +479,26 @@ enum WorkspaceKeyboardGate {
     }
 }
 
+/// When a new window listing must resize or re-rate running captures (#138).
+/// Capture size follows the tile's source frame: a window that enters or
+/// leaves full screen, is resized, or moves to a display with another scale
+/// needs a new size, or the pane stays soft (or oversized) until some other
+/// layout change. A tile going off screen or coming back changes its budget.
+/// `WorkspaceWindowCapture.update` skips a stream whose size and rate are
+/// unchanged, so a false positive costs nothing but a check.
+enum WorkspaceCaptureRetune {
+    static func needed(oldFrames: [UInt32: CGRect], newFrames: [UInt32: CGRect],
+                       oldStates: [String: String], newStates: [String: String]) -> Bool {
+        let frameChanged = newFrames.contains { window, frame in
+            oldFrames[window].map { $0 != frame } ?? false
+        }
+        let availabilityChanged = newStates.contains { tile, state in
+            oldStates[tile].map { ($0 == "offscreen") != (state == "offscreen") } ?? false
+        }
+        return frameChanged || availabilityChanged
+    }
+}
+
 /// Per-tile capture budget: the active tile at the stream rate, the rest
 /// reduced as more tiles share one encoder; paused windows cost nothing.
 enum WorkspaceCaptureBudget {
