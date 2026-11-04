@@ -1454,20 +1454,24 @@ private struct AboutSettingsPage: View {
         CatMode.resolveEnabled(requestedEnabled: catModeEnabledStorage, unlocked: catModeUnlocked)
     }
 
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
     var body: some View {
         SettingsForm {
             Section {
-                LabeledContent("Version", value: version)
+                LabeledContent("Version", value: AppVersion.current)
                     .settingsAnchor("version")
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance
                     // before unlock.
                     .contentShape(Rectangle())
                     .onTapGesture { registerCatModeTap() }
+                if let review = AppStore.writeReviewURL {
+                    // Opens the App Store's review page. Nothing is asked for
+                    // in the app and nothing remembers whether you rated.
+                    Link(destination: review) {
+                        Label("Rate MeowDisplay", systemImage: "star")
+                    }
+                    .settingsAnchor("rate")
+                }
                 Link(destination: ProjectLinks.gitHub) {
                     Label("MeowDisplay on GitHub", systemImage: "link")
                 }
