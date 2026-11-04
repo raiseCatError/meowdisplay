@@ -49,7 +49,7 @@ struct StreamingSettingsView: View {
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         Picker("Streaming Priority", selection: $controller.streamingPriority) {
-                            ForEach(StreamingPriority.allCases) { p in
+                            ForEach(StreamingPriority.pickerOrder) { p in
                                 Text(p.label).tag(p)
                             }
                         }

@@ -53,7 +53,7 @@ private struct ReceiverStreamingPage: View {
                     Picker("Streaming Priority", selection: Binding(
                         get: { receiver.streamingPriority },
                         set: { receiver.requestStreamingPriority($0) })) {
-                        ForEach(StreamingPriority.allCases) { priority in
+                        ForEach(StreamingPriority.pickerOrder) { priority in
                             Text(priority.label).tag(priority)
                         }
                     }

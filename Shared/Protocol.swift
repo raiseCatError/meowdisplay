@@ -115,8 +115,8 @@ enum WireProtocol {
     static let maxFPSWireVersion = 15
 
     /// Protocol version that introduced Mac-authoritative Streaming Priority:
-    /// `streamingPriorityState` (Mac -> receiver: confirmed Auto/Prefer FPS/
-    /// Prefer Latency selection) and `streamingPriorityRequest` (receiver ->
+    /// `streamingPriorityState` (Mac -> receiver: confirmed auto/preferFPS/
+    /// preferLatency selection, shown as Balanced/Smoothness/Latency) and `streamingPriorityRequest` (receiver ->
     /// Mac: request a different priority). A receiver MUST NOT send
     /// `streamingPriorityRequest`, and MUST NOT expect
     /// `streamingPriorityState`, when the peer is below this version — the

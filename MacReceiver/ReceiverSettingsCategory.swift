@@ -119,7 +119,7 @@ struct ReceiverSettingsSearchIndex {
                 keywords: ["profile", "performance", "quality", "custom", "frame rate", "fps"], systemImage: "gearshape.2"),
             ReceiverSettingsSearchItem(
                 id: "streaming.priority", title: String(localized: "Streaming Priority"), category: .streaming,
-                keywords: ["priority", "latency", "smoothness"], systemImage: "slider.horizontal.3"),
+                keywords: ["priority", "latency", "balanced", "smoothness", "delay"], systemImage: "slider.horizontal.3"),
             ReceiverSettingsSearchItem(
                 id: "streaming.maxFPS", title: String(localized: "Maximum FPS"), category: .streaming,
                 keywords: ["maximum fps", "max fps", "frame rate", "cap", "limit", "enforce"], systemImage: "speedometer"),
