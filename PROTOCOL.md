@@ -867,6 +867,16 @@ the session, stop redialing). Both are courtesy messages sent best-effort
 right before the receiver closes the connection; senders MUST NOT rely on
 receiving them (a cut cable produces neither).
 
+Over QUIC (2.4), closing the connection discards stream data the sender
+has not read yet, and the end of Video or Audio is not ordered with data
+on Control. A receiver that sends `closing` for a deliberate Disconnect
+therefore SHOULD finish its Control stream after it and leave the
+connection open, Video and Audio included, until the sender closes it,
+for a bounded time (the official receivers wait up to 3 s). A sender ends
+the session on `closing`, which closes the connection. Nothing on the wire
+changes; a receiver that closes at once only risks the sender reading
+the goodbye as a dropped link.
+
 ### 6.2 Sender to receiver
 
 These ride the same connection as video and MUST satisfy the demux rule of
