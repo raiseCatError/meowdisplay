@@ -4,8 +4,11 @@ import XCTest
 /// float a pane, move it, fling it into the edge and back, resize it from a corner, check that
 /// a touch where it overlaps a pane reaches the float only, and dock it back into the layout.
 final class FloatingWindowsDemoTests: XCTestCase {
-    override func setUp() {
+    override func setUpWithError() throws {
         continueAfterFailure = false
+        // Written for a regular-width screen (iPad): a phone shows one float at a time, nearly
+        // full width, so these moves and edge pulls mean something else there.
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .pad, "iPad only")
     }
 
     @MainActor
