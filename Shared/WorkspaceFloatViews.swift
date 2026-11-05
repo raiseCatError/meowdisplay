@@ -209,6 +209,31 @@ struct WorkspaceFloatLayer: View {
         grabber(id, rect: rect, active: active)
         grip(id, rect: rect, corner: .bottomLeading, active: active)
         grip(id, rect: rect, corner: .bottomTrailing, active: active)
+        if model.tileState(id)?.status == .offscreen, !moved { offscreenNotice(id, rect: rect) }
+    }
+
+    /// The float's window isn't on screen on the Mac (minimized, hidden or in another Space).
+    /// Nothing brings it back by itself (Minimize on Mac sticks); Show on Mac does, with control.
+    @ViewBuilder
+    private func offscreenNotice(_ id: String, rect: CGRect) -> some View {
+        let app = model.tileState(id)?.app ?? ""
+        VStack(spacing: 8) {
+            Text("\(app.isEmpty ? "This window" : app) is minimized, hidden or in another Space on the Mac")
+                .font(.callout.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
+            if inputAllowed, !model.missionControlOpen {
+                Button { model.showOnMac(id) } label: {
+                    Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                        .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Color.white.opacity(0.18), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("floatShowOnMac")
+            }
+        }
+        .padding(12)
+        .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: max(rect.width - 24, 120))
+        .position(x: rect.midX, y: rect.midY)
     }
 
     /// The title in a pill on the top edge, part of the outline. Drag it to move (fling to glide,
@@ -450,6 +475,10 @@ struct WorkspaceFloatLayer: View {
             Button { model.removeFloat(id) } label: { Label("Remove from This Device", systemImage: "rectangle.badge.minus") }
         }
         Section {
+            if model.tileState(id)?.status == .offscreen {
+                Button { model.showOnMac(id) } label: { Label("Show on Mac", systemImage: "macwindow") }
+                    .disabled(!inputAllowed)
+            }
             Button { model.minimizeRemoteWindow(id) } label: { Label("Minimize on Mac", systemImage: "minus.rectangle") }
                 .disabled(!inputAllowed)
             Button(role: .destructive) { onClose(id) } label: { Label("Close Window on Mac…", systemImage: "xmark.square") }

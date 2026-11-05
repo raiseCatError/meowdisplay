@@ -434,8 +434,6 @@ struct StagePeekGallery: View {
     @State private var heldAt: CGPoint = .zero
     @State private var menuWindow: CatalogWindowItem?
     @State private var confirmClose: CatalogWindowItem?
-    /// From the whole-screen desktop, floating a window switches this device to Window view: asked first.
-    @State private var confirmFloat: CatalogWindowItem?
     @State private var cardGestureClock = CardGestureClock()
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
@@ -547,13 +545,6 @@ struct StagePeekGallery: View {
             if model.canCloseWindows { Button("Close Window on Mac", role: .destructive) { model.closeWindow(w) } }
             Button("Cancel", role: .cancel) {}
         }
-        .alert("Open in Window View?", isPresented: Binding(get: { confirmFloat != nil }, set: { if !$0 { confirmFloat = nil } }),
-               presenting: confirmFloat) { w in
-            Button("Open") { onFloat?(w); confirmFloat = nil }
-            Button("Cancel", role: .cancel) { confirmFloat = nil }
-        } message: { _ in
-            Text("This device switches from the whole Mac screen to Window view, with the desktop behind the floating window. The Mac doesn't change.")
-        }
         .confirmationDialog(confirmClose.map { String(localized: "Close “\($0.title.isEmpty ? $0.app : $0.title)” on the Mac?") } ?? "",
                             isPresented: Binding(get: { confirmClose != nil }, set: { if !$0 { confirmClose = nil } }),
                             titleVisibility: .visible, presenting: confirmClose) { w in
@@ -564,13 +555,15 @@ struct StagePeekGallery: View {
         }
     }
 
+    /// In Window view, or over the mirrored desktop; never offered in Extend (see `canOpenFloats`).
     private func canFloat(_ w: CatalogWindowItem) -> Bool {
-        onFloat != nil && model.canFloatPanes && !WorkspaceSource.isDisplayKey(w.id)
+        onFloat != nil && model.canOpenFloats && !WorkspaceSource.isDisplayKey(w.id)
     }
 
-    /// Floats `w`; from Mirror or Extend it asks first (that switches this device to Window view).
+    /// Floats `w`. From Mirror it floats over the mirrored desktop straight away (Window view
+    /// starts underneath, as when a window is dropped onto the desktop).
     private func float(_ w: CatalogWindowItem) {
-        if model.windowMode { onFloat?(w) } else { confirmFloat = w }
+        onFloat?(w)
     }
 
     /// The window list in the chosen expanded layout (search results always use the grid).
