@@ -868,6 +868,7 @@ private struct GestureSettingsPage: View {
 private struct ControlSettingsPage: View {
     @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
+    @AppStorage(WorkspaceModel.defaultPlacementKey) private var defaultPlacement = WorkspacePlacement.pane.rawValue
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -963,6 +964,12 @@ private struct ControlSettingsPage: View {
                 }
                 Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
                     .accessibilityIdentifier("bringStripWindowsForward")
+                Picker("Default Window Placement", selection: $defaultPlacement) {
+                    Text("Pane").tag(WorkspacePlacement.pane.rawValue)
+                    Text("Floating").tag(WorkspacePlacement.float.rawValue)
+                }
+                .settingsAnchor("defaultWindowPlacement")
+                .accessibilityIdentifier("defaultWindowPlacementPicker")
             } header: {
                 Text("Window Switcher")
             } footer: {
@@ -972,7 +979,8 @@ private struct ControlSettingsPage: View {
                         ? " " + (controlStore.preferences.stagePeekDock == .compact
                                  ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
                                  : String(localized: "Normal uses the whole edge.")) : "")
-                     + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane."))
+                     + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")
+                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, shake it to switch between the two, or release it on Float."))
             }
             Section {
                 Picker("Control Profile", selection: Binding(

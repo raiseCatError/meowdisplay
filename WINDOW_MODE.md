@@ -31,6 +31,33 @@ removed, and the arrangement comes back when the space returns.
 | Drag an app in | In Stage Peek, press and hold an app in the carousel or in search results, then drag it onto a pane: one window goes straight in; with several, pick which; with none, you're offered to open it on the Mac (needs control) and its first new window lands there. Nothing opens just because a drag began | Same | — |
 | Resize | Arrange Tiles, then drag the grips between tiles | Same | Same |
 
+### Floating windows (iPhone and iPad)
+
+A window can also float over the panes instead of taking a place in the
+layout. Floats work over panes and over Full Desktop alike; there is no
+separate mode. Nothing about a float changes the Mac: the real window is not
+moved, resized or brought forward.
+
+| | iPhone / iPad |
+| --- | --- |
+| Float a window | In Stage Peek, hold a window's card and choose **Open as Floating Window** (in Mirror it floats over the mirrored desktop straight away; not offered in Extend). A pane's or tab's menu has **Float This Pane** / **Float This Tab**. While dragging a window or a pane title, **shake it** to switch between **Pane** and **Floating** (the chip at the top says which), or release it on **Float** beside Cancel. Settings → Controls → **Default Window Placement** (Pane or Floating) decides where windows you open from Stage Peek go; windows already open stay put |
+| Move | Drag the title pill on its top edge, or the short bar under it. Let go slowly and it stays; let go faster and it glides on and slows down. Touch it while it glides to catch it |
+| Tuck it away | Fling it toward the left or right edge, or pull it more than halfway past one, or choose Tuck in its ⋯ menu. A handle stays on that edge: tap it, or pull it inward, to bring the float back where it was. Slide a handle along the edge to move it. Several tucked floats line up; when they don't fit they share one handle with a menu. A fast throw across the middle never tucks. Tucking only hides it here: the Mac window stays open |
+| Resize | Drag the curved grip at either lower corner. The window keeps its shape (no stretching). With a pointer, the grips show a resize pointer |
+| Front and focus | Touch a float to bring it to the front and type into it. Input only reaches the window drawn on top at that point, never a pane a float covers |
+| Back into the layout | ⋯ → **Add to Layout**, or shake while dragging its title and drop it on a pane: on a pane's middle it becomes a tab there (it never replaces the window that was there), at an edge it becomes a new pane |
+| Fullscreen | Double-tap the title, or ⋯ → **Fullscreen on This Device**. Exiting brings the float back exactly where it was |
+| Other options (⋯) | Size (Small, Medium, Large), Fill/Show Whole Window, Rotate, Reset View, Change Window…, **Remove from This Device** (the Mac window stays open; Undo brings it back), and with control **Minimize on Mac** (it stays minimized: the float says so and offers **Show on Mac**) and **Close Window on Mac…** (asks first). Moving, resizing, tucking, docking or removing a float never minimizes or closes its Mac window |
+| VoiceOver | Each float is an element with actions: Bring to Front, Move Left/Right/Up/Down, Make Larger/Smaller, Tuck to Left/Right Edge, Add to Layout, Fullscreen on This Device, Remove from This Device. Tucked handles are buttons that bring their float back |
+
+On iPhone (and other compact screens) one float shows at a time; opening or
+restoring another tucks the one before. Floats stay where you left them
+through rotation, reconnects and saved layouts (a layout saved with floats
+opens on older versions of the app with the panes only). A Mac that doesn't
+offer floating windows (an older MeowDisplay) keeps them tucked until you
+connect to one that does. While a float is tucked, the Mac stops capturing
+that window.
+
 **Fullscreen on This Device** temporarily shows only the selected pane on the receiving device; **Exit Fullscreen** restores the previous pane arrangement. This differs from switching to **Mirror** or choosing **Full Desktop** in Stage Peek, which changes the content being viewed.
 
 Removing a tile never closes the Mac window. **Close Window on Mac…** is

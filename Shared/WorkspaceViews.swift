@@ -116,13 +116,13 @@ struct WorkspaceChromeView: View {
                     })
                     .position(x: picture.midX, y: picture.midY)
                     .allowsHitTesting(false)
-                ForEach(Array(frames.tiles.keys).sorted(), id: \.self) { id in
+                ForEach(Array(frames.tiles.keys).filter { !frames.isFloat($0) }.sorted(), id: \.self) { id in
                     if let rect = frames.tiles[id], let tile = model.layout.tiles[id] {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                if let id = model.active, let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
-                   multi || model.localFullscreen == id {
+                if let id = model.active, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
+                   multi || model.localFullscreen == id, !coveredByFloat(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 44), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     // While all its tabs are shown and leave too little room, the bar steps aside.
                     let e = unsafeInsets(of: rect)
@@ -135,6 +135,13 @@ struct WorkspaceChromeView: View {
                         PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
                     }
                 }
+                #if os(iOS)
+                // Floating panes over the arrangement, back to front, and tucked floats' edge handles.
+                if !model.arranging {
+                    WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
+                                        onClose: { confirmClose = $0 })
+                }
+                #endif
                 WorkspaceDropOverlay(model: model, picture: picture)
                 if model.arranging {
                     arrangeControls(frames)
@@ -250,11 +257,21 @@ struct WorkspaceChromeView: View {
                 .accessibilityIdentifier("workspacePane")
                 .accessibilityAddTraits(active ? .isSelected : [])
                 .accessibilityAction { model.focus(id) }
+            // Where a floating pane covers this pane's titles, they step aside: touches there go to the float.
+            let covered = coveredByFloat(CGRect(x: rect.minX, y: rect.minY, width: min(rect.width, 260), height: 44), frames)
             tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
                 .padding(unsafeInsets(of: rect))
+                .opacity(covered ? 0 : 1)
+                .allowsHitTesting(!covered)
+                .accessibilityHidden(covered)
         }
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
+    }
+
+    /// Whether a shown floating pane overlaps `r` (on screen).
+    private func coveredByFloat(_ r: CGRect, _ frames: WorkspaceFrames) -> Bool {
+        frames.floats.contains { frames.tiles[$0].map { $0.onScreen(picture).intersects(r) } ?? false }
     }
 
     /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
@@ -571,6 +588,11 @@ struct WorkspaceChromeView: View {
         .accessibilityAction(named: model.localFullscreen == id ? "Exit Fullscreen" : "Fullscreen on This Device") {
             model.toggleLocalFullscreen(id)
         }
+        #if os(iOS)
+        .accessibilityAction(named: tab == nil ? "Float This Pane" : "Float This Tab") {
+            if model.canFloat(pane: id, tab: tab) { model.floatPane(id, tab: tab) }
+        }
+        #endif
     }
 
     // MARK: The label menu
@@ -616,6 +638,14 @@ struct WorkspaceChromeView: View {
             }
             menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
             menuRow(isDesktop ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            #if os(iOS)
+            if model.canFloat(pane: m.tile, tab: m.tab) {
+                menuRow(m.tab == nil ? "Float This Pane" : "Float This Tab", "macwindow.on.rectangle",
+                        hint: "Shows it as a floating window over the others. Drag its title to move it.") {
+                    model.floatPane(m.tile, tab: m.tab)
+                }
+            }
+            #endif
             menuRow("Arrange Panes", "rectangle.3.group") { model.arranging = true }
             if let tab = m.tab {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
@@ -1230,9 +1260,13 @@ struct WorkspaceDropOverlay: View {
             if let d = model.drag {
                 let target = model.dropTarget(forGlobal: d.location)
                 if let target { preview(target, item: d.item) }
+                if d.placement == .float, let f = model.floatDropPreview(forGlobal: d.location) { floatPreview(f) }
+                if model.canPlace(d.item, .float) || d.placement == .float { placementChip(d) }
                 let removable = model.canDropToRemove
+                let floatable = model.canDropToFloat
                 HStack(spacing: 12) {
-                    cancelZone(over: model.overCancelZone(d.location), short: removable)
+                    cancelZone(over: model.overCancelZone(d.location), short: removable || floatable)
+                    if floatable { floatZone(over: model.overFloatZone(d.location)) }
                     if removable { removeZone(over: model.overRemoveZone(d.location)) }
                 }
                 .padding(.horizontal, 12)
@@ -1246,7 +1280,9 @@ struct WorkspaceDropOverlay: View {
             if !k.isEmpty, k != lastKey { Self.tick() }
             lastKey = k
         }
-        .onChange(of: model.drag == nil) { ended in if ended { model.cancelZoneGlobal = .zero; model.removeZoneGlobal = .zero } }
+        .onChange(of: model.drag == nil) { ended in
+            if ended { model.cancelZoneGlobal = .zero; model.removeZoneGlobal = .zero; model.floatZoneGlobal = .zero }
+        }
     }
 
     /// Changes whenever the landing under the finger changes (one haptic tick each).
@@ -1254,6 +1290,8 @@ struct WorkspaceDropOverlay: View {
         guard let d = model.drag else { return "" }
         if model.overCancelZone(d.location) { return "cancel" }
         if model.overRemoveZone(d.location) { return "remove" }
+        if model.overFloatZone(d.location) { return "float" }
+        if d.placement == .float { return "floating" }
         return model.dropTarget(forGlobal: d.location).map { "\($0)" } ?? ""
     }
 
@@ -1283,6 +1321,49 @@ struct WorkspaceDropOverlay: View {
             .position(x: r.midX, y: r.midY)
             .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
             .accessibilityHidden(true)
+    }
+
+    /// Floating placement: where the window will float, at its own shape. Dashed, unfilled, so it
+    /// never looks like a pane drop (a filled blue area).
+    private func floatPreview(_ f: WorkspaceRect) -> some View {
+        let r = f.onScreen(picture)
+        return RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.9), style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.18)))
+            .overlay(Text("Float Here").font(.caption.weight(.semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(workspaceChip, in: Capsule()))
+            .frame(width: r.width, height: r.height)
+            .position(x: r.midX, y: r.midY)
+            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
+            .accessibilityHidden(true)
+    }
+
+    /// Pane or Floating: what a release does now. A shake while holding switches it.
+    private func placementChip(_ d: WorkspaceDrag) -> some View {
+        let floating = d.placement == .float
+        return HStack(spacing: 6) {
+            Image(systemName: floating ? "macwindow.on.rectangle" : "rectangle.split.2x1").accessibilityHidden(true)
+            Text(floating ? "Floating" : "Pane").fontWeight(.semibold)
+            Text("· Shake to switch").foregroundStyle(.white.opacity(0.7))
+        }
+        .font(.caption)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(Capsule().fill(floating ? Color(white: 0.16, opacity: 0.92) : workspaceChip))
+        .overlay(Capsule().stroke(Color.white.opacity(floating ? 0.7 : 0.3), lineWidth: 1))
+        .position(x: picture.midX, y: picture.minY + 34)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: floating)
+        .accessibilityHidden(true)
+    }
+
+    /// Release here to float the window instead (no shake needed).
+    private func floatZone(over: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Float") : String(localized: "Float"),
+                 symbol: "macwindow.on.rectangle", over: over,
+                 fill: over ? Color(white: 0.42, opacity: 0.92) : Color.black.opacity(0.62)) {
+            model.floatZoneGlobal = $0
+        }
     }
 
     /// `short`: beside Remove from Layout, so both fit a narrow phone.

@@ -420,6 +420,8 @@ struct StagePeekGallery: View {
     var onEmptyTap: () -> Void = {}
     /// The gallery's visible height (Spatial Overview pages fill it).
     var height: CGFloat = 600
+    /// Open as Floating Window (nil: not offered).
+    var onFloat: ((CatalogWindowItem) -> Void)?
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -538,6 +540,7 @@ struct StagePeekGallery: View {
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
                             titleVisibility: .visible, presenting: menuWindow) { w in
             Button("Show in Pane") { onWindow(w) }
+            if canFloat(w) { Button("Open as Floating Window") { float(w) } }
             if model.canAddTile, !tiled.contains(w.id) { Button("Add as New Pane") { onAddTile(w) } }
             if model.canCloseWindows { Button("Close Window on Mac", role: .destructive) { model.closeWindow(w) } }
             Button("Cancel", role: .cancel) {}
@@ -550,6 +553,17 @@ struct StagePeekGallery: View {
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
+    }
+
+    /// In Window view, or over the mirrored desktop; never offered in Extend (see `canOpenFloats`).
+    private func canFloat(_ w: CatalogWindowItem) -> Bool {
+        onFloat != nil && model.canOpenFloats && !WorkspaceSource.isDisplayKey(w.id)
+    }
+
+    /// Floats `w`. From Mirror it floats over the mirrored desktop straight away (Window view
+    /// starts underneath, as when a window is dropped onto the desktop).
+    private func float(_ w: CatalogWindowItem) {
+        onFloat?(w)
     }
 
     /// The window list in the chosen expanded layout (search results always use the grid).
@@ -617,6 +631,7 @@ struct StagePeekGallery: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onWindow(w) }
         .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+        .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
         .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
         .accessibilityIdentifier("spatialWindowCard")
     }
@@ -643,6 +658,7 @@ struct StagePeekGallery: View {
                 .accessibilityAction { onWindow(w) }
                 .accessibilityAction(named: "Show in Pane") { onWindow(w) }
                 .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+                .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
                 .accessibilityAction(named: "Close Window") { if closable { confirmClose = w } }
                 .scaleEffect(held == w.id ? 1.04 : 1)
                 .overlay(cardGestures(w, onTap: { onWindow(w) }, swipe: closable && !closing))
