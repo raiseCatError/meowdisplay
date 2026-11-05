@@ -127,6 +127,9 @@ extension DemoModeSmokeTests {
         openControlsSettings(app)
         let stagePeek = app.buttons["Stage Peek"].firstMatch
         let rail = app.buttons["Rail"].firstMatch
+        // Lists load rows only as they scroll into view, and the Arrow Keys
+        // rows in Control Tray push Window Switcher below the fold on a phone.
+        for _ in 0..<5 where !stagePeek.waitForExistence(timeout: 1) { app.swipeUp(velocity: .slow) }
         XCTAssertTrue(stagePeek.waitForExistence(timeout: 5))
         for _ in 0..<6 where !rail.isHittable { app.swipeUp() }
         // The default itself is unit-tested (StagePeekTests); a run that failed
@@ -144,6 +147,7 @@ extension DemoModeSmokeTests {
         app.launch()
         openControlsSettings(app)
         let railAfterRelaunch = app.buttons["Rail"].firstMatch
+        for _ in 0..<5 where !railAfterRelaunch.waitForExistence(timeout: 1) { app.swipeUp(velocity: .slow) }
         XCTAssertTrue(railAfterRelaunch.waitForExistence(timeout: 5))
         for _ in 0..<6 where !railAfterRelaunch.isHittable { app.swipeUp() }
         XCTAssertTrue(becomesSelected(railAfterRelaunch, within: 10), "Rail is remembered")
