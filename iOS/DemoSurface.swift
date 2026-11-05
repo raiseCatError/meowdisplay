@@ -105,7 +105,10 @@ struct DemoReceiverScreen: View {
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
-                    reservedRegions: bannerFrame.map { [ControlReservedRegion(kind: .occlusion, frame: $0)] } ?? [],
+                    // The same fold and camera regions as a live session
+                    // (an iPhone Duo half open), plus the demo banner.
+                    reservedRegions: ControlReservedRegion.active(in: geo)
+                        + (bannerFrame.map { [ControlReservedRegion(kind: .occlusion, frame: $0)] } ?? []),
                     haptics: haptics,
                     onOccupiedFramesChange: { _ in },
                     onCanvasChange: { padCanvas = $0 },
