@@ -140,6 +140,7 @@ enum MobileSettingsSearchIndex {
         .init("showTray", String(localized: "Show Control Tray"), .controls, keywords: ["controls", "hide"]),
         .init("autoHide", String(localized: "Auto-hide Control Trays"), .controls, keywords: ["auto hide", "fade"]),
         .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
+        .init("defaultWindowPlacement", String(localized: "Default Window Placement"), .controls, keywords: ["floating", "float", "floating window", "pane", "dock", "shake", "window view", "placement"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("controlProfile", String(localized: "Control Profile"), .controls, keywords: ["active profile", "shortcuts", "palette", "modifier"]),
         .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),

@@ -23,6 +23,9 @@ struct DemoReceiverScreen: View {
     @State private var hintGeneration = 0
     @State private var feedbackVisible = false
     @State private var showGuide = false
+    /// Window view with sample windows (floating windows, tucking, docking), instead of the desktop.
+    @State private var windowView = false
+    @StateObject private var windowDemo = DemoWindowWorkspace(defaults: DemoSession.preferenceDefaults(demoActive: true))
 
     init(demo: DemoSession, store: ReceiverControlStore, showSettings: Binding<Bool>,
          keyboardActive: Binding<Bool>, haptics: ReceiverHaptics, onExit: @escaping () -> Void) {
@@ -53,6 +56,10 @@ struct DemoReceiverScreen: View {
             let targetSize = desktopSize(receiverSize: geo.size)
             ZStack(alignment: .topLeading) {
                 Color(white: 0.03).ignoresSafeArea()
+                if windowView {
+                    DemoWindowModeView(workspace: windowDemo, model: windowDemo.model, area: area, inputAllowed: demo.inputAllowed,
+                                       onShowDesktop: { withAnimation(.easeInOut(duration: 0.2)) { windowView = false } })
+                } else {
                 if demo.videoEnabled {
                     desktopLayer(base: base)
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -76,6 +83,7 @@ struct DemoReceiverScreen: View {
                                         : "Direct Touch. Touch the desktop where you want to click."))
                 .accessibilityAction(named: Text("Click at pointer")) {
                     tapAtPointer(base: base)
+                }
                 }
                 if !demo.videoEnabled {
                     videoOffActions
@@ -275,6 +283,18 @@ struct DemoReceiverScreen: View {
                 // The banner is one fixed-height row over the desktop; past
                 // this size its text overflowed and covered Exit Demo.
                 .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            if !windowView {
+                // Window view's own toolbar has Show Desktop (here it would cover the panes' titles).
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { windowView = true }
+                } label: {
+                    Label("Show Window View", systemImage: "macwindow.on.rectangle").font(.footnote.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .environment(\.colorScheme, .dark)
+                .accessibilityIdentifier("demoWindowViewToggle")
+            }
             if let hint {
                 DemoHintChip(hint: hint)
                     .transition(.opacity.combined(with: .move(edge: .top)))

@@ -162,7 +162,7 @@ struct StagePeekOverlay: View {
                     .zIndex(60)
             }
             if !machine.ids.isEmpty, !model.overviewOpen, !launchpad,
-               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
+               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding + floatHandles) {
                 stripView(strip, cards: cards)
             }
         }
@@ -463,7 +463,14 @@ struct StagePeekOverlay: View {
                          onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
                          // A flick toward the edge (off the cards) compacts the gallery again.
                          edge: edge, onCompact: { animate { machine.compact() } },
-                         onEmptyTap: { searchFocused = false; finish(machine.dismiss()) }, height: height)
+                         onEmptyTap: { searchFocused = false; finish(machine.dismiss()) }, height: height,
+                         onFloat: { w in
+                             haptics.play(.select, enabled: hapticsEnabled)
+                             searchFocused = false
+                             animate { machine.cancelAll() }
+                             model.stagePeekOpen = false
+                             model.openFloating(w)
+                         })
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)
@@ -692,6 +699,11 @@ struct StagePeekOverlay: View {
     }
 
     private func toolbarX(_ column: CGFloat) -> CGFloat { min(max(column, safe.minX + 130), safe.maxX - 130) }
+
+    /// Tucked floating windows' edge handles here: the hold strip keeps clear of them.
+    private var floatHandles: [CGRect] {
+        model.floatHandlesGlobal.map { $0.offsetBy(dx: -overlayOrigin.x, dy: -overlayOrigin.y) }
+    }
 
     /// Bottom of the stack's column, lifted above any control under it (the
     /// settings button, a tray): found on iPhone, where they collided.

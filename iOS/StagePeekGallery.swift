@@ -420,6 +420,8 @@ struct StagePeekGallery: View {
     var onEmptyTap: () -> Void = {}
     /// The gallery's visible height (Spatial Overview pages fill it).
     var height: CGFloat = 600
+    /// Open as Floating Window (nil: not offered).
+    var onFloat: ((CatalogWindowItem) -> Void)?
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -432,6 +434,8 @@ struct StagePeekGallery: View {
     @State private var heldAt: CGPoint = .zero
     @State private var menuWindow: CatalogWindowItem?
     @State private var confirmClose: CatalogWindowItem?
+    /// From the whole-screen desktop, floating a window switches this device to Window view: asked first.
+    @State private var confirmFloat: CatalogWindowItem?
     @State private var cardGestureClock = CardGestureClock()
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
@@ -538,9 +542,17 @@ struct StagePeekGallery: View {
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
                             titleVisibility: .visible, presenting: menuWindow) { w in
             Button("Show in Pane") { onWindow(w) }
+            if canFloat(w) { Button("Open as Floating Window") { float(w) } }
             if model.canAddTile, !tiled.contains(w.id) { Button("Add as New Pane") { onAddTile(w) } }
             if model.canCloseWindows { Button("Close Window on Mac", role: .destructive) { model.closeWindow(w) } }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert("Open in Window View?", isPresented: Binding(get: { confirmFloat != nil }, set: { if !$0 { confirmFloat = nil } }),
+               presenting: confirmFloat) { w in
+            Button("Open") { onFloat?(w); confirmFloat = nil }
+            Button("Cancel", role: .cancel) { confirmFloat = nil }
+        } message: { _ in
+            Text("This device switches from the whole Mac screen to Window view, with the desktop behind the floating window. The Mac doesn't change.")
         }
         .confirmationDialog(confirmClose.map { String(localized: "Close “\($0.title.isEmpty ? $0.app : $0.title)” on the Mac?") } ?? "",
                             isPresented: Binding(get: { confirmClose != nil }, set: { if !$0 { confirmClose = nil } }),
@@ -550,6 +562,15 @@ struct StagePeekGallery: View {
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
+    }
+
+    private func canFloat(_ w: CatalogWindowItem) -> Bool {
+        onFloat != nil && model.canFloatPanes && !WorkspaceSource.isDisplayKey(w.id)
+    }
+
+    /// Floats `w`; from Mirror or Extend it asks first (that switches this device to Window view).
+    private func float(_ w: CatalogWindowItem) {
+        if model.windowMode { onFloat?(w) } else { confirmFloat = w }
     }
 
     /// The window list in the chosen expanded layout (search results always use the grid).
@@ -617,6 +638,7 @@ struct StagePeekGallery: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onWindow(w) }
         .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+        .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
         .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
         .accessibilityIdentifier("spatialWindowCard")
     }
@@ -643,6 +665,7 @@ struct StagePeekGallery: View {
                 .accessibilityAction { onWindow(w) }
                 .accessibilityAction(named: "Show in Pane") { onWindow(w) }
                 .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+                .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
                 .accessibilityAction(named: "Close Window") { if closable { confirmClose = w } }
                 .scaleEffect(held == w.id ? 1.04 : 1)
                 .overlay(cardGestures(w, onTap: { onWindow(w) }, swipe: closable && !closing))
