@@ -85,6 +85,20 @@ within limits; nine windows never mean nine streams to decode on a phone.
 A tiny display stream keeps the Mac's audio and the usual capture lifecycle
 (pause, Video Off, recovery).
 
+**Floating panes** are panes drawn over the arrangement instead of in it
+(PROTOCOL.md §6.10, `windowFloat`). They use the same capture, compositor
+and encode: the compositor draws the tiled panes, then the floats back to
+front, and input goes to whatever is drawn on top at that point, so a pane
+a float covers can't be clicked or hovered through it. Moving, resizing,
+raising or docking a float keeps its window's capture running (no restart,
+no sharpness change). A pane almost entirely covered by floats is captured
+at 2 fps; a visible float keeps at least 15 fps. A float tucked to the edge
+is local: it isn't sent, so its capture stops until it comes back, and so
+does its app's sound unless another pane shows that app (Window view plays
+the sound of the apps on screen). The Mac
+accepts floats only from a receiver that says it can show them; older
+receivers, including Android 2.0, see Window view exactly as before.
+
 Windows are listed by identity and metadata, not by position: MeowDisplay's
 own windows, system UI, password prompts, the Stage Manager strip, every
 app's menu-bar backdrop and untitled off-screen helpers are left out; titled

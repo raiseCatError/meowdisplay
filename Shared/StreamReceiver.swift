@@ -3127,8 +3127,9 @@ final class StreamReceiver: ObservableObject {
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
-            // This receiver can arrange Mac windows (PROTOCOL.md 6.10); older Macs ignore it.
-            WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
+            // This receiver can arrange Mac windows, floating panes included (PROTOCOL.md 6.10):
+            // `ws` 2. Every Mac that knows Window mode accepts 1 or more; older Macs ignore it.
+            WindowWorkspaceWire.helloField: WindowWorkspaceWire.floatVersion,
             // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
             ControlChunkWire.helloField: ControlChunkWire.version,
             // This receiver takes the Mac's Tailscale addresses (PROTOCOL.md 6.17).

@@ -392,12 +392,24 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// Release every held key/button on the Mac (source changed under it).
     var releaseHeldInput: (() -> Void)?
 
-    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService) {
+    /// The receiver speaks floating panes (`hello.ws` >= 2) and this Mac offers them: a tile
+    /// with `layer: "float"` may overlap. Fixed for the session.
+    let allowFloats: Bool
+
+    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false) {
         self.hostID = hostID
         self.browser = browser
         self.canvas = canvas
         self.streamFPS = max(fps, 1)
+        self.allowFloats = allowFloats
         targeting.canvas = canvas
+    }
+
+    /// The capture rate for `a`: the shared budget, lower for a pane floats hide, at least the
+    /// float floor for a visible float.
+    private func budgetFPS(_ a: WorkspaceTileAssignment, active: String?, coverage: [String: Double], available: Bool) -> Int {
+        WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count, streamFPS: streamFPS,
+                                   available: available, covered: coverage[a.tileID] ?? 0, isFloat: a.isFloat)
     }
 
     // MARK: Lifecycle
@@ -695,7 +707,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let previous = Dictionary(assignments.map { ($0.tileID, $0) }, uniquingKeysWith: { a, _ in a })
         let displayFrames = browser.displayFrames()
         let result = WorkspaceRequestValidator.validate(tiles: raw, catalog: catalog, hostID: hostID, canvasPixels: canvas,
-                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames)
+                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames,
+                                                        allowFloats: allowFloats)
         assignments = result.assignments
         rejected = result.rejected
         let sources = WindowAudioSources.of(assignments)
@@ -734,6 +747,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         let now = ProcessInfo.processInfo.systemUptime
         for a in assignments where captures[a.tileID] == nil && tileState[a.tileID] != "closed" {
             if let r = recovery[a.tileID], r.generation != a.assignmentGeneration { recovery[a.tileID] = nil }
@@ -799,8 +813,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             captures[a.tileID] = capture
             setState(a.tileID, "waiting")
             let size = captureSize(for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
             Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) srcPt=\(sourceFrame(a).map { "\(Int($0.width))x\(Int($0.height))" } ?? "?") canvas=\(Int(canvas.width))x\(Int(canvas.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
             Task { [weak self] in
                 do {
@@ -850,6 +863,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments where a.displayID == nil && sheetCaptures[a.tileID] == nil && captures[a.tileID] != nil {
             guard let sheet = snapshot?.sheets[a.windowID]?.first, let window = sheet.scWindow,
                   !sheetFailed.contains(sheet.windowID), Self.reserveBudget() else { continue }
@@ -865,8 +879,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
             sheetCaptures[a.tileID] = capture
             let size = sheetCaptureSize(sheet.frame.size, for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
             let sheetID = sheet.windowID
             Task { [weak self] in
                 do {
@@ -902,10 +915,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     private func retuneCaptures() {
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments {
             guard let capture = captures[a.tileID] else { continue }
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: tileState[a.tileID] != "offscreen")
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
             Task { [weak self] in
                 if await capture.update(size: size, fps: max(fps, 1)) { self?.queue.async { self?.reconfigurations += 1 } }
@@ -1093,6 +1106,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             ]
             if let r = recovery[a.tileID], r.attempts > 0 { tile["attempt"] = r.attempts }
             if entry?.inStageStrip == true { tile["strip"] = true }
+            // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
+            if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"

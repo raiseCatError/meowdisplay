@@ -215,9 +215,15 @@ enum WireProtocol {
 /// Window workspaces (PROTOCOL.md 6.10): the receiver's hello field `ws`
 /// (its workspace version) and the Mac's welcome feature that turn them on.
 enum WindowWorkspaceWire {
+    /// The lowest `ws` that turns Window mode on (every receiver since 1.x sends at least this).
     static let version = 1
+    /// `ws` 2: the receiver understands floating panes. Sent by Apple receivers since the
+    /// floating-pane release; the Mac still accepts 1 exactly as before (Android 2.0 sends 1).
+    static let floatVersion = 2
     static let helloField = "ws"
     static let welcomeFeature = "window"
+    /// The Mac draws floating panes (`layer: "float"` tiles that may overlap, ordered by `z`).
+    static let floatFeature = "windowFloat"
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }

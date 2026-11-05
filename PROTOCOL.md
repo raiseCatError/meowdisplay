@@ -1375,7 +1375,7 @@ can never bypass the receiver's approval preference.
 ### 6.10 Window workspaces (`hello.ws`, `welcome.features`)
 
 Additive and capability-gated: no `pv` bump. A receiver that can arrange
-Mac windows sends `hello.ws` (its workspace version, currently `1`). A Mac
+Mac windows sends `hello.ws` (its workspace version: `1`, or `2` with floating panes). A Mac
 that offers it lists `"window"` in `welcome.features` (array of strings;
 the Mac's user can turn it off in Displays settings). Neither side sends
 any message below unless both are present; an older peer never sees them.
@@ -1508,6 +1508,45 @@ canvas isn't the Mac display's shape, so a receiver sizes the sprite as
 `cursorImg.pw × kx` by `cursorImg.ph × ky` of the picture and turns it by
 `r` about its hotspot, instead of using `nw`/`nh` (which would stretch it).
 Receivers may bound the drawn size so it stays visible; its shape is kept.
+
+**Floating panes** (`hello.ws` 2, welcome feature `windowFloat`). Additive:
+no `pv` bump and no new message. A receiver that can show panes floating over
+the others sends `hello.ws: 2` (a version-1 Mac reads any `ws` as "speaks
+workspaces"); a Mac that accepts them adds `"windowFloat"` to
+`welcome.features` next to `"window"` (only while Window mode is allowed).
+Only when both are present may a `workspaceRequest` tile carry
+`layer: "float"` and `z` (an integer, 0 at the back). Everything else about
+the tile is unchanged: the same `id`, `host`, `window`/`gen`, `x y w h`
+inside the canvas, minimum size, `rotation`, `fit` and `zoom`, and the same
+9-tile limit (floats count). Tiled panes still may not overlap each other;
+a float may overlap anything. A Mac that hasn't seen `ws` 2 ignores `layer`
+and `z` and validates exactly as before (an overlapping float is rejected
+as `overlap`), so a ws-1 receiver such as Android 2.0 sees no change, and a
+receiver must not send `layer` to a Mac without `windowFloat`.
+
+The Mac draws the tiled panes first, then the floats back to front by `z`
+(ties in request order), and maps input the same way round: a point goes to
+the frontmost float that contains it, else to the tiled pane there. A pane a
+float covers is never reached through the float, and the Mac's cursor isn't
+drawn on a float where it is over a covered pane's window. A tile keeps its
+capture (no restart) while it moves, resizes, changes `z` or switches
+between tiled and floating, as long as its `id` and window stay the same.
+A tiled pane at least 90% covered by floats is captured at 2 fps; a visible
+float is captured at no less than 15 fps. `workspaceState` echoes
+`layer: "float"` and `z` on the floats it accepted. A float the receiver has
+tucked to an edge or hidden is simply left out of the request: hiding is
+local, and nothing here closes, moves or activates a Mac window
+(`windowAction` and `windowClose` stay limited to the receiver's explicit,
+confirmed menu items). Floats are panes: an admitted session, the input
+grant and View Only apply to them unchanged.
+
+Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
+`schema` 3 and byte-identical while a layout has no floats. A layout with
+floats is `schema` 4 and adds `floats: [{tile, x, y, w, h, tuck?,
+offset?}]` (back to front; `tuck` is `left` or `right` with `offset` the
+handle's height 0–1). Its `tree` and `tiles` are as before, so a reader that
+ignores `floats` keeps the tiled arrangement and drops the floating tiles
+(nothing in its tree refers to them).
 
 ### 6.11 Text caret (`keyboardState` / `textCaret`)
 
@@ -2009,6 +2048,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
+| 22 (additive) | Floating panes (section 6.10): `hello.ws` 2, `welcome.features: ["windowFloat"]`, `workspaceRequest`/`workspaceState` tile `layer: "float"` and `z`, saved-layout `schema` 4 `floats`; gated by capability, no bump, ws-1 receivers unchanged |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 
