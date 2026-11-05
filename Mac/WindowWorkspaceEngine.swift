@@ -442,6 +442,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var deferredRaise = WorkspaceDeferredRaise()
     private var keyboardCheckedAt: TimeInterval = 0
     private var topmostCache: [UInt32: (at: TimeInterval, rect: CGRect, ok: Bool)] = [:]
+    /// Display-wide surfaces already logged (`noteDisplayWideSurface`), under `inputLock`.
+    private var loggedSurfaces: Set<String> = []
 
     /// A composited frame (engine queue). The sender hops to its own queue.
     var deliverFrame: ((CVPixelBuffer) -> Void)?
@@ -1523,35 +1525,72 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// Is `windowID` the frontmost window at `point`? Windows above it that
-    /// contain the point (other apps, panels, menus, the Dock) mean no.
+    /// contain the point (other apps, panels, menus, the Dock strip) mean no.
+    /// See `WorkspaceInputCover` for the display-wide surfaces the window server decides.
     private func isTopmost(_ windowID: UInt32, at point: CGPoint, cached: Bool) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         if cached, let c = topmostCache[windowID], now - c.at < 0.1, c.rect.contains(point) { return c.ok }
-        guard let above = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
-        var covering: CGRect?
-        let ownSheets = sheetCovers[windowID] ?? []
-        for info in above {
-            // The window's own sheet is part of it: a press on "Don't Save" goes through.
-            if let n = info[kCGWindowNumber as String] as? UInt32, ownSheets.contains(n) { continue }
-            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict),
-                  ((info[kCGWindowAlpha as String] as? Double) ?? 1) > 0.01,
-                  (info[kCGWindowOwnerName as String] as? String) != "Window Server" else { continue }
-            if bounds.contains(point) { covering = bounds; break }
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
+        let above = info.compactMap { w -> WorkspaceInputCover.Window? in
+            guard let n = w[kCGWindowNumber as String] as? UInt32,
+                  let boundsDict = w[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict) else { return nil }
+            return WorkspaceInputCover.Window(id: n, owner: w[kCGWindowOwnerName as String] as? String ?? "",
+                                             layer: w[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
+                                             alpha: (w[kCGWindowAlpha as String] as? Double) ?? 1)
         }
-        // The point must also be inside the target itself, on screen.
-        let ok = covering == nil && (Self.currentFrame(windowID)?.contains(point) ?? false)
-        let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
-        // Cached only as "covered by this window" or "fine near here"; outside the
-        // target (or off screen) is never cached, so it is re-checked every time.
-        if ok {
-            topmostCache[windowID] = (now, around, true)
-        } else if let covering {
-            topmostCache[windowID] = (now, covering, false)
-        } else {
+        let displays = Self.activeDisplayBounds()
+        var asked: UInt32??
+        let verdict = WorkspaceInputCover.verdict(
+            target: windowID, targetFrame: Self.currentFrame(windowID), at: point, above: above,
+            ownSheets: sheetCovers[windowID] ?? [], displays: displays,
+            hitTest: { let hit = Self.windowServerHit(at: point); asked = .some(hit); return hit })
+        if asked != nil, let surface = above.first(where: { $0.bounds.contains(point)
+                                                            && WorkspaceInputCover.isDisplayWideSurface($0, at: point, displays: displays) }) {
+            noteDisplayWideSurface(surface)
+        }
+        // Cached only as "covered here" or "fine near here"; outside the target (or off
+        // screen) is never cached, so it is re-checked every time.
+        switch verdict {
+        case .clear:
+            topmostCache[windowID] = (now, CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80), true)
+        case .covered(_, let rect):
+            topmostCache[windowID] = (now, rect, false)
+        case .outside:
             topmostCache[windowID] = nil
         }
-        return ok
+        return verdict == .clear
+    }
+
+    /// Each display-wide surface the window server decided for, logged once per owner and layer
+    /// (nothing else), so a QA log shows when that path is in use.
+    private func noteDisplayWideSurface(_ w: WorkspaceInputCover.Window) {
+        let key = "\(w.owner)#\(w.layer)"
+        guard !loggedSurfaces.contains(key) else { return }
+        loggedSurfaces.insert(key)
+        Log.info("workspace: display-wide surface owner=\(w.owner) layer=\(w.layer) over windows; input under it follows the window server's hit-test")
+    }
+
+    static func activeDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    /// The window a mouse-down at `point` (global, top-left origin) would hit, from the window
+    /// server (`+[NSWindow windowNumberAtPoint:belowWindowWithWindowNumber:]`, which knows each
+    /// window's real input shape: the Dock's display-wide window takes clicks only on the Dock).
+    /// Asked on the main thread, as AppKit expects, and bounded: nil, so "covered", when the main
+    /// thread doesn't answer in time or nothing is hit.
+    static func windowServerHit(at point: CGPoint, timeout: TimeInterval = 0.05) -> UInt32? {
+        // Cocoa's global origin is the primary display's bottom-left corner.
+        let primary = CGDisplayBounds(CGMainDisplayID())
+        let cocoa = NSPoint(x: point.x, y: primary.height - point.y)
+        guard let n = MainThreadQuery.run(timeout: timeout, { NSWindow.windowNumber(at: cocoa, belowWindowWithWindowNumber: 0) }),
+              n > 0, n <= Int(UInt32.max) else { return nil }
+        return UInt32(n)
     }
 
     // MARK: Accessibility helpers
@@ -1683,6 +1722,30 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 }
 
 private struct MenuItemsBox: @unchecked Sendable { let value: [[String: Any]] }
+
+/// Runs a short AppKit query on the main thread, as AppKit expects, for code on another queue
+/// that must not wait long: nil when the main thread doesn't run it within `timeout` (it still
+/// runs later and its answer is dropped). Called on the main thread, it just runs it.
+enum MainThreadQuery {
+    private final class Box<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: T?
+        func set(_ v: T) { lock.withLock { value = v } }
+        func get() -> T? { lock.withLock { value } }
+    }
+
+    static func run<T: Sendable>(timeout: TimeInterval, _ body: @escaping @MainActor @Sendable () -> T) -> T? {
+        if Thread.isMainThread { return MainActor.assumeIsolated { body() } }
+        let box = Box<T>()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            box.set(MainActor.assumeIsolated { body() })
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+        return box.get()
+    }
+}
 
 /// Window mode's audio (A1–A3): ScreenCaptureKit captures sound per app, not per window, so
 /// a pane's window brings its whole app's sound (every Chrome window shares Chrome's).
