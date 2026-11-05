@@ -155,6 +155,57 @@ final class WorkspaceInputCoverTests: XCTestCase {
         XCTAssertEqual(asked, 0)
     }
 
+    // MARK: Reading the window list
+
+    func testTheWindowListsOwnTypesAreRead() {
+        // As CGWindowListCopyWindowInfo hands them over: numbers, a bounds dictionary.
+        let info: [String: Any] = [kCGWindowNumber as String: NSNumber(value: 27), kCGWindowLayer as String: NSNumber(value: 20),
+                                   kCGWindowOwnerName as String: "Dock", kCGWindowAlpha as String: NSNumber(value: 1.0),
+                                   kCGWindowBounds as String: display.dictionaryRepresentation]
+        XCTAssertEqual(WorkspaceInputCover.window(from: info), dock)
+    }
+
+    func testAWindowListedWithoutANumberStillCovers() throws {
+        let bounds = CGRect(x: 600, y: 300, width: 300, height: 300)
+        let info: [String: Any] = [kCGWindowBounds as String: bounds.dictionaryRepresentation, kCGWindowLayer as String: 0,
+                                   kCGWindowOwnerName as String: "Other", kCGWindowAlpha as String: 1.0]
+        let w = try XCTUnwrap(WorkspaceInputCover.window(from: info), "kept, not dropped")
+        XCTAssertEqual(w.id, 0)
+        let (v, asked) = verdict(above: [dock, w], hit: target)
+        XCTAssertEqual(v, .covered(by: 0, cache: bounds))
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testMissingValuesReadAsACover() throws {
+        // Only bounds, the size of the display: without a layer it is never a display-wide surface.
+        let w = try XCTUnwrap(WorkspaceInputCover.window(from: [kCGWindowBounds as String: display.dictionaryRepresentation]))
+        XCTAssertEqual(w, W(id: 0, owner: "", layer: 0, bounds: display, alpha: 1))
+        let (v, asked) = verdict(above: [w], hit: target)
+        XCTAssertEqual(v, .covered(by: 0, cache: display))
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testAWindowWithoutBoundsIsSkipped() {
+        XCTAssertNil(WorkspaceInputCover.window(from: [kCGWindowNumber as String: NSNumber(value: 9), kCGWindowLayer as String: NSNumber(value: 0)]))
+    }
+
+    // MARK: Coordinates across displays
+
+    func testTheHitTestPointFlipsAboutThePrimaryDisplayOnEveryDisplay() {
+        func cocoa(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            WorkspaceInputCover.cocoaPoint(fromGlobal: CGPoint(x: x, y: y), primaryHeight: 1080)
+        }
+        // The primary display (measured: global (960, 15) is the menu bar, Cocoa y 1065).
+        XCTAssertEqual(cocoa(960, 15), CGPoint(x: 960, y: 1065))
+        XCTAssertEqual(cocoa(960, 1062), CGPoint(x: 960, y: 18))
+        // A display above the primary (global y negative): Cocoa y past the primary's height.
+        XCTAssertEqual(cocoa(100, -450), CGPoint(x: 100, y: 1530))
+        // A display below it: Cocoa y negative.
+        XCTAssertEqual(cocoa(500, 1500), CGPoint(x: 500, y: -420))
+        // A display to its left: x is unchanged, negative as in global coordinates.
+        XCTAssertEqual(cocoa(-1000, 200), CGPoint(x: -1000, y: 880))
+    }
+
     // MARK: The live query's bound
 
     func testTheMainThreadQueryRunsInlineOnTheMainThread() {

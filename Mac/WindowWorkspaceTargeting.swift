@@ -761,6 +761,26 @@ enum WorkspaceInputCover {
         return .clear
     }
 
+    /// One `CGWindowListCopyWindowInfo` entry. Nil only without bounds (nothing to place it by).
+    /// A missing value takes the reading that keeps the window a cover: no number (never the
+    /// target or its sheet), layer 0 (never a display-wide surface), an unknown owner, opaque.
+    static func window(from info: [String: Any]) -> Window? {
+        guard let dict = info[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: dict) else { return nil }
+        return Window(id: (info[kCGWindowNumber as String] as? UInt32) ?? 0,
+                      owner: info[kCGWindowOwnerName as String] as? String ?? "",
+                      layer: info[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
+                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1)
+    }
+
+    /// `point` (global, top-left origin) in Cocoa's global coordinates, which the window
+    /// server's hit-test takes: the same x, and y measured up from the primary display's bottom
+    /// edge, on every display (one above the primary has y past its height, one below it a
+    /// negative y).
+    static func cocoaPoint(fromGlobal point: CGPoint, primaryHeight: CGFloat) -> CGPoint {
+        CGPoint(x: point.x, y: primaryHeight - point.y)
+    }
+
     /// Above the normal window layer, and exactly the bounds of the display holding `point`.
     static func isDisplayWideSurface(_ w: Window, at point: CGPoint, displays: [CGRect]) -> Bool {
         guard w.layer > 0 else { return false }

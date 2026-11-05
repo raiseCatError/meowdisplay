@@ -1531,14 +1531,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         if cached, let c = topmostCache[windowID], now - c.at < 0.1, c.rect.contains(point) { return c.ok }
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
-        let above = info.compactMap { w -> WorkspaceInputCover.Window? in
-            guard let n = w[kCGWindowNumber as String] as? UInt32,
-                  let boundsDict = w[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict) else { return nil }
-            return WorkspaceInputCover.Window(id: n, owner: w[kCGWindowOwnerName as String] as? String ?? "",
-                                             layer: w[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
-                                             alpha: (w[kCGWindowAlpha as String] as? Double) ?? 1)
-        }
+        let above = info.compactMap(WorkspaceInputCover.window(from:))
         let displays = Self.activeDisplayBounds()
         var asked: UInt32??
         let verdict = WorkspaceInputCover.verdict(
@@ -1585,9 +1578,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// Asked on the main thread, as AppKit expects, and bounded: nil, so "covered", when the main
     /// thread doesn't answer in time or nothing is hit.
     static func windowServerHit(at point: CGPoint, timeout: TimeInterval = 0.05) -> UInt32? {
-        // Cocoa's global origin is the primary display's bottom-left corner.
-        let primary = CGDisplayBounds(CGMainDisplayID())
-        let cocoa = NSPoint(x: point.x, y: primary.height - point.y)
+        let cocoa = WorkspaceInputCover.cocoaPoint(fromGlobal: point, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height)
         guard let n = MainThreadQuery.run(timeout: timeout, { NSWindow.windowNumber(at: cocoa, belowWindowWithWindowNumber: 0) }),
               n > 0, n <= Int(UInt32.max) else { return nil }
         return UInt32(n)
