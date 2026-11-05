@@ -327,7 +327,10 @@ jobs:
         run: xcodegen generate
       - name: Create an iPhone Duo simulator
         id: duo
-        run: echo "udid=$(scripts/ci/duo-simulator.sh)" >> "$GITHUB_OUTPUT"
+        # An assignment, so the step fails when the script does (never an error text as the UDID).
+        run: |
+          udid=$(scripts/ci/duo-simulator.sh)
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
       - name: Boot the iPhone Duo simulator
         run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
       - name: Build the receiver and its UI tests
