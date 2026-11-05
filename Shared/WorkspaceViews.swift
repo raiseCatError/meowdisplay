@@ -581,6 +581,10 @@ struct WorkspaceChromeView: View {
                     }
                     heldLabel = nil
                 })
+        // One element with the label's own frame. Without it, the label and traits below also
+        // land on an element that reports the whole pane's frame: VoiceOver outlines the pane,
+        // and a UI test's press on it lands mid-pane, on the Mac picture in a live session.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(text + (shown ? "" : ", tab"))
         .accessibilityHint(shown ? "Selects this pane for typing. Fullscreen and other options are in Actions." : "Shows this tab.")
         .accessibilityAddTraits(.isButton)

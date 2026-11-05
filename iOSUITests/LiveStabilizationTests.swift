@@ -86,14 +86,16 @@ final class LiveStabilizationTests: XCTestCase {
         let panes = app.descendants(matching: .any).matching(identifier: "workspacePane").allElementsBoundByIndex
         print("LIVE panes=\(panes.count) labels=\(panes.map(\.label))")
 
-        // Pane menus open from the pane's title chip ("Full Desktop", "Google Chrome", …).
+        // Pane menus open from the pane's title chip ("Full Desktop", "Google Chrome", …). Only a
+        // title-sized chip at its pane's top is held: the rest of a pane is the Mac picture.
         let titles = panes.map { String($0.label.dropLast(" pane".count)) }
-        func chip(_ title: String) -> XCUIElement {
-            app.descendants(matching: .any).matching(NSPredicate(format: "label == %@ AND identifier != 'workspacePane'", title)).firstMatch
+        if let i = titles.indices.prefix(2).first(where: { app.paneTitleFrame(.paneTitle(titles[$0]), in: panes[$0]) == nil }) {
+            snapshot(app, "live-no-title-chip")
+            throw XCTSkip("'\(titles[i])' has no title-sized chip at its pane's top; not holding the pane")
         }
+        func holdChip(_ i: Int) throws { try app.holdPaneTitle(.paneTitle(titles[i]), in: panes[i]) }
         let rotate = app.buttons["Rotate"]
-        let firstChip = chip(titles[0])
-        firstChip.press(forDuration: 0.7)
+        try holdChip(0)
         XCTAssertTrue(rotate.waitForExistence(timeout: 5), "the pane menu opens")
         let rows = ["Rotate", "Reset View", "Arrange Panes", "Remove from Layout", "Fill Pane", "Show Whole Window", "Show Whole Desktop",
                     "Fullscreen on This Device", "View Full Screen", "Change Window…", "Show a Window Here…", "Remove This Tab"]
@@ -124,22 +126,21 @@ final class LiveStabilizationTests: XCTestCase {
         // Rotation belongs to one pane. Turn a pane that isn't turned yet (the owner's own turned
         // panes are left alone), check the other pane didn't change, then put it back.
         if titles.count > 1 {
-            let other = chip(titles[1])
-            other.press(forDuration: 0.7)
+            try holdChip(1)
             if rotate.waitForExistence(timeout: 5), !app.buttons["Reset View"].exists {
                 rotate.tap()
                 sleep(3)
                 snapshot(app, "live-04-second-pane-rotated")
-                other.press(forDuration: 0.7)
+                try holdChip(1)
                 XCTAssertTrue(app.buttons["Reset View"].waitForExistence(timeout: 5), "the rotated pane offers Reset View")
                 dismissOverlay(app)
-                firstChip.press(forDuration: 0.7)
+                try holdChip(0)
                 if rotate.waitForExistence(timeout: 5) {
                     XCTAssertEqual(app.buttons["Reset View"].exists, firstWasTurned, "the other pane is unchanged")
                     print("LIVE first pane Reset View before/after: \(firstWasTurned)/\(app.buttons["Reset View"].exists)")
                 }
                 dismissOverlay(app)
-                other.press(forDuration: 0.7)
+                try holdChip(1)
                 if app.buttons["Reset View"].waitForExistence(timeout: 5) { app.buttons["Reset View"].tap() }
                 sleep(2)
                 snapshot(app, "live-04b-second-pane-reset")
@@ -201,12 +202,12 @@ final class LiveStabilizationTests: XCTestCase {
         let switched = Date()
         switch mode {
         case "mirror":
-            desktop.press(forDuration: 0.7)
+            try app.holdPaneTitle(.paneTitle("Full Desktop"))
             let full = app.buttons["View Full Screen"]
             guard full.waitForExistence(timeout: 5) else { snapshot(app, "mode-no-fullscreen"); throw XCTSkip("no View Full Screen") }
             full.tap()
         case "extend":
-            desktop.press(forDuration: 0.7)
+            try app.holdPaneTitle(.paneTitle("Full Desktop"))
             let show = app.buttons["Show a Window Here…"]
             guard show.waitForExistence(timeout: 5) else { snapshot(app, "mode-no-overview"); throw XCTSkip("no overview") }
             show.tap()
