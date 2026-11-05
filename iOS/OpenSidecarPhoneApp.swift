@@ -96,6 +96,20 @@ struct ReceiverScreen: View {
     }
 
     /// Banners slide in from an edge; with Reduce Motion they only fade.
+    /// A centred prompt or hint moved wholly to one side of a fold (iPhone
+    /// Duo) when it would straddle it; unchanged on every other device.
+    /// `size` is the overlay's approximate size.
+    private func clearOfFolds(_ centre: CGPoint, size: CGSize, container: CGSize,
+                              regions: [ControlReservedRegion]) -> CGPoint {
+        let divisions = ControlReservedRegion.frames(of: .division, in: regions)
+        guard !divisions.isEmpty else { return centre }
+        let frame = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
+                           width: size.width, height: size.height)
+        let moved = ControlFoldGeometry.clearOfFolds(frame, in: CGRect(origin: .zero, size: container),
+                                                     divisions: divisions)
+        return CGPoint(x: moved.midX, y: moved.midY)
+    }
+
     private func slideTransition(from edge: Edge) -> AnyTransition {
         reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
@@ -564,19 +578,28 @@ struct ReceiverScreen: View {
                             return CGPoint(x: pic.minX + r.midX * pic.width,
                                            y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
                         } : nil
+                        let promptCentre = clearOfFolds(
+                            CGPoint(x: paneAnchor?.x ?? canvas.midX,
+                                    y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76),
+                            size: CGSize(width: 260, height: 44), container: geo.size,
+                            regions: reservedRegions)
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
-                            .position(x: paneAnchor?.x ?? canvas.midX,
-                                      y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
-                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76)
+                            .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                     }
                     if inputReachesMac, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
                        !controlStore.preferences.naturalTouchHintShown, !showSettings {
+                        // Narrower than a Duo half, so it fits beside the crease.
+                        let hintWidth: CGFloat = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+                            .isEmpty ? 460 : 400
                         NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
                             .padding(.horizontal, 16)
-                            .frame(maxWidth: 460)
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
+                            .frame(maxWidth: hintWidth)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60),
+                                                   size: CGSize(width: min(hintWidth, canvas.width), height: 96),
+                                                   container: geo.size, regions: reservedRegions))
                             .transition(.opacity)
                     }
                     if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
@@ -610,7 +633,8 @@ struct ReceiverScreen: View {
                         WindowModePrompt(
                             onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
                             onNo: { windowPromptAnswered = true })
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
+                                                   size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
                             .transition(slideTransition(from: .top))
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
@@ -1303,6 +1327,8 @@ struct IdleView: View {
     @State private var remoteEditPeerID: String?
     /// Bumped when remote details change so the (non-observable) store is re-read.
     @State private var remoteRefresh = 0
+    /// How each Mac's last Remote Access knock ended: the row's reason after a failed Connect.
+    @ObservedObject private var knockOutcomes = RemoteKnockOutcomes.shared
     @State private var forgetConfirmation = PeerForgetPrompt()
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
@@ -1376,6 +1402,11 @@ struct IdleView: View {
         .sheet(isPresented: $showRemoteAccessSetup, onDismiss: { remoteRefresh += 1 }) {
             NavigationStack {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showRemoteAccessSetup = false }
+                        }
+                    }
             }
         }
         .sheet(item: $homeSheet) { sheet in
@@ -1735,6 +1766,7 @@ struct IdleView: View {
         let user = PairedMacUserName.name(peerID: mac.peerID)
         let subtitle = [macSubtitle(mac), user, shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
             .joined(separator: " · ").nilIfEmpty
+        let remoteHint = remoteProblemHint(mac)
         func label(lines: Int?) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: mac.name)
@@ -1743,6 +1775,13 @@ struct IdleView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // What to check after a Connect over Remote failed, under the reason.
+                if let remoteHint {
+                    Text(verbatim: remoteHint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1779,12 +1818,45 @@ struct IdleView: View {
         if mac.localNetworkBlocked {
             return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
         }
-        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
-        if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
+        if wakeConnect.isRunning(forPeerID: peerID) {
+            return remoteProgress(mac, peerID: peerID)?.text ?? wakeConnect.statusLabel
+        }
+        if wakeConnect.failed(forPeerID: peerID) {
+            return remoteProblem(mac, peerID: peerID)?.summary(deviceKind: deviceKind) ?? remoteStatusText(peerID: peerID)
+        }
         if mac.switchedOut { return String(localized: "Switched Out") }
         if mac.nearby != nil { return String(localized: "Nearby") }
         if mac.hasRemote { return String(localized: "Remote") }
         return String(localized: "Not found")
+    }
+
+    /// Contacting your Mac / Waiting for your Mac to connect while a Connect
+    /// over Remote runs, from this device's knock (`RemoteConnectRowStatus`).
+    private func remoteProgress(_ mac: HomeMac, peerID: String) -> RemoteConnectRowStatus.Progress? {
+        RemoteConnectRowStatus.progress(stage: wakeConnect.attempt.stage,
+                                        wakePacketsSent: wakeConnect.attempt.wolBurstsSent,
+                                        hasSavedAddress: mac.hasRemote,
+                                        lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// Why the last Connect over Remote to this Mac failed, when its knock tells.
+    private func remoteProblem(_ mac: HomeMac, peerID: String) -> RemoteAccessProblem? {
+        RemoteConnectRowStatus.problem(failureReason: wakeConnect.failureReason(forPeerID: peerID),
+                                       macConnected: wakeConnect.attempt.promoteGeneration != nil,
+                                       hasSavedAddress: mac.hasRemote,
+                                       lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// The line under the reason: what to check next. Only where the row shows that reason.
+    private func remoteProblemHint(_ mac: HomeMac) -> String? {
+        guard let peerID = mac.peerID, sessionRole(mac) != .current, !mac.localNetworkBlocked,
+              !wakeConnect.isRunning(forPeerID: peerID), wakeConnect.failed(forPeerID: peerID),
+              let problem = remoteProblem(mac, peerID: peerID) else { return nil }
+        var otherMacName: String?
+        if case .some(.identityMismatch(let otherPeerID?)) = knockOutcomes.outcome(forPeerID: peerID)?.result {
+            otherMacName = TrustStore.shared.pinnedPeers().first { $0.peerID == otherPeerID }?.displayName
+        }
+        return problem.hint(deviceKind: deviceKind, otherMacName: otherMacName)
     }
 
     /// One session at a time: only the session's own Mac is Connected.
@@ -1838,6 +1910,8 @@ struct IdleView: View {
         if hasWakeHint || mac.nearby == nil {
             let failed = wakeConnect.failed(forPeerID: peerID)
             Button {
+                // A new attempt: an earlier knock's result no longer describes it.
+                knockOutcomes.reset(peerID: peerID)
                 wakeConnect.begin(peerID: peerID)
             } label: {
                 // Full label, never truncated: the row stacks the buttons
@@ -1879,14 +1953,15 @@ struct IdleView: View {
     private func macMenu(_ mac: HomeMac) -> some View {
         Menu {
             if let peerID = mac.peerID {
+                // The Mac's Remote Access address (TERMINOLOGY.md: Address).
                 if mac.hasRemote {
-                    Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
-                    Button("Remove Remote Details", role: .destructive) {
+                    Button("Edit Address…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Remove Address", role: .destructive) {
                         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
                         remoteRefresh += 1
                     }
                 } else {
-                    Button("Set Up Remote Access…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Add Address…") { presentRemoteSettings(peerID: peerID) }
                 }
                 Button("Forget…", role: .destructive) {
                     forgetConfirmation.request(peerID: peerID, name: mac.name)
@@ -2054,6 +2129,7 @@ private struct HowToConnectSheet: View {
                     instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
                     instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
                     instructionRow("hand.tap", "Or tap Connect next to a paired Mac")
+                    instructionRow("network", "Away from your Mac's Wi-Fi? Turn on Tailscale on both devices, then choose Remote Access at the bottom of the Macs card.")
                     instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
                 }
                 .padding(20)
@@ -2937,8 +3013,22 @@ struct VideoLayerView: UIViewRepresentable {
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
+        /// Where the pointer is drawn: the newest Mac report, or a point on the path between
+        /// two consecutive reports while `cursorPacer` paces it (see `moveCursor`).
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
+        private var cursorPacer = CursorPresentationPacer()
+        private var cursorLink: CADisplayLink?
+        /// On by default. Launching with `-cursorPacing NO` draws each report on arrival, as
+        /// before, for side-by-side comparison on a device.
+        private let pacesCursor = UserDefaults.standard.object(forKey: "cursorPacing") == nil
+            || UserDefaults.standard.bool(forKey: "cursorPacing")
+        #if DEBUG
+        private var cursorPacingTicks = 0
+        private var cursorPacingHeldTicks = 0
+        private var cursorPacingReports = 0
+        private var lastCursorPacingLogAt = Date.distantPast
+        #endif
 
         private var lastLoggedLayout = ""
 
@@ -4014,18 +4104,97 @@ struct VideoLayerView: UIViewRepresentable {
             return currentTransform.displayedRect.width / (currentTransform.remoteCrop.width * video.width)
         }
 
+        /// One confirmed Mac cursor report. Showing, hiding and jumps are drawn now. Moves are
+        /// drawn on the display's refreshes by `cursorPacer`, about one report interval behind
+        /// and only ever on the path between two reports, so the pointer advances evenly
+        /// however the reports were bunched on the way here.
         func moveCursor(x: Double, y: Double, visible: Bool) {
-            cursorNorm = CGPoint(x: x, y: y)
+            #if DEBUG
+            defer { logCursorTraceIfDue(reason: "moveCursor") }
+            #endif
             cursorVisible = visible
+            let report = CGPoint(x: x, y: y)
+            guard pacesCursor else {
+                drawCursor(at: report)
+                return
+            }
+            cursorPacer.receive(report, visible: visible, at: CACurrentMediaTime())
+            #if DEBUG
+            cursorPacingReports += 1
+            #endif
+            if cursorPacer.isSettled {
+                stopCursorLink()
+                drawCursor(at: cursorPacer.newest ?? report)
+            } else {
+                startCursorLink()
+            }
+        }
+
+        private func drawCursor(at point: CGPoint) {
+            cursorNorm = point
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            cursorLayer.isHidden = !visible || cursorLayer.contents == nil
+            cursorLayer.isHidden = !cursorVisible || cursorLayer.contents == nil
             updateCursorLayout()
             CATransaction.commit()
-            #if DEBUG
-            logCursorTraceIfDue(reason: "moveCursor")
-            #endif
         }
+
+        private func startCursorLink() {
+            guard cursorLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tickCursor(_:)))
+            // The screen's full rate while the pointer moves: 120 Hz on ProMotion (on iPhone
+            // only with CADisableMinimumFrameDurationOnPhone in Info.plist).
+            let maximum = Float(window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, maximum), maximum: maximum,
+                                                            preferred: maximum)
+            link.add(to: .main, forMode: .common)
+            cursorLink = link
+        }
+
+        private func stopCursorLink() {
+            cursorLink?.invalidate()
+            cursorLink = nil
+        }
+
+        /// Runs only while the pointer is catching up with a report; stops once the newest
+        /// report is drawn, so a resting pointer costs nothing.
+        @objc private func tickCursor(_ link: CADisplayLink) {
+            guard let point = cursorPacer.frame(at: link.timestamp) else {
+                stopCursorLink()
+                return
+            }
+            #if DEBUG
+            noteCursorPacingTick(moved: point != cursorNorm)
+            #endif
+            if point != cursorNorm { drawCursor(at: point) }
+            if cursorPacer.isSettled { stopCursorLink() }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // Off screen: stop pacing and show the newest report when the view returns.
+            guard window == nil, cursorLink != nil else { return }
+            stopCursorLink()
+            cursorPacer.settle()
+            if let newest = cursorPacer.newest { drawCursor(at: newest) }
+        }
+
+        #if DEBUG
+        /// Every 2 s while the pointer moves: refreshes drawn, how many held because the next
+        /// report had not arrived yet, and the pacing delay. The on-device check for pacing.
+        private func noteCursorPacingTick(moved: Bool) {
+            cursorPacingTicks += 1
+            if !moved { cursorPacingHeldTicks += 1 }
+            let now = Date()
+            guard now.timeIntervalSince(lastCursorPacingLogAt) >= 2 else { return }
+            lastCursorPacingLogAt = now
+            Log.info("cursorPacing: refreshes=\(cursorPacingTicks) held=\(cursorPacingHeldTicks) "
+                + "reports=\(cursorPacingReports) delayMs=\(String(format: "%.1f", cursorPacer.delay * 1000))")
+            cursorPacingTicks = 0
+            cursorPacingHeldTicks = 0
+            cursorPacingReports = 0
+        }
+        #endif
 
         func setCursorSprite(_ image: CGImage, anchor: CGPoint, normSize: CGSize) {
             CATransaction.begin()
@@ -4090,6 +4259,8 @@ struct VideoLayerView: UIViewRepresentable {
         func setCursorPaneSize(_ size: CursorPaneSize?) {
             guard size != cursorPaneSize else { return }
             cursorPaneSize = size
+            // Another pane: the report that follows is drawn where it is, not glided to.
+            cursorPacer.jumpAtNextReport()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             updateCursorLayout()

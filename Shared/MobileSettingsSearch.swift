@@ -144,7 +144,7 @@ enum MobileSettingsSearchIndex {
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("arrowKeys", String(localized: "Show Arrow Keys"), .controls, keywords: ["arrows", "arrow keys", "cursor keys", "up", "down", "left", "right", "keypad"], availability: .phoneOnly),
         .init("controlProfile", String(localized: "Control Profile"), .controls, keywords: ["active profile", "shortcuts", "palette", "modifier"]),
-        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),
+        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji", "calculator"]),
         .init("paletteStyle", String(localized: "Palette Style"), .controls, keywords: ["wheel", "chord", "keys"], availability: .padOnly),
         // Audio
         .init("audio", String(localized: "Audio"), .audio, keywords: ["sound"]),
@@ -155,6 +155,11 @@ enum MobileSettingsSearchIndex {
         .init("pairedMacs", String(localized: "Paired Macs"), .pairedMacs, keywords: ["forget", "trust", "automatically allow connections", "block"]),
         // Remote Access
         .init("remoteAccess", String(localized: "Remote Access"), .remoteAccess, keywords: ["tailscale", "internet", "remote"]),
+        .init("remoteAccessPrerequisites", String(localized: "Before You Start"), .remoteAccess, keywords: ["tailscale", "install tailscale", "get tailscale", "set up remote access", "tailnet", "vpn", "vpn on demand", "sign in", "requirements"]),
+        .init("remoteAddress", String(localized: "Address"), .remoteAccess, keywords: ["tailscale address", "magicdns", "ip address", "host", "remote address", "edit address", "remove address", "found automatically"]),
+        .init("shareTailscaleAddresses", String(localized: "Share Tailscale Addresses with Paired Macs"), .remoteAccess, keywords: ["automatic", "remote access", "found automatically"]),
+        .init("pairOverRemote", String(localized: "Pair over Remote"), .remoteAccess, keywords: ["pair new mac", "another network", "tailscale", "away from home"]),
+        .init("remoteAccessHelp", String(localized: "If Remote Access Doesn't Connect"), .remoteAccess, keywords: ["troubleshooting", "offline", "timed out", "no route", "different mac", "didn't connect back", "error", "remote access not working"]),
         // Permissions
         .init("localNetwork", String(localized: "Open iOS Settings for MeowDisplay"), .permissions, keywords: ["local network", "privacy"]),
         // Diagnostics

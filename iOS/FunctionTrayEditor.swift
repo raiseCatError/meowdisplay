@@ -57,6 +57,7 @@ struct FunctionTrayEditor: View {
             } footer: {
                 Text("Swipe left to remove (built-in actions are hidden instead), swipe right to show or hide. Tap an action to rename it or change how it looks.")
             }
+            LocalCalculatorUtilitySection(store: store)
         }
         .navigationTitle("Function Tray — \(slot.title)")
         .toolbar {
@@ -89,6 +90,15 @@ struct FunctionTrayEditor: View {
                     }
                 }
             }
+            if !store.preferences.showsCalculatorButton {
+                Section("Add a Utility") {
+                    Button {
+                        store.update { $0.showsCalculatorButton = true }
+                    } label: {
+                        Label("Calculator", systemImage: LocalCalculatorPanel.symbolName)
+                    }
+                }
+            }
         } label: {
             Label("Add Action", systemImage: "plus")
         }
@@ -98,6 +108,42 @@ struct FunctionTrayEditor: View {
         var profile = self.profile
         change(&profile)
         store.update { $0.updateFunctionTrayProfile(profile) }
+    }
+}
+
+/// The local Calculator's button, beside the profile's actions rather than
+/// one of them: it sends nothing to the Mac, works in View Only, and shows
+/// with every Function Tray profile. Off until added.
+private struct LocalCalculatorUtilitySection: View {
+    @ObservedObject var store: ReceiverControlStore
+
+    var body: some View {
+        Section {
+            Toggle(isOn: Binding(get: { store.preferences.showsCalculatorButton },
+                                 set: { shown in store.update { $0.showsCalculatorButton = shown } })) {
+                HStack(spacing: 12) {
+                    Image(systemName: LocalCalculatorPanel.symbolName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color(white: 0.22)))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Calculator", comment: "The local calculator's control and panel.")
+                        Text("On this device. Nothing is sent to your Mac.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("Utilities")
+        } footer: {
+            if store.isPad {
+                Text("A calculator that works on this iPad, in View Only too. Its button shows with every Function profile in the Strip and Overlay layouts; in a Custom layout, add it from the layout's editor.")
+            } else {
+                Text("A calculator that works on this iPhone, in View Only too. Its button sits in the upper-left corner and shows with every Function Tray profile.")
+            }
+        }
     }
 }
 
