@@ -90,10 +90,11 @@ final class LocalCalculatorTourTests: XCTestCase {
     }
 
     /// Auto-hide (on by default) fades the controls; any touch on the
-    /// surface brings them back.
+    /// surface brings them back. A faded control still reports itself
+    /// hittable, so this always touches the surface (below the demo banner)
+    /// rather than trusting `isHittable`.
     @MainActor
     private func revealControls(_ target: XCUIElement) {
-        if target.exists && target.isHittable { return }
         element("Sample Mac desktop").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
         _ = target.waitForExistence(timeout: 2)
         sleep(1)
@@ -106,7 +107,10 @@ final class LocalCalculatorTourTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         if !app.navigationBars["Controls"].exists {
             let controls = app.buttons["Controls"].firstMatch
-            reveal(controls)
+            // A landscape iPhone shows Settings as a sidebar beside the page;
+            // the tap scrolls the sidebar itself (its rows never report
+            // hittable, so `reveal` can't judge them).
+            if !app.collectionViews["Sidebar"].exists { reveal(controls) }
             XCTAssertTrue(controls.waitForExistence(timeout: 5))
             controls.tap()
             XCTAssertTrue(app.navigationBars["Controls"].waitForExistence(timeout: 3))
@@ -133,6 +137,10 @@ final class LocalCalculatorTourTests: XCTestCase {
                 done.tap()
             } else if back.exists {
                 back.tap()
+            } else if done.exists && app.collectionViews["Sidebar"].exists {
+                // The landscape sidebar's Done never reports hittable either;
+                // tap it where it is drawn.
+                done.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             } else {
                 XCTFail("Neither Done nor Back is available to leave Settings")
                 break
@@ -161,20 +169,33 @@ final class LocalCalculatorTourTests: XCTestCase {
         sleep(1)
     }
 
-    /// Scrolls a Settings form until a row is on screen, with short, slow
-    /// upward drags (a downward drag at the top of a sheet dismisses it).
+    /// Scrolls a Settings page until a row is on screen, below the
+    /// navigation bars and above the demo footer that covers the bottom of
+    /// Settings, with short, slow upward drags (a downward drag at the top of
+    /// a sheet dismisses it). Each drag moves at most half that band, so a
+    /// row can't skip past it, and a short landscape band just takes more
+    /// drags. In a landscape split view the page is the last list, beside
+    /// the sidebar.
     @MainActor
     private func reveal(_ target: XCUIElement) {
-        // The demo footer covers the bottom of Settings.
-        let usableBottom = app.frame.maxY - 60
-        func visible() -> Bool { target.exists && target.isHittable && target.frame.maxY < usableBottom }
-        guard let form = app.collectionViews.allElementsBoundByIndex.last else { return }
-        for _ in 0..<10 where !visible() {
-            form.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.7))
-                .press(forDuration: 0.1,
-                       thenDragTo: form.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)),
-                       withVelocity: .slow,
-                       thenHoldForDuration: 0.3)
+        let top = app.navigationBars.allElementsBoundByIndex.map(\.frame.maxY).max() ?? app.frame.minY
+        let bottom = app.frame.maxY - 60
+        func visible() -> Bool {
+            target.exists && target.isHittable && target.frame.minY >= top && target.frame.maxY < bottom
+        }
+        guard let page = app.collectionViews.allElementsBoundByIndex.last else { return }
+        let band = bottom - top
+        let screen = app.coordinate(withNormalizedOffset: .zero)
+        let from = screen.withOffset(CGVector(dx: page.frame.midX, dy: top + band * 0.6))
+        let to = screen.withOffset(CGVector(dx: page.frame.midX, dy: top + band * 0.1))
+        var lastFrame: CGRect?
+        for _ in 0..<30 where !visible() {
+            from.press(forDuration: 0.1, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
+            // Stop once a loaded row stops moving (the end of the page) or
+            // scrolls away, and leave it to the tap's own scroll-to-visible.
+            let frame: CGRect? = target.exists ? target.frame : nil
+            if lastFrame != nil && (frame == nil || frame == lastFrame) { break }
+            lastFrame = frame
         }
     }
 
