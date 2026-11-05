@@ -1123,6 +1123,11 @@ final class SenderController: ObservableObject {
         // must be seen regardless of Menu Bar/Background presentation or
         // whether the control window happens to be open — it cannot depend
         // on the user already having the Devices list in view.
+        // Request panels open in front of the person at this Mac, never on a
+        // display a device is viewing.
+        SecurityPresentationCoordinator.streamedDisplays = { [weak self] in
+            Set(self?.sessions.compactMap { $0.sender.virtualDisplayID } ?? [])
+        }
         pairingPrompt.onAccepted = { [weak self] pending in
             self?.beginExplicitPairing(peerID: pending.peerID)
         }

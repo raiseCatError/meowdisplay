@@ -12,6 +12,11 @@ import SwiftUI
 /// never by whichever settings view instance happens to exist.
 @MainActor
 enum SecurityPresentationCoordinator {
+    /// The displays MeowDisplay is streaming to devices as virtual displays.
+    /// Request panels never open on one while the Mac has another display.
+    /// Set once by the controller that owns the sessions.
+    static var streamedDisplays: @MainActor () -> Set<CGDirectDisplayID> = { [] }
+
     // MARK: - Pairing (SAS confirmation)
 
     private static var pairingPanel: NSPanel?
@@ -30,18 +35,8 @@ enum SecurityPresentationCoordinator {
         if let existing = pairingPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Pairing Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            // A security decision must stay visible even if the user clicks
-            // elsewhere — it may only close through explicit accept/reject
-            // or the model's own timeout, never by losing focus.
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Pairing Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 240))
             pairingPanel = panel
             Log.info("uiDebug: pairing panel created id=\(ObjectIdentifier(panel))")
         }
@@ -59,8 +54,7 @@ enum SecurityPresentationCoordinator {
             Log.info("uiDebug: pairing panel closed reason=resolved")
             panel.orderOut(nil)
         }))
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
         Log.info("uiDebug: pairing panel orderedFront visible=\(panel.isVisible) keyWindow=\(panel.isKeyWindow)")
     }
 
@@ -78,18 +72,8 @@ enum SecurityPresentationCoordinator {
         if let existing = inputControlPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Control Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            // Same rationale as the pairing panel: a security decision must
-            // stay visible until explicit action or timeout, never dismiss
-            // itself on a focus change.
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Control Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
             inputControlPanel = panel
         }
         let delegate = InputControlPanelWindowDelegate(prompt: prompt)
@@ -107,8 +91,7 @@ enum SecurityPresentationCoordinator {
         // truncates or leaves the panel oddly oversized.
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Remote Finder ("<Device Name> wants to browse your approved folders")
@@ -182,15 +165,8 @@ enum SecurityPresentationCoordinator {
         let request = filesConsentQueue.removeFirst()
         filesConsentShown = request
         // A fresh panel per question.
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-            styleMask: [.titled, .closable, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.title = String(localized: "Files Request")
-        panel.isFloatingPanel = true
-        panel.level = .modalPanel
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
+        let panel = SecurityPanelPlacement.makePanel(
+            title: String(localized: "Files Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
         filesConsentPanel = panel
         let delegate = FilesConsentPanelWindowDelegate()
         filesConsentPanelDelegate = delegate
@@ -201,8 +177,7 @@ enum SecurityPresentationCoordinator {
         })
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
@@ -219,15 +194,8 @@ enum SecurityPresentationCoordinator {
         if let existing = sessionApprovalPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Display Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Display Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
             sessionApprovalPanel = panel
         }
         let delegate = SessionApprovalPanelWindowDelegate(prompt: prompt)
@@ -238,8 +206,7 @@ enum SecurityPresentationCoordinator {
         }))
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Forget Device
