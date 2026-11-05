@@ -314,6 +314,33 @@ final class WorkspaceCompositor {
 /// One receiver's window workspace. Thread model: state lives on `queue`;
 /// input mapping (called from the injector on the network queue) reads the
 /// targeting model under `inputLock`.
+/// When the Mac may bring back a minimized or hidden window for a tile: only when the person
+/// chose that window for the tile while it was already off screen, and only once. A window that
+/// was on screen when the tile first showed it is never restored by the Mac later, so Minimize on
+/// Mac (or minimizing it on the Mac itself) sticks, and showing the same tile again (a float
+/// un-tucked) never brings a window back. Show on Mac still restores it, on request.
+struct WorkspaceRestoreLedger {
+    struct Key: Hashable {
+        var tile: String
+        var window: UInt32
+        var generation: UInt64
+    }
+
+    private(set) var seen = Set<Key>()
+
+    /// Called for each assigned window at every listing. True only the first time this tile shows
+    /// this window, when it is off screen and its capture delivers nothing.
+    mutating func observe(tile: String, window: UInt32, generation: UInt64, offscreen: Bool, delivering: Bool) -> Bool {
+        seen.insert(Key(tile: tile, window: window, generation: generation)).inserted && offscreen && !delivering
+    }
+
+    /// Forgets windows that are no longer listed, keeping the ledger small. A tile that is only
+    /// hidden for now (a tucked float) keeps its entry while its window is still listed.
+    mutating func prune(keeping isListed: (Key) -> Bool) {
+        seen = seen.filter(isListed)
+    }
+}
+
 final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// All receivers together: window streams this Mac will run at once.
     static let globalCaptureLimit = 16
@@ -613,8 +640,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Catalog
 
-    /// Assignment generations whose minimized/hidden window was already restored once.
-    private var restoreAttempted = Set<UInt64>()
+    /// When the Mac may bring back a tile's minimized or hidden window (see the ledger).
+    private var restoreLedger = WorkspaceRestoreLedger()
 
     /// Listings come from the shared browser (one identity ledger for every mode).
     private func refresh(sendCatalog: Bool) {
@@ -655,11 +682,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // that isn't on screen is refused at press/hover time (isTopmost checks
             // the window's own current on-screen bounds).
             frames[a.windowID] = sourceFrame(a) ?? entry.frame
+            let restore = restoreLedger.observe(tile: a.tileID, window: a.windowID, generation: entry.generation,
+                                                offscreen: entry.availability == .offscreen, delivering: delivering)
             if entry.availability == .offscreen {
                 setState(a.tileID, delivering ? "live" : "offscreen")
-                // Chosen on the receiver: bring it back on the Mac without activating its app
-                // (ScreenCaptureKit can't capture a minimized window). Once per assignment.
-                if !delivering, restoreAttempted.insert(a.assignmentGeneration).inserted {
+                // Chosen on the receiver while minimized or hidden: bring it back on the Mac without
+                // activating its app (ScreenCaptureKit can't capture a minimized window). Only then:
+                // Minimize on Mac sticks, and an un-tucked float never restores a window.
+                if restore {
                     let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                     DispatchQueue.main.async { Self.restoreQuietly(pid: pid, frame: frame, title: title) }
                     refreshSoon()
@@ -668,6 +698,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
         }
+        restoreLedger.prune { catalog[$0.window]?.generation == $0.generation }
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }

@@ -1445,6 +1445,9 @@ since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
 never activates it (no focus change on the Mac), and is answered with
 `appLaunchResult {bundle, ok}`. `windowAction` also takes
 `minimize {window, gen}` (input grant; the real Mac window; never activates).
+The Mac brings a tile's minimized or hidden window back only when the tile
+first shows it that way; a window minimized later stays minimized until
+`activate`.
 
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
@@ -1535,10 +1538,12 @@ A tiled pane at least 90% covered by floats is captured at 2 fps; a visible
 float is captured at no less than 15 fps. `workspaceState` echoes
 `layer: "float"` and `z` on the floats it accepted. A float the receiver has
 tucked to an edge or hidden is simply left out of the request: hiding is
-local, and nothing here closes, moves or activates a Mac window
+local, and nothing here closes, minimizes or moves a Mac window
 (`windowAction` and `windowClose` stay limited to the receiver's explicit,
-confirmed menu items). Floats are panes: an admitted session, the input
-grant and View Only apply to them unchanged.
+confirmed menu items). Focus works as for any pane: with the input grant,
+the window of the tile in `focus` comes to the front on the Mac so typing
+reaches it. Floats are panes: an admitted session, the input grant and View
+Only apply to them unchanged.
 
 Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
 `schema` 3 and byte-identical while a layout has no floats. A layout with

@@ -430,7 +430,8 @@ final class WorkspaceFloatTests: XCTestCase {
     // MARK: Receiver wire and safety
 
     @MainActor
-    private func connectedModel(features: Set<String>, drawsFloats: Bool = true,
+    private func connectedModel(features: Set<String>, drawsFloats: Bool = true, window: Bool = true,
+                                displays: [[String: Any]] = [],
                                 sent: @escaping ([String: Any]) -> Void) -> WorkspaceModel {
         let defaults = UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
         let m = WorkspaceModel(defaults: defaults)
@@ -439,11 +440,11 @@ final class WorkspaceFloatTests: XCTestCase {
         m.inputAllowed = { true }
         m.apply(.connected(peerID: "mac-a"))
         m.apply(.features(features))
-        m.apply(.mode(window: true))
+        m.apply(.mode(window: window))
         m.apply(WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
             "type": WireMessage.windowCatalog, "host": "mac-a",
             "windows": [10, 11, 12].map { ["id": $0, "gen": 5, "bundle": "app.\($0)", "app": "App\($0)", "title": "t", "w": 1600, "h": 1000, "state": "visible"] },
-            "apps": [],
+            "apps": [], "displays": displays,
         ])!)
         m.updateSpace(ipad, hinge: nil)
         return m
@@ -653,5 +654,141 @@ final class WorkspaceFloatTests: XCTestCase {
         mac.choose(mac.catalog!.windows[0], asNewTile: false)
         mac.openFloating(mac.catalog!.windows[1])
         XCTAssertTrue(mac.layout.floats.isEmpty)
+    }
+
+    // MARK: Over the whole-screen desktop
+
+    private static var twoDisplays: [[String: Any]] {
+        [["id": 1, "name": "Built-in Retina Display", "w": 1512, "h": 982, "main": true, "virtual": false],
+         ["id": 2, "name": "LG UltraFine", "w": 2560, "h": 1440, "main": false, "virtual": false]]
+    }
+
+    private static func mirrorEntry(_ name: String, _ w: Int, _ h: Int, main: Bool) -> MirrorDisplayEntry {
+        MirrorDisplayEntry(uuid: "uuid-\(name)-\(main)", name: name, isMain: main, logicalWidth: w, logicalHeight: h,
+                           pixelWidth: w * 2, pixelHeight: h * 2, likelyVirtual: false)
+    }
+
+    private static let safeTypes: Set<String> = [WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.workspaceBackdropRequest,
+                                                 WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest]
+
+    /// From Mirror a float opens over the same desktop without asking: Window mode starts with the
+    /// mirrored display as the pane underneath. Nothing it sends acts on a Mac window.
+    @MainActor
+    func testAFloatOpensOverTheMirroredDesktopWithoutAPrompt() {
+        var sent: [[String: Any]] = []
+        var windowModeRequests = 0
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
+                               window: false, displays: Self.twoDisplays) { sent.append($0) }
+        m.requestWindowMode = { windowModeRequests += 1 }
+        m.mirroring = { true }
+        m.mirrorChoice = { Self.mirrorEntry("LG UltraFine", 2560, 1440, main: false) }
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
+        XCTAssertTrue(m.canOpenFloats)
+        let w = m.catalog!.windows
+
+        m.openFloating(w[0])
+        XCTAssertEqual(windowModeRequests, 1, "Window mode starts at once; nothing asks first")
+        XCTAssertEqual(m.layout.paneCount, 1)
+        let pane = m.layout.orderedTileIDs[0]
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.windowID, WorkspaceSource.displayKey(2), "the desktop being mirrored, not the main display")
+        XCTAssertEqual(m.layout.floatIDs.count, 1)
+        XCTAssertEqual(m.layout.tiles[m.layout.floatIDs[0]]?.source?.windowID, 10)
+        XCTAssertTrue(sent.allSatisfy { Self.safeTypes.contains($0["type"] as? String ?? "") },
+                      "never a window action: \(sent.map { $0["type"] ?? "" })")
+        m.undo()
+        XCTAssertTrue(m.layout.floats.isEmpty, "one undo step")
+
+        // Default Window Placement: Floating also floats a tapped window over the mirrored desktop.
+        let tap = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
+                                 window: false, displays: Self.twoDisplays) { _ in }
+        tap.mirroring = { true }
+        tap.defaultPlacement = .float
+        tap.switchTo(tap.catalog!.windows[1])
+        XCTAssertEqual(tap.layout.floatIDs.count, 1)
+        XCTAssertEqual(tap.layout.tiles[tap.layout.orderedTileIDs[0]]?.source?.windowID, WorkspaceSource.displayKey(1),
+                       "Automatic: the main display")
+    }
+
+    /// From Extend nothing floats, by menu, drag, shake or tap: leaving Extend removes this
+    /// device's extended display, and macOS would move the windows on it.
+    @MainActor
+    func testNothingFloatsFromExtend() {
+        var sent: [[String: Any]] = []
+        var windowModeRequests = 0
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
+                               window: false, displays: Self.twoDisplays) { sent.append($0) }
+        m.requestWindowMode = { windowModeRequests += 1 }
+        m.mirroring = { false }   // Extend (or a Mac that hasn't confirmed Mirror)
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
+        let w = m.catalog!.windows
+        XCTAssertTrue(m.canFloat, "the Mac offers floats")
+        XCTAssertFalse(m.canOpenFloats)
+
+        m.openFloating(w[0])
+        XCTAssertTrue(m.layout.floats.isEmpty)
+        XCTAssertEqual(windowModeRequests, 0, "Extend is left alone")
+        XCTAssertTrue(sent.isEmpty)
+
+        m.defaultPlacement = .float
+        XCTAssertFalse(m.canPlace(.window(w[1]), .float))
+        m.beginDrag(.window(w[1]), at: CGPoint(x: 300, y: 300))
+        XCTAssertEqual(m.drag?.placement, .pane, "Floating placement isn't offered")
+        XCTAssertFalse(m.toggleDragPlacement(), "a shake can't switch to it")
+        XCTAssertFalse(m.shakeTipVisible)
+        m.cancelDrag()
+        m.switchTo(w[1])
+        XCTAssertTrue(m.layout.floats.isEmpty, "a tap never floats either")
+
+        // Once Window view is on, floats work as usual.
+        m.apply(.mode(window: true))
+        XCTAssertTrue(m.canOpenFloats)
+    }
+
+    /// A manual Mirror choice maps to the listed display by name and size; Automatic and an
+    /// unmatched choice fall back to the main display.
+    func testTheMirroredDisplayIsFoundByNameAndSize() {
+        let list = [
+            CatalogDisplayItem(id: 1, name: "Built-in Retina Display", width: 1512, height: 982, isMain: true, isVirtual: false),
+            CatalogDisplayItem(id: 2, name: "Studio Display", width: 2560, height: 1440, isMain: false, isVirtual: false),
+            CatalogDisplayItem(id: 3, name: "Studio Display", width: 2560, height: 1440, isMain: false, isVirtual: false),
+            CatalogDisplayItem(id: 4, name: "LG UltraFine", width: 2560, height: 1440, isMain: false, isVirtual: false),
+        ]
+        XCTAssertNil(WorkspaceModel.mirroredDisplay(in: list, choice: nil), "Automatic")
+        XCTAssertEqual(WorkspaceModel.mirroredDisplay(in: list, choice: Self.mirrorEntry("LG UltraFine", 2560, 1440, main: false))?.id, 4)
+        XCTAssertNil(WorkspaceModel.mirroredDisplay(in: list, choice: Self.mirrorEntry("LG UltraFine", 1920, 1080, main: false)),
+                     "a different size is a different display")
+        XCTAssertNil(WorkspaceModel.mirroredDisplay(in: list, choice: Self.mirrorEntry("Studio Display", 2560, 1440, main: false)),
+                     "two identical displays: no guess")
+        let mainStudio = list.map { $0.id == 2 ? CatalogDisplayItem(id: 2, name: $0.name, width: $0.width, height: $0.height, isMain: true, isVirtual: false) : $0 }
+        XCTAssertEqual(WorkspaceModel.mirroredDisplay(in: mainStudio, choice: Self.mirrorEntry("Studio Display", 2560, 1440, main: true))?.id, 2,
+                       "the main flag tells identical displays apart")
+    }
+
+    // MARK: The Mac never undoes Minimize on Mac
+
+    /// The Mac brings a minimized window back only when it was chosen for a tile while minimized,
+    /// once; never after Minimize on Mac, and never when a tucked float shows again.
+    func testTheMacRestoresAWindowOnlyWhenItWasChosenWhileMinimized() {
+        var ledger = WorkspaceRestoreLedger()
+        XCTAssertTrue(ledger.observe(tile: "w1", window: 10, generation: 5, offscreen: true, delivering: false), "chosen while minimized")
+        XCTAssertFalse(ledger.observe(tile: "w1", window: 10, generation: 5, offscreen: true, delivering: false), "only once")
+
+        XCTAssertFalse(ledger.observe(tile: "w2", window: 11, generation: 5, offscreen: false, delivering: true))
+        XCTAssertFalse(ledger.observe(tile: "w2", window: 11, generation: 5, offscreen: true, delivering: false),
+                       "minimized after it was shown (Minimize on Mac): it stays minimized")
+
+        // Tucked, the float's tile isn't sent; its window is still listed, so the entry stays.
+        ledger.prune { _ in true }
+        XCTAssertFalse(ledger.observe(tile: "w2", window: 11, generation: 5, offscreen: true, delivering: false),
+                       "un-tucking never restores a window")
+
+        XCTAssertFalse(ledger.observe(tile: "w4", window: 12, generation: 5, offscreen: true, delivering: true),
+                       "a hidden window that still delivers needs nothing")
+        XCTAssertFalse(ledger.observe(tile: "w4", window: 12, generation: 5, offscreen: true, delivering: false))
+
+        ledger.prune { $0.window != 11 }
+        XCTAssertFalse(ledger.seen.contains { $0.window == 11 }, "a closed window is forgotten")
+        XCTAssertTrue(ledger.observe(tile: "w5", window: 11, generation: 6, offscreen: true, delivering: false),
+                      "a window chosen anew while minimized is restored")
     }
 }
