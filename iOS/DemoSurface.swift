@@ -206,7 +206,12 @@ struct DemoReceiverScreen: View {
     private func handle(_ points: [CGPoint], at time: TimeInterval, base: RemoteViewportTransform) {
         let feedback = workspace.interaction.touches(points, at: time, base: base, settings: inputSettings)
         feedback.forEach(workspace.show)
-        if points.isEmpty { store.scheduleAutoHide() } else { store.beginAutoHideActivity() }
+        if points.isEmpty {
+            store.scheduleAutoHide()
+        } else {
+            store.beginAutoHideActivity()
+            store.noteSurfaceTouch()
+        }
     }
 
     private func tapAtPointer(base: RemoteViewportTransform) {
