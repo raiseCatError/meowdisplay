@@ -907,6 +907,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// earlier `.sameSide` (see `init(from:)`).
     var functionTrayPosition = FunctionTrayPosition.oppositeSide
     var functionTrayProfiles: [FunctionTrayProfile]
+    /// How long a modifier is touched before its shortcuts appear (#131).
+    var modifierHoldResponse = ModifierHoldResponse.standard
     /// The compact arrow button and its keypad (#179) on iPhone and compact
     /// windows. Its own switch, like the Function Tray's; only Allow Input
     /// and the keyboard wire also gate it. On for everyone, upgraded
@@ -1062,6 +1064,11 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Older saves predate the opposite-side default: keep what they had.
         functionTrayPosition = try value(.functionTrayPosition, FunctionTrayPosition.sameSide)
         functionTrayProfiles = try value(.functionTrayProfiles, fallback.functionTrayProfiles)
+        // Absent (added 2026-11-05): Standard. No schema bump.
+        // Lenient: a value a later build adds falls back here instead of
+        // failing the whole blob.
+        modifierHoldResponse = (try? value(.modifierHoldResponse, fallback.modifierHoldResponse))
+            ?? fallback.modifierHoldResponse
         // Absent (added 2026-11-05): a new install's values. No schema bump.
         arrowKeysEnabled = try value(.arrowKeysEnabled, fallback.arrowKeysEnabled)
         arrowKeysSide = try value(.arrowKeysSide, fallback.arrowKeysSide)

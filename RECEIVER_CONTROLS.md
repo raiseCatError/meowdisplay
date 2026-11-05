@@ -116,6 +116,7 @@ ignore Touch Style.
 | Hardware keyboard | Partial. Not verified with a real keyboard | Partial | Partial. Same | Yes, after Request Control |
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
+| Hold Response (how long ⌘ ⌥ ⌃ ⇧ are touched before their shortcuts appear: Fast 0.18 s, Standard 0.25 s, Deliberate 0.4 s) | Yes | Yes | No (fixed) | n/a |
 | Arrow keys (button and ↑ ← ↓ → keypad) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Compact windows only (roomy layouts: planned) | No | n/a |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |

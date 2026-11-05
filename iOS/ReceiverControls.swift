@@ -240,6 +240,12 @@ final class ReceiverControlStore: ObservableObject {
 @MainActor
 final class ReceiverHaptics {
     private let enabled: () -> Bool
+    // Kept, so `prepare()` can warm the Taptic Engine before the haptic a
+    // touch is about to earn (#131); a fresh generator per tap starts cold.
+    private lazy var selection = UISelectionFeedbackGenerator()
+    private lazy var light = UIImpactFeedbackGenerator(style: .light)
+    private lazy var medium = UIImpactFeedbackGenerator(style: .medium)
+    private lazy var notification = UINotificationFeedbackGenerator()
 
     init(enabled: @escaping () -> Bool) { self.enabled = enabled }
 
@@ -247,15 +253,23 @@ final class ReceiverHaptics {
         guard ControlHapticPolicy.shouldPlay(event, enabled: enabled()) else { return }
         switch event {
         case .selection:
-            UISelectionFeedbackGenerator().selectionChanged()
+            selection.selectionChanged()
         case .latch, .expandCollapse, .profileChange, .settings:
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            light.impactOccurred()
         case .confirmation, .reset:
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            notification.notificationOccurred(.success)
         case .sessionActions:
             // A firmer tap than Settings: the hold was recognized and a modal opened.
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            medium.impactOccurred()
         }
+    }
+
+    /// A modifier was touched: its tap (latch) or hold (palette) haptic is
+    /// moments away. Does nothing while haptics are off.
+    func prepareForModifier() {
+        guard enabled() else { return }
+        selection.prepare()
+        light.prepare()
     }
 }
 
@@ -399,6 +413,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// The local calculator's open panel (`LocalCalculatorLayer`), reported
     /// as occupied like the other controls.
     @State private var calculatorPanelFrames: [CGRect] = []
+    /// Down while a finger is on the controls. Resets on a cancelled touch
+    /// too, where `onEnded` never runs (see `cancelControlGesture`).
+    @GestureState private var controlTouchDown = false
+    /// The controls moved under a finger that is still down (a fold, a
+    /// rotation, the keyboard): the rest of that touch is ignored, so it can
+    /// never land on whatever moved under it.
+    @State private var controlTouchAbandoned = false
 
     /// Arrow keys (#179): the key a finger holds on the keypad, its repeat
     /// timer, and the button/keypad frames frozen while a finger is down so
@@ -599,6 +620,22 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         }
         .onChange(of: store.preferences.activeCustomLayoutID) { _ in apply(interaction.resetAll()) }
         .onChange(of: interaction.activeChord) { store.projectChord($0.modifiers) }
+        // A touch the system took never reaches `onEnded`. On a normal lift
+        // `onEnded` has already cleared `gestureActive` by the time this
+        // runs; the hop to the next turn of the run loop makes sure of it.
+        .onChange(of: controlTouchDown) { down in
+            guard !down else { return }
+            DispatchQueue.main.async {
+                if gestureActive { cancelControlGesture() }
+                controlTouchAbandoned = false
+            }
+        }
+        // Targets are hit-tested against live frames: when the controls'
+        // geometry changes under a held touch, drop the touch rather than
+        // let it finish on a different key.
+        .onChange(of: containerSize) { _ in abandonControlTouch() }
+        .onChange(of: reservedRegions) { _ in abandonControlTouch() }
+        .onChange(of: presentation) { _ in abandonControlTouch() }
         .onDisappear { store.projectChord([]) }
         .onPreferenceChange(WheelHitPreference.self) { wheelHit = $0 }
         .onPreferenceChange(LocalCalculatorFramesPreference.self) { calculatorPanelFrames = $0 }
@@ -1013,14 +1050,14 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     private func functionButton(_ item: ShortcutItem) -> some View {
-        ShortcutButtonFaceView(face: item.face, diameter: Metrics.trayItem)
-        .foregroundStyle(.white)
-        .frame(width: Metrics.trayItem, height: Metrics.trayItem)
-        .background(chip(selected: false))
-        .contentShape(Circle())
-        .onTapGesture { performFunctionAction(item) }
+        // A button, for its pressed state: it still fires on lift, and only
+        // when the finger lifts on it.
+        Button { performFunctionAction(item) } label: {
+            ShortcutButtonFaceView(face: item.face, diameter: Metrics.trayItem)
+                .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+        }
+        .buttonStyle(TrayChipButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel(item.title)
-        .trayButtonAccessibility { performFunctionAction(item) }
     }
 
     /// One plain Return press through the normal keyboard path. Modifiers
@@ -1040,8 +1077,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     private func modifierButton(_ modifier: ControlModifier, diameter: CGFloat) -> some View {
-        let selected = interaction.latchedModifiers.contains(modifier)
+        let held = interaction.latchedModifiers.contains(modifier)
             || interaction.temporaryModifiers.contains(modifier)
+        // Lit from the moment a finger lands, like the keyboard bar and iPad
+        // chips, so the chip never looks inert while tap-or-hold is decided.
+        let selected = held || interaction.phase == .pressed(modifier)
         return Text(modifier.symbol)
             .font(.system(size: (21 * diameter / Metrics.trayItem).rounded(), weight: .semibold))
             .foregroundStyle(selected ? Color.black : Color.white)
@@ -1050,7 +1090,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .background(chip(selected: selected))
             .accessibilityLabel(modifier.title)
             .accessibilityInputLabels(ControlTrayItem.item(for: modifier).spokenNames)
-            .accessibilityValue(selected ? "On" : "Off")
+            .accessibilityValue(held ? "On" : "Off")
             .trayButtonAccessibility { activateForAccessibility(ControlTrayItem.item(for: modifier)) }
     }
 
@@ -1144,7 +1184,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     private func controlGesture() -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("receiverControls"))
+            .updating($controlTouchDown) { _, down, _ in down = true }
             .onChanged { value in
+                guard !controlTouchAbandoned else { return }
                 if !gestureActive {
                     gestureActive = true
                     // A touch is down on the tray: reveal immediately (a
@@ -1160,9 +1202,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                         initiatingModifier = modifier
                         paletteAnchor = modifier
                         interaction.press(modifier)
+                        haptics.prepareForModifier()
                         holdTask?.cancel()
+                        let hold = store.preferences.modifierHoldResponse.delay
                         holdTask = Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(350))
+                            try? await Task.sleep(for: .milliseconds(Int(hold * 1000)))
                             guard !Task.isCancelled, interaction.phase == .pressed(modifier) else { return }
                             apply(interaction.beginPalette(with: modifier))
                         }
@@ -1171,6 +1215,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     }
                 }
 
+                // A finger already sliding toward the palette doesn't wait
+                // out the hold, and its lift is never a latching tap.
+                if let modifier = initiatingModifier, interaction.phase == .pressed(modifier),
+                   ModifierPressPolicy.slideOpensPalette(translation: value.translation) {
+                    holdTask?.cancel()
+                    apply(interaction.beginPalette(with: modifier))
+                }
                 // Sliding onto another modifier only builds a chord during a
                 // hold; a latched palette is browsed, not rebuilt.
                 if case .palette = interaction.phase {
@@ -1189,6 +1240,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             }
             .onEnded { value in
                 holdTask?.cancel()
+                guard !controlTouchAbandoned else {
+                    controlTouchAbandoned = false
+                    return
+                }
                 let finishedOn = selectedAction(under: value.location)
                 if let modifier = initiatingModifier {
                     // A press that never became a hold is a latch toggle;
@@ -1227,6 +1282,26 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 // itself declines in that case).
                 store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
             }
+    }
+
+    /// Clears a control touch the system cancelled: nothing latches, nothing
+    /// fires, and anything the hold held goes up.
+    private func cancelControlGesture() {
+        holdTask?.cancel()
+        apply(interaction.cancelPress())
+        initiatingModifier = nil
+        initiatingItem = nil
+        initiatingMoveView = false
+        initiatingReturn = false
+        lastHoveredModifier = nil
+        gestureActive = false
+        store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
+    }
+
+    private func abandonControlTouch() {
+        guard gestureActive else { return }
+        cancelControlGesture()
+        controlTouchAbandoned = controlTouchDown
     }
 
     private func trayItem(at point: CGPoint) -> ControlTrayItem? {
@@ -2943,5 +3018,26 @@ private extension View {
         } else {
             self
         }
+    }
+}
+
+/// The iPhone Function Tray's chips: the same translucent circle, lit while
+/// pressed so a tap is visible before it fires on lift.
+private struct TrayChipButtonStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .background(
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.45)
+                    .overlay(Circle().fill(Color.white.opacity(configuration.isPressed ? 0.3 : 0.07)))
+                    .overlay(Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.28), radius: 5, y: 1))
+            .contentShape(Circle())
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1)
+            .animation(.snappy(duration: 0.12), value: configuration.isPressed)
     }
 }

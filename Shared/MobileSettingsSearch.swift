@@ -139,6 +139,7 @@ enum MobileSettingsSearchIndex {
         .init("customLayouts", String(localized: "Custom Layouts"), .controls, keywords: ["two hand assist", "radial", "share", "import", "editor", "shortcut button"], availability: .padOnly),
         .init("showTray", String(localized: "Show Control Tray"), .controls, keywords: ["controls", "hide"]),
         .init("autoHide", String(localized: "Auto-hide Control Trays"), .controls, keywords: ["auto hide", "fade"]),
+        .init("holdResponse", String(localized: "Hold Response"), .controls, keywords: ["hold", "long press", "delay", "palette", "shortcuts", "modifier", "timing", "fast", "deliberate"]),
         .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("arrowKeys", String(localized: "Show Arrow Keys"), .controls, keywords: ["arrows", "arrow keys", "cursor keys", "up", "down", "left", "right", "keypad"], availability: .phoneOnly),
