@@ -202,7 +202,7 @@ struct WorkspaceFloatLayer: View {
         .accessibilityLabel(Text("\(title(id)), floating window"))
         .accessibilityIdentifier("workspaceFloat")
         .accessibilityAddTraits(active ? .isSelected : [])
-        .accessibilityAction { model.raiseFloat(id); model.focus(id) }
+        .accessibilityAction { model.raiseFloat(id); model.focus(id, raise: false) }   // selects it here only
         .modifier(FloatAccessibilityActions(model: model, id: id, front: front))
 
         titlePill(id, rect: rect, active: active, outline: outline)
@@ -210,6 +210,25 @@ struct WorkspaceFloatLayer: View {
         grip(id, rect: rect, corner: .bottomLeading, active: active)
         grip(id, rect: rect, corner: .bottomTrailing, active: active)
         if model.tileState(id)?.status == .offscreen, !moved { offscreenNotice(id, rect: rect) }
+        else if active, model.remote?.hostFocus.isMismatch == true, !moved { typingPaused(id, rect: rect) }
+    }
+
+    /// Typing to this float paused: the Mac's focus moved to another app or window after its
+    /// window came forward. Only this explicit tap brings the window forward again; arranging
+    /// the float never does (keys meanwhile go nowhere, never into another window).
+    private func typingPaused(_ id: String, rect: CGRect) -> some View {
+        Button { model.focus(id) } label: {
+            Text(model.remote?.hostFocus == .otherWindowFocused
+                 ? "Typing paused: another window is in front on the Mac. Tap to resume."
+                 : "Typing paused: another app is in front on the Mac. Tap to resume.")
+                .font(.caption).foregroundStyle(.white).multilineTextAlignment(.center)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: max(rect.width - 24, 120))
+        .position(x: rect.midX, y: rect.maxY - 34)
+        .accessibilityIdentifier("floatTypingPaused")
     }
 
     /// The float's window isn't on screen on the Mac (minimized, hidden or in another Space).
@@ -450,7 +469,8 @@ struct WorkspaceFloatLayer: View {
         let front = model.layout.visibleFloatIDs.last == id
         Section {
             if !front {
-                Button { model.raiseFloat(id); model.focus(id) } label: { Label("Bring to Front", systemImage: "square.3.layers.3d.top.filled") }
+                // On this device only: the Mac window stays where it is.
+                Button { model.raiseFloat(id); model.focus(id, raise: false) } label: { Label("Bring to Front", systemImage: "square.3.layers.3d.top.filled") }
             }
             Button { model.toggleLocalFullscreen(id) } label: {
                 Label("Fullscreen on This Device", systemImage: "arrow.up.left.and.arrow.down.right")
@@ -630,7 +650,7 @@ private struct FloatAccessibilityActions: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .accessibilityAction(named: Text("Bring to Front")) { model.raiseFloat(id); model.focus(id) }
+            .accessibilityAction(named: Text("Bring to Front")) { model.raiseFloat(id); model.focus(id, raise: false) }
             .accessibilityAction(named: Text("Move Left")) { model.nudgeFloat(id, dx: -0.1, dy: 0) }
             .accessibilityAction(named: Text("Move Right")) { model.nudgeFloat(id, dx: 0.1, dy: 0) }
             .accessibilityAction(named: Text("Move Up")) { model.nudgeFloat(id, dx: 0, dy: -0.1) }
