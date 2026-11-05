@@ -97,8 +97,7 @@ final class DemoModeVisualTourTests: XCTestCase {
         let gear = app.descendants(matching: .any)["Settings"].firstMatch
         if !gear.isHittable {
             // Auto-hide faded the trays; any touch on the surface brings them back.
-            app.descendants(matching: .any)["Sample Mac desktop"].firstMatch
-                .coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
+            app.demoDesktopWakePoint().tap()
             sleep(1)
         }
         gear.tap()

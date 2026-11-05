@@ -284,7 +284,7 @@ final class ReceiverControlsTourTests: XCTestCase {
     @MainActor
     private func revealControls(_ control: XCUIElement) {
         guard !control.isHittable else { return }
-        element("Sample Mac desktop").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
+        app.demoDesktopWakePoint().tap()
         sleep(1)
     }
 
