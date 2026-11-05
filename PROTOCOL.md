@@ -922,9 +922,13 @@ informational only. Note the asymmetry: the receiver's `ping` solicits a
 **`cursor`**: `v` is 1 (visible) or 0 (hidden). When visible, `x`, `y`
 give the normalized position (section 7); when hidden they MAY be absent.
 The cursor rides the control path rather than being baked into the video
-so it moves at input rate, not at video latency; the official sender emits
-up to 120 updates/s, deduplicated by movement threshold. Receivers without
-cursor rendering MAY ignore both cursor messages.
+so it moves at input rate, not at video latency; the official sender reads
+the Mac cursor every 8 ms and sends a position whenever its four-decimal
+value changes, so up to about 120 updates/s while it moves and none at rest.
+Receivers without cursor rendering MAY ignore both cursor messages. A
+receiver MAY draw the cursor on its own display refresh, a short delay
+behind the newest report, interpolating between two consecutive reported
+positions; it MUST NOT draw a position past the newest report.
 
 **`displayState`** carries `paused` when the user pauses capture and
 `running` after every successful capture start, including initial capture,

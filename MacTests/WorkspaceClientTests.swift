@@ -94,7 +94,12 @@ final class WorkspaceClientTests: XCTestCase {
         m.updateSpace(WorkspaceSize(width: 800, height: 600), hinge: nil)
         m.choose(m.catalog!.windows[0], asNewTile: false)
         let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The request goes out after a short debounce. Wait for it to be sent rather than a
+        // fixed time: on a busy CI runner the debounced task can run later than 200 ms.
+        let deadline = Date().addingTimeInterval(5)
+        while !sent.contains(where: { $0["type"] as? String == WireMessage.workspaceRequest }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         let request = try XCTUnwrap(sent.last { $0["type"] as? String == WireMessage.workspaceRequest })
         let tile = try XCTUnwrap((request["tiles"] as? [[String: Any]])?.first)
         let epoch = try XCTUnwrap(tile["view"] as? Int)

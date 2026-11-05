@@ -4975,11 +4975,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // With the pane's scale and rotation: the canvas isn't the Mac display's shape, so
                 // the sprite's display-normalized size would stretch it (PROTOCOL.md 6.10).
                 let scaleChanged = lastCursorPane.map { abs($0.kx - p.kx) > $0.kx * 0.01 || $0.rotation != p.rotation } ?? true
-                if !lastCursorSent.visible || abs(p.x - lastCursorSent.x) > 0.0004 || abs(p.y - lastCursorSent.y) > 0.0004 || scaleChanged {
-                    lastCursorSent = (p.x, p.y, true)
+                let wire = CursorWirePosition(x: p.x, y: p.y)
+                if !lastCursorSent.visible || wire != CursorWirePosition(x: lastCursorSent.x, y: lastCursorSent.y) || scaleChanged {
+                    lastCursorSent = (wire.x, wire.y, true)
                     lastCursorPane = (p.kx, p.rotation)
-                    sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
-                                      p.x, p.y, p.kx, p.ky, p.rotation))
+                    sendCursor(wire.fields + String(format: ",\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
+                                                    p.kx, p.ky, p.rotation))
                 }
             } else if lastCursorSent.visible {
                 lastCursorSent.visible = false
@@ -4995,12 +4996,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         if bounds.contains(loc) {
-            let x = (loc.x - bounds.minX) / bounds.width
-            let y = (loc.y - bounds.minY) / bounds.height
-            if !lastCursorSent.visible
-                || abs(x - lastCursorSent.x) > 0.0004 || abs(y - lastCursorSent.y) > 0.0004 {
-                lastCursorSent = (x, y, true)
-                sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1", x, y))
+            // Every change the wire can carry is sent (CursorWirePosition), so slow moves
+            // aren't held back and the receiver rests exactly where the Mac cursor stopped.
+            let wire = CursorWirePosition(x: (loc.x - bounds.minX) / bounds.width,
+                                          y: (loc.y - bounds.minY) / bounds.height)
+            if !lastCursorSent.visible || wire != CursorWirePosition(x: lastCursorSent.x, y: lastCursorSent.y) {
+                lastCursorSent = (wire.x, wire.y, true)
+                sendCursor(wire.fields + ",\"v\":1")
             }
         } else if lastCursorSent.visible {
             lastCursorSent.visible = false
