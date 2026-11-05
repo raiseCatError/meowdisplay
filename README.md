@@ -38,6 +38,10 @@ control, with devices paired and every session encrypted.
 No MeowDisplay account is required, and there is no MeowDisplay-hosted relay
 or server in the middle.
 
+**Already using another remote-display app?** [Compare MeowDisplay with alternatives](COMPARISON.md)
+to check platform support, input styles, pricing, feature limits and trade-offs
+before deciding what fits your setup.
+
 ## MeowDisplay 2.0 — official release
 
 MeowDisplay 2.0 is officially released, with iPhone and iPad available on the
