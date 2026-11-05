@@ -490,6 +490,17 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var canCloseWindows = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
+    /// This receiver has floating-pane chrome (iPhone and iPad). The Mac Receiver doesn't yet:
+    /// it says `ws` 1 and never floats a pane.
+    nonisolated static let floatsDrawnHere: Bool = {
+        #if os(iOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+    /// Per model, so tests on the Mac can exercise floats.
+    var floatsDrawnHere = WorkspaceModel.floatsDrawnHere
     /// The Mac offers Lock This Mac (any mode); the last request's outcome.
     @Published private(set) var canLockMac = false
     @Published private(set) var lockMacStatus: LockMacStatus?
@@ -530,6 +541,13 @@ final class WorkspaceModel: ObservableObject {
     var cancelZoneGlobal: CGRect = .zero
     /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
     var removeZoneGlobal: CGRect = .zero
+    /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
+    /// floats the window instead (the way that needs no shake).
+    var floatZoneGlobal: CGRect = .zero
+    /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
+    @Published var floatHandlesGlobal: [CGRect] = []
+    /// The first-use tip about shaking a drag (shown once, ever, on this device).
+    @Published private(set) var shakeTipVisible = false
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -605,7 +623,7 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
-            canFloat = f.contains(WindowWorkspaceWire.floatFeature)
+            canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
@@ -1456,6 +1474,24 @@ final class WorkspaceModel: ObservableObject {
         if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
         drag = d
         shake.reset()
+        if canPlace(item, .float), !defaults.bool(forKey: Self.shakeTipKey) {
+            defaults.set(true, forKey: Self.shakeTipKey)   // never repeated, even if dismissed unseen
+            shakeTipVisible = true
+        }
+    }
+
+    static let shakeTipKey = "workspace.shakeTipShown"
+    func dismissShakeTip() { shakeTipVisible = false }
+
+    /// The Float zone is offered while dragging in Pane placement something that can float, in Window view.
+    var canDropToFloat: Bool {
+        guard windowMode, let d = drag, d.placement == .pane else { return false }
+        if case .float = d.item { return false }
+        return canPlace(d.item, .float)
+    }
+
+    func overFloatZone(_ p: CGPoint) -> Bool {
+        canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
     }
 
     /// Moves the drag; a shake while holding switches its placement (true when it switched).
@@ -1471,7 +1507,7 @@ final class WorkspaceModel: ObservableObject {
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
-        if overCancelZone(p) || overRemoveZone(p) { return nil }
+        if overCancelZone(p) || overRemoveZone(p) || overFloatZone(p) { return nil }
         if drag?.placement == .float { return nil }   // Floating placement: no pane targets
         if !windowMode {
             switch drag?.item { case .window?, .app?: break; default: return nil }
@@ -1525,6 +1561,10 @@ final class WorkspaceModel: ObservableObject {
         if d.placement == .float {
             drag = nil
             return dropFloating(d)
+        }
+        if overFloatZone(d.location), canPlace(d.item, .float) {
+            drag = nil
+            return floatItem(d.item, at: nil)
         }
         let target = dropTarget(forGlobal: d.location)
         let remove = overRemoveZone(d.location)
@@ -1677,6 +1717,16 @@ final class WorkspaceModel: ObservableObject {
 
     /// Stage Peek's tap: shows `w` in `switchTarget`; never adds a tile.
     func switchTo(_ w: CatalogWindowItem) {
+        if windowMode, let host, let holder = layout.tile(holding: host, windowID: w.id), layout.isFloat(holder) {
+            untuckFloat(holder)   // a float already shows it: bring that one back, never a second copy
+            return
+        }
+        // Default Window Placement applies to windows not in the layout yet.
+        if windowMode, canFloat, defaultPlacement == .float, !WorkspaceSource.isDisplayKey(w.id),
+           let host, layout.tile(holding: host, windowID: w.id) == nil {
+            openFloating(w)
+            return
+        }
         replacingTile = switchTarget
         choose(w, asNewTile: false)
     }
@@ -2052,15 +2102,20 @@ extension WorkspaceModel {
     /// A drop in Floating placement: the window floats where it was let go.
     fileprivate func dropFloating(_ d: WorkspaceDrag) -> Bool {
         guard let frame = floatDropFrame(d, at: d.location) else { return false }
-        let center = WorkspacePoint(x: frame.midX, y: frame.midY)
-        switch d.item {
+        return floatItem(d.item, at: WorkspacePoint(x: frame.midX, y: frame.midY))
+    }
+
+    /// Floats a dragged item, centred at `center` (nil: where a new float opens).
+    fileprivate func floatItem(_ item: WorkspaceDrag.Item, at center: WorkspacePoint?) -> Bool {
+        switch item {
         case .window(let w):
             openFloating(w, at: center)
             return true
         case .app(let app):
             let windows = (catalog?.windows ?? []).filter { $0.bundleID == app.bundleID }
             if windows.count == 1 { openFloating(windows[0], at: center); return true }
-            appDrop = AppDrop(app: app, windows: windows, target: .replace(tile: Self.noDesktop, preview: frame), floatAt: center)
+            appDrop = AppDrop(app: app, windows: windows, target: .replace(tile: Self.noDesktop, preview: .unit),
+                              floatAt: center ?? WorkspacePoint(x: 0.5, y: 0.5))
             return !windows.isEmpty
         case .pane(let id, let tab):
             floatPane(id, tab: tab, at: center)

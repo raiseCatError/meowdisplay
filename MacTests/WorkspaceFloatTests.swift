@@ -430,9 +430,11 @@ final class WorkspaceFloatTests: XCTestCase {
     // MARK: Receiver wire and safety
 
     @MainActor
-    private func connectedModel(features: Set<String>, sent: @escaping ([String: Any]) -> Void) -> WorkspaceModel {
+    private func connectedModel(features: Set<String>, drawsFloats: Bool = true,
+                                sent: @escaping ([String: Any]) -> Void) -> WorkspaceModel {
         let defaults = UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
         let m = WorkspaceModel(defaults: defaults)
+        m.floatsDrawnHere = drawsFloats   // the iPhone/iPad receiver (this test runs on the Mac)
         m.send = { sent($0); return true }
         m.inputAllowed = { true }
         m.apply(.connected(peerID: "mac-a"))
@@ -600,5 +602,56 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertTrue(m.endDrag())
         XCTAssertTrue(m.layout.floats.isEmpty)
         XCTAssertEqual(Set(m.layout.tiles.values.flatMap(\.windows).map(\.windowID)), [10, 11, 12], "every window still here")
+    }
+
+    /// Without a shake: the Float zone beside Cancel floats the dragged window. Default Window
+    /// Placement applies to windows not in the layout yet; a window already floating comes back
+    /// instead of opening twice. The shake tip shows once, ever.
+    @MainActor
+    func testFloatZoneDefaultPlacementAndTheOneTimeTip() {
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
+        m.cancelZoneGlobal = CGRect(x: 400, y: 760, width: 120, height: 44)
+        m.floatZoneGlobal = CGRect(x: 540, y: 760, width: 120, height: 44)
+        let before = m.layout.orderedTileIDs
+
+        XCTAssertFalse(m.shakeTipVisible)
+        m.beginDrag(.window(w[1]), at: CGPoint(x: 300, y: 300))
+        XCTAssertTrue(m.shakeTipVisible, "the first drag that can float shows the tip")
+        XCTAssertTrue(m.canDropToFloat)
+        m.moveDrag(to: CGPoint(x: 600, y: 780), at: 1)
+        XCTAssertTrue(m.overFloatZone(CGPoint(x: 600, y: 780)))
+        XCTAssertNil(m.dropTarget(forGlobal: CGPoint(x: 600, y: 780)), "no pane drop under the Float zone")
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.floatIDs.count, 1)
+        XCTAssertEqual(m.layout.orderedTileIDs, before)
+        m.dismissShakeTip()
+        m.beginDrag(.window(w[2]), at: CGPoint(x: 300, y: 300))
+        XCTAssertFalse(m.shakeTipVisible, "never repeated")
+        m.cancelDrag()
+
+        // Stage Peek's tap: a floating window comes back (untucked), never a second copy.
+        let fid = m.layout.floatIDs[0]
+        m.tuckFloat(fid, edge: .left, offset: 0.5)
+        m.switchTo(w[1])
+        XCTAssertNil(m.layout.float(fid)?.tuck)
+        XCTAssertEqual(m.layout.tiles.count, 2)
+
+        // Default Window Placement: Floating opens a new window as a float; Pane keeps today's behaviour.
+        m.defaultPlacement = .float
+        m.switchTo(w[2])
+        XCTAssertEqual(m.layout.floatIDs.count, 2)
+        XCTAssertEqual(m.layout.orderedTileIDs, before)
+        m.defaultPlacement = .pane
+        XCTAssertEqual(m.layout.floatIDs.count, 2, "changing the setting moves nothing already open")
+
+        // A receiver without float chrome (the Mac Receiver) never floats, even when the Mac offers it.
+        let mac = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature], drawsFloats: false) { _ in }
+        XCTAssertFalse(mac.canFloat)
+        mac.choose(mac.catalog!.windows[0], asNewTile: false)
+        mac.openFloating(mac.catalog!.windows[1])
+        XCTAssertTrue(mac.layout.floats.isEmpty)
     }
 }
