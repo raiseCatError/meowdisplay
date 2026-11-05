@@ -2985,8 +2985,22 @@ struct VideoLayerView: UIViewRepresentable {
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
+        /// Where the pointer is drawn: the newest Mac report, or a point on the path between
+        /// two consecutive reports while `cursorPacer` paces it (see `moveCursor`).
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
+        private var cursorPacer = CursorPresentationPacer()
+        private var cursorLink: CADisplayLink?
+        /// On by default. Launching with `-cursorPacing NO` draws each report on arrival, as
+        /// before, for side-by-side comparison on a device.
+        private let pacesCursor = UserDefaults.standard.object(forKey: "cursorPacing") == nil
+            || UserDefaults.standard.bool(forKey: "cursorPacing")
+        #if DEBUG
+        private var cursorPacingTicks = 0
+        private var cursorPacingHeldTicks = 0
+        private var cursorPacingReports = 0
+        private var lastCursorPacingLogAt = Date.distantPast
+        #endif
 
         private var lastLoggedLayout = ""
 
@@ -4062,18 +4076,97 @@ struct VideoLayerView: UIViewRepresentable {
             return currentTransform.displayedRect.width / (currentTransform.remoteCrop.width * video.width)
         }
 
+        /// One confirmed Mac cursor report. Showing, hiding and jumps are drawn now. Moves are
+        /// drawn on the display's refreshes by `cursorPacer`, about one report interval behind
+        /// and only ever on the path between two reports, so the pointer advances evenly
+        /// however the reports were bunched on the way here.
         func moveCursor(x: Double, y: Double, visible: Bool) {
-            cursorNorm = CGPoint(x: x, y: y)
+            #if DEBUG
+            defer { logCursorTraceIfDue(reason: "moveCursor") }
+            #endif
             cursorVisible = visible
+            let report = CGPoint(x: x, y: y)
+            guard pacesCursor else {
+                drawCursor(at: report)
+                return
+            }
+            cursorPacer.receive(report, visible: visible, at: CACurrentMediaTime())
+            #if DEBUG
+            cursorPacingReports += 1
+            #endif
+            if cursorPacer.isSettled {
+                stopCursorLink()
+                drawCursor(at: cursorPacer.newest ?? report)
+            } else {
+                startCursorLink()
+            }
+        }
+
+        private func drawCursor(at point: CGPoint) {
+            cursorNorm = point
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            cursorLayer.isHidden = !visible || cursorLayer.contents == nil
+            cursorLayer.isHidden = !cursorVisible || cursorLayer.contents == nil
             updateCursorLayout()
             CATransaction.commit()
-            #if DEBUG
-            logCursorTraceIfDue(reason: "moveCursor")
-            #endif
         }
+
+        private func startCursorLink() {
+            guard cursorLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tickCursor(_:)))
+            // The screen's full rate while the pointer moves: 120 Hz on ProMotion (on iPhone
+            // only with CADisableMinimumFrameDurationOnPhone in Info.plist).
+            let maximum = Float(window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, maximum), maximum: maximum,
+                                                            preferred: maximum)
+            link.add(to: .main, forMode: .common)
+            cursorLink = link
+        }
+
+        private func stopCursorLink() {
+            cursorLink?.invalidate()
+            cursorLink = nil
+        }
+
+        /// Runs only while the pointer is catching up with a report; stops once the newest
+        /// report is drawn, so a resting pointer costs nothing.
+        @objc private func tickCursor(_ link: CADisplayLink) {
+            guard let point = cursorPacer.frame(at: link.timestamp) else {
+                stopCursorLink()
+                return
+            }
+            #if DEBUG
+            noteCursorPacingTick(moved: point != cursorNorm)
+            #endif
+            if point != cursorNorm { drawCursor(at: point) }
+            if cursorPacer.isSettled { stopCursorLink() }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // Off screen: stop pacing and show the newest report when the view returns.
+            guard window == nil, cursorLink != nil else { return }
+            stopCursorLink()
+            cursorPacer.settle()
+            if let newest = cursorPacer.newest { drawCursor(at: newest) }
+        }
+
+        #if DEBUG
+        /// Every 2 s while the pointer moves: refreshes drawn, how many held because the next
+        /// report had not arrived yet, and the pacing delay. The on-device check for pacing.
+        private func noteCursorPacingTick(moved: Bool) {
+            cursorPacingTicks += 1
+            if !moved { cursorPacingHeldTicks += 1 }
+            let now = Date()
+            guard now.timeIntervalSince(lastCursorPacingLogAt) >= 2 else { return }
+            lastCursorPacingLogAt = now
+            Log.info("cursorPacing: refreshes=\(cursorPacingTicks) held=\(cursorPacingHeldTicks) "
+                + "reports=\(cursorPacingReports) delayMs=\(String(format: "%.1f", cursorPacer.delay * 1000))")
+            cursorPacingTicks = 0
+            cursorPacingHeldTicks = 0
+            cursorPacingReports = 0
+        }
+        #endif
 
         func setCursorSprite(_ image: CGImage, anchor: CGPoint, normSize: CGSize) {
             CATransaction.begin()
@@ -4138,6 +4231,8 @@ struct VideoLayerView: UIViewRepresentable {
         func setCursorPaneSize(_ size: CursorPaneSize?) {
             guard size != cursorPaneSize else { return }
             cursorPaneSize = size
+            // Another pane: the report that follows is drawn where it is, not glided to.
+            cursorPacer.jumpAtNextReport()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             updateCursorLayout()
