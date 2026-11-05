@@ -46,6 +46,10 @@ final class ReceiverControlStore: ObservableObject {
     /// Turn Off), so the on-surface prompt offers Enable rather than
     /// Request. Transient.
     @Published private(set) var userTurnedOffInput = false
+    /// The local calculator's calculation and panel for this app session —
+    /// memory only, independent of the session and of input grants.
+    let calculator = LocalCalculatorModel()
+
     /// The arrow keypad (#179) is open. Transient: never persisted, and
     /// closed by a touch on the remote surface or whenever input stops
     /// reaching the Mac (see `ReceiverControlOverlay`'s reset hooks).
@@ -392,6 +396,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     @State private var initiatingItem: ControlTrayItem?
     @State private var gestureActive = false
     @State private var lastHoveredModifier: ControlModifier?
+    /// The local calculator's open panel (`LocalCalculatorLayer`), reported
+    /// as occupied like the other controls.
+    @State private var calculatorPanelFrames: [CGRect] = []
+
     /// Arrow keys (#179): the key a finger holds on the keypad, its repeat
     /// timer, and the button/keypad frames frozen while a finger is down so
     /// nothing moves under it (an opening palette would otherwise push them).
@@ -593,6 +601,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .onChange(of: interaction.activeChord) { store.projectChord($0.modifiers) }
         .onDisappear { store.projectChord([]) }
         .onPreferenceChange(WheelHitPreference.self) { wheelHit = $0 }
+        .onPreferenceChange(LocalCalculatorFramesPreference.self) { calculatorPanelFrames = $0 }
     }
 
     @ViewBuilder
@@ -713,7 +722,19 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             reservedRegions: reservedRegions,
             bottomRow: true) : []
         #endif
-        // Arrow keys (#179): placed after everything else, around it.
+        // The local calculator's button, once added: the upper-left usable
+        // spot clear of everything above (which never moves for it).
+        let calculatorButton: CGRect? = LocalCalculatorPolicy.showsButton(
+            added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
+            keyboardBarShown: false) ? LocalCalculatorPlacement.phoneButtonFrame(
+                container: CGRect(origin: .zero, size: containerSize), safeInsets: safe,
+                keyboardVisibleRect: keyboardVisibleRect, portrait: portrait, diameter: Metrics.trayItem,
+                occupied: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
+                avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
+                reservedRegions: reservedRegions) : nil
+        // Arrow keys (#179): placed after everything else, around it,
+        // the calculator's button and open panel included. The calculator
+        // never moves for them, so the two can't push each other around.
         let computedArrows: ArrowKeysLayout? = arrowKeysShown ? ControlTrayGeometry.arrowKeysLayout(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
@@ -724,7 +745,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             keypadSize: store.arrowKeypadOpen
                 ? ArrowKeypadGeometry.size(key: Metrics.arrowKey, gap: Metrics.arrowGap) : nil,
             mainTrayFrame: renderedMainTrayFrame,
-            obstacles: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
+            obstacles: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? [])
+                + (calculatorButton.map { [$0] } ?? []) + calculatorPanelFrames,
             avoidNotch: store.preferences.avoidNotch,
             notchSide: notchSide,
             reservedRegions: reservedRegions) : nil
@@ -732,6 +754,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let occupiedFrames = [renderedMainTrayFrame]
             + functionFrames
             + (renderedPaletteFrame.map { [$0] } ?? [])
+            + (calculatorButton.map { [$0] } ?? []) + calculatorPanelFrames
             + (arrows?.occupied ?? [])
 
         ZStack(alignment: .topLeading) {
@@ -807,6 +830,14 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             // The full tray's gear fades out with Auto-hide (a tap there
             // first reveals it); the collapsed gear never hides.
             settingsHoldTarget(reachable: collapsed || !autoHiding)
+
+            LocalCalculatorLayer(
+                model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
+                panelBounds: safe.safeRect(in: containerSize).insetBy(dx: LocalCalculatorPlacement.margin,
+                                                                       dy: LocalCalculatorPlacement.margin),
+                obstacles: [renderedMainTrayFrame] + functionFrames
+                    + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                autoHiding: autoHiding, haptics: haptics) { chip(selected: $0) }
 
             #if DEBUG
             if notchDebugOverlayEnabled {
@@ -1766,6 +1797,12 @@ extension ReceiverControlOverlay {
         let mainGroups = padCollapsed ? [] : padMainGroups
         let mainKinds = mainGroups.flatMap { $0 }
         let groups = functionGroups
+        // The local calculator, once added, is the Function edge's first
+        // group of its own — so it starts the edge (top, or left) and shows
+        // in View Only too, when the Function groups themselves can't.
+        let showsCalculator = LocalCalculatorPolicy.showsButton(
+            added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
+            keyboardBarShown: false)
         let mainEdge = store.preferences.padMainEdge
         let functionEdge = store.preferences.padFunctionEdge
         let pass: (CGFloat?) -> PadEdgeLayout = { keyboardTop in
@@ -1773,8 +1810,8 @@ extension ReceiverControlOverlay {
                                    mainEdge: mainEdge, functionEdge: functionEdge,
                                    mainGroupCounts: mainGroups.map(\.count),
                                    mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
-                                   functionGroupCounts: groups.map(\.count), metrics: metrics,
-                                   keyboardTop: keyboardTop)
+                                   functionGroupCounts: (showsCalculator ? [1] : []) + groups.map(\.count),
+                                   metrics: metrics, keyboardTop: keyboardTop)
         }
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
@@ -1791,8 +1828,10 @@ extension ReceiverControlOverlay {
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
         }
+        let calculatorButton: CGRect? = showsCalculator
+            ? layout.functionCells.first.map { PadEdgeGeometry.circleFrame(inCell: $0, metrics: metrics) } : nil
         let functionControls: [(item: ShortcutItem, frame: CGRect)] =
-            zip(groups.flatMap { $0 }, layout.functionCells).map { item, cell in
+            zip(groups.flatMap { $0 }, layout.functionCells.dropFirst(showsCalculator ? 1 : 0)).map { item, cell in
                 (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics))
             }
         let autoHiding = store.autoHidden
@@ -1834,7 +1873,7 @@ extension ReceiverControlOverlay {
         let trays: [CGRect] = strip ? [] : (layout.mainSegments + layout.functionSegments)
             .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
         let occupied = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
-            + [gearFrame, paletteFrame].compactMap { $0 }
+            + [gearFrame, paletteFrame].compactMap { $0 } + calculatorPanelFrames
         // The touch region, built from typed pieces: as one `+`/`??` chain
         // inside the ZStack it exceeded Xcode 26's type-checking budget.
         let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
@@ -1908,6 +1947,16 @@ extension ReceiverControlOverlay {
             // Overlay's rail gear fades with Auto-hide like the rest of the rail (a tap
             // there reaches the Mac and reveals it); the collapsed gear and the Strip never hide.
             settingsHoldTarget(reachable: padCollapsed || !autoHiding)
+            LocalCalculatorLayer(
+                model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
+                buttonHint: hints ? String(localized: "calculator", comment: "Strip control hint.") : nil,
+                panelBounds: Self.boundsAboveKeyboard(
+                    layout.canvas.intersection(safeInsets.safeRect(in: containerSize))
+                        .insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
+                    keyboardTop: keyboardTop),
+                obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
+                    + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: true) }
         }
         .onAppear {
             onCanvasChange(canvasPublication)
@@ -2024,7 +2073,10 @@ extension ReceiverControlOverlay {
         }
         let regionControls = controlsPlaced.filter { !$0.kind.isOneTapAction }
         let occupied = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
-            + (wheel.map { [$0.frame] } ?? [])
+            + (wheel.map { [$0.frame] } ?? []) + calculatorPanelFrames
+        // Drawn by `LocalCalculatorLayer` (one, even if a shared layout
+        // placed more).
+        let calculatorButton = controlsPlaced.first { $0.kind == .calculator }?.frame
 
         ZStack(alignment: .topLeading) {
             ForEach(controlsPlaced) { control in
@@ -2038,6 +2090,8 @@ extension ReceiverControlOverlay {
                         padFunctionChip(item, frame: control.frame, onRail: false, hint: nil)
                     case .tray, .moveView:
                         padControlChip(control.kind, frame: control.frame, onRail: false, hint: nil)
+                    case .calculator:
+                        EmptyView()
                     }
                 }
                 .opacity(autoHiding && control.kind != .tray(.settings) ? 0 : 1)
@@ -2078,6 +2132,12 @@ extension ReceiverControlOverlay {
                         + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])))
                 .gesture(controlGesture())
             settingsHoldTarget(reachable: true)   // Custom keeps Settings through Auto-hide
+            LocalCalculatorLayer(
+                model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
+                panelBounds: area.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
+                obstacles: controlsPlaced.filter { $0.kind != .calculator }.map(\.frame)
+                    + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: false) }
         }
         .animation(.snappy(duration: 0.22), value: assistState)
         .onAppear {
@@ -2108,6 +2168,10 @@ extension ReceiverControlOverlay {
             case .function: return store.preferences.functionTrayCanBeShown && !padCollapsed
             case .shortcut: return store.preferences.trayCanBeShown && !padCollapsed
             case .moveView: return padShowsMoveView
+            // Local: shown in View Only too, never sent to the Mac.
+            case .calculator:
+                return LocalCalculatorPolicy.showsButton(added: true, trayCollapsed: store.preferences.trayCollapsed,
+                                                         keyboardBarShown: false)
             }
         }
     }
@@ -2159,6 +2223,7 @@ extension ReceiverControlOverlay {
         case .function(let id): return "function-\(id)"
         case .moveView: return "moveView"
         case .shortcut(let item): return "shortcut-\(item.id)"
+        case .calculator: return "calculator"
         }
     }
 
@@ -2179,6 +2244,7 @@ extension ReceiverControlOverlay {
         case .function(let id): return id
         case .shortcut(let item): return item.title.lowercased()
         case .moveView: return String(localized: "move view", comment: "Strip control hint.")
+        case .calculator: return String(localized: "calculator", comment: "Strip control hint.")
         }
     }
 
@@ -2196,7 +2262,7 @@ extension ReceiverControlOverlay {
                     || interaction.temporaryModifiers.contains(modifier)
                     || interaction.phase == .pressed(modifier)
             case .moveView: return store.moveViewActive
-            case .function, .shortcut: return false
+            case .function, .shortcut, .calculator: return false
             }
         }()
         let frameID: String = {
@@ -2206,6 +2272,7 @@ extension ReceiverControlOverlay {
             case .moveView: return "control:moveView"
             case .function(let id): return "function:\(id)"
             case .shortcut(let item): return "shortcut:\(item.id)"
+            case .calculator: return "control:calculator"
             }
         }()
         VStack(spacing: 2) {
@@ -2221,7 +2288,7 @@ extension ReceiverControlOverlay {
                 case .moveView:
                     Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
                         .font(.system(size: diameter * 0.38, weight: .semibold))
-                case .function, .shortcut:
+                case .function, .shortcut, .calculator:
                     EmptyView()
                 }
             }
@@ -2251,7 +2318,7 @@ extension ReceiverControlOverlay {
             case .moveView:
                 store.setMoveViewActive(!store.moveViewActive)
                 haptics.play(.selection)
-            case .function, .shortcut:
+            case .function, .shortcut, .calculator:
                 break
             }
         }
@@ -2269,6 +2336,7 @@ extension ReceiverControlOverlay {
         case .moveView: return String(localized: "Move View")
         case .function(let id): return id
         case .shortcut(let item): return item.title
+        case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")
         }
     }
 

@@ -83,6 +83,9 @@
         }
       }
     },
+    "%@ times ten to the power of %@" : {
+
+    },
     "%@ wants to share its display with this device." : {
 
     },
@@ -105,6 +108,12 @@
 
     },
     "⌘ ⌥ ⌃ ⇧ form the next arc out. Hold or tap a modifier to use it." : {
+
+    },
+    "A calculator that works on this iPad, in View Only too. Its button shows with every Function profile in the Strip and Overlay layouts; in a Custom layout, add it from the layout's editor." : {
+
+    },
+    "A calculator that works on this iPhone, in View Only too. Its button sits in the upper-left corner and shows with every Function Tray profile." : {
 
     },
     "A control dropped near a guide line settles exactly on it. Needs Alignment Guides on." : {
@@ -135,6 +144,12 @@
 
     },
     "Address filled in. Tap Save to use it." : {
+
+    },
+    "Add a Utility" : {
+
+    },
+    "All Clear" : {
 
     },
     "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected." : {
@@ -176,6 +191,12 @@
     "Before You Start" : {
 
     },
+    "calculator" : {
+
+    },
+    "Calculator" : {
+
+    },
     "Can't connect" : {
 
     },
@@ -192,6 +213,12 @@
 
     },
     "Connection failed: different Mac at this address" : {
+
+    },
+    "Clear" : {
+
+    },
+    "Close Calculator" : {
 
     },
     "Connection lost" : {
@@ -266,6 +293,24 @@
     "Keep your Mac awake and logged in, with MeowDisplay open." : {
 
     },
+    "Copies the number to this device's clipboard." : {
+
+    },
+    "Copy Result" : {
+
+    },
+    "Decimal Point" : {
+
+    },
+    "Divide" : {
+
+    },
+    "Equals" : {
+
+    },
+    "Error" : {
+
+    },
     "Looking for Macs on this Wi-Fi…" : {
 
     },
@@ -281,7 +326,13 @@
     "Messages" : {
 
     },
+    "Minus" : {
+
+    },
     "More for %@" : {
+
+    },
+    "Multiply" : {
 
     },
     "Not found" : {
@@ -308,6 +359,15 @@
     "On iPhone and iPad, Remote Access connects with the address saved above. An address your Mac shared appears there as Found Automatically, and is used only after you save it." : {
 
     },
+    "On this device. Nothing is sent to your Mac." : {
+
+    },
+    "Open" : {
+
+    },
+    "Opens a calculator on this iPad, in View Only too. It never sends anything to your Mac." : {
+
+    },
     "Or tap Connect next to a paired Mac" : {
 
     },
@@ -318,6 +378,15 @@
 
     },
     "Paused" : {
+
+    },
+    "Percent" : {
+
+    },
+    "Plus" : {
+
+    },
+    "Plus or Minus" : {
 
     },
     "Ready to connect" : {
@@ -950,6 +1019,9 @@
     "Control allowed (Demo)." : {
 
     },
+    "Result" : {
+
+    },
     "Shake the %@ to open Settings anytime" : {
 
     },
@@ -1008,6 +1080,9 @@
 
     },
     "Use This Address" : {
+
+    },
+    "Utilities" : {
 
     },
     "View Only (Demo)." : {
@@ -1182,6 +1257,12 @@
 
     },
     "When Connect over Remote doesn't finish, the Mac's row on Home says what happened and what to check." : {
+
+    },
+    "Works on this iPad only. Nothing is sent to your Mac." : {
+
+    },
+    "Works on this iPhone only. Nothing is sent to your Mac." : {
 
     },
     "You also need the **MeowDisplay Mac app**, open on your Mac." : {
