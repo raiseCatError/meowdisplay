@@ -172,6 +172,11 @@ final class ReceiverController: ObservableObject {
         windowWorkspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
         windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        windowWorkspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
+        windowWorkspace.mirrorChoice = { [weak receiver] in
+            guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
+            return state.displays.first { $0.uuid == chosen }
+        }
         // The Mac's confirmed decision on control (Request Control), never assumed: Window mode's
         // control-only actions (Stage Manager, Lock Mac, …) are offered only once the Mac allowed
         // them, and not after the session ends. It was left at its default, `.allowed`, so in

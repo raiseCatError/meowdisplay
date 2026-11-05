@@ -555,6 +555,11 @@ final class WorkspaceModel: ObservableObject {
     var requestWindowMode: () -> Void = {}
     /// Whether this session may change the Mac (launch apps, close windows).
     var inputAllowed: () -> Bool = { false }
+    /// Whether this device shows the Mac in Mirror now (outside Window view), as the Mac confirmed.
+    var mirroring: () -> Bool = { false }
+    /// The Mac's manual Mirror display choice (nil: Automatic), so a float opened over the
+    /// mirrored desktop keeps that same desktop behind it.
+    var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
 
     private let defaults: UserDefaults
     private var saved = WorkspaceLayout()
@@ -1150,10 +1155,27 @@ final class WorkspaceModel: ObservableObject {
         return catalog?.windows.first { $0.id == source.windowID }
     }
 
+    /// The desktop the picture shows outside Window view: in Mirror, the Mac's manual Mirror
+    /// choice when exactly one listed display matches it; otherwise the main display.
+    var desktopDisplay: CatalogDisplayItem? {
+        if mirroring(), let d = Self.mirroredDisplay(in: catalog?.displays ?? [], choice: mirrorChoice()) { return d }
+        return mainDisplay
+    }
+
+    /// The listed display a manual Mirror choice names (the two lists share names and point
+    /// sizes, not ids). Nil for Automatic, or when no single display matches.
+    nonisolated static func mirroredDisplay(in displays: [CatalogDisplayItem], choice: MirrorDisplayEntry?) -> CatalogDisplayItem? {
+        guard let choice else { return nil }
+        let matches = displays.filter { $0.name == choice.name && $0.width == choice.logicalWidth && $0.height == choice.logicalHeight }
+        if matches.count == 1 { return matches[0] }
+        let main = matches.filter { $0.isMain == choice.isMain }
+        return main.count == 1 ? main[0] : nil
+    }
+
     /// Mirror/Extend: the picture is one pane showing the desktop, so a window dragged onto it
     /// replaces it, joins it as a tab, or splits it (Window mode then starts with both).
     private func desktopLayout() -> WorkspaceLayout? {
-        guard let host, let d = mainDisplay else { return nil }
+        guard let host, let d = desktopDisplay else { return nil }
         let tile = WorkspaceTile(id: "w\(nextTile)", source: WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id)))
         return WorkspaceLayout(preset: .single, tiles: [tile])
     }
@@ -1721,9 +1743,10 @@ final class WorkspaceModel: ObservableObject {
             untuckFloat(holder)   // a float already shows it: bring that one back, never a second copy
             return
         }
-        // Default Window Placement applies to windows not in the layout yet.
-        if windowMode, canFloat, defaultPlacement == .float, !WorkspaceSource.isDisplayKey(w.id),
-           let host, layout.tile(holding: host, windowID: w.id) == nil {
+        // Default Window Placement applies to windows not in the layout yet (in Mirror, any window:
+        // it floats over the mirrored desktop).
+        if canOpenFloats, defaultPlacement == .float, !WorkspaceSource.isDisplayKey(w.id),
+           let host, !windowMode || layout.tile(holding: host, windowID: w.id) == nil {
             openFloating(w)
             return
         }
@@ -1833,24 +1856,34 @@ extension WorkspaceModel {
         return tile.rotation.isQuarterTurn ? 1 / a : a
     }
 
-    private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?) -> WorkspaceRect {
-        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
+    private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
+        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
     }
+
+    /// A window can open floating from here: in Window view, or over the mirrored desktop (Window
+    /// view then starts with that desktop as the pane underneath, as when a window is dropped
+    /// onto it; the person isn't asked). Never from Extend: leaving Extend removes this device's
+    /// extended display, and macOS moves the windows on it, which a float must never cause.
+    var canOpenFloats: Bool { canFloat && (windowMode || (mirroring() && desktopDisplay != nil)) }
 
     // MARK: Opening, floating, docking
 
     /// Open as Floating Window (Stage Peek): a window already in the workspace floats from where
-    /// it is (a float comes back to the front); a new one opens floating. In Mirror or Extend the
-    /// desktop becomes the pane underneath (Window mode starts with both; the caller asks first).
+    /// it is (a float comes back to the front); a new one opens floating. In Mirror the mirrored
+    /// desktop becomes the pane underneath and Window mode starts with both, without asking. Never
+    /// from Extend (see `canOpenFloats`).
     func openFloating(_ w: CatalogWindowItem, at center: WorkspacePoint? = nil) {
-        guard canFloat, let host, let source = source(for: w) else { return }
+        guard canOpenFloats, let host, let source = source(for: w) else { return }
         let aspect = w.width > 0 && w.height > 0 ? Double(w.width) / Double(w.height) : nil
         if !windowMode {
             guard let desk = desktopLayout() else { return }
             nextTile += 1   // the desktop pane's id
             let id = "w\(nextTile)"; nextTile += 1
             history.record(saved)
-            saved = desk.addingFloat(WorkspaceTile(id: id, source: source), frame: newFloatFrame(aspect: aspect, at: center)).compacted()
+            // Sized in the picture shown now: Window view's own space isn't measured yet.
+            let shown = desktopPictureGlobal.width > 0 && desktopPictureGlobal.height > 0
+                ? WorkspaceSize(width: desktopPictureGlobal.width, height: desktopPictureGlobal.height) : nil
+            saved = desk.addingFloat(WorkspaceTile(id: id, source: source), frame: newFloatFrame(aspect: aspect, at: center, in: shown)).compacted()
             localFullscreen = nil
             refreshMissing(); persist(); publish()
             requestWindowMode()
@@ -2056,7 +2089,7 @@ extension WorkspaceModel {
     /// Whether `item` may land with `placement`.
     func canPlace(_ item: WorkspaceDrag.Item, _ placement: WorkspacePlacement) -> Bool {
         guard placement == .float else { return true }
-        guard canFloat else { return false }
+        guard canOpenFloats else { return false }   // never from Extend
         switch item {
         case .window(let w): return !WorkspaceSource.isDisplayKey(w.id)
         case .app: return true

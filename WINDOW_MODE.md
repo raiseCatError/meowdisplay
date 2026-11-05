@@ -95,6 +95,11 @@ Measured on macOS 27 (integration evidence `W1-sck`): ScreenCaptureKit's
 when it is covered, off-screen (including negative coordinates) or belongs to
 a hidden app on another Space. Minimized windows and hidden apps deliver no
 frames (stills fail with -3811) and resume on the same stream when restored.
+A window chosen for a tile while it is minimized (or its app hidden) is
+brought back once, without activating its app. A window that was on screen
+when its tile first showed it is never brought back by the Mac on its own:
+**Minimize on Mac** sticks, and a tucked float shown again doesn't restore
+it. **Show on Mac** restores it on request.
 
 So Window mode creates **no virtual display** and never moves, resizes or
 re-Spaces a window:
@@ -125,6 +130,16 @@ does its app's sound unless another pane shows that app (Window view plays
 the sound of the apps on screen). The Mac
 accepts floats only from a receiver that says it can show them; older
 receivers, including Android 2.0, see Window view exactly as before.
+
+From **Mirror**, a window opened floating (Stage Peek's **Open as Floating
+Window**, a drag in Floating placement, or a tap with Default Window
+Placement set to Floating) starts Window view with the mirrored display as
+the pane underneath and the window floating over it, without asking, the
+same way a window dropped onto the desktop starts Window view beside it.
+The Mac's windows are untouched. Floats aren't offered in **Extend**: the
+extended desktop is a virtual display that exists only while this device
+extends, so leaving Extend removes it and macOS moves the windows on it to
+the Mac's other displays, which a float must never cause.
 
 Windows are listed by identity and metadata, not by position: MeowDisplay's
 own windows, system UI, password prompts, the Stage Manager strip, every

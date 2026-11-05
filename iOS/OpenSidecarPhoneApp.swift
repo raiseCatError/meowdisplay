@@ -2255,6 +2255,11 @@ final class ReceiverModel: ObservableObject {
         workspace.clipboard.platform = IOSClipboardPlatform.shared
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
+        workspace.mirrorChoice = { [weak receiver] in
+            guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
+            return state.displays.first { $0.uuid == chosen }
+        }
         receiver.$connected
             .removeDuplicates()
             .filter { !$0 }
