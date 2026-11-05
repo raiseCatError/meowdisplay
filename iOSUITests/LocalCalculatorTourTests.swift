@@ -192,7 +192,11 @@ final class LocalCalculatorTourTests: XCTestCase {
         let from = screen.withOffset(CGVector(dx: margin, dy: top + band * 0.6))
         let to = screen.withOffset(CGVector(dx: margin, dy: top + band * 0.1))
         var lastFrame: CGRect?
-        for _ in 0..<30 where !visible() {
+        // Stop as soon as the row is in view. A `where` filter would keep
+        // re-checking it on every remaining pass, and each check is several
+        // accessibility queries (slow on a hosted runner).
+        for _ in 0..<30 {
+            if visible() { break }
             from.press(forDuration: 0.1, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
             // Stop once a loaded row stops moving (the end of the page) or
             // scrolls away, and leave it to the tap's own scroll-to-visible.
