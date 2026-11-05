@@ -370,6 +370,8 @@ targets:
       - Shared/ControlFoldGeometry.swift
       - Shared/PadControlLayout.swift
       - Shared/CustomControlLayout.swift
+      - Shared/LocalCalculator.swift
+      - Shared/LocalCalculatorPlacement.swift
       - Shared/MobileSettingsCategory.swift
       # iOS Demo Mode boundary (Foundation only, no UIKit).
       - iOS/DemoSession.swift

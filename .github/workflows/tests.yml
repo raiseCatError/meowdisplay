@@ -350,5 +350,6 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
             -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
             -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
+            -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300

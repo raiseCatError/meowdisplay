@@ -83,6 +83,9 @@
         }
       }
     },
+    "%@ times ten to the power of %@" : {
+
+    },
     "%@ wants to share its display with this device." : {
 
     },
@@ -107,6 +110,12 @@
     "⌘ ⌥ ⌃ ⇧ form the next arc out. Hold or tap a modifier to use it." : {
 
     },
+    "A calculator that works on this iPad, in View Only too. Its button shows with every Function profile in the Strip and Overlay layouts; in a Custom layout, add it from the layout's editor." : {
+
+    },
+    "A calculator that works on this iPhone, in View Only too. Its button sits in the upper-left corner and shows with every Function Tray profile." : {
+
+    },
     "A control dropped near a guide line settles exactly on it. Needs Alignment Guides on." : {
 
     },
@@ -129,6 +138,12 @@
 
     },
     "A solid rail at the edge of the screen holds the controls, and your Mac fits beside it." : {
+
+    },
+    "Add a Utility" : {
+
+    },
+    "All Clear" : {
 
     },
     "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected." : {
@@ -164,7 +179,19 @@
     "Active Layout" : {
 
     },
+    "calculator" : {
+
+    },
+    "Calculator" : {
+
+    },
     "Can't connect" : {
+
+    },
+    "Clear" : {
+
+    },
+    "Close Calculator" : {
 
     },
     "Connection lost" : {
@@ -206,6 +233,24 @@
     "Allow" : {
 
     },
+    "Copies the number to this device's clipboard." : {
+
+    },
+    "Copy Result" : {
+
+    },
+    "Decimal Point" : {
+
+    },
+    "Divide" : {
+
+    },
+    "Equals" : {
+
+    },
+    "Error" : {
+
+    },
     "Looking for Macs on this Wi-Fi…" : {
 
     },
@@ -215,13 +260,28 @@
     "Macs" : {
 
     },
+    "Minus" : {
+
+    },
     "More for %@" : {
+
+    },
+    "Multiply" : {
 
     },
     "Not found" : {
 
     },
     "Not paired" : {
+
+    },
+    "On this device. Nothing is sent to your Mac." : {
+
+    },
+    "Open" : {
+
+    },
+    "Opens a calculator on this iPad, in View Only too. It never sends anything to your Mac." : {
 
     },
     "Or tap Connect next to a paired Mac" : {
@@ -231,6 +291,15 @@
 
     },
     "Paused" : {
+
+    },
+    "Percent" : {
+
+    },
+    "Plus" : {
+
+    },
+    "Plus or Minus" : {
 
     },
     "Ready to connect" : {
@@ -317,7 +386,7 @@
     "Back to Home" : {
 
     },
-    "Balanced default." : {
+    "Balanced" : {
 
     },
     "Block" : {
@@ -740,10 +809,10 @@
     "Fast" : {
 
     },
-    "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency." : {
+    "Favors a smooth, steady frame rate, keeping a little more work in flight at a small cost in delay." : {
 
     },
-    "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+    "Favors the newest frame and the lowest delay, accepting a lower frame rate under load." : {
 
     },
     "File" : {
@@ -869,6 +938,9 @@
     "Control allowed (Demo)." : {
 
     },
+    "Result" : {
+
+    },
     "Set Up Remote Access…" : {
 
     },
@@ -888,6 +960,9 @@
 
     },
     "Try the Demo" : {
+
+    },
+    "Utilities" : {
 
     },
     "View Only (Demo)." : {
@@ -1056,6 +1131,12 @@
 
     },
     "Wake and connect to %@" : {
+
+    },
+    "Works on this iPad only. Nothing is sent to your Mac." : {
+
+    },
+    "Works on this iPhone only. Nothing is sent to your Mac." : {
 
     },
     "You also need the **MeowDisplay Mac app**, open on your Mac." : {
@@ -1344,12 +1425,6 @@
 
     },
     "Portrait" : {
-
-    },
-    "Prefer FPS" : {
-
-    },
-    "Prefer Latency" : {
 
     },
     "Prefer MeowDisplay Gestures" : {
@@ -1697,6 +1772,9 @@
     "Smart Touch Haptics" : {
       "comment" : "Toggle label. \"Smart Touch\" is the feature's brand name and must stay untranslated; only \"Haptics\" is translatable."
     },
+    "Smoothness" : {
+
+    },
     "Snap Rotation" : {
 
     },
@@ -1812,6 +1890,9 @@
 
     },
     "The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier." : {
+
+    },
+    "The default: a balance of smooth motion and low delay." : {
 
     },
     "The editor opens full screen, with separate landscape and portrait arrangements. Preview lets you try the layout without sending anything to your Mac." : {

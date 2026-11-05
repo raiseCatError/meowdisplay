@@ -110,7 +110,8 @@ enum MobileSettingsSearchIndex {
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),
         .init("surfaceGrid", String(localized: "Show Surface Grid"), .display, keywords: ["video off", "dots"]),
         .init("pictureInPicture", String(localized: "Picture in Picture"), .display, keywords: ["pip", "floating window"]),
-        .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "priority", "fps"]),
+        .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "fps"]),
+        .init("streamingPriority", String(localized: "Streaming Priority"), .display, keywords: ["priority", "latency", "balanced", "smoothness", "smooth", "delay", "lag"]),
         .init("maxFPS", String(localized: "Enforce Maximum FPS"), .display, keywords: ["frame rate", "fps", "limit"]),
         // Input
         .init("control", String(localized: "Control"), .input, keywords: ["request control", "request input", "allow input", "permission"]),
@@ -142,7 +143,7 @@ enum MobileSettingsSearchIndex {
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("arrowKeys", String(localized: "Show Arrow Keys"), .controls, keywords: ["arrows", "arrow keys", "cursor keys", "up", "down", "left", "right", "keypad"], availability: .phoneOnly),
         .init("controlProfile", String(localized: "Control Profile"), .controls, keywords: ["active profile", "shortcuts", "palette", "modifier"]),
-        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji"]),
+        .init("functionTray", String(localized: "Show Function Tray"), .controls, keywords: ["undo", "redo", "zoom in", "zoom out", "launchpad", "edit function tray", "macro", "sequence", "shortcut button", "emoji", "calculator"]),
         .init("paletteStyle", String(localized: "Palette Style"), .controls, keywords: ["wheel", "chord", "keys"], availability: .padOnly),
         // Audio
         .init("audio", String(localized: "Audio"), .audio, keywords: ["sound"]),
