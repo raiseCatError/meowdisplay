@@ -26,12 +26,13 @@ struct RemotePairingView: View {
     private var form: some View {
         Form {
             Section {
-                Text("On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here. The Mac shows both in Settings → Remote Access → Check Tailscale.")
+                Text("Turn on Tailscale on this \(deviceKind) and on the Mac. On the Mac, choose Settings → Devices → Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here. The Mac shows both in Settings → Remote Access → Check Tailscale.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("Mac Address") {
-                TextField("Tailscale IP or MagicDNS name", text: $host)
+            // "Address", not "Mac Address": that reads as a network card's MAC address.
+            Section("Address") {
+                TextField("Address", text: $host, prompt: Text("Tailscale address or MagicDNS name"))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -84,7 +85,7 @@ struct RemotePairingView: View {
                 .accessibilityHidden(true)
             Text(kind.title).font(.headline).multilineTextAlignment(.center)
                 .accessibilityAddTraits(.isHeader)
-            if let detail = kind.detail {
+            if let detail = RemotePairingGuidance.detail(for: kind) {
                 Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
             HStack {
@@ -102,8 +103,8 @@ struct RemotePairingView: View {
     private func start() {
         switch RemotePairingEndpoint.make(host: host) {
         case .success(let endpoint): receiver.pairWithRemoteHost(endpoint)
-        case .failure(.emptyHost): errorMessage = String(localized: "Enter a host or IP address.")
-        case .failure: errorMessage = String(localized: "That doesn't look like a valid host or IP address.")
+        case .failure(.emptyHost): errorMessage = String(localized: "Enter an address.")
+        case .failure: errorMessage = String(localized: "That doesn't look like an address. Enter a name such as mac.tailnet-name.ts.net or an address such as 100.101.102.103.")
         }
     }
 }

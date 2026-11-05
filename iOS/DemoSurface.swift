@@ -23,6 +23,9 @@ struct DemoReceiverScreen: View {
     @State private var hintGeneration = 0
     @State private var feedbackVisible = false
     @State private var showGuide = false
+    /// The banner over the controls, which they treat as an obstacle (it
+    /// moves only what would land under it: the local calculator).
+    @State private var bannerFrame: CGRect?
 
     init(demo: DemoSession, store: ReceiverControlStore, showSettings: Binding<Bool>,
          keyboardActive: Binding<Bool>, haptics: ReceiverHaptics, onExit: @escaping () -> Void) {
@@ -102,13 +105,18 @@ struct DemoReceiverScreen: View {
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
-                    reservedRegions: [],
+                    // The same fold and camera regions as a live session
+                    // (an iPhone Duo half open), plus the demo banner.
+                    reservedRegions: ControlReservedRegion.active(in: geo)
+                        + (bannerFrame.map { [ControlReservedRegion(kind: .occlusion, frame: $0)] } ?? []),
                     haptics: haptics,
                     onOccupiedFramesChange: { _ in },
                     onCanvasChange: { padCanvas = $0 },
                     surfaceOrigin: canvas.origin)
                 chrome(canvas: canvas, insets: insets)
             }
+            .coordinateSpace(name: Self.screenSpace)
+            .onPreferenceChange(DemoBannerFramePreference.self) { bannerFrame = $0 }
             .onAppear { reconfigure(to: targetSize) }
             .onChange(of: DesktopKey(mode: demo.displayMode, size: targetSize)) { key in reconfigure(to: key.size) }
         }
@@ -191,6 +199,8 @@ struct DemoReceiverScreen: View {
     }
 
     /// Where the banner row starts.
+    private static let screenSpace = "demoScreen"
+
     private static func bandTop(canvas: CGRect, insets: ControlSafeInsets) -> CGFloat {
         max(canvas.minY, insets.top) + 6
     }
@@ -206,7 +216,12 @@ struct DemoReceiverScreen: View {
     private func handle(_ points: [CGPoint], at time: TimeInterval, base: RemoteViewportTransform) {
         let feedback = workspace.interaction.touches(points, at: time, base: base, settings: inputSettings)
         feedback.forEach(workspace.show)
-        if points.isEmpty { store.scheduleAutoHide() } else { store.beginAutoHideActivity() }
+        if points.isEmpty {
+            store.scheduleAutoHide()
+        } else {
+            store.beginAutoHideActivity()
+            store.noteSurfaceTouch()
+        }
     }
 
     private func tapAtPointer(base: RemoteViewportTransform) {
@@ -275,6 +290,10 @@ struct DemoReceiverScreen: View {
                 // The banner is one fixed-height row over the desktop; past
                 // this size its text overflowed and covered Exit Demo.
                 .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: DemoBannerFramePreference.self,
+                                           value: proxy.frame(in: .named(Self.screenSpace)))
+                })
             if let hint {
                 DemoHintChip(hint: hint)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -685,6 +704,13 @@ struct DemoTrackpadPreview: View {
 }
 
 // MARK: - Chrome
+
+private struct DemoBannerFramePreference: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
+}
 
 /// Always visible: DEMO, the sample Mac, Allow Input, options and Exit Demo.
 struct DemoSessionBanner: View {

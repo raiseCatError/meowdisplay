@@ -305,9 +305,11 @@ jobs:
   # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
   # were made for. Not a required check yet: the first runs establish it.
   #
-  # The build runs before the simulator boots. With the Duo booted first, starting xcodebuild,
-  # fetching the packages and compiling took several times as long as the same work in the
-  # `mac` job on the same runner image; the booted simulator kept this runner busy throughout.
+  # The simulator boots before the build, so it has settled by the time the tests start. With
+  # the build first (#183), the tests began a few minutes after a fresh boot, while the Duo was
+  # still busy after `bootstatus`: about half of those runs then failed with "Timed out while
+  # evaluating UI query" or a test runner that crashed before starting. The build is slower with
+  # the Duo booted, but it stays a separate step so its time is visible.
   ios-duo:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
@@ -325,7 +327,12 @@ jobs:
         run: xcodegen generate
       - name: Create an iPhone Duo simulator
         id: duo
-        run: echo "udid=$(scripts/ci/duo-simulator.sh)" >> "$GITHUB_OUTPUT"
+        # An assignment, so the step fails when the script does (never an error text as the UDID).
+        run: |
+          udid=$(scripts/ci/duo-simulator.sh)
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Boot the iPhone Duo simulator
+        run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
       - name: Build the receiver and its UI tests
         run: |
           xcodebuild build-for-testing \
@@ -335,8 +342,6 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
-      - name: Boot the iPhone Duo simulator
-        run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
       # No paired Mac is ever reachable here, so the live-Mac tests in DemoModeSmokeTests skip
       # at once (MEOW_NO_LIVE_MAC) instead of first waiting out their connection timeouts.
       - name: UI tests on iPhone Duo
@@ -350,5 +355,6 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
             -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
             -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
+            -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300

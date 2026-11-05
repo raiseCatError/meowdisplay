@@ -5158,6 +5158,8 @@ final class StreamReceiver: ObservableObject {
             otherPeer: { TrustStore.receiverRole.peerID(forSPKI: $0) },
             completion: { result in
                 Log.info("routeDebug: remote connect-request result peer=\(peerID) result=\(result)")
+                // Status only (the Home row's reason); never feeds back into knocking or trust.
+                RemoteKnockOutcomes.record(result, peerID: peerID)
                 completion?(result)
             })
     }
