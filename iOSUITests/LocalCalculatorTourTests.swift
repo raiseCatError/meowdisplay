@@ -95,7 +95,7 @@ final class LocalCalculatorTourTests: XCTestCase {
     /// rather than trusting `isHittable`.
     @MainActor
     private func revealControls(_ target: XCUIElement) {
-        element("Sample Mac desktop").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).tap()
+        app.demoDesktopWakePoint().tap()
         _ = target.waitForExistence(timeout: 2)
         sleep(1)
     }
@@ -175,7 +175,9 @@ final class LocalCalculatorTourTests: XCTestCase {
     /// a sheet dismisses it). Each drag moves at most half that band, so a
     /// row can't skip past it, and a short landscape band just takes more
     /// drags. In a landscape split view the page is the last list, beside
-    /// the sidebar.
+    /// the sidebar. The drags run down the list's leading margin, beside the
+    /// rows: a slow drag that starts on a segmented picker (Hold Response, on
+    /// the Controls page) moves the picker instead of scrolling the list.
     @MainActor
     private func reveal(_ target: XCUIElement) {
         let top = app.navigationBars.allElementsBoundByIndex.map(\.frame.maxY).max() ?? app.frame.minY
@@ -186,10 +188,15 @@ final class LocalCalculatorTourTests: XCTestCase {
         guard let page = app.collectionViews.allElementsBoundByIndex.last else { return }
         let band = bottom - top
         let screen = app.coordinate(withNormalizedOffset: .zero)
-        let from = screen.withOffset(CGVector(dx: page.frame.midX, dy: top + band * 0.6))
-        let to = screen.withOffset(CGVector(dx: page.frame.midX, dy: top + band * 0.1))
+        let margin = page.frame.minX + 8
+        let from = screen.withOffset(CGVector(dx: margin, dy: top + band * 0.6))
+        let to = screen.withOffset(CGVector(dx: margin, dy: top + band * 0.1))
         var lastFrame: CGRect?
-        for _ in 0..<30 where !visible() {
+        // Stop as soon as the row is in view. A `where` filter would keep
+        // re-checking it on every remaining pass, and each check is several
+        // accessibility queries (slow on a hosted runner).
+        for _ in 0..<30 {
+            if visible() { break }
             from.press(forDuration: 0.1, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
             // Stop once a loaded row stops moving (the end of the page) or
             // scrolls away, and leave it to the tap's own scroll-to-visible.
