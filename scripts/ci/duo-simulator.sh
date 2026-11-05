@@ -3,7 +3,7 @@
 # and the first device type whose name contains "Duo". Fails, listing what this Xcode has,
 # when there is no such device type: a missing Duo must never pass as "tests skipped".
 # `duo-simulator.sh boot UDID` then boots it and waits until it has finished booting. The
-# ios-duo job builds in between: a booted simulator slows everything else on the runner down.
+# ios-duo job boots it before building, so it has settled by the time the UI tests start.
 set -euo pipefail
 if [ "${1:-}" = boot ]; then
   xcrun simctl boot "${2:?usage: duo-simulator.sh boot UDID}"
