@@ -341,6 +341,39 @@ struct WorkspaceRestoreLedger {
     }
 }
 
+/// A tile the receiver chose by arranging its own view (a float moved, resized, tucked or docked,
+/// fullscreen on the device, a zoom) becomes the keyboard target without its Mac window coming
+/// forward: nothing changes on the Mac (no app activation, no Stage Manager or Space change).
+/// The window comes forward once, when the first authorized key for that tile arrives and the
+/// Mac's focus is elsewhere; a press in the tile does it as before. Keys still go only to a window
+/// that is really in front (`WorkspaceKeyboardGate`).
+struct WorkspaceDeferredRaise: Equatable {
+    private(set) var tile: String?
+
+    /// A focus request: `raiseNow` false defers the raise for `tile`; true (or another tile) drops it.
+    mutating func focused(_ tile: String?, raiseNow: Bool) {
+        self.tile = raiseNow ? nil : tile
+    }
+
+    /// A press brought a window forward: nothing is pending any more.
+    mutating func clear() { tile = nil }
+
+    /// Asked when a key for the active tile is checked. True once: raise the window now. Either way
+    /// the pending raise is used up, so a later change of focus on the Mac pauses typing as before.
+    mutating func takeForKey(active: String?, decision: WorkspaceKeyboardGate.Decision) -> Bool {
+        guard let pending = tile, pending == active else { return false }
+        tile = nil
+        return decision == .hostFocusElsewhere || decision == .otherWindowFocused
+    }
+
+    /// What the receiver is told: while the raise waits for the first key, typing will reach the
+    /// tile, so it shows no "typing paused" notice.
+    func reported(_ decision: WorkspaceKeyboardGate.Decision, active: String?) -> WorkspaceKeyboardGate.Decision {
+        guard let pending = tile, pending == active, decision == .hostFocusElsewhere || decision == .otherWindowFocused else { return decision }
+        return .deliver
+    }
+}
+
 final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// All receivers together: window streams this Mac will run at once.
     static let globalCaptureLimit = 16
@@ -405,6 +438,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var lastStateSent: String = ""
     private var stopped = false
     private var keyboardDecision: WorkspaceKeyboardGate.Decision = .noActiveTile
+    /// The tile whose window comes forward at its first key (see `WorkspaceDeferredRaise`).
+    private var deferredRaise = WorkspaceDeferredRaise()
     private var keyboardCheckedAt: TimeInterval = 0
     private var topmostCache: [UInt32: (at: TimeInterval, rect: CGRect, ok: Bool)] = [:]
 
@@ -601,9 +636,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 applyWorkspace(obj)
             case WireMessage.workspaceFocus:
                 let id = obj["tile"] as? String
-                inputLock.withLock { targeting.setActive(id); keyboardCheckedAt = 0 }
+                // `raise: false`: chosen by arranging the receiver's own view. The window stays
+                // where it is on the Mac until a key or a press for it needs it in front.
+                let raiseNow = obj["raise"] as? Bool ?? true
+                inputLock.withLock {
+                    targeting.setActive(id); keyboardCheckedAt = 0
+                    deferredRaise.focused(id, raiseNow: raiseNow)
+                }
                 retuneCaptures()
-                if inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
+                if raiseNow, inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
                     activateBounded(a)
                 }
                 sendState(force: true)
@@ -1126,7 +1167,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }
 
     private func sendState(force: Bool = false) {
-        let (t, decision) = inputLock.withLock { (targeting, keyboardDecision) }
+        let (t, decision) = inputLock.withLock {
+            (targeting, deferredRaise.reported(keyboardDecision, active: targeting.keyboardTarget?.tileID))
+        }
         let tiles: [[String: Any]] = assignments.map { a in
             let entry = catalog[a.windowID]
             var tile: [String: Any] = [
@@ -1376,6 +1419,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         if target.activates {
             Self.raise(pid: target.pid, frame: targeting.windowFrames[target.windowID] ?? .zero)
+            deferredRaise.clear()
             keyboardCheckedAt = 0
             queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
             // Bounded wait for the window to come to the front, so the press
@@ -1418,17 +1462,32 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let active = inputLock.withLock { targeting.keyboardTarget }
         if now - keyboardCheckedAt > 0.2 {
             keyboardCheckedAt = now
-            let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            var focusedID: UInt32?
-            var isChild = false
-            if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
-                isChild = info.isChild
-                focusedID = WorkspaceKeyboardGate.focusedTileWindow(
-                    active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
-                    frames: inputLock.withLock { targeting.windowFrames }, matches: Self.framesMatch)
+            func evaluate() -> WorkspaceKeyboardGate.Decision {
+                let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                var focusedID: UInt32?
+                var isChild = false
+                if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
+                    isChild = info.isChild
+                    focusedID = WorkspaceKeyboardGate.focusedTileWindow(
+                        active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
+                        frames: targeting.windowFrames, matches: Self.framesMatch)
+                }
+                return WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
+                                                    focusedWindowIsChild: isChild)
             }
-            let decision = WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
-                                                        focusedWindowIsChild: isChild)
+            var decision = evaluate()
+            if let active, deferredRaise.takeForKey(active: active.tileID, decision: decision) {
+                // Chosen by arranging the receiver's view: this authorized key brings the window
+                // forward, and waits (bounded) until it really is, so it is typed once, into it.
+                Self.raise(pid: active.pid, frame: targeting.windowFrames[active.windowID] ?? .zero)
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+                while decision != .deliver, ProcessInfo.processInfo.systemUptime < deadline {
+                    usleep(10_000)
+                    decision = evaluate()
+                }
+                keyboardCheckedAt = ProcessInfo.processInfo.systemUptime
+                queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
+            }
             if decision != keyboardDecision {
                 keyboardDecision = decision
                 queue.async { [weak self] in self?.sendState(force: true) }

@@ -382,9 +382,12 @@ enum WorkspaceRequests {
         ["type": WireMessage.windowAction, "action": "activate", "window": Int(id), "gen": Int(generation)]
     }
 
-    static func focus(_ tile: String?) -> [String: Any] {
+    /// `raise` false: the tile was chosen by arranging this device's view, so the Mac keeps its
+    /// window where it is until a key or a press for it needs it in front (older Macs ignore it).
+    static func focus(_ tile: String?, raise: Bool = true) -> [String: Any] {
         var m: [String: Any] = ["type": WireMessage.workspaceFocus]
         if let tile { m["tile"] = tile }
+        if !raise { m["raise"] = false }
         return m
     }
 
@@ -560,6 +563,38 @@ final class WorkspaceModel: ObservableObject {
     /// The Mac's manual Mirror display choice (nil: Automatic), so a float opened over the
     /// mirrored desktop keeps that same desktop behind it.
     var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
+    /// Whether this device extends the Mac now (outside Window view), as the Mac confirmed.
+    var extending: () -> Bool = { false }
+
+    /// A step that would start Window view from Extend, waiting for the person to confirm it.
+    struct LeaveExtendRequest: Identifiable {
+        let id = UUID()
+        let perform: () -> Void
+    }
+    /// Leaving Extend removes this device's extended display, and macOS moves the windows on it to
+    /// the Mac's other displays, so a tap, a pick or a drop never does it by itself: it waits here
+    /// until the person confirms (`confirmLeavingExtend`). Mirror and Window view never wait.
+    @Published private(set) var leaveExtendRequest: LeaveExtendRequest?
+    private var leavingExtendConfirmed = false
+
+    /// True when `step` has to wait for confirmation (it is kept until then); false: go ahead.
+    private func holdForLeavingExtend(_ step: @escaping () -> Void) -> Bool {
+        guard !windowMode, extending(), !leavingExtendConfirmed else { return false }
+        leaveExtendRequest = LeaveExtendRequest(perform: step)
+        return true
+    }
+
+    /// The person chose to leave Extend for Window view: the step they took runs now.
+    func confirmLeavingExtend() {
+        guard let request = leaveExtendRequest else { return }
+        leaveExtendRequest = nil
+        leavingExtendConfirmed = true
+        defer { leavingExtendConfirmed = false }
+        request.perform()
+    }
+
+    /// Stay in Extend: nothing changes.
+    func cancelLeavingExtend() { leaveExtendRequest = nil }
 
     private let defaults: UserDefaults
     private var saved = WorkspaceLayout()
@@ -651,6 +686,7 @@ final class WorkspaceModel: ObservableObject {
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
         case .mode(let window):
             windowMode = window
+            leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
             if !window { remote = nil }
             if window { awaitingCatalogToSend = true; requestCatalog() }
         case .catalog(let c):
@@ -705,6 +741,7 @@ final class WorkspaceModel: ObservableObject {
             lockMacStatus = .done(result)
         case .disconnected:
             sendTask?.cancel()
+            leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
             canCloseWindows = false; closingWindows = []; closeNotice = nil
@@ -863,7 +900,7 @@ final class WorkspaceModel: ObservableObject {
                   windowSize(tile) != nil else { zoomGesture = nil; zoomPreview = nil; return false }
             zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
             zoomPreview = nil
-            if active != id { focus(id) }
+            if active != id { focus(id, raise: false) }   // zooming is this device's view only
             requestBackdrop(id)
         }
         guard var g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
@@ -1077,6 +1114,7 @@ final class WorkspaceModel: ObservableObject {
     /// One window shows in one pane only: it leaves the pane (or tab) it was in.
     func drop(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) {
         guard let source = source(for: w) else { return }
+        if holdForLeavingExtend({ [weak self] in self?.drop(w, on: target) }) { return }
         if !windowMode { requestWindowMode() }
         var focusTile: String?
         edit { l in
@@ -1370,6 +1408,7 @@ final class WorkspaceModel: ObservableObject {
 
     func choose(_ w: CatalogWindowItem, asNewTile: Bool) {
         guard let host, let source = source(for: w) else { return }
+        if holdForLeavingExtend({ [weak self] in self?.choose(w, asNewTile: asNewTile) }) { return }
         if w.inStageStrip, bringStripWindowsForward, inputAllowed() {
             _ = send(WorkspaceRequests.activateWindow(w.id, generation: w.generation))   // the person chose it, and opted in
         }
@@ -1473,7 +1512,7 @@ final class WorkspaceModel: ObservableObject {
         guard layout.tiles[tile] != nil else { return }
         localFullscreen = tile
         publish(); scheduleSend(immediately: true)
-        focus(tile)
+        focus(tile, raise: false)   // fullscreen on this device only: nothing changes on the Mac
     }
 
     func exitLocalFullscreen() {
@@ -1668,6 +1707,8 @@ final class WorkspaceModel: ObservableObject {
     /// A window dropped on a pane (or, outside Window mode, beside the desktop).
     private func place(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) -> Bool {
         if !windowMode {
+            // From Extend, only once the person confirms (it removes the extended display).
+            if holdForLeavingExtend({ [weak self] in _ = self?.place(w, on: target) }) { return false }
             // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
             guard let desk = desktopLayout() else { switchTo(w); return true }
             guard let source = source(for: w) else { return false }
@@ -1689,10 +1730,14 @@ final class WorkspaceModel: ObservableObject {
         guard inputAllowed(), let source = layout.tiles[tile]?.source, let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.minimizeWindow(source.windowID, generation: gen))
     }
-    func focus(_ tile: String) {
+    /// Makes `tile` the one typing goes to. `raise` false for anything that only arranges this
+    /// device's view (moving, resizing, tucking, docking or zooming a window, fullscreen on this
+    /// device): the Mac window then stays where it is, and comes forward only when a key or a
+    /// press for it needs it to (never typing into another window meanwhile).
+    func focus(_ tile: String, raise: Bool = true) {
         if layout.tiles[tile] != nil, !layout.isFloat(tile) { lastFocusedPane = tile }
         requestedFocus = tile
-        _ = send(WorkspaceRequests.focus(tile))
+        _ = send(WorkspaceRequests.focus(tile, raise: raise))
     }
 
     /// The tree's pane focused last: where typing goes back to when a focused float is tucked or removed.
@@ -1887,7 +1932,7 @@ extension WorkspaceModel {
             localFullscreen = nil
             refreshMissing(); persist(); publish()
             requestWindowMode()
-            focus(id)
+            focus(id, raise: false)
             return
         }
         if let holder = layout.tile(holding: host, windowID: w.id) {
@@ -1899,7 +1944,7 @@ extension WorkspaceModel {
             if canFloat(pane: holder, tab: tab.flatMap { (layout.tiles[holder]?.tabs.count ?? 0) > 1 ? $0 : nil }) {
                 floatPane(holder, tab: tab.flatMap { (layout.tiles[holder]?.tabs.count ?? 0) > 1 ? $0 : nil }, at: center)
             } else {
-                focus(holder)   // the only pane: it stays a pane
+                focus(holder, raise: false)   // the only pane: it stays a pane
             }
             return
         }
@@ -1908,7 +1953,7 @@ extension WorkspaceModel {
         let frame = newFloatFrame(aspect: aspect, at: center)
         edit { $0.addingFloat(WorkspaceTile(id: id, source: source), frame: frame) }
         if compactSpace { tuckOthers(than: id) }
-        focus(id)
+        focus(id, raise: false)
     }
 
     /// Float This Pane / Float This Tab, or a pane title dropped in Floating placement. The
@@ -1930,7 +1975,7 @@ extension WorkspaceModel {
             edit { $0.floatingPane(id, frame: frame) }
         }
         if compactSpace { tuckOthers(than: floated) }
-        focus(floated)
+        focus(floated, raise: false)
     }
 
     /// A float docked where it was dropped in Pane placement: a tab, a new pane beside one, or an
@@ -1944,7 +1989,7 @@ extension WorkspaceModel {
         }
         if localFullscreen == id { localFullscreen = nil }
         edit { $0.docking(id, to: drop) }
-        focus(id)
+        focus(id, raise: false)
     }
 
     /// Add to Layout: a new pane when there's room, else a tab of the focused (or last) pane.
@@ -1957,7 +2002,7 @@ extension WorkspaceModel {
         } else if let target = lastFocusedPane.flatMap({ layout.orderedTileIDs.contains($0) ? $0 : nil }) ?? layout.orderedTileIDs.last {
             edit { $0.dockingAsTab(id, into: target) }
         }
-        focus(id)
+        focus(id, raise: false)
     }
 
     // MARK: Moving and resizing (one undo step per gesture)
@@ -1968,7 +2013,7 @@ extension WorkspaceModel {
         floatGesture = id
         floatGestureStart = saved
         raiseFloat(id)
-        if active != id { focus(id) }
+        if active != id { focus(id, raise: false) }   // arranging only: the Mac window stays put
         requestBackdrop(id)
     }
 
@@ -2037,7 +2082,7 @@ extension WorkspaceModel {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
         edit { $0.untuckingFloat(id) }
         if compactSpace { tuckOthers(than: id) }
-        focus(id)
+        focus(id, raise: false)
     }
 
     /// A tab dragged along its edge (no undo step; tucked floats aren't sent).
@@ -2073,7 +2118,7 @@ extension WorkspaceModel {
         let next = layout.visibleFloatIDs.last { $0 != id }
             ?? lastFocusedPane.flatMap { layout.orderedTileIDs.contains($0) ? $0 : nil }
             ?? layout.orderedTileIDs.first
-        if let next { focus(next) }
+        if let next { focus(next, raise: false) }
     }
 
     // MARK: Drag placement (Pane | Floating)

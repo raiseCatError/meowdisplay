@@ -791,4 +791,140 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertTrue(ledger.observe(tile: "w5", window: 11, generation: 6, offscreen: true, delivering: false),
                       "a window chosen anew while minimized is restored")
     }
+
+    // MARK: Arranging floats leaves the Mac's focus alone
+
+    /// Every float arrangement (open, grab and move, tuck and the hand-back, un-tuck, fullscreen on
+    /// the device, Add to Layout, Float This Pane, dock) sends focus with `raise: false`, so the Mac
+    /// window, its app and Stage Manager stay as they are. An explicit focus still raises.
+    @MainActor
+    func testArrangingFloatsNeverBringsTheMacWindowForward() {
+        var sent: [[String: Any]] = []
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { sent.append($0) }
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        m.choose(w[1], asNewTile: true)
+        settle()
+        sent.removeAll()
+
+        m.openFloating(w[2])
+        let fid = m.layout.floatIDs[0]
+        m.beginFloatGesture(fid)
+        m.updateFloatFrame(fid, WorkspaceRect(x: 0.2, y: 0.2, width: 0.3, height: 0.3))
+        m.endFloatGesture(fid)
+        m.tuckFloat(fid, edge: .right, offset: 0.5)
+        m.untuckFloat(fid)
+        m.enterLocalFullscreen(fid)
+        m.exitLocalFullscreen()
+        m.addFloatToLayout(fid)
+        m.floatPane(fid)
+        m.dockFloat(fid, to: .tab(tile: m.layout.orderedTileIDs[0], preview: .unit))
+        settle()
+        let focuses = sent.filter { $0["type"] as? String == WireMessage.workspaceFocus }
+        XCTAssertGreaterThanOrEqual(focuses.count, 5)
+        XCTAssertTrue(focuses.allSatisfy { $0["raise"] as? Bool == false },
+                      "arranging never brings a Mac window forward: \(focuses)")
+        XCTAssertTrue(sent.allSatisfy { Self.safeTypes.contains($0["type"] as? String ?? "") },
+                      "and never acts on one: \(sent.map { $0["type"] ?? "" })")
+
+        // Tap to resume, or a tap that picks a pane: the person asked for that window.
+        sent.removeAll()
+        m.focus(m.layout.orderedTileIDs[0])
+        XCTAssertEqual(sent.last?["type"] as? String, WireMessage.workspaceFocus)
+        XCTAssertNil(sent.last?["raise"], "an explicit focus keeps today's message, so the Mac raises the window")
+    }
+
+    /// On the Mac, a tile chosen by arranging the receiver's view comes forward once, at its first
+    /// authorized key, and only when the Mac's focus is elsewhere. Until then the receiver isn't
+    /// told typing is paused; afterwards a change on the Mac pauses typing as before.
+    func testTheMacBringsALocallyChosenWindowForwardOnlyForItsFirstKey() {
+        var d = WorkspaceDeferredRaise()
+        d.focused("f1", raiseNow: false)
+        XCTAssertEqual(d.reported(.hostFocusElsewhere, active: "f1"), .deliver, "no typing-paused notice while it waits")
+        XCTAssertEqual(d.reported(.hostFocusElsewhere, active: "p1"), .hostFocusElsewhere)
+        XCTAssertFalse(d.takeForKey(active: "p1", decision: .hostFocusElsewhere), "only for the tile that was chosen")
+        XCTAssertTrue(d.takeForKey(active: "f1", decision: .otherWindowFocused), "the first key brings it forward")
+        XCTAssertFalse(d.takeForKey(active: "f1", decision: .hostFocusElsewhere), "once")
+        XCTAssertEqual(d.reported(.hostFocusElsewhere, active: "f1"), .hostFocusElsewhere, "then typing pauses as before")
+
+        d.focused("f1", raiseNow: false)
+        XCTAssertFalse(d.takeForKey(active: "f1", decision: .deliver), "already in front: nothing is raised")
+        XCTAssertNil(d.tile)
+        d.focused("f1", raiseNow: false)
+        d.focused("p1", raiseNow: true)
+        XCTAssertNil(d.tile, "an explicit focus raises at once instead")
+        d.focused("f1", raiseNow: false)
+        d.clear()
+        XCTAssertNil(d.tile, "a press brought a window forward")
+
+        XCTAssertEqual(WorkspaceRequests.focus("f1", raise: false)["raise"] as? Bool, false)
+        XCTAssertNil(WorkspaceRequests.focus("f1")["raise"])
+    }
+
+    // MARK: Extend is never left by a gesture
+
+    /// From Extend, a Stage Peek tap, Add as New Pane, an overview pick or a drop onto the desktop
+    /// waits for confirmation (Window view would remove the extended display). Stay in Extend
+    /// changes nothing; confirming runs the step once.
+    @MainActor
+    func testLeavingExtendAlwaysAsksFirst() {
+        var sent: [[String: Any]] = []
+        var windowModeRequests = 0
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
+                               window: false, displays: Self.twoDisplays) { sent.append($0) }
+        m.requestWindowMode = { windowModeRequests += 1 }
+        m.extending = { true }
+        let w = m.catalog!.windows
+        let before = m.layout.orderedTileIDs
+
+        m.switchTo(w[0])
+        XCTAssertNotNil(m.leaveExtendRequest, "a Stage Peek tap asks")
+        XCTAssertEqual(windowModeRequests, 0)
+        XCTAssertEqual(m.layout.orderedTileIDs, before)
+        m.cancelLeavingExtend()
+        XCTAssertNil(m.leaveExtendRequest)
+        XCTAssertEqual(windowModeRequests, 0, "Stay in Extend changes nothing")
+        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceRequest })
+
+        // A drop onto the desktop asks as well.
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
+        m.beginDrag(.window(w[1]), at: CGPoint(x: 300, y: 300))
+        m.moveDrag(to: CGPoint(x: 900, y: 400), at: 1)
+        XCTAssertFalse(m.endDrag())
+        XCTAssertNotNil(m.leaveExtendRequest)
+        XCTAssertEqual(windowModeRequests, 0)
+        m.cancelLeavingExtend()
+
+        // Add as New Pane (or an overview pick), confirmed: Window view starts, once.
+        m.choose(w[2], asNewTile: true)
+        XCTAssertNotNil(m.leaveExtendRequest)
+        m.confirmLeavingExtend()
+        XCTAssertNil(m.leaveExtendRequest)
+        XCTAssertEqual(windowModeRequests, 1)
+        XCTAssertTrue(m.layout.tiles.values.contains { $0.source?.windowID == 12 })
+
+        // A pending question is dropped when the mode changes underneath or the session ends.
+        m.switchTo(w[1])
+        XCTAssertNotNil(m.leaveExtendRequest)
+        m.apply(.mode(window: true))
+        XCTAssertNil(m.leaveExtendRequest)
+    }
+
+    /// Mirror and Window view never ask: nothing on the Mac moves when they start Window view.
+    @MainActor
+    func testMirrorAndWindowViewNeverAskToLeaveExtend() {
+        var windowModeRequests = 0
+        let mirror = connectedModel(features: [WindowWorkspaceWire.welcomeFeature], window: false, displays: Self.twoDisplays) { _ in }
+        mirror.requestWindowMode = { windowModeRequests += 1 }
+        mirror.mirroring = { true }
+        mirror.switchTo(mirror.catalog!.windows[0])
+        XCTAssertNil(mirror.leaveExtendRequest)
+        XCTAssertEqual(windowModeRequests, 1)
+
+        let window = connectedModel(features: [WindowWorkspaceWire.welcomeFeature]) { _ in }
+        window.extending = { true }   // a stale Extend answer never matters inside Window view
+        window.switchTo(window.catalog!.windows[0])
+        XCTAssertNil(window.leaveExtendRequest)
+        XCTAssertFalse(window.layout.orderedTileIDs.isEmpty)
+    }
 }
