@@ -173,6 +173,7 @@ final class ReceiverController: ObservableObject {
         windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
         windowWorkspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
+        windowWorkspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
         windowWorkspace.mirrorChoice = { [weak receiver] in
             guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
             return state.displays.first { $0.uuid == chosen }
@@ -881,6 +882,7 @@ struct MacWorkspaceOverlay: View {
                                    onMirror: { receiver.requestDisplayMode(.mirror) },
                                    onExtend: { receiver.requestDisplayMode(.extend) })
             }
+            .modifier(WorkspaceLeaveExtendConfirmation(model: model))
         }
     }
 }

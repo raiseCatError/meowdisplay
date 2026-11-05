@@ -604,6 +604,7 @@ struct ReceiverScreen: View {
                        !showSettings, !model.workspace.overviewOpen {
                         // Full-desktop view: offer Window mode once per launch, never forced.
                         WindowModePrompt(
+                            extending: model.receiver.confirmedDisplayMode == .extend,
                             onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
                             onNo: { windowPromptAnswered = true })
                             .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
@@ -742,6 +743,7 @@ struct ReceiverScreen: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {
                 PairedToast()
@@ -2256,6 +2258,7 @@ final class ReceiverModel: ObservableObject {
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
         workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
+        workspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
         workspace.mirrorChoice = { [weak receiver] in
             guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
             return state.displays.first { $0.uuid == chosen }
@@ -5583,6 +5586,8 @@ enum ActiveScene {
 /// Full-desktop view: a small yes/no offer to switch to Window view.
 private struct WindowModePrompt: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    /// In Extend, Yes also ends Extend: the prompt says so before it is answered.
+    var extending = false
     let onYes: () -> Void
     let onNo: () -> Void
 
@@ -5590,13 +5595,22 @@ private struct WindowModePrompt: View {
         HStack(spacing: 10) {
             Image(systemName: "rectangle.split.2x1")
                 .accessibilityHidden(true)
-            Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+                if extending {
+                    Text("Ends Extend. Windows on it move to your Mac's other displays.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Button("Yes", action: onYes)
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("windowModePromptYes")
-                .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
+                .accessibilityHint(extending
+                    ? Text("Window view shows chosen Mac windows as tiles. Extend ends: the extended display goes away and its windows move to your Mac's other displays.")
+                    : Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
             Button("No", action: onNo)
                 .font(.subheadline)
                 .buttonStyle(.bordered)

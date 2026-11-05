@@ -1228,6 +1228,22 @@ struct WorkspaceAppDropDialogs: ViewModifier {
     }
 }
 
+/// From Extend, a tap, pick or drop that would start Window view asks first, and says what
+/// happens: this device's extended display goes away and macOS moves the windows on it.
+struct WorkspaceLeaveExtendConfirmation: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+
+    func body(content: Content) -> some View {
+        content.alert("Switch to Window View?",
+                      isPresented: Binding(get: { model.leaveExtendRequest != nil }, set: { if !$0 { model.cancelLeavingExtend() } })) {
+            Button("Switch to Window View") { model.confirmLeavingExtend() }
+            Button("Stay in Extend", role: .cancel) { model.cancelLeavingExtend() }
+        } message: {
+            Text("This device stops extending your Mac. The extended display goes away, and macOS moves the windows on it to your Mac's other displays.")
+        }
+    }
+}
+
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).

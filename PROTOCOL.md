@@ -1474,8 +1474,16 @@ delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
 (not yet: the device explains where to set it up instead of offering Turn
 Off) or `failed` (macOS didn't apply the last change, for a few seconds).
 
-`workspaceFocus {tile}` makes a tile active (the Mac raises its window when
-input is granted). `windowAction {action}` needs this session's input
+`workspaceFocus {tile, raise?}` makes a tile active (the Mac raises its window
+when input is granted). `raise: false` (optional; older Macs ignore it and
+raise) means the receiver chose the tile by arranging its own view (moving,
+resizing, tucking or docking a float, fullscreen on the device, a zoom): the
+Mac makes it the keyboard target but leaves its window, its app and Stage
+Manager as they are. The window comes forward once, when the first key for
+that tile arrives with the input grant (the key waits up to 0.25 s until the
+window is really in front, and is dropped otherwise), or on a press in the
+tile. Until then `workspaceState.hostFocus` reports `deliver` for it, since
+typing will reach it. `windowAction {action}` needs this session's input
 grant: `activate {window, gen}`, `launch {bundle}` (only an app the Mac
 listed) and `close {window, gen}` (closes the real Mac window; receivers
 send it only from its own explicit, confirmed action — removing a tile is
@@ -1540,9 +1548,8 @@ float is captured at no less than 15 fps. `workspaceState` echoes
 tucked to an edge or hidden is simply left out of the request: hiding is
 local, and nothing here closes, minimizes or moves a Mac window
 (`windowAction` and `windowClose` stay limited to the receiver's explicit,
-confirmed menu items). Focus works as for any pane: with the input grant,
-the window of the tile in `focus` comes to the front on the Mac so typing
-reaches it. Floats are panes: an admitted session, the input grant and View
+confirmed menu items). Arranging floats never brings a window forward on the
+Mac either: the receiver sends `workspaceFocus` with `raise: false`. Floats are panes: an admitted session, the input grant and View
 Only apply to them unchanged.
 
 Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
