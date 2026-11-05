@@ -1602,24 +1602,33 @@ extension ReceiverControlOverlay {
         let padding: CGFloat = 6
         let preferredItem: CGFloat = store.isPad ? (PadControlMetrics.baseItem * CGFloat(PadControlScale.clamped(store.preferences.padControlScale))).rounded() : 38
         // Eight keys need a little more than a 375pt iPhone offers at 38pt.
-        let item = ControlTrayGeometry.fittedChipDiameter(count: items.count, length: containerSize.width,
-                                                          preferred: preferredItem, gap: gap, slack: padding * 2)
-        let barWidth = CGFloat(items.count) * item + CGFloat(items.count - 1) * gap + padding * 2
-        let bar = CGRect(x: containerSize.width / 2 - barWidth / 2, y: keyboardTop - 8 - item - padding * 2,
-                         width: barWidth, height: item + padding * 2)
-        let cells = items.indices.map { index in
-            CGRect(x: bar.minX + padding + CGFloat(index) * (item + gap), y: bar.minY + padding, width: item, height: item)
-        }
+        let fitted = ControlTrayGeometry.fittedChipDiameter(count: items.count, length: containerSize.width,
+                                                            preferred: preferredItem, gap: gap, slack: padding * 2)
+        let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+        let modifierCount = items.filter { if case .modifier = $0 { return true } else { return false } }.count
+        // On a fold (iPhone Duo) the bar splits like the keyboard below it in
+        // book pose and sits above the hinge in laptop pose. Without one this
+        // is the plain centred bar.
+        let layout = ControlFoldGeometry.keyboardBar(
+            count: items.count, leadingCount: modifierCount > 0 ? modifierCount : items.count / 2,
+            item: fitted, gap: gap, padding: padding, container: CGRect(origin: .zero, size: containerSize),
+            keyboardTop: keyboardTop, divisions: divisions)
+        let bars = layout.bars
+        let cells = layout.cells
+        let item = layout.item
+        let paletteArea = layout.paletteArea
+        let barsTop = bars.map(\.minY).min() ?? keyboardTop
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
         let key = item * 0.92
-        let perRow = max(1, Int((containerSize.width - 32 + gap) / (key + gap)))
+        let perRow = max(1, Int((paletteArea.width - 32 + gap) / (key + gap)))
         let rows = Int(ceil(Double(max(actions.count, 1)) / Double(perRow)))
         let columns = min(max(actions.count, 1), perRow)
         let paletteSize = CGSize(width: CGFloat(columns) * key + CGFloat(columns - 1) * gap + padding * 2,
                                  height: CGFloat(rows) * key + CGFloat(rows - 1) * gap + padding * 2)
-        let paletteFrame = CGRect(x: containerSize.width / 2 - paletteSize.width / 2,
-                                  y: bar.minY - 10 - paletteSize.height,
+        // The palette opens over the half that holds the modifiers.
+        let paletteFrame = CGRect(x: paletteArea.midX - paletteSize.width / 2,
+                                  y: barsTop - 10 - paletteSize.height,
                                   width: paletteSize.width, height: paletteSize.height)
         let keys: [(action: ShortcutItem, frame: CGRect)] = actions.enumerated().map { index, action in
             let row = index / perRow
@@ -1628,10 +1637,12 @@ extension ReceiverControlOverlay {
                                    y: paletteFrame.minY + padding + CGFloat(row) * (key + gap), width: key, height: key))
         }
         ZStack(alignment: .topLeading) {
-            ControlTray()
-                .frame(width: bar.width, height: bar.height)
-                .position(x: bar.midX, y: bar.midY)
-                .allowsHitTesting(false)
+            ForEach(Array(bars.enumerated()), id: \.offset) { _, bar in
+                ControlTray()
+                    .frame(width: bar.width, height: bar.height)
+                    .position(x: bar.midX, y: bar.midY)
+                    .allowsHitTesting(false)
+            }
             ForEach(Array(zip(items, cells)), id: \.0) { entry, cell in
                 keyboardBarKey(entry, frame: cell)
             }
@@ -1652,20 +1663,25 @@ extension ReceiverControlOverlay {
             }
             if let selected = selectedAction(in: actions) {
                 shortcutHUD(selected)
-                    .position(x: containerSize.width / 2, y: max(safeInsets.top + 30, paletteFrame.minY - 26))
+                    .position(x: paletteArea.midX, y: max(safeInsets.top + 30, paletteFrame.minY - 26))
             }
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
-                .contentShape(ControlRegionShape(rects: [bar] + (paletteChord == nil ? [] : [paletteFrame])))
+                .contentShape(ControlRegionShape(rects: bars + (paletteChord == nil ? [] : [paletteFrame])))
                 .gesture(controlGesture())
             // Arrow keys (#179): the bar item is its own button, above the
             // bar's gesture layer; the keypad opens above it or beside the bar.
             if let arrowIndex = items.firstIndex(of: .arrowKeys) {
                 let cell = cells[arrowIndex]
+                let centre = CGPoint(x: cell.midX, y: cell.midY)
+                let arrowBar = bars.first { $0.contains(centre) } ?? bars[0]
+                // On a fold the keypad stays on the arrow key's own half.
+                let safe = safeInsets.safeRect(in: containerSize)
+                let piece = ControlFoldGeometry.pieces(of: safe, divisions: divisions).first { $0.contains(centre) } ?? safe
                 let computed = ArrowKeysLayout(
                     toggle: cell,
                     keypad: store.arrowKeypadOpen ? ControlTrayGeometry.keyboardBarKeypadFrame(
-                        safe: safeInsets.safeRect(in: containerSize), bar: bar, item: cell,
+                        safe: piece, bar: arrowBar, item: cell,
                         keypadSize: ArrowKeypadGeometry.size(key: Metrics.arrowKey, gap: Metrics.arrowGap),
                         palette: paletteChord == nil ? nil : paletteFrame) : nil)
                 let arrows = heldArrowLayout ?? computed
@@ -1681,7 +1697,7 @@ extension ReceiverControlOverlay {
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
         .animation(reduceMotion ? .easeInOut(duration: 0.12) : .snappy(duration: 0.2), value: store.arrowKeypadOpen)
         .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
-        .onAppear { onOccupiedFramesChange([bar]) }
+        .onAppear { onOccupiedFramesChange(bars) }
     }
 
     @ViewBuilder

@@ -171,6 +171,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
 | Hinge-aware tiles on foldables | Yes. Geometry unit-tested only; not yet run on a half-open iPhone Duo or a posed simulator | n/a | Yes. Emulator only | n/a |
+| Fold-aware prompts and keyboard bar (iPhone Duo) | Yes. Centred prompts and hints move wholly onto one half; the keyboard bar splits around a book fold and sits above a laptop fold; Demo Mode uses the same regions. Geometry unit-tested only | n/a | No | n/a |
 | **Hidden on this screen** when space shrinks | Yes | Yes | Yes | Yes |
 | **Typing paused** when another app is in front on the Mac | Yes | Yes | Yes | Yes |
 
