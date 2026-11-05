@@ -18,6 +18,9 @@ protocol ReceiverControlSource: ObservableObject {
     var remoteInputTicket: RemoteInputTicket? { get }
     func sendKeyboardPress(usage: Int, modifiers: [String])
     func sendKeyboardDown(usage: Int, modifiers: [String])
+    /// `isRepeat`: an autorepeat of a key already down, timed by the
+    /// receiver (the Mac never repeats a key on its own).
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool)
     func sendKeyboardUp(usage: Int, modifiers: [String])
     func sendModifier(_ modifier: ControlModifier, down: Bool)
     func sendGesture(name: String)
@@ -203,6 +206,12 @@ extension DemoSession: ReceiverControlSource {
     }
 
     func sendKeyboardDown(usage: Int, modifiers: [String]) {
+        sendKeyboardPress(usage: usage, modifiers: modifiers)
+    }
+
+    /// The sample desktop has no held keys: each repeat moves it once more,
+    /// like a held arrow on a real Mac.
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
         sendKeyboardPress(usage: usage, modifiers: modifiers)
     }
 
