@@ -145,7 +145,14 @@ extension DemoModeSmokeTests {
             let title = String(pane.label.dropLast(" pane".count))
             let named = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == %@ AND identifier != 'workspacePane'", title)).allElementsBoundByIndex
+            print("PANE '\(title)' \(paneFrame): \(named.map { "type \($0.elementType.rawValue) id '\($0.identifier)' \($0.frame)" })")
             XCTAssertFalse(named.isEmpty, "'\(title)' has a title")
+            if named.contains(where: { $0.frame.height >= XCUIApplication.paneTitleMaxHeight }) {
+                let tree = XCTAttachment(string: app.debugDescription)
+                tree.name = "pane-titles-tree-\(title)"
+                tree.lifetime = .keepAlways
+                add(tree)
+            }
             for element in named {
                 XCTAssertLessThan(element.frame.height, XCUIApplication.paneTitleMaxHeight,
                                   "'\(title)' is title-sized, not the pane: \(element.frame) in \(paneFrame)")

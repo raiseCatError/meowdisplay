@@ -263,6 +263,9 @@ struct WorkspaceChromeView: View {
                 .padding(unsafeInsets(of: rect))
                 .opacity(covered ? 0 : 1)
                 .allowsHitTesting(!covered)
+                // A container, not an element: an accessibility modifier on this pane-sized layer
+                // otherwise makes it one element that takes its title's label and button trait.
+                .accessibilityElement(children: .contain)
                 .accessibilityHidden(covered)
         }
         .frame(width: rect.width, height: rect.height)
