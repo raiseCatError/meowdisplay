@@ -1446,7 +1446,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// The finger on the keypad is now over `direction`, or over no key.
     private func arrowFinger(on direction: ArrowKeyDirection?) {
         guard direction == nil || store.preferences.allowInput else { return releaseArrowKey() }
-        let events = arrowHold.move(to: direction, now: ProcessInfo.processInfo.systemUptime)
+        let events = arrowHold.move(to: direction, now: CACurrentMediaTime())
         guard !events.isEmpty else { return }
         if events.contains(where: { if case .down = $0 { return true } else { return false } }) {
             store.beginAutoHideActivity()
@@ -1467,11 +1467,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         guard arrowHold.isHolding else { return }
         arrowRepeatTask = Task { @MainActor in
             while !Task.isCancelled, let due = arrowHold.nextRepeatAt {
-                let wait = due - ProcessInfo.processInfo.systemUptime
+                let wait = due - CACurrentMediaTime()
                 if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
                 guard !Task.isCancelled else { return }
                 guard store.preferences.allowInput else { return releaseArrowKey() }
-                if let event = arrowHold.tick(now: ProcessInfo.processInfo.systemUptime) {
+                if let event = arrowHold.tick(now: CACurrentMediaTime()) {
                     sendArrowEvents([event])
                 }
             }
