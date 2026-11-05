@@ -263,6 +263,9 @@ struct WorkspaceChromeView: View {
                 .padding(unsafeInsets(of: rect))
                 .opacity(covered ? 0 : 1)
                 .allowsHitTesting(!covered)
+                // A container, not an element: an accessibility modifier on this pane-sized layer
+                // otherwise makes it one element that takes its title's label and button trait.
+                .accessibilityElement(children: .contain)
                 .accessibilityHidden(covered)
         }
         .frame(width: rect.width, height: rect.height)
@@ -581,6 +584,10 @@ struct WorkspaceChromeView: View {
                     }
                     heldLabel = nil
                 })
+        // One element with the label's own frame. Without it, the label and traits below also
+        // land on an element that reports the whole pane's frame: VoiceOver outlines the pane,
+        // and a UI test's press on it lands mid-pane, on the Mac picture in a live session.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(text + (shown ? "" : ", tab"))
         .accessibilityHint(shown ? "Selects this pane for typing. Fullscreen and other options are in Actions." : "Shows this tab.")
         .accessibilityAddTraits(.isButton)

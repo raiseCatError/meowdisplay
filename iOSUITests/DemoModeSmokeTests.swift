@@ -117,6 +117,72 @@ final class DemoModeSmokeTests: XCTestCase {
     }
 }
 
+// MARK: - Pane titles
+
+extension DemoModeSmokeTests {
+    /// Demo Window view: whatever is named after a pane is title-sized at the pane's top, never
+    /// the whole pane (whose middle is the Mac picture in a live session), and holding the title
+    /// there opens the pane's menu.
+    @MainActor
+    func testPaneTitlesAreTheirOwnControlsInDemoWindowView() throws {
+        let app = XCUIApplication()
+        app.launch()
+        if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
+        waitForNonExistence(app.buttons["Close"])
+        let explore = app.buttons["exploreDemo"]
+        XCTAssertTrue(explore.waitForExistence(timeout: 5))
+        tapWhenSettled(explore, in: app)
+        let toggle = app.buttons["demoWindowViewToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 8))
+        toggle.tap()
+        let panes = app.descendants(matching: .any).matching(identifier: "workspacePane")
+        XCTAssertTrue(panes.firstMatch.waitForExistence(timeout: 8), "Window view shows its panes")
+        snapshot(app, "pane-titles-window-view")
+
+        let rotate = app.buttons["Rotate"]
+        for pane in panes.allElementsBoundByIndex {
+            let paneFrame = pane.frame
+            let title = String(pane.label.dropLast(" pane".count))
+            let named = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@ AND identifier != 'workspacePane'", title)).allElementsBoundByIndex
+            print("PANE '\(title)' \(paneFrame): \(named.map { "type \($0.elementType.rawValue) id '\($0.identifier)' \($0.frame)" })")
+            XCTAssertFalse(named.isEmpty, "'\(title)' has a title")
+            if named.contains(where: { $0.frame.height >= XCUIApplication.paneTitleMaxHeight }) {
+                let tree = XCTAttachment(string: app.debugDescription)
+                tree.name = "pane-titles-tree-\(title)"
+                tree.lifetime = .keepAlways
+                add(tree)
+            }
+            for element in named {
+                XCTAssertLessThan(element.frame.height, XCUIApplication.paneTitleMaxHeight,
+                                  "'\(title)' is title-sized, not the pane: \(element.frame) in \(paneFrame)")
+                XCTAssertLessThan(element.frame.width, paneFrame.width * 0.75, "'\(title)': \(element.frame) in \(paneFrame)")
+            }
+            _ = try XCTUnwrap(app.paneTitleFrame(.paneTitle(title), in: pane), "'\(title)' has a title at its pane's top")
+            try app.holdPaneTitle(.paneTitle(title), in: pane)
+            XCTAssertTrue(rotate.waitForExistence(timeout: 5), "holding '\(title)' opens its menu")
+            snapshot(app, "pane-titles-menu-\(title)")
+            closePaneMenu(app, panes: panes)
+            waitForNonExistence(rotate)
+        }
+    }
+
+    /// Closes the pane menu with a tap on a pane away from the menu (its scrim takes the tap).
+    @MainActor
+    private func closePaneMenu(_ app: XCUIApplication, panes: XCUIElementQuery) {
+        let rows = ["Fullscreen on This Device", "Exit Fullscreen", "View Full Screen", "Fill Pane", "Show Whole Window",
+                    "Show Whole Desktop", "Reset View", "Rotate", "Change Window…", "Show a Window Here…", "Float This Pane",
+                    "Float This Tab", "Arrange Panes", "Remove from Layout", "Remove This Tab"]
+        let menu = rows.map { app.buttons[$0].firstMatch }.filter(\.exists).map(\.frame)
+            .reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -16, dy: -16)
+        let spots = panes.allElementsBoundByIndex.map(\.frame).flatMap { f in
+            [CGPoint(x: f.midX, y: f.midY), CGPoint(x: f.midX, y: f.maxY - 24), CGPoint(x: f.maxX - 24, y: f.midY)]
+        }
+        guard let spot = spots.first(where: { !menu.contains($0) }) else { XCTFail("no spot outside the menu \(menu)"); return }
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: spot.x, dy: spot.y)).tap()
+    }
+}
+
 // MARK: - Touch Style
 
 extension DemoModeSmokeTests {
@@ -348,8 +414,11 @@ extension DemoModeSmokeTests {
         if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
         else if connect.waitForExistence(timeout: 10) { connect.tap() }
         sleep(10)
-        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        let titles = NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")
+        let pane = app.descendants(matching: .any).matching(titles).firstMatch
         guard pane.waitForExistence(timeout: 20) else { snapshot(app, "twist-no-pane"); throw XCTSkip("no Window-mode pane") }
+        // Only a title-sized title is held at the end: the rest of a pane is the Mac picture.
+        guard app.paneTitleFrame(titles) != nil else { snapshot(app, "twist-no-title"); throw XCTSkip("no title-sized pane title") }
         snapshot(app, "cursor-before")
         // Trackpad: one finger moves the cursor (a drag, never a tap: no click on the Mac).
         let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
@@ -365,7 +434,7 @@ extension DemoModeSmokeTests {
         sleep(4)
         snapshot(app, "twist-after")
         // Leave the owner's layout as it was.
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let reset = app.buttons["Reset View"]
         XCTAssertTrue(reset.waitForExistence(timeout: 5), "a turned pane offers Reset View")
         snapshot(app, "twist-menu")
@@ -385,10 +454,12 @@ extension DemoModeSmokeTests {
         if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
         else if connect.waitForExistence(timeout: 10) { connect.tap() }
         sleep(10)
-        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        let titles = NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")
+        let pane = app.descendants(matching: .any).matching(titles).firstMatch
         guard pane.waitForExistence(timeout: 20) else { snapshot(app, "rotate-no-pane"); throw XCTSkip("no Window-mode pane") }
+        guard app.paneTitleFrame(titles) != nil else { snapshot(app, "rotate-no-title"); throw XCTSkip("no title-sized pane title") }
         snapshot(app, "rotate-before")
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let rotate = app.buttons["Rotate"]
         XCTAssertTrue(rotate.waitForExistence(timeout: 5), "the pane menu offers Rotate")
         snapshot(app, "rotate-menu")
@@ -396,7 +467,7 @@ extension DemoModeSmokeTests {
         sleep(4)
         snapshot(app, "rotate-after")
         // Leave the owner's layout as it was.
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let reset = app.buttons["Reset View"]
         XCTAssertTrue(reset.waitForExistence(timeout: 5), "a rotated pane offers Reset View")
         reset.tap()
