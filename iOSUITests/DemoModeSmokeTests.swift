@@ -325,40 +325,55 @@ extension DemoModeSmokeTests {
         XCTAssertTrue(app.navigationBars["Input"].waitForExistence(timeout: 5))
     }
 
-    /// Natural Touch is the default; Classic stays available, shows Smart
-    /// Touch, and is remembered across a relaunch.
+    /// Touch Style, with Direct Touch: Classic shows the Smart Touch rows and Natural Touch
+    /// doesn't, a change is remembered across a relaunch, and the device's own choice is put
+    /// back. Starts from whichever style the device has (Classic for new and upgraded installs
+    /// since schema 21, which InputDefaultsTests checks), so it means the same on any device.
     @MainActor
-    func testTouchStyleDefaultsToNaturalAndClassicPersists() throws {
+    func testTouchStyleShowsSmartTouchForClassicAndIsRemembered() throws {
         let app = XCUIApplication()
         app.launch()
         openInputSettings(app)
-        let natural = app.buttons["Natural Touch"].firstMatch
-        let classic = app.buttons["Classic"].firstMatch
-        // Touch Style belongs to Direct Touch; a device set to Trackpad is left as it is.
+        // Touch Style belongs to Direct Touch; a device set to Trackpad (phones start there) is left as it is.
         if app.buttons["Trackpad"].firstMatch.waitForExistence(timeout: 3), app.buttons["Trackpad"].firstMatch.isSelected {
             throw XCTSkip("Input Mode is Trackpad on this device; not changing it")
         }
+        let natural = app.buttons["Natural Touch"].firstMatch
+        let classic = app.buttons["Classic"].firstMatch
         // Lists load rows only as they scroll into view (the Input page grew).
         for _ in 0..<5 where !natural.waitForExistence(timeout: 1) { app.swipeUp() }
         XCTAssertTrue(natural.waitForExistence(timeout: 5))
-        XCTAssertTrue(natural.isSelected, "Natural Touch is the default")
-        XCTAssertFalse(app.staticTexts["Smart Touch"].exists, "Smart Touch belongs to Classic")
-        snapshot(app, "touch-style-natural")
+        XCTAssertTrue(classic.exists)
+        XCTAssertNotEqual(natural.isSelected, classic.isSelected, "exactly one Touch Style is chosen")
+        let startedClassic = classic.isSelected
+        let (own, other) = startedClassic ? ("Classic", "Natural Touch") : ("Natural Touch", "Classic")
+        assertSmartTouch(app, shown: startedClassic)
+        snapshot(app, "touch-style-start-\(own)")
 
-        classic.tap()
-        XCTAssertTrue(classic.isSelected)
-        XCTAssertTrue(app.staticTexts["Smart Touch"].waitForExistence(timeout: 3), "Classic shows Smart Touch")
-        snapshot(app, "touch-style-classic")
+        select(app.buttons[other].firstMatch)
+        assertSmartTouch(app, shown: !startedClassic)
+        snapshot(app, "touch-style-\(other)")
 
         app.terminate()
         app.launch()
         openInputSettings(app)
-        for _ in 0..<5 where !app.buttons["Classic"].firstMatch.waitForExistence(timeout: 1) { app.swipeUp() }
-        XCTAssertTrue(app.buttons["Classic"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Classic"].firstMatch.isSelected, "Classic is remembered")
+        let remembered = app.buttons[other].firstMatch
+        for _ in 0..<5 where !remembered.waitForExistence(timeout: 1) { app.swipeUp() }
+        XCTAssertTrue(remembered.waitForExistence(timeout: 5))
+        XCTAssertTrue(remembered.isSelected, "\(other) is remembered")
+        assertSmartTouch(app, shown: !startedClassic)
 
-        app.buttons["Natural Touch"].firstMatch.tap()   // leave the simulator on the default
-        XCTAssertTrue(app.buttons["Natural Touch"].firstMatch.isSelected)
+        select(app.buttons[own].firstMatch)   // the device's own choice back
+        assertSmartTouch(app, shown: startedClassic)
+    }
+
+    /// The Smart Touch rows show with Classic only.
+    @MainActor
+    private func assertSmartTouch(_ app: XCUIApplication, shown: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        let row = app.staticTexts["Smart Touch"]
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == %@", NSNumber(value: shown)), object: row)
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 3), .completed,
+                       shown ? "Classic shows Smart Touch" : "Smart Touch belongs to Classic", file: file, line: line)
     }
 }
 
