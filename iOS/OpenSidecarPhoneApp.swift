@@ -1299,6 +1299,8 @@ struct IdleView: View {
     @State private var remoteEditPeerID: String?
     /// Bumped when remote details change so the (non-observable) store is re-read.
     @State private var remoteRefresh = 0
+    /// How each Mac's last Remote Access knock ended: the row's reason after a failed Connect.
+    @ObservedObject private var knockOutcomes = RemoteKnockOutcomes.shared
     @State private var forgetConfirmation = PeerForgetPrompt()
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
@@ -1372,6 +1374,11 @@ struct IdleView: View {
         .sheet(isPresented: $showRemoteAccessSetup, onDismiss: { remoteRefresh += 1 }) {
             NavigationStack {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showRemoteAccessSetup = false }
+                        }
+                    }
             }
         }
         .sheet(item: $homeSheet) { sheet in
@@ -1731,6 +1738,7 @@ struct IdleView: View {
         let user = PairedMacUserName.name(peerID: mac.peerID)
         let subtitle = [macSubtitle(mac), user, shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
             .joined(separator: " · ").nilIfEmpty
+        let remoteHint = remoteProblemHint(mac)
         func label(lines: Int?) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: mac.name)
@@ -1739,6 +1747,13 @@ struct IdleView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // What to check after a Connect over Remote failed, under the reason.
+                if let remoteHint {
+                    Text(verbatim: remoteHint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1775,12 +1790,45 @@ struct IdleView: View {
         if mac.localNetworkBlocked {
             return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
         }
-        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
-        if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
+        if wakeConnect.isRunning(forPeerID: peerID) {
+            return remoteProgress(mac, peerID: peerID)?.text ?? wakeConnect.statusLabel
+        }
+        if wakeConnect.failed(forPeerID: peerID) {
+            return remoteProblem(mac, peerID: peerID)?.summary(deviceKind: deviceKind) ?? remoteStatusText(peerID: peerID)
+        }
         if mac.switchedOut { return String(localized: "Switched Out") }
         if mac.nearby != nil { return String(localized: "Nearby") }
         if mac.hasRemote { return String(localized: "Remote") }
         return String(localized: "Not found")
+    }
+
+    /// Contacting your Mac / Waiting for your Mac to connect while a Connect
+    /// over Remote runs, from this device's knock (`RemoteConnectRowStatus`).
+    private func remoteProgress(_ mac: HomeMac, peerID: String) -> RemoteConnectRowStatus.Progress? {
+        RemoteConnectRowStatus.progress(stage: wakeConnect.attempt.stage,
+                                        wakePacketsSent: wakeConnect.attempt.wolBurstsSent,
+                                        hasSavedAddress: mac.hasRemote,
+                                        lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// Why the last Connect over Remote to this Mac failed, when its knock tells.
+    private func remoteProblem(_ mac: HomeMac, peerID: String) -> RemoteAccessProblem? {
+        RemoteConnectRowStatus.problem(failureReason: wakeConnect.failureReason(forPeerID: peerID),
+                                       macConnected: wakeConnect.attempt.promoteGeneration != nil,
+                                       hasSavedAddress: mac.hasRemote,
+                                       lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// The line under the reason: what to check next. Only where the row shows that reason.
+    private func remoteProblemHint(_ mac: HomeMac) -> String? {
+        guard let peerID = mac.peerID, sessionRole(mac) != .current, !mac.localNetworkBlocked,
+              !wakeConnect.isRunning(forPeerID: peerID), wakeConnect.failed(forPeerID: peerID),
+              let problem = remoteProblem(mac, peerID: peerID) else { return nil }
+        var otherMacName: String?
+        if case .some(.identityMismatch(let otherPeerID?)) = knockOutcomes.outcome(forPeerID: peerID)?.result {
+            otherMacName = TrustStore.shared.pinnedPeers().first { $0.peerID == otherPeerID }?.displayName
+        }
+        return problem.hint(deviceKind: deviceKind, otherMacName: otherMacName)
     }
 
     /// One session at a time: only the session's own Mac is Connected.
@@ -1834,6 +1882,8 @@ struct IdleView: View {
         if hasWakeHint || mac.nearby == nil {
             let failed = wakeConnect.failed(forPeerID: peerID)
             Button {
+                // A new attempt: an earlier knock's result no longer describes it.
+                knockOutcomes.reset(peerID: peerID)
                 wakeConnect.begin(peerID: peerID)
             } label: {
                 // Full label, never truncated: the row stacks the buttons
@@ -1875,14 +1925,15 @@ struct IdleView: View {
     private func macMenu(_ mac: HomeMac) -> some View {
         Menu {
             if let peerID = mac.peerID {
+                // The Mac's Remote Access address (TERMINOLOGY.md: Address).
                 if mac.hasRemote {
-                    Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
-                    Button("Remove Remote Details", role: .destructive) {
+                    Button("Edit Address…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Remove Address", role: .destructive) {
                         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
                         remoteRefresh += 1
                     }
                 } else {
-                    Button("Set Up Remote Access…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Add Address…") { presentRemoteSettings(peerID: peerID) }
                 }
                 Button("Forget…", role: .destructive) {
                     forgetConfirmation.request(peerID: peerID, name: mac.name)
@@ -2050,6 +2101,7 @@ private struct HowToConnectSheet: View {
                     instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
                     instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
                     instructionRow("hand.tap", "Or tap Connect next to a paired Mac")
+                    instructionRow("network", "Away from your Mac's Wi-Fi? Turn on Tailscale on both devices, then choose Remote Access at the bottom of the Macs card.")
                     instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
                 }
                 .padding(20)

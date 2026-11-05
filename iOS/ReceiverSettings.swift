@@ -1230,6 +1230,8 @@ private struct ConnectionSettingsPage: View {
                       systemImage: "cable.connector")
                 Label("Wi-Fi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
                       systemImage: "wifi")
+                Label("Remote: on another network, turn on Tailscale on both devices and save the Mac's address in Remote Access.",
+                      systemImage: "network")
                 Label("Rotate the \(deviceKind) for a vertical second monitor.",
                       systemImage: "rectangle.portrait.rotate")
                 Label("Touch: tap to click, swipe to scroll, press and move to drag, hold to right-click.",
@@ -1360,21 +1362,13 @@ private struct RequestInputAutomaticallyToggle: View {
 
 // MARK: - Remote Access
 
+/// The same page with or without a paired Mac: before one is paired it still
+/// shows what to set up and how to pair over Remote, not a dead end.
 private struct RemoteAccessSettingsPage: View {
     let receiver: StreamReceiver
 
     var body: some View {
-        if TrustStore.shared.pinnedPeers().isEmpty {
-            SettingsForm {
-                Section {
-                    Text("Pair with a Mac first, then set up Remote Access for it here.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle(MobileSettingsCategory.remoteAccess.title)
-        } else {
-            RemoteAccessSettingsView(receiver: receiver)
-        }
+        RemoteAccessSettingsView(receiver: receiver)
     }
 }
 
