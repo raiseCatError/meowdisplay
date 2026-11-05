@@ -209,6 +209,7 @@ targets:
       - Mac/InputRouting.swift
       - Mac/SmartTouchTargetClassifier.swift
       - Mac/TextCaretFollower.swift
+      - Mac/CursorWirePosition.swift
       - MacReceiver/ReceiverWindowLifecycle.swift
       - MacReceiver/ReceiverSettingsCategory.swift
       - MacReceiver/ReceiverInputForwarding.swift
