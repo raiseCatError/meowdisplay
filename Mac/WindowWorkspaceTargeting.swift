@@ -697,3 +697,97 @@ enum WorkspaceCaptureSizing {
         return CGSize(width: even(source.width * perPoint), height: even(source.height * perPoint))
     }
 }
+
+// MARK: - Covered windows
+
+/// Whether input at a point may go to a tiled window: nothing else may be over it there, so a
+/// press, hover or scroll never lands in a window the receiver isn't showing. Pure; the engine
+/// feeds it what macOS lists above the target and, only when needed, the window server's own
+/// mouse-down hit-test.
+///
+/// Any window over the point covers it: another app, a menu, a panel, a sheet that isn't the
+/// target's own, Stage Manager's strip. The one exception is a *display-wide surface*: a window
+/// above the normal layer whose bounds are exactly a whole display. On macOS 27 the Dock is one
+/// (measured: a single 1920×1080 window at layer 20, holding the Dock strip, over every app
+/// window). Its bounds say nothing about where it takes clicks, so for it the window server
+/// decides: the point is clear only when a mouse-down there would hit the target itself (or
+/// its own sheet). Where such a surface takes the click (the Dock strip, Mission Control, a
+/// screen-capture overlay), or the answer is missing, the target stays covered.
+enum WorkspaceInputCover {
+    /// A window macOS lists above the target (`.optionOnScreenAboveWindow`), front to back.
+    struct Window: Equatable, Sendable {
+        var id: UInt32
+        var owner: String
+        var layer: Int
+        /// Global, top-left origin.
+        var bounds: CGRect
+        var alpha: Double
+    }
+
+    enum Verdict: Equatable {
+        /// Nothing else is over the target here: input may go to it.
+        case clear
+        /// Something is over the target here (`by`, when known); the answer holds within `cache`.
+        case covered(by: UInt32?, cache: CGRect)
+        /// The point isn't on the target on screen (outside it, on another Space, minimized).
+        case outside
+    }
+
+    /// How far a window's bounds may be from a display's and still span it, in points.
+    static let displayTolerance: CGFloat = 0.5
+
+    /// - Parameters:
+    ///   - targetFrame: the target's current on-screen frame, nil when it isn't on screen.
+    ///   - ownSheets: the target's own sheets, which are part of it.
+    ///   - displays: the active displays' bounds (global, top-left origin).
+    ///   - hitTest: the window a mouse-down at `point` would hit, nil when unknown. Asked only
+    ///     when every window over the point is a display-wide surface.
+    static func verdict(target: UInt32, targetFrame: CGRect?, at point: CGPoint, above: [Window],
+                        ownSheets: Set<UInt32>, displays: [CGRect], hitTest: () -> UInt32?) -> Verdict {
+        let covering = above.filter {
+            !ownSheets.contains($0.id) && $0.alpha > 0.01 && $0.owner != "Window Server" && $0.bounds.contains(point)
+        }
+        if let cover = covering.first(where: { !isDisplayWideSurface($0, at: point, displays: displays) }) {
+            return .covered(by: cover.id, cache: cover.bounds)
+        }
+        guard targetFrame?.contains(point) == true else { return .outside }
+        let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
+        guard !covering.isEmpty else { return .clear }
+        // Only display-wide surfaces are over the point: the window server knows where they
+        // take clicks. Cached small, as it changes across the surface (the Dock strip).
+        guard let hit = hitTest(), hit == target || ownSheets.contains(hit) else {
+            return .covered(by: covering.first?.id, cache: around)
+        }
+        return .clear
+    }
+
+    /// One `CGWindowListCopyWindowInfo` entry. Nil only without bounds (nothing to place it by).
+    /// A missing value takes the reading that keeps the window a cover: no number (never the
+    /// target or its sheet), layer 0 (never a display-wide surface), an unknown owner, opaque.
+    static func window(from info: [String: Any]) -> Window? {
+        guard let dict = info[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: dict) else { return nil }
+        return Window(id: (info[kCGWindowNumber as String] as? UInt32) ?? 0,
+                      owner: info[kCGWindowOwnerName as String] as? String ?? "",
+                      layer: info[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
+                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1)
+    }
+
+    /// `point` (global, top-left origin) in Cocoa's global coordinates, which the window
+    /// server's hit-test takes: the same x, and y measured up from the primary display's bottom
+    /// edge, on every display (one above the primary has y past its height, one below it a
+    /// negative y).
+    static func cocoaPoint(fromGlobal point: CGPoint, primaryHeight: CGFloat) -> CGPoint {
+        CGPoint(x: point.x, y: primaryHeight - point.y)
+    }
+
+    /// Above the normal window layer, and exactly the bounds of the display holding `point`.
+    static func isDisplayWideSurface(_ w: Window, at point: CGPoint, displays: [CGRect]) -> Bool {
+        guard w.layer > 0 else { return false }
+        let t = displayTolerance
+        return displays.contains { d in
+            d.contains(point) && abs(w.bounds.minX - d.minX) <= t && abs(w.bounds.minY - d.minY) <= t
+                && abs(w.bounds.width - d.width) <= t && abs(w.bounds.height - d.height) <= t
+        }
+    }
+}
