@@ -95,6 +95,9 @@ struct PhoneInfo: Decodable {
     /// Window workspaces version (PROTOCOL.md 6.10); absent = not supported.
     let ws: Int?
     var supportsWindowWorkspace: Bool { (ws ?? 0) >= WindowWorkspaceWire.version }
+    /// Floating panes (PROTOCOL.md 6.10): `ws` 2 or later, and only while this Mac offers
+    /// `windowFloat`. A `ws` 1 receiver (Android 2.0, older Apple receivers) is unchanged.
+    var supportsWindowFloats: Bool { (ws ?? 0) >= WindowWorkspaceWire.floatVersion && WindowStreamingPolicy.isAllowed() }
     /// Reassembles control messages sent in parts (PROTOCOL.md 6.14); absent = not supported.
     let chunks: Int?
     var supportsControlChunks: Bool { (chunks ?? 0) >= ControlChunkWire.version }
@@ -6908,6 +6911,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
+            features.append(WindowWorkspaceWire.floatFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         welcome["features"] = features
@@ -7442,7 +7446,8 @@ extension MacSender {
     /// `queue` only.
     private func installWorkspaceEngine(hostID: String, canvas: CGSize, fps: Int) {
         stopWorkspaceEngine()
-        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser())
+        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser(),
+                                           allowFloats: lastHello?.supportsWindowFloats == true)
         let selfBox = self.selfBox
         let queue = self.queue
         // Only the CURRENT engine may reach this session: a stopped one's late

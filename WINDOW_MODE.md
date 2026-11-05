@@ -24,7 +24,7 @@ removed, and the arrangement comes back when the space returns.
 | --- | --- | --- | --- |
 | Open the window overview | Hold three fingers still on the picture, or Settings → Display → Show Mac Windows… | Hold three fingers still, the rail, or Settings → Display → Choose Windows… | Windows in the title bar, or ⌃⌥W |
 | Quick switch | Stage Peek (default): touch and hold the left edge (or right, in Settings), slide to browse, lift (nothing changes), tap a window to show it in the active tile; tap outside to close. Drag inward or tap Expand for a larger browser. The top card, Full Desktop, returns to the whole Mac screen. Settings → Controls → Window Switcher → Rail brings back the window rail (a thin handle at the top by default; Move Rail for another edge) | Same (Settings → Display → Window Switcher) | Overview |
-| Switch view | From Window view: Stage Peek's Full Desktop card, or the overview's Mirror/Extend. From the whole screen: answer Yes to "Switch to Window view?" (offered once per launch when the Mac supports it), or open the overview | Same | — |
+| Switch view | From Window view: Stage Peek's Full Desktop card, or the overview's Mirror/Extend. From the whole screen: answer Yes to "Switch to Window view?" (offered once per launch when the Mac supports it), or open the overview. From Extend, a pick or drop that starts Window view asks first, since the extended display goes away | Same | — |
 | Pane/tab options | **Touch and hold a pane's title** (about 0.4 seconds), then **release without dragging** to open its menu: **Fullscreen on This Device / Exit Fullscreen**, Fill Pane / Show Whole Window, Change Window…, Arrange Panes, **Remove from Layout**, and (with control) Close Window on Mac…. A **single tap** selects the pane or switches tabs; it does not open the menu. **Double-tap** a pane's title to enter Fullscreen on This Device, and double-tap it again (it stays visible) to return to the same arrangement; the menu, the fullscreen strip's Exit Fullscreen button and the VoiceOver/TalkBack actions do the same. With one pane, use the rail's **Arrange** action to reveal its title | Hold a pane/tab title for options; a tap selects/switches tabs | Shared pane menu; Arrange shows the pane labels |
 | Move a tile | Press and hold its name, then drag: a highlighted area shows where it lands (middle swaps, an edge splits). Release on **Cancel** to leave everything as it was. With more than one pane, moving a whole pane also shows **Remove from Layout** beside Cancel: release there to take the pane off this device's layout (Undo brings it back; the Mac window stays open). Remove is not offered for tabs, for windows or apps dragged in from Stage Peek, or for the last pane | Same | Same, while Arrange is on |
 | Tabs in a pane | Drop a window on a pane's labels to add it as a tab; tap a label to switch (only the shown tab streams). Hold a tab's label and drag it: onto another pane's labels to move it there, onto an edge for a new pane, or along its own labels to reorder. Each tab keeps its own rotation, Fit/Fill and zoom. Remove This Tab only takes it out of the pane; the Mac window stays open | Same | — |
@@ -68,6 +68,11 @@ Measured on macOS 27 (integration evidence `W1-sck`): ScreenCaptureKit's
 when it is covered, off-screen (including negative coordinates) or belongs to
 a hidden app on another Space. Minimized windows and hidden apps deliver no
 frames (stills fail with -3811) and resume on the same stream when restored.
+A window chosen for a tile while it is minimized (or its app hidden) is
+brought back once, without activating its app. A window that was on screen
+when its tile first showed it is never brought back by the Mac on its own:
+**Minimize on Mac** sticks, and a tucked float shown again doesn't restore
+it. **Show on Mac** restores it on request.
 
 So Window mode creates **no virtual display** and never moves, resizes or
 re-Spaces a window:
@@ -84,6 +89,48 @@ One encode per receiver keeps hardware encoders and the receivers' decoders
 within limits; nine windows never mean nine streams to decode on a phone.
 A tiny display stream keeps the Mac's audio and the usual capture lifecycle
 (pause, Video Off, recovery).
+
+**Floating panes** are panes drawn over the arrangement instead of in it
+(PROTOCOL.md §6.10, `windowFloat`). They use the same capture, compositor
+and encode: the compositor draws the tiled panes, then the floats back to
+front, and input goes to whatever is drawn on top at that point, so a pane
+a float covers can't be clicked or hovered through it. Moving, resizing,
+raising or docking a float keeps its window's capture running (no restart,
+no sharpness change). A pane almost entirely covered by floats is captured
+at 2 fps; a visible float keeps at least 15 fps. A float tucked to the edge
+is local: it isn't sent, so its capture stops until it comes back, and so
+does its app's sound unless another pane shows that app (Window view plays
+the sound of the apps on screen). The Mac
+accepts floats only from a receiver that says it can show them; older
+receivers, including Android 2.0, see Window view exactly as before.
+
+From **Mirror**, a window opened floating (Stage Peek's **Open as Floating
+Window**, a drag in Floating placement, or a tap with Default Window
+Placement set to Floating) starts Window view with the mirrored display as
+the pane underneath and the window floating over it, without asking, the
+same way a window dropped onto the desktop starts Window view beside it.
+The Mac's windows are untouched. Floats aren't offered in **Extend**: the
+extended desktop is a virtual display that exists only while this device
+extends, so leaving Extend removes it and macOS moves the windows on it to
+the Mac's other displays, which a float must never cause.
+
+Arranging a float is local too: moving, grabbing, resizing, flinging,
+tucking, restoring, docking it, Add to Layout, Bring to Front, fullscreen on
+this device, and zooming any pane make it the window you type into, but the
+Mac window, its app, Stage Manager and Spaces stay as they are. The window
+comes forward on the Mac only when you type into it (with control; the first
+key waits for it, briefly) or touch inside it. Keys never go to another
+window meanwhile: if the window can't come forward, typing pauses and the
+float says so, with **Tap to resume**.
+
+Leaving **Extend** always asks first. Showing a window in a pane from Stage
+Peek or the overview, or dropping one onto the desktop, would start Window
+view, which removes this device's extended display. So in Extend the device
+asks **Switch to Window View?** and explains that the windows on the
+extended display move to the Mac's other displays; **Stay in Extend** changes
+nothing. The once-per-launch **Switch to Window view?** offer says the same
+in Extend. Mirror switches without asking, as before: nothing on the Mac
+moves.
 
 Windows are listed by identity and metadata, not by position: MeowDisplay's
 own windows, system UI, password prompts, the Stage Manager strip, every

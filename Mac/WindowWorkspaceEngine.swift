@@ -314,6 +314,66 @@ final class WorkspaceCompositor {
 /// One receiver's window workspace. Thread model: state lives on `queue`;
 /// input mapping (called from the injector on the network queue) reads the
 /// targeting model under `inputLock`.
+/// When the Mac may bring back a minimized or hidden window for a tile: only when the person
+/// chose that window for the tile while it was already off screen, and only once. A window that
+/// was on screen when the tile first showed it is never restored by the Mac later, so Minimize on
+/// Mac (or minimizing it on the Mac itself) sticks, and showing the same tile again (a float
+/// un-tucked) never brings a window back. Show on Mac still restores it, on request.
+struct WorkspaceRestoreLedger {
+    struct Key: Hashable {
+        var tile: String
+        var window: UInt32
+        var generation: UInt64
+    }
+
+    private(set) var seen = Set<Key>()
+
+    /// Called for each assigned window at every listing. True only the first time this tile shows
+    /// this window, when it is off screen and its capture delivers nothing.
+    mutating func observe(tile: String, window: UInt32, generation: UInt64, offscreen: Bool, delivering: Bool) -> Bool {
+        seen.insert(Key(tile: tile, window: window, generation: generation)).inserted && offscreen && !delivering
+    }
+
+    /// Forgets windows that are no longer listed, keeping the ledger small. A tile that is only
+    /// hidden for now (a tucked float) keeps its entry while its window is still listed.
+    mutating func prune(keeping isListed: (Key) -> Bool) {
+        seen = seen.filter(isListed)
+    }
+}
+
+/// A tile the receiver chose by arranging its own view (a float moved, resized, tucked or docked,
+/// fullscreen on the device, a zoom) becomes the keyboard target without its Mac window coming
+/// forward: nothing changes on the Mac (no app activation, no Stage Manager or Space change).
+/// The window comes forward once, when the first authorized key for that tile arrives and the
+/// Mac's focus is elsewhere; a press in the tile does it as before. Keys still go only to a window
+/// that is really in front (`WorkspaceKeyboardGate`).
+struct WorkspaceDeferredRaise: Equatable {
+    private(set) var tile: String?
+
+    /// A focus request: `raiseNow` false defers the raise for `tile`; true (or another tile) drops it.
+    mutating func focused(_ tile: String?, raiseNow: Bool) {
+        self.tile = raiseNow ? nil : tile
+    }
+
+    /// A press brought a window forward: nothing is pending any more.
+    mutating func clear() { tile = nil }
+
+    /// Asked when a key for the active tile is checked. True once: raise the window now. Either way
+    /// the pending raise is used up, so a later change of focus on the Mac pauses typing as before.
+    mutating func takeForKey(active: String?, decision: WorkspaceKeyboardGate.Decision) -> Bool {
+        guard let pending = tile, pending == active else { return false }
+        tile = nil
+        return decision == .hostFocusElsewhere || decision == .otherWindowFocused
+    }
+
+    /// What the receiver is told: while the raise waits for the first key, typing will reach the
+    /// tile, so it shows no "typing paused" notice.
+    func reported(_ decision: WorkspaceKeyboardGate.Decision, active: String?) -> WorkspaceKeyboardGate.Decision {
+        guard let pending = tile, pending == active, decision == .hostFocusElsewhere || decision == .otherWindowFocused else { return decision }
+        return .deliver
+    }
+}
+
 final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// All receivers together: window streams this Mac will run at once.
     static let globalCaptureLimit = 16
@@ -378,6 +438,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var lastStateSent: String = ""
     private var stopped = false
     private var keyboardDecision: WorkspaceKeyboardGate.Decision = .noActiveTile
+    /// The tile whose window comes forward at its first key (see `WorkspaceDeferredRaise`).
+    private var deferredRaise = WorkspaceDeferredRaise()
     private var keyboardCheckedAt: TimeInterval = 0
     private var topmostCache: [UInt32: (at: TimeInterval, rect: CGRect, ok: Bool)] = [:]
 
@@ -392,12 +454,24 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// Release every held key/button on the Mac (source changed under it).
     var releaseHeldInput: (() -> Void)?
 
-    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService) {
+    /// The receiver speaks floating panes (`hello.ws` >= 2) and this Mac offers them: a tile
+    /// with `layer: "float"` may overlap. Fixed for the session.
+    let allowFloats: Bool
+
+    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false) {
         self.hostID = hostID
         self.browser = browser
         self.canvas = canvas
         self.streamFPS = max(fps, 1)
+        self.allowFloats = allowFloats
         targeting.canvas = canvas
+    }
+
+    /// The capture rate for `a`: the shared budget, lower for a pane floats hide, at least the
+    /// float floor for a visible float.
+    private func budgetFPS(_ a: WorkspaceTileAssignment, active: String?, coverage: [String: Double], available: Bool) -> Int {
+        WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count, streamFPS: streamFPS,
+                                   available: available, covered: coverage[a.tileID] ?? 0, isFloat: a.isFloat)
     }
 
     // MARK: Lifecycle
@@ -562,9 +636,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 applyWorkspace(obj)
             case WireMessage.workspaceFocus:
                 let id = obj["tile"] as? String
-                inputLock.withLock { targeting.setActive(id); keyboardCheckedAt = 0 }
+                // `raise: false`: chosen by arranging the receiver's own view. The window stays
+                // where it is on the Mac until a key or a press for it needs it in front.
+                let raiseNow = obj["raise"] as? Bool ?? true
+                inputLock.withLock {
+                    targeting.setActive(id); keyboardCheckedAt = 0
+                    deferredRaise.focused(id, raiseNow: raiseNow)
+                }
                 retuneCaptures()
-                if inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
+                if raiseNow, inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
                     activateBounded(a)
                 }
                 sendState(force: true)
@@ -601,8 +681,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Catalog
 
-    /// Assignment generations whose minimized/hidden window was already restored once.
-    private var restoreAttempted = Set<UInt64>()
+    /// When the Mac may bring back a tile's minimized or hidden window (see the ledger).
+    private var restoreLedger = WorkspaceRestoreLedger()
 
     /// Listings come from the shared browser (one identity ledger for every mode).
     private func refresh(sendCatalog: Bool) {
@@ -643,11 +723,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // that isn't on screen is refused at press/hover time (isTopmost checks
             // the window's own current on-screen bounds).
             frames[a.windowID] = sourceFrame(a) ?? entry.frame
+            let restore = restoreLedger.observe(tile: a.tileID, window: a.windowID, generation: entry.generation,
+                                                offscreen: entry.availability == .offscreen, delivering: delivering)
             if entry.availability == .offscreen {
                 setState(a.tileID, delivering ? "live" : "offscreen")
-                // Chosen on the receiver: bring it back on the Mac without activating its app
-                // (ScreenCaptureKit can't capture a minimized window). Once per assignment.
-                if !delivering, restoreAttempted.insert(a.assignmentGeneration).inserted {
+                // Chosen on the receiver while minimized or hidden: bring it back on the Mac without
+                // activating its app (ScreenCaptureKit can't capture a minimized window). Only then:
+                // Minimize on Mac sticks, and an un-tucked float never restores a window.
+                if restore {
                     let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                     DispatchQueue.main.async { Self.restoreQuietly(pid: pid, frame: frame, title: title) }
                     refreshSoon()
@@ -656,6 +739,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
         }
+        restoreLedger.prune { catalog[$0.window]?.generation == $0.generation }
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
@@ -695,7 +779,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let previous = Dictionary(assignments.map { ($0.tileID, $0) }, uniquingKeysWith: { a, _ in a })
         let displayFrames = browser.displayFrames()
         let result = WorkspaceRequestValidator.validate(tiles: raw, catalog: catalog, hostID: hostID, canvasPixels: canvas,
-                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames)
+                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames,
+                                                        allowFloats: allowFloats)
         assignments = result.assignments
         rejected = result.rejected
         let sources = WindowAudioSources.of(assignments)
@@ -734,6 +819,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         let now = ProcessInfo.processInfo.systemUptime
         for a in assignments where captures[a.tileID] == nil && tileState[a.tileID] != "closed" {
             if let r = recovery[a.tileID], r.generation != a.assignmentGeneration { recovery[a.tileID] = nil }
@@ -799,8 +885,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             captures[a.tileID] = capture
             setState(a.tileID, "waiting")
             let size = captureSize(for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
             Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) srcPt=\(sourceFrame(a).map { "\(Int($0.width))x\(Int($0.height))" } ?? "?") canvas=\(Int(canvas.width))x\(Int(canvas.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
             Task { [weak self] in
                 do {
@@ -850,6 +935,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments where a.displayID == nil && sheetCaptures[a.tileID] == nil && captures[a.tileID] != nil {
             guard let sheet = snapshot?.sheets[a.windowID]?.first, let window = sheet.scWindow,
                   !sheetFailed.contains(sheet.windowID), Self.reserveBudget() else { continue }
@@ -865,8 +951,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
             sheetCaptures[a.tileID] = capture
             let size = sheetCaptureSize(sheet.frame.size, for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
             let sheetID = sheet.windowID
             Task { [weak self] in
                 do {
@@ -902,10 +987,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     private func retuneCaptures() {
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments {
             guard let capture = captures[a.tileID] else { continue }
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: tileState[a.tileID] != "offscreen")
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
             Task { [weak self] in
                 if await capture.update(size: size, fps: max(fps, 1)) { self?.queue.async { self?.reconfigurations += 1 } }
@@ -1082,7 +1167,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }
 
     private func sendState(force: Bool = false) {
-        let (t, decision) = inputLock.withLock { (targeting, keyboardDecision) }
+        let (t, decision) = inputLock.withLock {
+            (targeting, deferredRaise.reported(keyboardDecision, active: targeting.keyboardTarget?.tileID))
+        }
         let tiles: [[String: Any]] = assignments.map { a in
             let entry = catalog[a.windowID]
             var tile: [String: Any] = [
@@ -1093,6 +1180,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             ]
             if let r = recovery[a.tileID], r.attempts > 0 { tile["attempt"] = r.attempts }
             if entry?.inStageStrip == true { tile["strip"] = true }
+            // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
+            if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"
@@ -1330,6 +1419,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         if target.activates {
             Self.raise(pid: target.pid, frame: targeting.windowFrames[target.windowID] ?? .zero)
+            deferredRaise.clear()
             keyboardCheckedAt = 0
             queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
             // Bounded wait for the window to come to the front, so the press
@@ -1372,17 +1462,32 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let active = inputLock.withLock { targeting.keyboardTarget }
         if now - keyboardCheckedAt > 0.2 {
             keyboardCheckedAt = now
-            let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            var focusedID: UInt32?
-            var isChild = false
-            if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
-                isChild = info.isChild
-                focusedID = WorkspaceKeyboardGate.focusedTileWindow(
-                    active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
-                    frames: inputLock.withLock { targeting.windowFrames }, matches: Self.framesMatch)
+            func evaluate() -> WorkspaceKeyboardGate.Decision {
+                let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                var focusedID: UInt32?
+                var isChild = false
+                if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
+                    isChild = info.isChild
+                    focusedID = WorkspaceKeyboardGate.focusedTileWindow(
+                        active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
+                        frames: targeting.windowFrames, matches: Self.framesMatch)
+                }
+                return WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
+                                                    focusedWindowIsChild: isChild)
             }
-            let decision = WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
-                                                        focusedWindowIsChild: isChild)
+            var decision = evaluate()
+            if let active, deferredRaise.takeForKey(active: active.tileID, decision: decision) {
+                // Chosen by arranging the receiver's view: this authorized key brings the window
+                // forward, and waits (bounded) until it really is, so it is typed once, into it.
+                Self.raise(pid: active.pid, frame: targeting.windowFrames[active.windowID] ?? .zero)
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+                while decision != .deliver, ProcessInfo.processInfo.systemUptime < deadline {
+                    usleep(10_000)
+                    decision = evaluate()
+                }
+                keyboardCheckedAt = ProcessInfo.processInfo.systemUptime
+                queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
+            }
             if decision != keyboardDecision {
                 keyboardDecision = decision
                 queue.async { [weak self] in self?.sendState(force: true) }

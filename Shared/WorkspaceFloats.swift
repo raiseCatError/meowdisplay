@@ -1,0 +1,635 @@
+import Foundation
+
+// Floating panes: Window mode panes that float above the tiled panes (or above a Full Desktop
+// pane), may overlap, can be tucked to the left or right edge and turned back into panes.
+//
+// Everything here is receiver-local presentation. A float is an ordinary workspace tile with a
+// frame and a place in a back-to-front order: the Mac composites it into the same single
+// canvas and the same single stream, after the tiled panes, so moving, resizing, raising,
+// tucking, flinging or docking one changes only the canvas. The real Mac window is never moved,
+// resized, minimized, closed or activated by any of it, and none of it produces pointer input.
+//
+// Pure and deterministic (Foundation only), like WindowWorkspace.swift: every rule is unit
+// tested in MacTests and can be ported to Android against the same expectations.
+
+// MARK: - Model
+
+/// Where a tucked float waits: on the left or right edge, its tab centred at `offset` (0 = top
+/// of the picture, 1 = bottom). Its frame is kept, so it comes back exactly where it was.
+struct WorkspaceFloatTuck: Equatable, Sendable {
+    /// `.left` or `.right` only (the top and bottom edges belong to the system's own gestures).
+    var edge: WorkspaceEdge
+    var offset: Double
+}
+
+/// One floating pane: a tile of the layout drawn at `frame` (normalized to the canvas) above
+/// the tree, or tucked to an edge.
+struct WorkspaceFloat: Equatable, Sendable {
+    var tile: String
+    /// The window's content on the canvas (what the Mac draws). The receiver's title bar sits
+    /// just above it, so the Mac window's own title bar and tabs stay reachable.
+    var frame: WorkspaceRect
+    /// Tucked: not shown, not sent (its capture stops), restored to `frame`.
+    var tuck: WorkspaceFloatTuck?
+
+    /// Kept on the canvas without knowing its size (decode, normalize): finite, inside, not empty.
+    var sanitized: WorkspaceFloat {
+        var copy = self
+        func finite(_ v: Double, _ fallback: Double) -> Double { v.isFinite ? v : fallback }
+        let w = min(max(finite(frame.width, 0.4), 0.02), 1)
+        let h = min(max(finite(frame.height, 0.4), 0.02), 1)
+        let x = min(max(finite(frame.x, 0), 0), 1 - w)
+        let y = min(max(finite(frame.y, 0), 0), 1 - h)
+        copy.frame = WorkspaceRect(x: x, y: y, width: w, height: h)
+        if var t = tuck {
+            if t.edge.axis != .horizontal { t.edge = .right }
+            t.offset = min(max(finite(t.offset, 0.5), 0), 1)
+            copy.tuck = t
+        }
+        return copy
+    }
+}
+
+extension WorkspaceLayout {
+    /// Floating panes, back to front.
+    var floatIDs: [String] { floats.map(\.tile) }
+    /// Every pane: the tree's in reading order, then the floats back to front.
+    var allTileIDs: [String] { orderedTileIDs + floatIDs }
+    /// Panes in the tree. Capacity, presets and "the last pane" count these; floats don't take
+    /// the tree's room.
+    var paneCount: Int { orderedTileIDs.count }
+    /// Floats shown now, back to front (tucked ones aren't).
+    var visibleFloatIDs: [String] { floats.filter { $0.tuck == nil }.map(\.tile) }
+
+    func isFloat(_ id: String) -> Bool { floats.contains { $0.tile == id } }
+    func float(_ id: String) -> WorkspaceFloat? { floats.first { $0.tile == id } }
+
+    // MARK: Opening and converting
+
+    /// A new floating pane in front of the others (Stage Peek's Open as Floating Window).
+    func addingFloat(_ tile: WorkspaceTile, frame: WorkspaceRect) -> WorkspaceLayout {
+        guard tiles[tile.id] == nil, tiles.count < Self.maximumTiles else { return self }
+        var copy = self
+        copy.tiles[tile.id] = tile
+        copy.floats.append(WorkspaceFloat(tile: tile.id, frame: frame))
+        copy.normalize()
+        return copy
+    }
+
+    /// A pane of the tree floats (Float This Pane, or its title dragged out). It keeps its tile
+    /// id, so the Mac keeps the same capture: only its rectangle changes. Its slot closes up and
+    /// the neighbours take the room, as when a pane is removed.
+    func floatingPane(_ id: String, frame: WorkspaceRect) -> WorkspaceLayout {
+        guard tiles[id] != nil, orderedTileIDs.contains(id) else { return self }
+        var copy = self
+        copy.root = Self.removeSlot(root, tileID: id)
+        copy.floats.append(WorkspaceFloat(tile: id, frame: frame))
+        if copy.maximized == id { copy.maximized = nil }
+        copy.normalize()
+        return copy
+    }
+
+    /// One tab of a pane floats. The shown tab keeps the pane's id (its capture goes on) and
+    /// the other tabs stay in the slot under `newID`; a background tab (not streaming) becomes
+    /// a new floating pane `newID`. Nothing is closed or dropped.
+    func floatingTab(of id: String, at index: Int, frame: WorkspaceRect, newID: String) -> WorkspaceLayout {
+        guard let tile = tiles[id], orderedTileIDs.contains(id), tile.tabs.indices.contains(index),
+              tiles[newID] == nil, tiles.count < Self.maximumTiles else { return self }
+        let s = tile.tabs[index]
+        var copy = self
+        if s == tile.source {
+            var rest = tile
+            rest.id = newID
+            rest.tabs.remove(at: index)
+            rest.tabViews[s.tabKey] = nil
+            rest.show(rest.tabs[min(index, rest.tabs.count - 1)], keepingCurrent: false)
+            if rest.tabs.count <= 1 { rest.tabs = []; rest.tabViews = [:] }
+            copy.tiles[newID] = rest
+            copy.tiles[id] = WorkspaceTile(id: id, source: s, rotation: tile.rotation, fit: tile.fit, zoom: tile.zoom)
+            copy.root = Self.mapSlots(root) { $0 == id ? newID : $0 }
+            copy.floats.append(WorkspaceFloat(tile: id, frame: frame))
+            if copy.maximized == id { copy.maximized = newID }
+            copy.normalize()
+            return copy
+        }
+        let view = tile.tabViews[s.tabKey] ?? WorkspaceTabView()
+        copy = copy.removingTab(of: id, at: index)
+        return copy.addingFloat(WorkspaceTile(id: newID, source: s, rotation: view.rotation, fit: view.fit, zoom: view.zoom), frame: frame)
+    }
+
+    /// A float goes back into the tree where it was dropped: beside a pane (`split`), into an
+    /// empty slot, or into a pane as a tab (`tab`; `replace` is a tab too: docking never
+    /// replaces or drops another window). It keeps its tile id where it can, so its capture goes on.
+    func docking(_ id: String, to drop: WorkspaceWindowDrop) -> WorkspaceLayout {
+        guard isFloat(id) else { return self }
+        switch drop {
+        case .split(let index, let edge, _):
+            guard let occupant = Self.slotID(root, at: index) else { return self }
+            var copy = self
+            copy.floats.removeAll { $0.tile == id }
+            if copy.maximized == id { copy.maximized = nil }
+            copy.root = occupant == nil ? Self.setSlot(root, at: index, to: id) : Self.split(root, at: index, edge: edge, inserting: id)
+            copy.normalize()
+            return copy
+        case .emptySlot(let index, _):
+            guard Self.slotID(root, at: index) == .some(nil) else { return self }
+            var copy = self
+            copy.floats.removeAll { $0.tile == id }
+            if copy.maximized == id { copy.maximized = nil }
+            copy.root = Self.setSlot(root, at: index, to: id)
+            copy.normalize()
+            return copy
+        case .tab(let target, _), .replace(let target, _):
+            return dockingAsTab(id, into: target)
+        }
+    }
+
+    /// The float joins pane `target` as its shown tab; the pane's windows stay as tabs, each
+    /// with its own view. The merged pane takes the float's tile id, so the docked window's
+    /// capture goes on; the pane's previous window simply stops streaming as a background tab.
+    func dockingAsTab(_ id: String, into target: String) -> WorkspaceLayout {
+        guard id != target, let floating = tiles[id], isFloat(id), let source = floating.source,
+              let pane = tiles[target], orderedTileIDs.contains(target) else { return self }
+        guard let current = pane.source else {
+            // An empty pane: the float simply takes its place.
+            var copy = self
+            copy.floats.removeAll { $0.tile == id }
+            copy.tiles[target] = nil
+            copy.root = Self.mapSlots(root) { $0 == target ? id : $0 }
+            if copy.maximized == target || copy.maximized == id { copy.maximized = nil }
+            copy.normalize()
+            return copy
+        }
+        var merged = pane
+        merged.id = id
+        let kept = WorkspaceTabView(rotation: pane.rotation, fit: pane.fit, zoom: pane.zoom)
+        merged.tabViews[current.tabKey] = kept.isDefault ? nil : kept
+        var list = pane.windows
+        list.removeAll { $0.host == source.host && $0.windowID == source.windowID }
+        list.append(source)
+        merged.tabs = list.count > 1 ? list : []
+        merged.source = source
+        merged.rotation = floating.rotation
+        merged.fit = floating.fit
+        merged.zoom = floating.zoom
+        let keys = Set(merged.tabs.map(\.tabKey))
+        merged.tabViews = merged.tabViews.filter { keys.contains($0.key) && $0.key != source.tabKey }
+        var copy = self
+        copy.floats.removeAll { $0.tile == id }
+        copy.tiles[target] = nil
+        copy.tiles[id] = merged
+        copy.root = Self.mapSlots(root) { $0 == target ? id : $0 }
+        if copy.maximized == target || copy.maximized == id { copy.maximized = nil }
+        copy.normalize()
+        return copy
+    }
+
+    /// Add to Layout: the float becomes a new pane (an empty slot, else beside the last pane).
+    func dockingAsPane(_ id: String, landscape: Bool) -> WorkspaceLayout {
+        guard let tile = tiles[id], isFloat(id) else { return self }
+        var copy = self
+        copy.floats.removeAll { $0.tile == id }
+        copy.tiles[id] = nil
+        if copy.maximized == id { copy.maximized = nil }
+        copy.normalize()
+        if copy.orderedTileIDs.isEmpty {
+            copy.tiles[id] = tile
+            copy.root = .slot(id)
+            copy.normalize()
+            return copy
+        }
+        return copy.adding(tile, landscape: landscape)
+    }
+
+    /// `tree`'s panes (a preset, a re-flow) with this layout's floats kept as they are.
+    func replacingTree(with tree: WorkspaceLayout) -> WorkspaceLayout {
+        guard !floats.isEmpty else { return tree }
+        var copy = tree
+        let inTree = Set(tree.orderedTileIDs)
+        let kept = floats.filter { !inTree.contains($0.tile) && tiles[$0.tile] != nil }
+        for f in kept { copy.tiles[f.tile] = tiles[f.tile] }
+        copy.floats = kept
+        copy.normalize()
+        return copy
+    }
+
+    // MARK: Arranging
+
+    func settingFloatFrame(_ id: String, _ frame: WorkspaceRect) -> WorkspaceLayout {
+        guard let i = floats.firstIndex(where: { $0.tile == id }), floats[i].frame != frame else { return self }
+        var copy = self
+        copy.floats[i].frame = frame
+        copy.normalize()
+        return copy
+    }
+
+    /// In front of the other floats (touching it, focusing it). Floats always stay above the tree.
+    func raisingFloat(_ id: String) -> WorkspaceLayout {
+        guard let i = floats.firstIndex(where: { $0.tile == id }), i != floats.count - 1 else { return self }
+        var copy = self
+        copy.floats.append(copy.floats.remove(at: i))
+        return copy
+    }
+
+    /// Hidden to an edge: it keeps its frame and its place in the workspace; nothing happens to
+    /// the Mac window. Its capture stops while it isn't sent.
+    func tuckingFloat(_ id: String, edge: WorkspaceEdge, offset: Double) -> WorkspaceLayout {
+        guard edge.axis == .horizontal, let i = floats.firstIndex(where: { $0.tile == id }) else { return self }
+        var copy = self
+        copy.floats[i].tuck = WorkspaceFloatTuck(edge: edge, offset: min(max(offset.isFinite ? offset : 0.5, 0), 1))
+        if copy.maximized == id { copy.maximized = nil }
+        return copy
+    }
+
+    /// Back from its edge, at the frame it had, in front.
+    func untuckingFloat(_ id: String) -> WorkspaceLayout {
+        guard let i = floats.firstIndex(where: { $0.tile == id }), floats[i].tuck != nil else { return raisingFloat(id) }
+        var copy = self
+        copy.floats[i].tuck = nil
+        return copy.raisingFloat(id)
+    }
+}
+
+// MARK: - Geometry
+
+enum WorkspaceFloatGeometry {
+    /// The receiver's title bar above a float's content, in points.
+    static let barHeight = 30.0
+    /// New floats step down and right from the last one by this much (points).
+    static let cascade = 24.0
+    /// Margin kept from the picture's edges when gliding (points); closer than `snap` lands flush.
+    static let snap = 14.0
+
+    /// Smallest float content in points: large enough to touch and read (HIG 44 pt targets),
+    /// never larger than the picture allows.
+    static func minimum(for size: WorkspaceSize) -> WorkspaceSize {
+        let compact = WorkspaceSizeClass.of(size) == .compact
+        let w = compact ? 160.0 : 200.0, h = compact ? 120.0 : 150.0
+        return WorkspaceSize(width: min(w, size.width), height: min(h, max(size.height - barHeight, 1)))
+    }
+
+    /// Visible floats at a time: one on a compact screen (a phone, or an iPad in a narrow
+    /// window), as many as the workspace holds otherwise. More are kept tucked, never closed.
+    static func visibleLimit(for size: WorkspaceSize) -> Int {
+        WorkspaceSizeClass.of(size) == .compact ? 1 : WorkspaceLayout.maximumTiles
+    }
+
+    /// `rect` kept usable on this picture: at least the minimum size, at most the picture, the
+    /// whole content and the title bar on screen.
+    static func clamped(_ rect: WorkspaceRect, in size: WorkspaceSize) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0 else { return WorkspaceFloat(tile: "", frame: rect).sanitized.frame }
+        let bar = min(barHeight / size.height, 0.5)
+        let m = minimum(for: size)
+        let mw = min(m.width / size.width, 1), mh = min(m.height / size.height, 1 - bar)
+        func finite(_ v: Double, _ d: Double) -> Double { v.isFinite ? v : d }
+        let w = min(max(finite(rect.width, 0.4), mw), 1)
+        let h = min(max(finite(rect.height, 0.4), mh), 1 - bar)
+        let x = min(max(finite(rect.x, 0), 0), 1 - w)
+        let y = min(max(finite(rect.y, bar), bar), 1 - h)
+        return WorkspaceRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// Where a new float opens. `aspect`: the window's width / height when known. `index`: how
+    /// many floats are already shown (each new one cascades). `center`: where it was dropped.
+    static func defaultFrame(aspect: Double?, in size: WorkspaceSize, index: Int = 0, center: WorkspacePoint? = nil) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0 else { return WorkspaceRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4) }
+        let a = (aspect ?? 1.5).isFinite && (aspect ?? 0) > 0 ? aspect! : 1.5
+        let compact = WorkspaceSizeClass.of(size) == .compact
+        let portrait = size.height > size.width
+        var w: Double, h: Double
+        if compact && portrait {
+            w = size.width * 0.88; h = min(w / a, size.height * 0.45)
+        } else if compact {
+            w = size.width * 0.46; h = min(w / a, size.height * 0.72)
+        } else {
+            w = size.width * 0.42; h = min(w / a, size.height * 0.62)
+        }
+        if h < w / a { w = h * a }   // keep the window's shape when the height ran out
+        let step = Double(index) * cascade
+        var x: Double, y: Double
+        if let c = center {
+            x = c.x * size.width - w / 2; y = c.y * size.height - h / 2
+        } else if compact && portrait {
+            x = (size.width - w) / 2; y = size.height - h - 24 - step
+        } else if compact {
+            x = size.width - w - 24 - step; y = size.height - h - 24 - step
+        } else {
+            x = size.width * 0.5 - w / 2 + step; y = size.height * 0.18 + step
+        }
+        return clamped(WorkspaceRect(x: x / size.width, y: y / size.height, width: w / size.width, height: h / size.height), in: size)
+    }
+
+    /// The floats as shown in this space: each kept usable (clamped), and on a compact screen
+    /// only one shown (the active one if it floats, else the frontmost): the rest wait tucked.
+    /// `shown` false (the Mac can't draw floats): all of them wait tucked.
+    static func fitted(_ floats: [WorkspaceFloat], in size: WorkspaceSize, active: String?, shown: Bool = true) -> [WorkspaceFloat] {
+        var out = floats.map { f -> WorkspaceFloat in
+            var c = f
+            c.frame = clamped(f.frame, in: size)
+            return c
+        }
+        func tuck(_ i: Int) {
+            guard out[i].tuck == nil else { return }
+            let count = out.filter { $0.tuck?.edge == .right }.count
+            out[i].tuck = WorkspaceFloatTuck(edge: .right, offset: min(0.3 + Double(count) * 0.12, 0.85))
+        }
+        guard shown else {
+            for i in out.indices { tuck(i) }
+            return out
+        }
+        let limit = visibleLimit(for: size)
+        let visible = out.indices.filter { out[$0].tuck == nil }
+        guard visible.count > limit else { return out }
+        var keep = Array(visible.suffix(limit))
+        if let active, let a = visible.first(where: { out[$0].tile == active }), !keep.contains(a) {
+            keep[keep.count - 1] = a
+        }
+        for i in visible where !keep.contains(i) { tuck(i) }
+        return out
+    }
+
+    /// Which lower corner a resize grip is on.
+    enum Corner: Sendable { case bottomLeading, bottomTrailing }
+
+    /// A float resized from a lower corner by `translation` (points) since the drag began at
+    /// `start`: the opposite top corner stays put. With `aspect` (the window's width / height as
+    /// drawn) the float keeps that shape, so the window fills it without bars or distortion;
+    /// the larger of the two finger movements decides. Kept between the minimum and the picture.
+    static func resized(_ start: WorkspaceRect, corner: Corner, translation: (x: Double, y: Double), aspect: Double?,
+                        in size: WorkspaceSize) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0, translation.x.isFinite, translation.y.isFinite else { return start }
+        let m = minimum(for: size)
+        let sign = corner == .bottomTrailing ? 1.0 : -1.0
+        var w = start.width * size.width + sign * translation.x
+        var h = start.height * size.height + translation.y
+        // Room from the fixed corner to the picture's edges.
+        let maxW = corner == .bottomTrailing ? (1 - start.x) * size.width : start.maxX * size.width
+        let maxH = (1 - start.y) * size.height
+        let minW = min(m.width, maxW), minH = min(m.height, maxH)
+        if let a = aspect, a.isFinite, a > 0 {
+            // Follow whichever movement asks for the larger float, at the window's shape.
+            let byW = max(w, minW), byH = max(h, minH)
+            w = max(byW, byH * a); h = w / a
+            if w > maxW { w = maxW; h = w / a }
+            if h > maxH { h = maxH; w = h * a }
+            if w < minW || h < minH { w = max(min(max(w, minW), maxW), 1); h = max(min(max(h, minH), maxH), 1) }
+        } else {
+            w = min(max(w, minW), maxW); h = min(max(h, minH), maxH)
+        }
+        let x = corner == .bottomTrailing ? start.x : start.maxX - w / size.width
+        return WorkspaceRect(x: x, y: start.y, width: w / size.width, height: h / size.height)
+    }
+
+    /// A float scaled about its centre (accessibility Make Larger / Smaller, size presets),
+    /// keeping its shape, kept usable.
+    static func scaled(_ r: WorkspaceRect, by factor: Double, in size: WorkspaceSize) -> WorkspaceRect {
+        guard factor.isFinite, factor > 0 else { return r }
+        let w = r.width * factor, h = r.height * factor
+        return clamped(WorkspaceRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h), in: size)
+    }
+
+    // MARK: Tucked tabs
+
+    /// One handle on an edge: a single tucked float, or several collapsed into a stack.
+    struct TuckTab: Equatable, Sendable {
+        /// Back to front as tucked; more than one = a stack (opens a list).
+        var ids: [String]
+        /// In points, in the picture's coordinates.
+        var rect: WorkspaceRect
+        var isStack: Bool { ids.count > 1 }
+    }
+
+    /// Tab size (points): narrow, tall enough for a thumb, 44 pt along the edge at least.
+    static let tabSize = WorkspaceSize(width: 30, height: 60)
+    static let tabSpacing = 8.0
+    /// The top and bottom of an edge are left to the system (Control Center, the Home indicator,
+    /// notification and app switching gestures): tabs stay within the middle of it.
+    static let tabBand = 0.12
+
+    /// The handles on one edge of `area` (points). `tucked`: (id, offset) in tuck order. One tab
+    /// each, near its offset without overlapping, while they fit; otherwise one stack.
+    static func tuckTabs(_ tucked: [(id: String, offset: Double)], edge: WorkspaceEdge, area: WorkspaceRect) -> [TuckTab] {
+        guard !tucked.isEmpty, area.width > 0, area.height > 0 else { return [] }
+        let top = area.y + area.height * tabBand, bottom = area.maxY - area.height * tabBand
+        let band = max(bottom - top, tabSize.height)
+        let x = edge == .left ? area.x : area.maxX - tabSize.width
+        let h = tabSize.height, gap = tabSpacing
+        let needed = Double(tucked.count) * h + Double(tucked.count - 1) * gap
+        func rect(_ y: Double) -> WorkspaceRect { WorkspaceRect(x: x, y: y, width: tabSize.width, height: h) }
+        if needed > band || tucked.count > 4 {
+            let mid = tucked.map(\.offset).sorted()[tucked.count / 2]
+            let y = min(max(area.y + mid * area.height - h / 2, top), top + band - h)
+            return [TuckTab(ids: tucked.map(\.id), rect: rect(y))]
+        }
+        // Wanted places, top to bottom; then pushed apart (down, then back up from the bottom).
+        let order = tucked.enumerated().sorted { ($0.element.offset, $0.offset) < ($1.element.offset, $1.offset) }
+        var ys = order.map { min(max(area.y + $0.element.offset * area.height - h / 2, top), top + band - h) }
+        for i in ys.indices.dropFirst() where ys[i] < ys[i - 1] + h + gap { ys[i] = ys[i - 1] + h + gap }
+        if let last = ys.last, last > top + band - h {
+            ys[ys.count - 1] = top + band - h
+            for i in ys.indices.dropLast().reversed() where ys[i] > ys[i + 1] - h - gap { ys[i] = ys[i + 1] - h - gap }
+        }
+        return zip(order, ys).map { TuckTab(ids: [$0.element.id], rect: rect($1)) }
+    }
+}
+
+// MARK: - Drag, fling and tuck
+
+/// What happens when a float's title bar is let go: it stays, glides on with its momentum, or
+/// is carried into the edge it was flung at and tucked. Only the receiver's presentation moves:
+/// nothing here is ever sent to the Mac as input.
+enum WorkspaceFloatMotion {
+    /// Deceleration per millisecond for a released float: between UIKit's `.fast` (0.99) and
+    /// `.normal` (0.998), so a window carries on a little, like a thrown card, not a scroll view.
+    static let decelerationRate = 0.995
+    /// Below this release speed (points/s) a float stays where it was let go.
+    static let glideSpeed = 220.0
+    /// A fling toward an edge needs at least this speed (points/s)…
+    static let flingSpeed = 1100.0
+    /// …mostly sideways (the cosine of its angle to the edge's normal)…
+    static let flingCosine = 0.8
+    /// …must carry at least this share of the float past the edge…
+    static let pastEdge = 0.5
+    /// …and be let go on that edge's side of the picture (its centre past this share of the
+    /// width from the far side), so a fast move across the middle never hides a float.
+    static let releaseSide = 0.55
+
+    /// How far a release at `velocity` (points/s) carries before it stops (WWDC18, "Designing
+    /// Fluid Interfaces": the projection of a decelerating throw).
+    static func projection(_ velocity: Double) -> Double {
+        guard velocity.isFinite else { return 0 }
+        return velocity / 1000 * decelerationRate / (1 - decelerationRate)
+    }
+
+    enum Outcome: Equatable, Sendable {
+        /// Ends at `frame` (normalized, inside the picture). `glide`: it travels there (with its
+        /// momentum, or pulled back inside); otherwise it stays exactly where it was let go.
+        case settle(frame: WorkspaceRect, glide: Bool)
+        /// Carried into `edge` and tucked; its tab waits at `offset`.
+        case tuck(edge: WorkspaceEdge, offset: Double)
+    }
+
+    /// `frame`: where the float is when let go (normalized; while dragging it may hang past an
+    /// edge). `velocity`: its release velocity in points per second. `canTuck`: false while the
+    /// float can't be tucked (it isn't a float of a live workspace).
+    static func decide(release frame: WorkspaceRect, velocity: (x: Double, y: Double), in size: WorkspaceSize,
+                       canTuck: Bool = true) -> Outcome {
+        guard size.width > 0, size.height > 0, frame.width > 0, frame.height > 0,
+              [frame.x, frame.y, frame.width, frame.height].allSatisfy(\.isFinite) else {
+            return .settle(frame: WorkspaceFloatGeometry.clamped(frame, in: size), glide: false)
+        }
+        let vx = velocity.x.isFinite ? velocity.x : 0, vy = velocity.y.isFinite ? velocity.y : 0
+        let offset = min(max(frame.midY, 0), 1)
+        func past(_ r: WorkspaceRect, _ edge: WorkspaceEdge) -> Double {
+            (edge == .left ? max(0, -r.x) : max(0, r.maxX - 1)) / r.width
+        }
+        if canTuck {
+            // Pulled more than halfway past an edge on purpose and let go there (slowly or not,
+            // as long as it isn't being thrown back in).
+            for edge in [WorkspaceEdge.left, .right] where past(frame, edge) >= pastEdge {
+                let inward = edge == .left ? vx : -vx
+                if inward < flingSpeed { return .tuck(edge: edge, offset: offset) }
+            }
+            // Flung at an edge: fast, mostly sideways, let go on that side, carried past it.
+            let speed = (vx * vx + vy * vy).squareRoot()
+            if speed >= flingSpeed, abs(vx) / speed >= flingCosine {
+                let edge: WorkspaceEdge = vx < 0 ? .left : .right
+                let onSide = edge == .left ? frame.midX <= 1 - releaseSide : frame.midX >= releaseSide
+                var projected = frame
+                projected.x += projection(vx) / size.width
+                projected.y += projection(vy) / size.height
+                if onSide, past(projected, edge) >= pastEdge {
+                    return .tuck(edge: edge, offset: min(max(projected.midY, 0), 1))
+                }
+            }
+        }
+        let held = WorkspaceFloatGeometry.clamped(frame, in: size)
+        let speed = (vx * vx + vy * vy).squareRoot()
+        guard speed >= glideSpeed else { return .settle(frame: snapped(held, in: size), glide: snapped(held, in: size) != frame) }
+        var target = frame
+        target.x += projection(vx) / size.width
+        target.y += projection(vy) / size.height
+        let landed = snapped(WorkspaceFloatGeometry.clamped(target, in: size), in: size)
+        return .settle(frame: landed, glide: landed != frame)
+    }
+
+    /// Close to an edge of the picture (within `WorkspaceFloatGeometry.snap` points): flush with it.
+    static func snapped(_ r: WorkspaceRect, in size: WorkspaceSize) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0 else { return r }
+        var c = r
+        let sx = WorkspaceFloatGeometry.snap / size.width, sy = WorkspaceFloatGeometry.snap / size.height
+        let bar = min(WorkspaceFloatGeometry.barHeight / size.height, 0.5)
+        if c.x > 0, c.x < sx { c.x = 0 }
+        if c.maxX < 1, 1 - c.maxX < sx { c.x = 1 - c.width }
+        if c.y > bar, c.y - bar < sy { c.y = bar }
+        if c.maxY < 1, 1 - c.maxY < sy { c.y = 1 - c.height }
+        return c
+    }
+
+    /// Where a tucked float slides to while it hides: just past its edge, at its height.
+    static func hiddenFrame(_ frame: WorkspaceRect, edge: WorkspaceEdge) -> WorkspaceRect {
+        var r = frame
+        r.x = edge == .left ? -r.width - 0.02 : 1.02
+        return r
+    }
+
+    /// A critically damped spring from `from` toward `to`, starting at `velocity` (units/s):
+    /// its value and velocity after `t` seconds. Continuous with the finger's release velocity,
+    /// so the motion carries on from the gesture instead of starting a canned slide; it can be
+    /// caught at any moment (the value at "now" is where a new drag starts).
+    static func spring(from: Double, to: Double, velocity: Double, t: Double, response: Double = 0.42) -> (value: Double, velocity: Double) {
+        guard t > 0, response > 0, from.isFinite, to.isFinite, velocity.isFinite else { return (from, velocity) }
+        let w = 2 * Double.pi / response
+        let x0 = from - to
+        let c = velocity + w * x0
+        let e = exp(-w * t)
+        return (to + (x0 + c * t) * e, (velocity - w * c * t) * e)
+    }
+}
+
+// MARK: - Occlusion (Mac capture budget)
+
+enum WorkspaceOcclusion {
+    /// The share of `rect` that `covers` hide, sampled on a 16 x 16 grid: exact enough to lower
+    /// the frame rate of a pane that floats hide almost entirely.
+    static func coveredFraction(of rect: WorkspaceRect, by covers: [WorkspaceRect]) -> Double {
+        guard rect.width > 0, rect.height > 0, !covers.isEmpty else { return 0 }
+        let n = 16
+        var hidden = 0
+        for i in 0..<n {
+            for j in 0..<n {
+                let p = WorkspacePoint(x: rect.x + (Double(i) + 0.5) / Double(n) * rect.width,
+                                       y: rect.y + (Double(j) + 0.5) / Double(n) * rect.height)
+                if covers.contains(where: { $0.contains(p) }) { hidden += 1 }
+            }
+        }
+        return Double(hidden) / Double(n * n)
+    }
+}
+
+// MARK: - Shake to switch placement
+
+/// An intentional back-and-forth shake while holding a dragged window (Dropover-style): it
+/// switches between Pane and Floating placement. Ordinary drag corrections don't count: each
+/// swing must be at least `amplitude` long, `reversals` of them inside `window` seconds, and
+/// after a switch nothing more counts for `cooldown` seconds. Pure: fed the finger's points.
+struct WorkspaceShakeDetector: Equatable, Sendable {
+    /// Points one swing must cover (hysteresis: a wobble smaller than this is ignored).
+    var amplitude = 26.0
+    /// Direction changes that make a shake (left-right-left-right is three).
+    var reversals = 3
+    /// Seconds all of them must fall within.
+    var window = 0.9
+    /// Seconds after a shake before another can count.
+    var cooldown = 0.7
+
+    private struct Axis: Equatable, Sendable {
+        var anchor: Double?
+        var peak = 0.0
+        var direction = 0.0
+    }
+    private var x = Axis()
+    private var y = Axis()
+    private var turns: [Double] = []
+    private var quietUntil = -Double.infinity
+
+    init(amplitude: Double = 26, reversals: Int = 3, window: Double = 0.9, cooldown: Double = 0.7) {
+        self.amplitude = amplitude
+        self.reversals = reversals
+        self.window = window
+        self.cooldown = cooldown
+    }
+
+    /// Starts over (a new drag).
+    mutating func reset() {
+        x = Axis(); y = Axis(); turns = []; quietUntil = -Double.infinity
+    }
+
+    /// One finger position (points) at time `t` (seconds). True once per shake.
+    mutating func add(x px: Double, y py: Double, at t: Double) -> Bool {
+        guard px.isFinite, py.isFinite, t.isFinite else { return false }
+        let turnedX = step(&x, px), turnedY = step(&y, py)
+        if turnedX || turnedY { turns.append(t) }
+        turns.removeAll { t - $0 > window }
+        guard t >= quietUntil, turns.count >= reversals else { return false }
+        turns = []
+        quietUntil = t + cooldown
+        return true
+    }
+
+    /// Follows one axis; true when it turned back after a full swing.
+    private func step(_ a: inout Axis, _ v: Double) -> Bool {
+        guard let anchor = a.anchor else { a.anchor = v; a.peak = v; return false }
+        if a.direction == 0 {
+            if abs(v - anchor) >= amplitude { a.direction = v > anchor ? 1 : -1; a.peak = v }
+            return false
+        }
+        if (v - a.peak) * a.direction > 0 { a.peak = v; return false }
+        guard abs(a.peak - v) >= amplitude else { return false }
+        // A full swing back: the old peak is where this swing started.
+        a.anchor = a.peak
+        a.direction = -a.direction
+        a.peak = v
+        return true
+    }
+}

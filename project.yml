@@ -277,6 +277,7 @@ targets:
       - Shared/LogRedaction.swift
       - Shared/Protocol.swift
       - Shared/WindowWorkspace.swift
+      - Shared/WorkspaceFloats.swift
       - Mac/WindowCatalog.swift
       - Mac/WindowWorkspaceTargeting.swift
       - Mac/WindowWorkspaceEngine.swift

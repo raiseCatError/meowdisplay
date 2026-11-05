@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import QuartzCore
 
 // Window workspaces on Apple receivers (iPhone, iPad, Mac Receiver): what the
 // Mac sends, what this device asks for, and the model the views draw. Same
@@ -100,6 +101,8 @@ struct RemoteTileItem: Equatable, Sendable {
     var attempt = 0
     /// The window sits in Stage Manager's side strip (macOS pauses its picture there).
     var inStageStrip = false
+    /// The Mac accepted it as a floating pane (`layer: "float"`).
+    var isFloat = false
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -198,7 +201,8 @@ enum WorkspaceEvent: Sendable {
                 return RemoteTileItem(id: id, windowID: u32(t, "window") ?? 0, generation: u64(t, "gen") ?? 0,
                                       status: (t["state"] as? String).flatMap(RemoteTileStatus.init(rawValue:)) ?? .waiting,
                                       app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
-                                      attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false)
+                                      attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false,
+                                      isFloat: t["layer"] as? String == "float")
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -318,13 +322,18 @@ enum WorkspaceRequests {
         ["type": WireMessage.windowAction, "action": "minimize", "window": Int(id), "gen": Int(generation)]
     }
 
-    /// Only this host's tiles, at their normalized frames.
+    /// Only this host's tiles, at their normalized frames. `floats`: the Mac draws floating panes
+    /// (`windowFloat`): the shown floats follow the tiled panes as `layer: "float"`, back to
+    /// front by `z`. Without it no float is sent (they wait tucked), and a layout without floats
+    /// is sent exactly as before.
     static func workspace(_ layout: WorkspaceLayout, frames: WorkspaceFrames, host: String, focus: String?,
                           generation: (WorkspaceSource) -> UInt64?,
                           displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
-                          viewEpoch: (String) -> Int? = { _ in nil }) -> [String: Any] {
+                          viewEpoch: (String) -> Int? = { _ in nil },
+                          floats: Bool = false) -> [String: Any] {
         var tiles: [[String: Any]] = []
-        for id in layout.orderedTileIDs {
+        let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
+        for id in layout.orderedTileIDs + floating {
             guard let tile = layout.tiles[id], let source = tile.source, source.host == host,
                   let r = frames.tiles[id], r.width > 0, r.height > 0 else { continue }
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
@@ -340,6 +349,7 @@ enum WorkspaceRequests {
             }
             if let z = tile.zoom { t["zoom"] = z.wire }
             if let e = viewEpoch(id) { t["view"] = e }
+            if let z = floating.firstIndex(of: id) { t["layer"] = "float"; t["z"] = z }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
@@ -372,9 +382,12 @@ enum WorkspaceRequests {
         ["type": WireMessage.windowAction, "action": "activate", "window": Int(id), "gen": Int(generation)]
     }
 
-    static func focus(_ tile: String?) -> [String: Any] {
+    /// `raise` false: the tile was chosen by arranging this device's view, so the Mac keeps its
+    /// window where it is until a key or a press for it needs it in front (older Macs ignore it).
+    static func focus(_ tile: String?, raise: Bool = true) -> [String: Any] {
         var m: [String: Any] = ["type": WireMessage.workspaceFocus]
         if let tile { m["tile"] = tile }
+        if !raise { m["raise"] = false }
         return m
     }
 
@@ -422,10 +435,23 @@ struct WorkspaceDrag: Equatable {
         /// An app from Stage Peek's carousel, search or Launchpad: its window when it has one;
         /// several → the person picks; none → offered to open it (never just because a drag began).
         case app(MacAppItem)
+        /// A floating pane, shaken (or switched) into Pane placement: it docks where it's dropped.
+        case float(String)
     }
     var item: Item
     /// Global (screen) coordinates.
     var location: CGPoint
+    /// Where a drop goes: into the panes (tab, split, swap) or floating at the finger. Switched
+    /// with a shake while holding, or the drag's Float/Dock control; Cancel keeps everything.
+    var placement: WorkspacePlacement = .pane
+}
+
+/// The two ways a dragged window lands in one workspace (never a global mode).
+enum WorkspacePlacement: String, CaseIterable, Sendable {
+    /// Into the panes: the pane, tab and split targets.
+    case pane
+    /// Floating, where it is dropped.
+    case float
 }
 
 @MainActor
@@ -465,6 +491,19 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var launchFailed: String?
     /// The Mac can close a listed window from Stage Peek (`windowClose`).
     @Published private(set) var canCloseWindows = false
+    /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
+    @Published private(set) var canFloat = false
+    /// This receiver has floating-pane chrome (iPhone and iPad). The Mac Receiver doesn't yet:
+    /// it says `ws` 1 and never floats a pane.
+    nonisolated static let floatsDrawnHere: Bool = {
+        #if os(iOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+    /// Per model, so tests on the Mac can exercise floats.
+    var floatsDrawnHere = WorkspaceModel.floatsDrawnHere
     /// The Mac offers Lock This Mac (any mode); the last request's outcome.
     @Published private(set) var canLockMac = false
     @Published private(set) var lockMacStatus: LockMacStatus?
@@ -505,6 +544,13 @@ final class WorkspaceModel: ObservableObject {
     var cancelZoneGlobal: CGRect = .zero
     /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
     var removeZoneGlobal: CGRect = .zero
+    /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
+    /// floats the window instead (the way that needs no shake).
+    var floatZoneGlobal: CGRect = .zero
+    /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
+    @Published var floatHandlesGlobal: [CGRect] = []
+    /// The first-use tip about shaking a drag (shown once, ever, on this device).
+    @Published private(set) var shakeTipVisible = false
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -512,6 +558,43 @@ final class WorkspaceModel: ObservableObject {
     var requestWindowMode: () -> Void = {}
     /// Whether this session may change the Mac (launch apps, close windows).
     var inputAllowed: () -> Bool = { false }
+    /// Whether this device shows the Mac in Mirror now (outside Window view), as the Mac confirmed.
+    var mirroring: () -> Bool = { false }
+    /// The Mac's manual Mirror display choice (nil: Automatic), so a float opened over the
+    /// mirrored desktop keeps that same desktop behind it.
+    var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
+    /// Whether this device extends the Mac now (outside Window view), as the Mac confirmed.
+    var extending: () -> Bool = { false }
+
+    /// A step that would start Window view from Extend, waiting for the person to confirm it.
+    struct LeaveExtendRequest: Identifiable {
+        let id = UUID()
+        let perform: () -> Void
+    }
+    /// Leaving Extend removes this device's extended display, and macOS moves the windows on it to
+    /// the Mac's other displays, so a tap, a pick or a drop never does it by itself: it waits here
+    /// until the person confirms (`confirmLeavingExtend`). Mirror and Window view never wait.
+    @Published private(set) var leaveExtendRequest: LeaveExtendRequest?
+    private var leavingExtendConfirmed = false
+
+    /// True when `step` has to wait for confirmation (it is kept until then); false: go ahead.
+    private func holdForLeavingExtend(_ step: @escaping () -> Void) -> Bool {
+        guard !windowMode, extending(), !leavingExtendConfirmed else { return false }
+        leaveExtendRequest = LeaveExtendRequest(perform: step)
+        return true
+    }
+
+    /// The person chose to leave Extend for Window view: the step they took runs now.
+    func confirmLeavingExtend() {
+        guard let request = leaveExtendRequest else { return }
+        leaveExtendRequest = nil
+        leavingExtendConfirmed = true
+        defer { leavingExtendConfirmed = false }
+        request.perform()
+    }
+
+    /// Stay in Extend: nothing changes.
+    func cancelLeavingExtend() { leaveExtendRequest = nil }
 
     private let defaults: UserDefaults
     private var saved = WorkspaceLayout()
@@ -559,6 +642,8 @@ final class WorkspaceModel: ObservableObject {
         host.flatMap { id in TrustStore.receiverRole.pinnedPeers().first { $0.peerID == id }?.displayName } ?? "your Mac"
     }
     var frames: WorkspaceFrames { WorkspaceGeometry.frames(for: layout, in: size, hinge: hinge) }
+    /// The workspace's size in points (what float sizes and flings are measured in).
+    var space: WorkspaceSize { size }
     func tileState(_ id: String) -> RemoteTileItem? { remote?.tiles.first { $0.id == id } }
 
     // MARK: Events
@@ -578,6 +663,8 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
+            publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
@@ -599,12 +686,14 @@ final class WorkspaceModel: ObservableObject {
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
         case .mode(let window):
             windowMode = window
+            leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
             if !window { remote = nil }
             if window { awaitingCatalogToSend = true; requestCatalog() }
         case .catalog(let c):
             onCatalog(c)
         case .state(let s):
             remote = s
+            if let r = requestedFocus, s.active == r || layout.tiles[r] == nil { requestedFocus = nil }
             // A live pane gets its whole-source still before the first pinch, so zooming out or
             // panning never shows an empty area while the fingers move (bounded: once a second).
             for item in s.tiles where item.status == .live && backdrop(item.id) == nil && zoomGesture == nil {
@@ -652,9 +741,11 @@ final class WorkspaceModel: ObservableObject {
             lockMacStatus = .done(result)
         case .disconnected:
             sendTask?.cancel()
+            leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
             canCloseWindows = false; closingWindows = []; closeNotice = nil
+            canFloat = false; floatGesture = nil
             canLockMac = false; lockMacStatus = nil
             files.setAvailable(false)
             menus.setAvailable(false)
@@ -662,6 +753,7 @@ final class WorkspaceModel: ObservableObject {
             // A new session's frames carry no echo of this one's views; stills are re-asked.
             composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
             zoomGesture = nil; zoomPreview = nil
+            requestedFocus = nil; floatGestureStart = nil; drag = nil
         }
     }
 
@@ -739,7 +831,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func publish() {
-        let adapted = WorkspaceAdaptation.adapt(saved, to: size, hinge: hinge, active: remote?.active)
+        let adapted = WorkspaceAdaptation.adapt(saved, to: size, hinge: hinge, active: remote?.active, floatsShown: canFloat || !windowMode)
         if let full = localFullscreen, adapted.visible.tiles[full] == nil { localFullscreen = nil }
         // Local fullscreen is presentation only: the saved tree is untouched.
         arranged = adapted.visible
@@ -801,13 +893,14 @@ final class WorkspaceModel: ObservableObject {
     func pinch(began: Bool, ended: Bool, isPinch: Bool, initial: WorkspacePoint, current: WorkspacePoint, scale: Double,
                turn: Double = 0, snapTurn: Bool = true) -> Bool {
         if began || zoomGesture == nil {
-            guard let (id, rect) = frames.tiles.first(where: { $0.value.contains(initial) }).map({ ($0.key, $0.value) }),
+            let f = frames
+            guard let id = f.hitTest(initial), let rect = f.tiles[id],
                   let tile = layout.tiles[id], tile.source != nil,
                   isPinch || tile.zoom != nil || effectiveFit(id) == .fill,
                   windowSize(tile) != nil else { zoomGesture = nil; zoomPreview = nil; return false }
             zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
             zoomPreview = nil
-            if active != id { focus(id) }
+            if active != id { focus(id, raise: false) }   // zooming is this device's view only
             requestBackdrop(id)
         }
         guard var g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
@@ -913,7 +1006,7 @@ final class WorkspaceModel: ObservableObject {
 
     /// Two-finger double-tap: the pane under the fingers back to its default view.
     func resetView(at p: WorkspacePoint) {
-        guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key, layout.tiles[id]?.source != nil else { return }
+        guard let id = frames.hitTest(p), layout.tiles[id]?.source != nil else { return }
         resetView(id)
     }
 
@@ -994,10 +1087,13 @@ final class WorkspaceModel: ObservableObject {
 
     /// The first touch in a tile selects it, so typing and zoom go there (also in View Only).
     /// True when the touch chose another pane (selection only; nothing goes to the Mac).
+    /// A float touched in its content comes to the front first (sent at once, so the Mac hits
+    /// the same window), and that same touch goes on to it, as a click on a pane does.
     @discardableResult
     func selectTile(at p: WorkspacePoint) -> Bool {
-        guard let id = frames.tiles.first(where: { $0.value.contains(p) })?.key,
-              layout.tiles[id]?.source != nil, active != id else { return false }
+        guard let id = frames.hitTest(p), layout.tiles[id]?.source != nil else { return false }
+        if layout.isFloat(id) { raiseFloat(id) }
+        guard active != id else { return false }
         focus(id)
         return true
     }
@@ -1018,6 +1114,7 @@ final class WorkspaceModel: ObservableObject {
     /// One window shows in one pane only: it leaves the pane (or tab) it was in.
     func drop(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) {
         guard let source = source(for: w) else { return }
+        if holdForLeavingExtend({ [weak self] in self?.drop(w, on: target) }) { return }
         if !windowMode { requestWindowMode() }
         var focusTile: String?
         edit { l in
@@ -1045,7 +1142,7 @@ final class WorkspaceModel: ObservableObject {
             return (l.addingTab(source, to: t), t)
         case .split(let index, let edge, _):
             let id = "w\(nextTile)"; nextTile += 1
-            if l.tiles.count < capacity { return (l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge), id) }
+            if l.paneCount < capacity { return (l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge), id) }
             let holder = WorkspaceLayout.slotID(l.root, at: index).flatMap { $0 }
             return (holder.map { l.addingTab(source, to: $0) } ?? l, holder)
         case .emptySlot(let index, _):
@@ -1096,10 +1193,27 @@ final class WorkspaceModel: ObservableObject {
         return catalog?.windows.first { $0.id == source.windowID }
     }
 
+    /// The desktop the picture shows outside Window view: in Mirror, the Mac's manual Mirror
+    /// choice when exactly one listed display matches it; otherwise the main display.
+    var desktopDisplay: CatalogDisplayItem? {
+        if mirroring(), let d = Self.mirroredDisplay(in: catalog?.displays ?? [], choice: mirrorChoice()) { return d }
+        return mainDisplay
+    }
+
+    /// The listed display a manual Mirror choice names (the two lists share names and point
+    /// sizes, not ids). Nil for Automatic, or when no single display matches.
+    nonisolated static func mirroredDisplay(in displays: [CatalogDisplayItem], choice: MirrorDisplayEntry?) -> CatalogDisplayItem? {
+        guard let choice else { return nil }
+        let matches = displays.filter { $0.name == choice.name && $0.width == choice.logicalWidth && $0.height == choice.logicalHeight }
+        if matches.count == 1 { return matches[0] }
+        let main = matches.filter { $0.isMain == choice.isMain }
+        return main.count == 1 ? main[0] : nil
+    }
+
     /// Mirror/Extend: the picture is one pane showing the desktop, so a window dragged onto it
     /// replaces it, joins it as a tab, or splits it (Window mode then starts with both).
     private func desktopLayout() -> WorkspaceLayout? {
-        guard let host, let d = mainDisplay else { return nil }
+        guard let host, let d = desktopDisplay else { return nil }
         let tile = WorkspaceTile(id: "w\(nextTile)", source: WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id)))
         return WorkspaceLayout(preset: .single, tiles: [tile])
     }
@@ -1123,7 +1237,7 @@ final class WorkspaceModel: ObservableObject {
                 }
                 return l.swapping(id, t)
             case .split(let index, let edge, let preview):
-                if tab != nil, let s = windows.first, l.tiles.count < capacity {
+                if tab != nil, let s = windows.first, l.paneCount < capacity {
                     l = Self.detach(s, from: id, in: l)
                     let newID = "w\(nextTile)"; nextTile += 1
                     return l.insertingSplit(WorkspaceTile(id: newID, source: s), at: index, edge: edge)
@@ -1144,10 +1258,21 @@ final class WorkspaceModel: ObservableObject {
         return tile.source?.windowID == s.windowID ? l.removing(id) : l
     }
 
-    /// Where a dragged window or label would land (normalized picture point).
+    /// Where a dragged window or label would land (normalized picture point). Over a floating
+    /// pane: that float (replace it, or swap with a dragged pane); a float being docked never
+    /// lands on a float. Splits count the tree's panes only.
     func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
-        WorkspaceGeometry.windowDrop(at: p, layout: layout, frames: frames, size: size, labelHeight: labelHeight,
-                                     canSplit: layout.tiles.count < capacity)
+        let f = frames
+        if let hit = f.hitTest(p), f.isFloat(hit) {
+            if case .float? = drag?.item { return nil }
+            if case .pane(let id, _)? = drag?.item, id == hit { return nil }
+            return f.tiles[hit].map { .replace(tile: hit, preview: $0) }
+        }
+        let drop = WorkspaceGeometry.windowDrop(at: p, layout: layout, frames: f, size: size, labelHeight: labelHeight,
+                                                canSplit: layout.paneCount < capacity)
+        // Docking never replaces a window: the middle of a pane adds it as a tab there.
+        if case .float? = drag?.item, case .replace(let t, let r)? = drop { return .tab(tile: t, preview: r) }
+        return drop
     }
 
     /// The arrangement without local fullscreen: what edits apply to.
@@ -1239,7 +1364,7 @@ final class WorkspaceModel: ObservableObject {
                     nextTile += 1
                 }
             }
-            return ordered.count > preset.slotCount ? l.applying(preset).layout : WorkspaceLayout(preset: preset, tiles: ordered)
+            return l.replacingTree(with: ordered.count > preset.slotCount ? l.applying(preset).layout : WorkspaceLayout(preset: preset, tiles: ordered))
         }
     }
     func move(_ tile: String, to target: WorkspaceDropTarget) { edit { $0.materializing(hinge: hinge).moving(tile, to: target) } }
@@ -1283,6 +1408,7 @@ final class WorkspaceModel: ObservableObject {
 
     func choose(_ w: CatalogWindowItem, asNewTile: Bool) {
         guard let host, let source = source(for: w) else { return }
+        if holdForLeavingExtend({ [weak self] in self?.choose(w, asNewTile: asNewTile) }) { return }
         if w.inStageStrip, bringStripWindowsForward, inputAllowed() {
             _ = send(WorkspaceRequests.activateWindow(w.id, generation: w.generation))   // the person chose it, and opted in
         }
@@ -1310,12 +1436,13 @@ final class WorkspaceModel: ObservableObject {
         edit { l in
             let target = replacing ?? (asNewTile ? nil : (active ?? (l.orderedTileIDs.count == 1 ? l.orderedTileIDs.first : nil)))
             if let target, l.tiles[target] != nil { return l.replacingSource(of: target, with: source) }
-            if l.tiles.count < capacity {
+            if l.paneCount < capacity, l.tiles.count < WorkspaceLayout.maximumTiles {
                 let tile = WorkspaceTile(id: "w\(nextTile)", source: source)
                 nextTile += 1
-                if l.tiles.isEmpty { return WorkspaceLayout(preset: .single, tiles: [tile]) }
+                if l.paneCount == 0 { return l.replacingTree(with: WorkspaceLayout(preset: .single, tiles: [tile])) }
                 let added = l.adding(tile, landscape: landscape)
-                return WorkspaceLayout(preset: .natural(for: added.tiles.count, landscape: landscape), tiles: added.orderedTileIDs.compactMap { added.tiles[$0] })
+                return added.replacingTree(with: WorkspaceLayout(preset: .natural(for: added.paneCount, landscape: landscape),
+                                                         tiles: added.orderedTileIDs.compactMap { added.tiles[$0] }))
             }
             return l.orderedTileIDs.last.map { l.replacingSource(of: $0, with: source) } ?? l
         }
@@ -1385,7 +1512,7 @@ final class WorkspaceModel: ObservableObject {
         guard layout.tiles[tile] != nil else { return }
         localFullscreen = tile
         publish(); scheduleSend(immediately: true)
-        focus(tile)
+        focus(tile, raise: false)   // fullscreen on this device only: nothing changes on the Mac
     }
 
     func exitLocalFullscreen() {
@@ -1402,14 +1529,47 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Dragging windows and labels onto panes
 
-    func beginDrag(_ item: WorkspaceDrag.Item, at global: CGPoint) { drag = WorkspaceDrag(item: item, location: global) }
-    func moveDrag(to global: CGPoint) { if drag != nil { drag?.location = global } }
+    func beginDrag(_ item: WorkspaceDrag.Item, at global: CGPoint, placement: WorkspacePlacement? = nil) {
+        var d = WorkspaceDrag(item: item, location: global)
+        d.placement = placement ?? initialPlacement(for: item)
+        if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
+        drag = d
+        shake.reset()
+        if canPlace(item, .float), !defaults.bool(forKey: Self.shakeTipKey) {
+            defaults.set(true, forKey: Self.shakeTipKey)   // never repeated, even if dismissed unseen
+            shakeTipVisible = true
+        }
+    }
+
+    static let shakeTipKey = "workspace.shakeTipShown"
+    func dismissShakeTip() { shakeTipVisible = false }
+
+    /// The Float zone is offered while dragging in Pane placement something that can float, in Window view.
+    var canDropToFloat: Bool {
+        guard windowMode, let d = drag, d.placement == .pane else { return false }
+        if case .float = d.item { return false }
+        return canPlace(d.item, .float)
+    }
+
+    func overFloatZone(_ p: CGPoint) -> Bool {
+        canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
+    }
+
+    /// Moves the drag; a shake while holding switches its placement (true when it switched).
+    @discardableResult
+    func moveDrag(to global: CGPoint, at time: TimeInterval = CACurrentMediaTime()) -> Bool {
+        guard drag != nil else { return false }
+        drag?.location = global
+        guard shake.add(x: Double(global.x), y: Double(global.y), at: time) else { return false }
+        return toggleDragPlacement()
+    }
     func cancelDrag() { drag = nil }
 
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
     func dropTarget(forGlobal p: CGPoint, labelHeight: CGFloat = 30) -> WorkspaceWindowDrop? {
-        if overCancelZone(p) || overRemoveZone(p) { return nil }
+        if overCancelZone(p) || overRemoveZone(p) || overFloatZone(p) { return nil }
+        if drag?.placement == .float { return nil }   // Floating placement: no pane targets
         if !windowMode {
             switch drag?.item { case .window?, .app?: break; default: return nil }
             guard desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
@@ -1443,7 +1603,7 @@ final class WorkspaceModel: ObservableObject {
     /// zone agree). Never the last one: that would leave an empty canvas, and
     /// the pane's menu offers Change Window… instead (#120).
     func canRemoveFromLayout(_ tile: String) -> Bool {
-        arranged.tiles[tile] != nil && arranged.tiles.count > 1
+        arranged.tiles[tile] != nil && (arranged.isFloat(tile) || arranged.paneCount > 1)
     }
 
     /// Cancel wins where the two zones' touch margins meet (they sit 12 pt
@@ -1459,6 +1619,14 @@ final class WorkspaceModel: ObservableObject {
     @discardableResult
     func endDrag() -> Bool {
         guard let d = drag else { return false }
+        if d.placement == .float {
+            drag = nil
+            return dropFloating(d)
+        }
+        if overFloatZone(d.location), canPlace(d.item, .float) {
+            drag = nil
+            return floatItem(d.item, at: nil)
+        }
         let target = dropTarget(forGlobal: d.location)
         let remove = overRemoveZone(d.location)
         drag = nil
@@ -1480,6 +1648,9 @@ final class WorkspaceModel: ObservableObject {
             // Several: which one. None: offer to open it, then place its first window there.
             appDrop = AppDrop(app: app, windows: windows, target: target)
             return windows.isEmpty ? false : true
+        case .float(let id):
+            dockFloat(id, to: target)
+            return true
         }
     }
 
@@ -1500,6 +1671,8 @@ final class WorkspaceModel: ObservableObject {
         var app: MacAppItem
         var windows: [CatalogWindowItem]
         var target: WorkspaceWindowDrop
+        /// Dropped in Floating placement: the window floats here instead (picture-normalized).
+        var floatAt: WorkspacePoint? = nil
     }
     @Published var appDrop: AppDrop?
     /// Opened from a drop: its first new window goes where it was dropped (for up to 20 s).
@@ -1508,6 +1681,7 @@ final class WorkspaceModel: ObservableObject {
     /// The window picked for an app drop.
     func completeAppDrop(_ d: AppDrop, with w: CatalogWindowItem) {
         appDrop = nil
+        if let at = d.floatAt { openFloating(w, at: at); return }
         _ = place(w, on: d.target)
     }
 
@@ -1533,6 +1707,8 @@ final class WorkspaceModel: ObservableObject {
     /// A window dropped on a pane (or, outside Window mode, beside the desktop).
     private func place(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) -> Bool {
         if !windowMode {
+            // From Extend, only once the person confirms (it removes the extended display).
+            if holdForLeavingExtend({ [weak self] in _ = self?.place(w, on: target) }) { return false }
             // Mirror/Extend: Window mode starts with the desktop and the window as dropped.
             guard let desk = desktopLayout() else { switchTo(w); return true }
             guard let source = source(for: w) else { return false }
@@ -1554,11 +1730,31 @@ final class WorkspaceModel: ObservableObject {
         guard inputAllowed(), let source = layout.tiles[tile]?.source, let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.minimizeWindow(source.windowID, generation: gen))
     }
-    func focus(_ tile: String) { _ = send(WorkspaceRequests.focus(tile)) }
+    /// Makes `tile` the one typing goes to. `raise` false for anything that only arranges this
+    /// device's view (moving, resizing, tucking, docking or zooming a window, fullscreen on this
+    /// device): the Mac window then stays where it is, and comes forward only when a key or a
+    /// press for it needs it to (never typing into another window meanwhile).
+    func focus(_ tile: String, raise: Bool = true) {
+        if layout.tiles[tile] != nil, !layout.isFloat(tile) { lastFocusedPane = tile }
+        requestedFocus = tile
+        _ = send(WorkspaceRequests.focus(tile, raise: raise))
+    }
+
+    /// The tree's pane focused last: where typing goes back to when a focused float is tucked or removed.
+    private var lastFocusedPane: String?
+    /// The pane this device asked to focus, until the Mac's state says so: the next layout request
+    /// carries it, so a request in flight never puts the old focus back.
+    private var requestedFocus: String?
+    /// The floating pane being moved or resized by a finger now (its chrome draws the local preview).
+    @Published private(set) var floatGesture: String?
+    /// The layout before the current float gesture, recorded as one undo step once it changes something.
+    private var floatGestureStart: WorkspaceLayout?
+    /// Shake while dragging (pane label, Stage Peek window, float title).
+    var shake = WorkspaceShakeDetector()
 
     /// The hardware pointer at a normalized canvas point: hover only, never focus.
     func hover(at p: CGPoint?) {
-        let id = p.flatMap { p in frames.tiles.first { $0.value.contains(WorkspacePoint(x: p.x, y: p.y)) }?.key }
+        let id = p.flatMap { p in frames.hitTest(WorkspacePoint(x: p.x, y: p.y)) }
         if hovered != id { hovered = id }
     }
 
@@ -1588,12 +1784,23 @@ final class WorkspaceModel: ObservableObject {
 
     /// Stage Peek's tap: shows `w` in `switchTarget`; never adds a tile.
     func switchTo(_ w: CatalogWindowItem) {
+        if windowMode, let host, let holder = layout.tile(holding: host, windowID: w.id), layout.isFloat(holder) {
+            untuckFloat(holder)   // a float already shows it: bring that one back, never a second copy
+            return
+        }
+        // Default Window Placement applies to windows not in the layout yet (in Mirror, any window:
+        // it floats over the mirrored desktop).
+        if canOpenFloats, defaultPlacement == .float, !WorkspaceSource.isDisplayKey(w.id),
+           let host, !windowMode || layout.tile(holding: host, windowID: w.id) == nil {
+            openFloating(w)
+            return
+        }
         replacingTile = switchTarget
         choose(w, asNewTile: false)
     }
 
     /// Whether another tile can be added (Stage Peek's "Add as Tile").
-    var canAddTile: Bool { layout.tiles.count < capacity }
+    var canAddTile: Bool { layout.paneCount < capacity && layout.tiles.count < WorkspaceLayout.maximumTiles }
 
     /// While any browser is open (in every display mode): catalog every few seconds,
     /// stills as cards appear, the app list once (then only when it changed).
@@ -1646,14 +1853,357 @@ final class WorkspaceModel: ObservableObject {
         for id in missing { sendable = sendable.replacingSource(of: id, with: nil) }
         let sendFrames = WorkspaceGeometry.frames(for: sendable, in: size, hinge: hinge)
         noteViews(sendable, frames: sendFrames)
+        let focusNow = requestedFocus.flatMap { sendFrames.tiles[$0] != nil ? $0 : nil } ?? active
         _ = send(WorkspaceRequests.workspace(sendable, frames: sendFrames,
-                                             host: host, focus: active, generation: generation,
+                                             host: host, focus: focusNow, generation: generation,
                                              displayID: { [weak self] in self?.display(for: $0)?.id },
-                                             viewEpoch: { [weak self] in self?.viewEpochs[$0] }))
+                                             viewEpoch: { [weak self] in self?.viewEpochs[$0] },
+                                             floats: canFloat))
     }
 
     private func persist() {
         guard let host, let data = WorkspaceLayoutRecord(saved).encoded() else { return }
         defaults.set(data, forKey: "workspace.layout.\(host)")
     }
+}
+
+// MARK: - Floating panes (receiver-local; WorkspaceFloats.swift)
+//
+// Every action here changes only this device's workspace and the rectangles it asks the Mac
+// to composite. None of them sends pointer input, `windowAction` or `windowClose`: the Mac
+// window is never moved, resized, minimized, closed or activated by floating, moving,
+// resizing, flinging, tucking, docking or local fullscreen.
+
+extension WorkspaceModel {
+    /// Settings ▸ Window View: where windows newly brought in (mostly from Stage Peek) land.
+    /// Existing windows are never rearranged by it.
+    static let defaultPlacementKey = "workspace.defaultPlacement"
+    var defaultPlacement: WorkspacePlacement {
+        get { defaults.string(forKey: Self.defaultPlacementKey).flatMap(WorkspacePlacement.init(rawValue:)) ?? .pane }
+        set { defaults.set(newValue.rawValue, forKey: Self.defaultPlacementKey); objectWillChange.send() }
+    }
+
+    /// Floating panes can be shown now (the Mac draws them).
+    var canFloatPanes: Bool { canFloat }
+
+    /// The pane's window can float: the Mac draws floats, and the tree keeps at least one pane
+    /// (a tab of a pane always can, its pane stays).
+    func canFloat(pane id: String, tab: Int? = nil) -> Bool {
+        guard canFloat, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
+        if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
+        return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
+    }
+
+    /// The window's width / height as the pane draws it (turned a quarter: swapped).
+    func windowAspect(_ id: String) -> Double? {
+        guard let tile = layout.tiles[id], let s = tile.source, let w = windowItem(s), w.width > 0, w.height > 0 else { return nil }
+        let a = Double(w.width) / Double(w.height)
+        return tile.rotation.isQuarterTurn ? 1 / a : a
+    }
+
+    private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
+        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
+    }
+
+    /// A window can open floating from here: in Window view, or over the mirrored desktop (Window
+    /// view then starts with that desktop as the pane underneath, as when a window is dropped
+    /// onto it; the person isn't asked). Never from Extend: leaving Extend removes this device's
+    /// extended display, and macOS moves the windows on it, which a float must never cause.
+    var canOpenFloats: Bool { canFloat && (windowMode || (mirroring() && desktopDisplay != nil)) }
+
+    // MARK: Opening, floating, docking
+
+    /// Open as Floating Window (Stage Peek): a window already in the workspace floats from where
+    /// it is (a float comes back to the front); a new one opens floating. In Mirror the mirrored
+    /// desktop becomes the pane underneath and Window mode starts with both, without asking. Never
+    /// from Extend (see `canOpenFloats`).
+    func openFloating(_ w: CatalogWindowItem, at center: WorkspacePoint? = nil) {
+        guard canOpenFloats, let host, let source = source(for: w) else { return }
+        let aspect = w.width > 0 && w.height > 0 ? Double(w.width) / Double(w.height) : nil
+        if !windowMode {
+            guard let desk = desktopLayout() else { return }
+            nextTile += 1   // the desktop pane's id
+            let id = "w\(nextTile)"; nextTile += 1
+            history.record(saved)
+            // Sized in the picture shown now: Window view's own space isn't measured yet.
+            let shown = desktopPictureGlobal.width > 0 && desktopPictureGlobal.height > 0
+                ? WorkspaceSize(width: desktopPictureGlobal.width, height: desktopPictureGlobal.height) : nil
+            saved = desk.addingFloat(WorkspaceTile(id: id, source: source), frame: newFloatFrame(aspect: aspect, at: center, in: shown)).compacted()
+            localFullscreen = nil
+            refreshMissing(); persist(); publish()
+            requestWindowMode()
+            focus(id, raise: false)
+            return
+        }
+        if let holder = layout.tile(holding: host, windowID: w.id) {
+            if layout.isFloat(holder) {
+                untuckFloat(holder)
+                return
+            }
+            let tab = layout.tiles[holder]?.tabs.firstIndex { $0.windowID == w.id }
+            if canFloat(pane: holder, tab: tab.flatMap { (layout.tiles[holder]?.tabs.count ?? 0) > 1 ? $0 : nil }) {
+                floatPane(holder, tab: tab.flatMap { (layout.tiles[holder]?.tabs.count ?? 0) > 1 ? $0 : nil }, at: center)
+            } else {
+                focus(holder, raise: false)   // the only pane: it stays a pane
+            }
+            return
+        }
+        guard layout.tiles.count < WorkspaceLayout.maximumTiles else { return }
+        let id = "w\(nextTile)"; nextTile += 1
+        let frame = newFloatFrame(aspect: aspect, at: center)
+        edit { $0.addingFloat(WorkspaceTile(id: id, source: source), frame: frame) }
+        if compactSpace { tuckOthers(than: id) }
+        focus(id, raise: false)
+    }
+
+    /// Float This Pane / Float This Tab, or a pane title dropped in Floating placement. The
+    /// pane's window keeps its tile (and its capture); the layout closes up around it.
+    func floatPane(_ id: String, tab: Int? = nil, at center: WorkspacePoint? = nil) {
+        guard canFloat(pane: id, tab: tab), let tile = layout.tiles[id] else { return }
+        let aspect: Double? = {
+            guard let tab, tile.tabs.indices.contains(tab), let w = windowItem(tile.tabs[tab]), w.width > 0, w.height > 0 else { return windowAspect(id) }
+            return Double(w.width) / Double(w.height)
+        }()
+        let frame = newFloatFrame(aspect: aspect, at: center)
+        var floated = id
+        if let tab, tile.tabs.count > 1 {
+            let newID = "w\(nextTile)"; nextTile += 1
+            if tile.tabs[tab] != tile.source { floated = newID }
+            edit { $0.floatingTab(of: id, at: tab, frame: frame, newID: newID) }
+        } else {
+            if localFullscreen == id { localFullscreen = nil }
+            edit { $0.floatingPane(id, frame: frame) }
+        }
+        if compactSpace { tuckOthers(than: floated) }
+        focus(floated, raise: false)
+    }
+
+    /// A float docked where it was dropped in Pane placement: a tab, a new pane beside one, or an
+    /// empty slot. Never replaces or drops another window.
+    func dockFloat(_ id: String, to target: WorkspaceWindowDrop) {
+        guard layout.isFloat(id) else { return }
+        var drop = target
+        if case .split(let index, _, _) = target, layout.paneCount >= capacity,
+           let holder = WorkspaceLayout.slotID(layout.root, at: index).flatMap({ $0 }) {
+            drop = .tab(tile: holder, preview: target.preview)   // no room for another pane: a tab of that one
+        }
+        if localFullscreen == id { localFullscreen = nil }
+        edit { $0.docking(id, to: drop) }
+        focus(id, raise: false)
+    }
+
+    /// Add to Layout: a new pane when there's room, else a tab of the focused (or last) pane.
+    func addFloatToLayout(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        if localFullscreen == id { localFullscreen = nil }
+        if layout.paneCount < capacity {
+            let landscape = size.width >= size.height
+            edit { $0.dockingAsPane(id, landscape: landscape) }
+        } else if let target = lastFocusedPane.flatMap({ layout.orderedTileIDs.contains($0) ? $0 : nil }) ?? layout.orderedTileIDs.last {
+            edit { $0.dockingAsTab(id, into: target) }
+        }
+        focus(id, raise: false)
+    }
+
+    // MARK: Moving and resizing (one undo step per gesture)
+
+    /// A finger took the float's title, grabber or resize grip: it comes to the front.
+    func beginFloatGesture(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        floatGesture = id
+        floatGestureStart = saved
+        raiseFloat(id)
+        if active != id { focus(id, raise: false) }   // arranging only: the Mac window stays put
+        requestBackdrop(id)
+    }
+
+    /// The float's frame while the finger moves (kept usable; the Mac follows at most ~30 times a second).
+    func updateFloatFrame(_ id: String, _ frame: WorkspaceRect) {
+        let next = saved.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(frame, in: size))
+        guard next != saved else { return }
+        if let start = floatGestureStart { history.record(start); floatGestureStart = nil }
+        saved = next
+        publish(); scheduleThrottledSend()
+    }
+
+    /// The gesture ended (the float settled where `frame` says, if given).
+    func endFloatGesture(_ id: String, frame: WorkspaceRect? = nil) {
+        if let frame { updateFloatFrame(id, frame) }
+        floatGesture = nil
+        floatGestureStart = nil
+        persist(); publish(); sendNow()
+    }
+
+    /// In front of the other floats. Presentation only (not an undo step); sent at once so the
+    /// Mac hits the same window the finger sees.
+    func raiseFloat(_ id: String) {
+        let next = saved.raisingFloat(id)
+        guard next != saved else { return }
+        saved = next
+        persist(); publish(); sendNow()
+    }
+
+    /// Size presets and accessibility Make Larger / Smaller: about its centre, keeping its shape.
+    func scaleFloat(_ id: String, by factor: Double) {
+        guard let f = layout.float(id) else { return }
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.scaled(f.frame, by: factor, in: size)) }
+    }
+
+    /// Small / Medium / Large: a share of the picture's width at the window's shape.
+    func sizeFloat(_ id: String, widthShare: Double) {
+        guard let f = layout.float(id), size.width > 0 else { return }
+        let aspect = windowAspect(id) ?? (f.frame.width * size.width) / max(f.frame.height * size.height, 1)
+        let w = size.width * widthShare, h = w / aspect
+        let r = WorkspaceRect(x: f.frame.midX - w / size.width / 2, y: f.frame.midY - h / size.height / 2,
+                              width: w / size.width, height: h / size.height)
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
+    }
+
+    /// Accessibility Move Left / Right / Up / Down: a tenth of the picture per step.
+    func nudgeFloat(_ id: String, dx: Double, dy: Double) {
+        guard let f = layout.float(id) else { return }
+        var r = f.frame
+        r.x += dx; r.y += dy
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
+    }
+
+    // MARK: Tucking
+
+    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched.
+    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double) {
+        guard layout.isFloat(id) else { return }
+        edit { $0.tuckingFloat(id, edge: edge, offset: offset) }
+        refocus(after: id)
+    }
+
+    /// Back where it was, in front and focused. On a compact screen the float shown before
+    /// tucks in its place (one shows at a time there).
+    func untuckFloat(_ id: String) {
+        guard layout.isFloat(id) || saved.isFloat(id) else { return }
+        edit { $0.untuckingFloat(id) }
+        if compactSpace { tuckOthers(than: id) }
+        focus(id, raise: false)
+    }
+
+    /// A tab dragged along its edge (no undo step; tucked floats aren't sent).
+    func moveTuckTab(_ id: String, offset: Double) {
+        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), saved.floats[i].tuck != nil else { return }
+        saved.floats[i].tuck?.offset = min(max(offset.isFinite ? offset : 0.5, 0), 1)
+        persist(); publish()
+    }
+
+    /// Removes a float from this device (Undo brings it back). The Mac window stays open.
+    func removeFloat(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        if localFullscreen == id { localFullscreen = nil }
+        edit { $0.removing(id) }
+        refocus(after: id)
+    }
+
+    private var compactSpace: Bool { WorkspaceFloatGeometry.visibleLimit(for: size) <= 1 }
+
+    private func tuckOthers(than id: String) {
+        let others = saved.visibleFloatIDs.filter { $0 != id }
+        guard !others.isEmpty else { return }
+        var next = saved
+        for (i, o) in others.enumerated() { next = next.tuckingFloat(o, edge: .right, offset: min(0.3 + Double(i) * 0.12, 0.85)) }
+        saved = next
+        persist(); publish(); scheduleSend()
+    }
+
+    /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,
+    /// else the pane focused before it. Nothing is sent to the Mac but the focus.
+    private func refocus(after id: String) {
+        guard active == id || requestedFocus == id else { return }
+        let next = layout.visibleFloatIDs.last { $0 != id }
+            ?? lastFocusedPane.flatMap { layout.orderedTileIDs.contains($0) ? $0 : nil }
+            ?? layout.orderedTileIDs.first
+        if let next { focus(next, raise: false) }
+    }
+
+    // MARK: Drag placement (Pane | Floating)
+
+    private func initialPlacement(for item: WorkspaceDrag.Item) -> WorkspacePlacement {
+        switch item {
+        case .window, .app: return defaultPlacement
+        case .pane: return .pane
+        case .float: return .pane
+        }
+    }
+
+    /// Whether `item` may land with `placement`.
+    func canPlace(_ item: WorkspaceDrag.Item, _ placement: WorkspacePlacement) -> Bool {
+        guard placement == .float else { return true }
+        guard canOpenFloats else { return false }   // never from Extend
+        switch item {
+        case .window(let w): return !WorkspaceSource.isDisplayKey(w.id)
+        case .app: return true
+        case .pane(let id, let tab): return canFloat(pane: id, tab: tab)
+        case .float: return false
+        }
+    }
+
+    /// Switches the drag between Pane and Floating placement (a shake, or the drag's control).
+    /// True when it switched.
+    @discardableResult
+    func toggleDragPlacement() -> Bool {
+        guard let d = drag else { return false }
+        let next: WorkspacePlacement = d.placement == .pane ? .float : .pane
+        guard canPlace(d.item, next) else { return false }
+        drag?.placement = next
+        return true
+    }
+
+    /// Where a Floating-placement drop would put the window (picture-normalized), for its preview.
+    func floatDropPreview(forGlobal p: CGPoint) -> WorkspaceRect? {
+        drag.flatMap { floatDropFrame($0, at: p) }
+    }
+
+    private func floatDropFrame(_ d: WorkspaceDrag, at p: CGPoint) -> WorkspaceRect? {
+        guard d.placement == .float, !overCancelZone(p) else { return nil }
+        let picture = windowMode ? pictureGlobal : desktopPictureGlobal
+        guard picture.width > 0, picture.height > 0, picture.contains(p) else { return nil }
+        let center = WorkspacePoint(x: (p.x - picture.minX) / picture.width, y: (p.y - picture.minY) / picture.height)
+        let aspect: Double? = {
+            switch d.item {
+            case .window(let w): return w.width > 0 && w.height > 0 ? Double(w.width) / Double(w.height) : nil
+            case .pane(let id, let tab):
+                if let tab, let s = layout.tiles[id]?.tabs[safe: tab], let w = windowItem(s), w.width > 0, w.height > 0 { return Double(w.width) / Double(w.height) }
+                return windowAspect(id)
+            default: return nil
+            }
+        }()
+        let space = windowMode ? size : WorkspaceSize(width: picture.width, height: picture.height)
+        return WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space, center: center)
+    }
+
+    /// A drop in Floating placement: the window floats where it was let go.
+    fileprivate func dropFloating(_ d: WorkspaceDrag) -> Bool {
+        guard let frame = floatDropFrame(d, at: d.location) else { return false }
+        return floatItem(d.item, at: WorkspacePoint(x: frame.midX, y: frame.midY))
+    }
+
+    /// Floats a dragged item, centred at `center` (nil: where a new float opens).
+    fileprivate func floatItem(_ item: WorkspaceDrag.Item, at center: WorkspacePoint?) -> Bool {
+        switch item {
+        case .window(let w):
+            openFloating(w, at: center)
+            return true
+        case .app(let app):
+            let windows = (catalog?.windows ?? []).filter { $0.bundleID == app.bundleID }
+            if windows.count == 1 { openFloating(windows[0], at: center); return true }
+            appDrop = AppDrop(app: app, windows: windows, target: .replace(tile: Self.noDesktop, preview: .unit),
+                              floatAt: center ?? WorkspacePoint(x: 0.5, y: 0.5))
+            return !windows.isEmpty
+        case .pane(let id, let tab):
+            floatPane(id, tab: tab, at: center)
+            return true
+        case .float:
+            return false
+        }
+    }
+}
+
+private extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }

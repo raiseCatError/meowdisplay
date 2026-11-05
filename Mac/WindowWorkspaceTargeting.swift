@@ -42,6 +42,11 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     /// A whole display in this tile (Full Desktop as a tile source). `windowID` is then its
     /// reserved key (`WorkspaceSource.displayKey`), so window-keyed maps never collide.
     var displayID: UInt32? = nil
+    /// A floating pane (`layer: "float"`, only from a receiver that said `ws` 2 to a Mac that
+    /// offers `windowFloat`): drawn after every tiled pane, in `z` order, and hit first.
+    var isFloat = false
+    /// Back (0) to front among the floats.
+    var z = 0
 }
 
 enum WorkspaceRequestValidator {
@@ -63,9 +68,16 @@ enum WorkspaceRequestValidator {
     /// `tiles`: the request's `tiles` array. `hostID`: this Mac's install id;
     /// tiles naming another host belong to another connection and are skipped.
     /// `displays`: the displays this Mac listed to this session (id -> global bounds); a tile may show one.
+    /// `allowFloats`: the receiver speaks floating panes (`hello.ws` >= 2) and this Mac offers
+    /// them (`windowFloat`). Otherwise `layer` is ignored and every tile is a tiled pane, exactly
+    /// as before (a float sent anyway overlaps and is refused as `overlap`).
+    ///
+    /// Tiled panes may never overlap each other. Floats may overlap anything. The result lists
+    /// the tiled panes first (request order), then the floats back to front by `z`: the
+    /// compositor draws in that order, and `WorkspaceInputTargeting` hits it front first.
     static func validate(tiles raw: [[String: Any]], catalog: [UInt32: WindowCatalogEntry], hostID: String,
                          canvasPixels: CGSize, previous: [String: WorkspaceTileAssignment],
-                         nextGeneration: inout UInt64, displays: [UInt32: CGRect] = [:]) -> Result {
+                         nextGeneration: inout UInt64, displays: [UInt32: CGRect] = [:], allowFloats: Bool = false) -> Result {
         var accepted: [WorkspaceTileAssignment] = []
         var rejected: [String: String] = [:]
         var seen = Set<String>()
@@ -82,7 +94,9 @@ enum WorkspaceRequestValidator {
             let rect = WorkspaceRect(x: max(x, 0), y: max(y, 0), width: min(w, 1 - max(x, 0)), height: min(h, 1 - max(y, 0)))
             guard rect.width * canvasPixels.width >= minimumTilePixels.width,
                   rect.height * canvasPixels.height >= minimumTilePixels.height else { rejected[id] = "tooSmall"; continue }
-            if accepted.contains(where: { ($0.rect.intersection(rect)?.area ?? 0) > 1e-6 }) {
+            let isFloat = allowFloats && (item["layer"] as? String) == "float"
+            let z = isFloat ? min(max(item["z"] as? Int ?? 0, 0), maxTiles * 2) : 0
+            if !isFloat, accepted.contains(where: { !$0.isFloat && ($0.rect.intersection(rect)?.area ?? 0) > 1e-6 }) {
                 rejected[id] = "overlap"
                 continue
             }
@@ -108,7 +122,7 @@ enum WorkspaceRequestValidator {
                 accepted.append(WorkspaceTileAssignment(
                     tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
                     rotation: rotation, fit: fit, zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation,
-                    displayID: displayID))
+                    displayID: displayID, isFloat: isFloat, z: z))
                 continue
             }
             guard let windowNumber = (item["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
@@ -132,9 +146,16 @@ enum WorkspaceRequestValidator {
             accepted.append(WorkspaceTileAssignment(
                 tileID: id, rect: rect, windowID: entry.windowID, windowGeneration: entry.generation, pid: entry.pid,
                 bundleID: entry.bundleID, follow: follow, rotation: rotation, fit: fit,
-                zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation))
+                zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation, isFloat: isFloat, z: z))
         }
-        return Result(assignments: accepted, rejected: rejected)
+        return Result(assignments: paintOrder(accepted), rejected: rejected)
+    }
+
+    /// Tiled panes first (as requested), then floats back to front (`z`, ties in request order).
+    static func paintOrder(_ list: [WorkspaceTileAssignment]) -> [WorkspaceTileAssignment] {
+        guard list.contains(where: \.isFloat) else { return list }
+        let floats = list.enumerated().filter { $0.element.isFloat }.sorted { ($0.element.z, $0.offset) < ($1.element.z, $1.offset) }.map(\.element)
+        return list.filter { !$0.isFloat } + floats
     }
 }
 
@@ -197,8 +218,16 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
                                     rotation: a.rotation, fit: a.fit, zoom: a.zoom)
     }
 
+    /// The pane under `p`: the frontmost float that contains it, else the tiled pane (which
+    /// never overlap). A pane a float covers can't be reached through the float.
     func tile(at p: WorkspacePoint) -> WorkspaceTileAssignment? {
-        assignments.first { $0.rect.contains(p) }
+        if let float = assignments.last(where: { $0.isFloat && $0.rect.contains(p) }) { return float }
+        return assignments.first { !$0.isFloat && $0.rect.contains(p) }
+    }
+
+    /// Front to back: floats (frontmost first), then the tiled panes.
+    private var frontToBack: [WorkspaceTileAssignment] {
+        assignments.filter(\.isFloat).reversed() + assignments.filter { !$0.isFloat }
     }
 
     private func global(_ a: WorkspaceTileAssignment, _ p: WorkspacePoint, clamped: Bool) -> CGPoint? {
@@ -390,11 +419,14 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     /// cursor sprite from these, so it keeps its shape in a pane of any shape.
     func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
         guard canvas.width > 0, canvas.height > 0 else { return nil }
-        for a in assignments {
+        for a in frontToBack {
             guard let frame = windowFrames[a.windowID], frame.contains(g), let t = transform(for: a) else { continue }
             let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
             guard let visible = t.visibleRect, visible.contains(q) else { continue }
-            return (q.x / canvas.width, q.y / canvas.height, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
+            // Where a float covers this pane, the cursor isn't drawn over the float.
+            let n = WorkspacePoint(x: q.x / canvas.width, y: q.y / canvas.height)
+            if assignments.contains(where: \.isFloat), tile(at: n)?.tileID != a.tileID { continue }
+            return (n.x, n.y, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
         }
         return nil
     }
@@ -408,7 +440,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     func canvasCaretRect(forGlobal g: CGRect) -> CGRect? {
         guard canvas.width > 0, canvas.height > 0, g.minX.isFinite, g.minY.isFinite, g.width.isFinite, g.height.isFinite else { return nil }
         let centre = CGPoint(x: g.midX, y: g.midY)
-        let candidates = keyboardTarget.map { [$0] } ?? assignments
+        let candidates = keyboardTarget.map { [$0] } ?? frontToBack
         for a in candidates {
             guard let frame = windowFrames[a.windowID], frame.contains(centre), let t = transform(for: a) else { continue }
             let corners = [CGPoint(x: g.minX, y: g.minY), CGPoint(x: g.maxX, y: g.minY),
@@ -419,6 +451,9 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
             guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { continue }
             guard let visible = t.visibleRect,
                   visible.contains(WorkspacePoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)) else { continue }
+            // A caret a float covers isn't followed (the receiver keeps following its last touch).
+            if assignments.contains(where: \.isFloat),
+               tile(at: WorkspacePoint(x: (minX + maxX) / 2 / canvas.width, y: (minY + maxY) / 2 / canvas.height))?.tileID != a.tileID { continue }
             return CGRect(x: minX / canvas.width, y: minY / canvas.height,
                           width: (maxX - minX) / canvas.width, height: (maxY - minY) / canvas.height)
         }
@@ -502,14 +537,34 @@ enum WorkspaceCaptureRetune {
 /// Per-tile capture budget: the active tile at the stream rate, the rest
 /// reduced as more tiles share one encoder; paused windows cost nothing.
 enum WorkspaceCaptureBudget {
-    static func fps(isActive: Bool, tileCount: Int, streamFPS: Int, available: Bool) -> Int {
+    /// A tiled pane that floats hide at least this much is captured at `coveredFPS` only.
+    static let coveredShare = 0.9
+    static let coveredFPS = 2
+    /// A visible floating pane never drops below this (it is usually what someone watches).
+    static let floatFloorFPS = 15
+
+    /// `covered`: the share of a tiled pane hidden by floats. `isFloat`: a floating pane.
+    static func fps(isActive: Bool, tileCount: Int, streamFPS: Int, available: Bool,
+                    covered: Double = 0, isFloat: Bool = false) -> Int {
         guard available else { return 0 }
         if isActive || tileCount == 1 { return streamFPS }
+        if !isFloat, covered >= coveredShare { return min(streamFPS, coveredFPS) }
+        let shared: Int
         switch tileCount {
-        case ...3: return min(streamFPS, 30)
-        case 4...6: return min(streamFPS, 15)
-        default: return min(streamFPS, 10)
+        case ...3: shared = min(streamFPS, 30)
+        case 4...6: shared = min(streamFPS, 15)
+        default: shared = min(streamFPS, 10)
         }
+        return isFloat ? max(shared, min(streamFPS, floatFloorFPS)) : shared
+    }
+
+    /// How much of each tiled pane the floats hide (floats: 0).
+    static func coverage(_ assignments: [WorkspaceTileAssignment]) -> [String: Double] {
+        let floats = assignments.filter(\.isFloat).map(\.rect)
+        guard !floats.isEmpty else { return [:] }
+        var out: [String: Double] = [:]
+        for a in assignments where !a.isFloat { out[a.tileID] = WorkspaceOcclusion.coveredFraction(of: a.rect, by: floats) }
+        return out
     }
 
     /// Capture size for a tile: its share of the canvas (rotated to the
