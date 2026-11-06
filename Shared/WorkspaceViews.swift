@@ -86,8 +86,13 @@ struct WorkspaceChromeView: View {
     @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
+    /// While a label is held: its pane and whether its titles were folded then. They keep that
+    /// form until the finger lifts (see `PaneLabelInteraction.folded`).
+    @State private var heldForm: (tile: String, folded: Bool)?
+    /// A label's hold is in progress (reset by SwiftUI when it ends or is cancelled).
+    @GestureState private var labelPress: PaneMenuTarget?
     /// The last label tap, for telling a double tap (fullscreen toggle) from two single taps.
-    @State private var lastLabelTap: (target: PaneMenuTarget, at: Date)?
+    @State private var lastLabelTap: PaneLabelInteraction.Tap?
     @State private var stripVisible = true
     @State private var stripHideTask: Task<Void, Never>?
     /// The pane whose tabs are all shown while the menu bar shares their row; the others show
@@ -99,9 +104,9 @@ struct WorkspaceChromeView: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    struct PaneMenuTarget: Equatable { var tile: String; var tab: Int? }
+    typealias PaneMenuTarget = PaneLabelInteraction.Target
     /// Matches UIKit's default double-tap timing.
-    static let doubleTapInterval: TimeInterval = 0.35
+    static let doubleTapInterval = PaneLabelInteraction.doubleTapInterval
 
     private var layoutRect: CGRect { layoutPicture ?? picture }
     private var size: WorkspaceSize { WorkspaceSize(width: layoutRect.width, height: layoutRect.height) }
@@ -217,7 +222,21 @@ struct WorkspaceChromeView: View {
             .onAppear { syncMenus() }
             .onChange(of: menuKey) { _ in syncMenus() }
             .onChange(of: model.touchPulse) { _ in if model.localFullscreen != nil { revealStrip() } }
+            .onChange(of: labelPress) { press in if press == nil { DispatchQueue.main.async { finishCancelledHold() } } }
         }
+    }
+
+    /// A label's hold ended without `onEnded` (the system took the touch): nothing stays marked
+    /// held, and a drag it began is cancelled, never dropped where the finger happened to be.
+    private func finishCancelledHold() {
+        guard labelPress == nil, let held = heldLabel else { return }
+        let dragging: Bool
+        if case .pane(let tile, _)? = model.drag?.item, tile == held.tile { dragging = true } else { dragging = false }
+        if PaneLabelInteraction.holdEnded(cancelled: true, dragging: dragging, heldHere: true, folded: false) == .cancelDrag {
+            model.cancelDrag()
+        }
+        heldLabel = nil
+        heldForm = nil
     }
 
     /// What decides whose menus the bar shows: the focused pane, its app, and control.
@@ -511,14 +530,17 @@ struct WorkspaceChromeView: View {
 
     /// `sharesRow`: the menu bar sits in this row, so the tabs shrink to the shown tab's app icon
     /// and "+N" until the person taps, holds or scrolls them (`expandTabs`): then full names,
-    /// scrolling when they don't fit.
+    /// scrolling when they don't fit. A held label keeps the form it was held in until the finger
+    /// lifts, so one hold on the icon opens the options (with the titles shown in full).
     @ViewBuilder
     private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, sharesRow: Bool) -> some View {
         let windows = tile.windows
         let available = max(rect.width - 12, 60)
         // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
         let each = windows.count <= 1 ? min(180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
-        let compact = sharesRow && !windows.isEmpty && tabsExpanded != id && heldLabel?.tile != id && model.drag == nil
+        let compact = PaneLabelInteraction.folded(sharesRow: sharesRow, hasWindows: !windows.isEmpty, expanded: tabsExpanded == id,
+                                                  held: heldLabel?.tile == id, dragging: model.drag != nil,
+                                                  heldFolded: heldForm?.tile == id ? heldForm?.folded : nil)
         if compact {
             let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
             let visible = [shownIndex]
@@ -526,7 +548,7 @@ struct WorkspaceChromeView: View {
             HStack(spacing: 4) {
                 ForEach(visible, id: \.self) { i in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(windows[i], in: tile, id: id),
-                          icon: windows[i].bundleID.flatMap { model.icons[$0] }, shown: i == shownIndex, active: active,
+                          app: labelApp(windows[i]), shown: i == shownIndex, active: active,
                           width: 64, iconOnly: true)
                 }
                 if hidden > 0 {
@@ -547,11 +569,11 @@ struct WorkspaceChromeView: View {
         } else {
             let row = HStack(spacing: 4) {
                 if windows.isEmpty {
-                    label(id: id, tab: nil, text: String(localized: "Empty"), icon: nil, shown: true, active: active, width: each)
+                    label(id: id, tab: nil, text: String(localized: "Empty"), app: nil, shown: true, active: active, width: each)
                 }
                 ForEach(Array(windows.enumerated()), id: \.offset) { i, s in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(s, in: tile, id: id),
-                          icon: s.bundleID.flatMap { model.icons[$0] }, shown: s == tile.source, active: active, width: each)
+                          app: labelApp(s), shown: s == tile.source, active: active, width: each)
                 }
             }
             .padding(6)
@@ -572,14 +594,23 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    /// `iconOnly`: just the app's icon (its name when there is no icon), beside the menu bar.
-    private func label(id: String, tab: Int?, text: String, icon: CGImage?, shown: Bool, active: Bool, width: CGFloat,
-                       iconOnly: Bool = false) -> some View {
+    /// The app a label names: its icon, or the placeholder until the Mac sends one. nil for a desktop.
+    private func labelApp(_ s: WorkspaceSource) -> (bundleID: String, name: String)? {
+        guard !s.isDisplay, let bundle = s.bundleID ?? windowItem(s)?.bundleID, !bundle.isEmpty else { return nil }
+        return (bundle, windowItem(s)?.app ?? "")
+    }
+
+    /// `iconOnly`: just the app's icon (the placeholder until it arrives; a desktop's name), beside the menu bar.
+    private func label(id: String, tab: Int?, text: String, app: (bundleID: String, name: String)?, shown: Bool, active: Bool,
+                       width: CGFloat, iconOnly: Bool = false) -> some View {
         let highlighted = shown && active
         let target = PaneMenuTarget(tile: id, tab: tab)
         return HStack(spacing: 5) {
-            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 15, height: 15) }
-            if !iconOnly || icon == nil {
+            if let app {
+                WorkspaceAppIcon(icon: model.icons[app.bundleID], name: app.name.isEmpty ? text : app.name,
+                                 bundleID: app.bundleID, size: 15, tint: highlighted ? .black : .white)
+            }
+            if !iconOnly || app == nil {
                 Text(text).font(.caption.weight(shown ? .semibold : .regular)).lineLimit(1).truncationMode(.tail)
             }
         }
@@ -599,41 +630,60 @@ struct WorkspaceChromeView: View {
         .contentShape(Capsule())
         .onTapGesture {
             // A tap selects the pane (typing goes there) or shows that tab. Never a click on the Mac.
-            guard heldLabel == nil else { return }
-            // A second tap on the same label: this pane fills the device, or the layout comes back.
-            // The first tap acts at once (no waiting to see whether another follows).
-            let now = Date()
-            if let last = lastLabelTap, last.target == target, now.timeIntervalSince(last.at) < Self.doubleTapInterval {
+            let now = Date().timeIntervalSinceReferenceDate
+            switch PaneLabelInteraction.tap(target, shown: shown, highlighted: highlighted, folded: iconOnly,
+                                            last: lastLabelTap, now: now, held: heldLabel != nil) {
+            case .toggleFullscreen?:
+                // A second tap: this pane fills the device, or the layout comes back.
                 lastLabelTap = nil
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) { model.toggleLocalFullscreen(id) }
                 Self.haptic(.drop)
-                return
+            case .showTab(let t, let expand)?:
+                lastLabelTap = .init(target: target, at: now, folded: iconOnly)
+                model.switchTab(id, to: t)
+                if expand { expandTabs(id) }
+            case .select(let expand)?:
+                lastLabelTap = .init(target: target, at: now, folded: iconOnly)
+                model.focus(id)
+                // Tabs, or the selected pane's folded icon: every title in full for a while.
+                if expand { expandTabs(id) }
+            case nil:
+                // A label is held. With no hold in flight (the system cancelled it), it's let go of
+                // once any ending hold has run, so the next tap acts.
+                if labelPress == nil { DispatchQueue.main.async { finishCancelledHold() } }
             }
-            lastLabelTap = (target, now)
-            if let tab, !shown { model.switchTab(id, to: tab) } else { model.focus(id) }
-            // Working with tabs: keep them all shown for a while (only matters beside the menu bar).
-            if tab != nil { expandTabs(id) }
         }
         // Hold: lift the label. Move = drag it to another pane (merge as a tab, split, swap);
-        // release without moving = the label's menu.
+        // release without moving = the label's menu. The strip keeps its form until the finger
+        // lifts, so the view carrying this gesture stays (see `labelStrip`).
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.4)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                .updating($labelPress) { value, state, _ in
+                    if case .second(true, _) = value { state = target }
+                }
                 .onChanged { value in
                     guard case .second(true, let drag) = value else { return }
-                    if heldLabel == nil { heldLabel = target; Self.haptic(.lift) }
+                    if heldLabel == nil { heldLabel = target; heldForm = (id, iconOnly); Self.haptic(.lift) }
                     guard let drag else { return }
                     let moved = hypot(drag.translation.width, drag.translation.height)
                     if model.drag == nil, moved > 10 { model.beginDrag(.pane(id, tab: tab), at: drag.location) }
                     else if model.drag != nil { model.moveDrag(to: drag.location) }
                 }
                 .onEnded { _ in
-                    if model.drag != nil {
+                    switch PaneLabelInteraction.holdEnded(cancelled: false, dragging: model.drag != nil,
+                                                          heldHere: heldLabel == target, folded: heldForm?.folded == true) {
+                    case .drop:
                         if model.endDrag() { Self.haptic(.drop) }
-                    } else if heldLabel == target {
+                    case .menu(let expand):
+                        // One hold on the folded icon: its titles in full and its options together.
+                        if expand { expandTabs(id) }
                         withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82)) { menu = target }
+                    case .cancelDrag, .nothing:
+                        break
                     }
                     heldLabel = nil
+                    heldForm = nil
                 })
         // One element with the label's own frame. Without it, the label and traits below also
         // land on an element that reports the whole pane's frame: VoiceOver outlines the pane,
