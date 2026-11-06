@@ -576,6 +576,8 @@ struct WorkspaceBackdrop: @unchecked Sendable {
     var image: CGImage
     /// From before macOS paused the window.
     var stale: Bool
+    /// When this device received it.
+    var receivedAt = Date()
 }
 
 // MARK: - Layout tree

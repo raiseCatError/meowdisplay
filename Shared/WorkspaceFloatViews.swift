@@ -231,12 +231,14 @@ struct WorkspaceFloatLayer: View {
         let coverRects = covers.map(WorkspaceRect.init)
         let covered: (CGRect) -> Bool = { WorkspaceFloatLayering.isCovered(WorkspaceRect($0), by: coverRects) }
         let handles = WorkspaceFloatLayering.showsHandles(selected: active, hovered: model.hovered == id, manipulating: moved)
+        // While a finger moves or resizes it the Mac leaves it out (`floatLift`) and it's drawn
+        // here, from its last still, in its own view at this size. A Mac without lift keeps
+        // drawing it a moment behind, so the still goes with the finger as before.
+        let drawnHere = model.drawsFloatHere(id) || (moved && !model.canLiftFloats)
         ZStack {
-            // While it moves, the window's last picture goes with the finger (the Mac follows).
-            if moved, let image = model.backdrops[id]?.image {
-                Image(decorative: image, scale: 1).resizable().scaledToFill()
-                    .frame(width: rect.width, height: rect.height)
-                    .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+            if drawnHere, let image = model.backdrop(id)?.image,
+               let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
+                FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
             }
             RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
                 .strokeBorder(Color.black.opacity(highContrast ? 0.8 : 0.45), lineWidth: active ? 3.5 : 2.5)
@@ -375,10 +377,9 @@ struct WorkspaceFloatLayer: View {
 
     private func leavingGhost(_ id: String, _ rect: CGRect) -> some View {
         ZStack {
-            if let image = model.backdrops[id]?.image {
-                Image(decorative: image, scale: 1).resizable().scaledToFill()
-                    .frame(width: rect.width, height: rect.height)
-                    .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+            if let image = model.backdrop(id)?.image,
+               let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
+                FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
             }
             RoundedRectangle(cornerRadius: floatCorner, style: .continuous).strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
         }
@@ -405,17 +406,22 @@ struct WorkspaceFloatLayer: View {
                 list.append(Sample(point: v.location, time: v.time.timeIntervalSinceReferenceDate))
                 if list.count > 10 { list.removeFirst(list.count - 10) }
                 samples[id] = list
-                if !moving.contains(id), hypot(v.translation.width, v.translation.height) < 4 { return }
-                moving.insert(id)
+                if !moving.contains(id) {
+                    if hypot(v.translation.width, v.translation.height) < 4 { return }
+                    moving.insert(id)
+                    model.liftFloat(id)   // drawn here from now; a tap never lifts
+                }
                 let global = CGPoint(x: v.location.x + toGlobal.x, y: v.location.y + toGlobal.y)
                 // Shaken while held: switch between moving it and docking it into the layout.
                 if shake.add(x: v.location.x, y: v.location.y, at: v.time.timeIntervalSinceReferenceDate) {
                     if docking == id {
                         docking = nil
                         model.cancelDrag()
+                        model.liftFloat(id)
                     } else {
                         docking = id
                         motion.drop(id)
+                        model.landFloat(id)   // back where it was, drawn by the Mac
                         model.updateFloatFrame(id, s)
                         model.beginDrag(.float(id), at: global)
                     }
@@ -503,9 +509,11 @@ struct WorkspaceFloatLayer: View {
                     model.beginFloatGesture(id)
                 }
                 guard let s = resizeStart[id] else { return }
-                let aspect = model.windowAspect(id) ?? (s.width * picture.width) / max(s.height * picture.height, 1)
+                if hypot(v.translation.width, v.translation.height) > 2 { model.liftFloat(id) }
+                // Width and height follow the finger freely: the window keeps its view (Fit with
+                // bars, Fill, zoom) at the new size, never stretched.
                 let r = WorkspaceFloatGeometry.resized(s, corner: corner, translation: (v.translation.width, v.translation.height),
-                                                       aspect: aspect, in: pictureSize)
+                                                       aspect: nil, in: pictureSize)
                 model.updateFloatFrame(id, r)
             }
             .onEnded { _ in
@@ -546,9 +554,10 @@ struct WorkspaceFloatLayer: View {
         }
         local.append(act(String(localized: "Add to Layout"), "rectangle.split.2x1") { model.addFloatToLayout(id) })
         local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"), children: [
-            act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.6 : 0.3) },
-            act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.8 : 0.45) },
-            act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.95 : 0.65) },
+            act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.45 : 0.3) },
+            act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.65 : 0.45) },
+            act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.9 : 0.65) },
+            act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) },
         ]))
         local.append(act(String(localized: "Change Window…"), "macwindow.on.rectangle") { model.openOverview(replacing: id) })
         local.append(act(String(localized: "Remove from This Device"), "rectangle.badge.minus") { model.removeFloat(id) })
@@ -781,3 +790,27 @@ private struct FloatResizePointer: ViewModifier {
     }
 }
 #endif
+
+/// A float drawn on this device from its whole-window still, in the float's own view (Fit with
+/// bars, Fill, zoom, any rotation) exactly as the Mac composes it at this size: while a finger
+/// moves or resizes it the Mac leaves it out (`floatLift`), so this is the only copy on screen.
+private struct FloatStill: View {
+    var image: CGImage
+    var view: TileContentTransform
+    var size: CGSize
+    var corner: CGFloat
+
+    var body: some View {
+        let box = view.contentRect, s = view.scale
+        ZStack(alignment: .topLeading) {
+            // The Mac's letterbox colour (WorkspaceCompositor).
+            Color(red: 0.07, green: 0.07, blue: 0.08)
+            Image(decorative: image, scale: 1).resizable().interpolation(.medium)
+                .frame(width: max(view.source.width * s, 1), height: max(view.source.height * s, 1))
+                .rotationEffect(.degrees(Double(view.rotation.rawValue)))
+                .position(x: box.midX, y: box.midY)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+    }
+}
