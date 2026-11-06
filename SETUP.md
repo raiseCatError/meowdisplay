@@ -283,6 +283,19 @@ under Settings → Displays → Windows on the Mac. How it works, how to switch
 between Window view and the whole screen, and its limits are in
 [WINDOW_MODE.md](WINDOW_MODE.md).
 
+Windows in Stage Manager's side strip don't stream live. Under Settings →
+System → Stage Manager on the Mac, **Set Up Automatically** prepares two
+shortcuts (you click Add Shortcut for each), and **Turn Off During Window
+Mode** then turns Stage Manager off when the first device starts Window mode
+and back on about 25 seconds after the last one leaves. The shortcuts are
+made with your current Dock and recent-apps settings so running them leaves
+those alone. If you change those settings later, or made the shortcuts with
+an older MeowDisplay, Settings asks you to delete the two shortcuts in
+Shortcuts and set them up again, and nothing switches on its own until you
+do. Your own Shortcuts automations for Stage Manager run each time MeowDisplay
+switches it. Settings shows what MeowDisplay last did and whether it still
+needs to turn Stage Manager back on.
+
 ### Audio
 
 Audio is off by default and started from the receiving device: turn on

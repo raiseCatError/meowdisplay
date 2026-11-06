@@ -1475,8 +1475,9 @@ app is frontmost on the Mac) or `otherWindowFocused`; keys are not
 delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
 `limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`. `stageManager` is true while Stage Manager is on; `stageManagerControl` is
 `ready` (the Mac can switch it: the owner made its two shortcuts), `setup`
-(not yet: the device explains where to set it up instead of offering Turn
-Off) or `failed` (macOS didn't apply the last change, for a few seconds).
+(not yet, or they need setting up again so they leave the Mac's Dock alone:
+the device explains where to set it up instead of offering Turn Off) or
+`failed` (the Mac didn't make the last change, for a few seconds).
 
 `workspaceFocus {tile, raise?}` makes a tile active (the Mac raises its window
 when input is granted). `raise: false` (optional; older Macs ignore it and

@@ -89,6 +89,9 @@ screens cannot pass this check unnoticed. See
   pairing again.
 - No account, email, or personal identifier is required or collected to use
   MeowDisplay.
+- Stage Manager bookkeeping is kept in the Mac app's preferences: whether
+  MeowDisplay still owes turning Stage Manager back on, the format and the
+  Dock settings its two shortcuts were made with, and the last change.
 
 ## Sessions, input and revocation
 
@@ -115,6 +118,15 @@ other end. It does not by itself admit a session:
   session, and drop remembered acceptances; answering a prompt afterwards
   does nothing. Forget also removes the pin, so a stale in-memory copy of the
   trust store can't bring it back.
+- **Stage Manager changes only through the owner's shortcuts.** The Mac
+  runs only the two shortcuts the owner added (by exact name; MeowDisplay
+  never imports silently, edits or deletes shortcuts). A device needs control
+  and a confirmation on the device to turn Stage Manager off; switching it
+  for Window mode is the owner's opt-in setting on the Mac, limited to 4
+  automatic changes in 10 minutes. Shortcuts whose Dock settings no longer
+  match the Mac's are never run automatically or for a device. Every change
+  and its result are shown in the Mac's Settings. The owner's own Shortcuts
+  automations for Stage Manager run on each change.
 - **Automatic reconnection never becomes a user request.** Remote Access
   recovery tells the Mac it is automatic, so it can never raise an approval
   prompt; only an explicit Connect can. Discovery metadata (Bonjour names

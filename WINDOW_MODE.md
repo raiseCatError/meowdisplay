@@ -199,6 +199,38 @@ holding the old one is refused, never pointed at the new one.
   `GloballyEnabled` preference has no visible effect (measured). A window
   that returns to the stage gets a fresh stream within about 2 s.
   Evidence: the integration folder's RESEARCH-2026-10-30-stage-manager-capture-lab.md.
+- **When Stage Manager is switched.** One owner on the Mac
+  (`StageManagerController`) does all of it, one step at a time:
+  - With **Turn Off During Window Mode** on (off by default), the *first*
+    device to start Window mode turns it off. It comes back on only after the
+    *last* device leaves, 25 s later; a device starting Window mode within
+    those 25 s cancels that, so reconnects and Mirror ↔ Window switches don't
+    toggle it. A device's confirmed **Turn Off** is turned back on the same way.
+  - MeowDisplay notes that it owes turning it back on *before* it turns it
+    off, and clears that only once Stage Manager is on again (also when the
+    owner turns it on). A quit or crash leaves it owed: the next launch turns
+    it back on after the same 25 s. A failed attempt stays owed and Settings
+    shows it, with the exit code and the error; it isn't retried in a loop.
+  - At most 4 automatic changes in 10 minutes. After that, automatic
+    switching pauses for 10 minutes and Settings says so; an owed restore is
+    tried once when the pause ends.
+  - **The Dock.** "Set Stage Manager" also writes Show Dock (Dock hiding) and
+    Show Recent Apps on every run, and both default to on, so shortcuts that
+    leave them unset turn Dock hiding off each time (measured in the Dock's
+    log). Setup now writes both into the shortcuts with the owner's current
+    settings and remembers them. Shortcuts from before this, or made for
+    settings that have since changed, never run automatically, and devices see
+    `setup` instead of Turn Off: Settings asks the owner to delete the two
+    shortcuts in Shortcuts and set them up again (MeowDisplay never deletes
+    or edits shortcuts). An owed restore then waits for the owner's **Turn
+    Stage Manager On** in Settings, which first says what the old shortcuts
+    also change. After every run the Dock settings are read back, and any
+    change is shown in Settings.
+  - Settings ▸ System ▸ Stage Manager shows the last change (automatic or
+    asked, result, exit code, the first error line), whether a restore is
+    owed and when it runs, and any pause.
+  - The owner's own Shortcuts automations that run when Stage Manager turns
+    on or off run each time MeowDisplay switches it.
 
 ## Turning it off
 
