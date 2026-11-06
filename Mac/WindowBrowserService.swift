@@ -53,6 +53,35 @@ struct ThumbnailScheduler: Equatable {
     mutating func forget(_ id: UInt32) { cache[id] = nil; pending.removeAll { $0 == id } }
 }
 
+/// Which asked-for app icons to send (tested). The receiver asks only for icons it lacks, so an
+/// ask is answered once per connection; asked again later (the receiver restarted while this
+/// session stayed, or the icon was lost on the way) it's sent again, at most every `resendAfter`.
+/// An app the Mac has no icon for is tried again only after `unavailableRetry`.
+struct AppIconSendLedger: Equatable {
+    static let resendAfter: TimeInterval = 10
+    static let unavailableRetry: TimeInterval = 60
+    static let batch = 48
+
+    private(set) var attemptedAt: [String: TimeInterval] = [:]
+    private(set) var unavailable: Set<String> = []
+
+    /// The bundles to look up and send now (at most `batch` of the ask, in order).
+    mutating func admit(_ bundles: [String], now: TimeInterval) -> [String] {
+        var out: [String] = []
+        for b in bundles.prefix(Self.batch) where !b.isEmpty && !out.contains(b) {
+            if let at = attemptedAt[b], now - at < (unavailable.contains(b) ? Self.unavailableRetry : Self.resendAfter) { continue }
+            attemptedAt[b] = now
+            out.append(b)
+        }
+        return out
+    }
+
+    mutating func noIcon(_ bundle: String) { unavailable.insert(bundle) }
+    mutating func sent(_ bundle: String) { unavailable.remove(bundle) }
+    /// A new admitted connection (or a resume): whatever the receiver asks for next is sent.
+    mutating func reset() { self = AppIconSendLedger() }
+}
+
 /// One Mac display a tile (or Stage Peek's Displays row) can show.
 struct DisplayCatalogEntry: Equatable, Sendable {
     var displayID: UInt32
@@ -89,7 +118,7 @@ final class WindowBrowserService: @unchecked Sendable {
     private var inFlight = 0
     private static let maxConcurrentStills = 2
     private var lastAppRevisionSent: Int?
-    private var iconsSent = Set<String>()
+    private var icons = AppIconSendLedger()
 
     /// A message for the receiver (the sender gates it on admission).
     var sendMessage: (([String: Any]) -> Void)?
@@ -103,8 +132,15 @@ final class WindowBrowserService: @unchecked Sendable {
 
     init(hostID: String) { self.hostID = hostID }
 
-    /// Paused, Video Off or not admitted: no listings or stills leave the Mac.
-    func setActive(_ value: Bool) { queue.async { [self] in active = value } }
+    /// Paused, Video Off or not admitted: no listings or stills leave the Mac. Active again (a new
+    /// admitted connection, or a resume): icons are answered afresh, since the receiver may have
+    /// restarted and lost them while this session stayed.
+    func setActive(_ value: Bool) {
+        queue.async { [self] in
+            if value, !active { icons.reset() }
+            active = value
+        }
+    }
 
     func stop() {
         queue.async { [self] in
@@ -142,8 +178,8 @@ final class WindowBrowserService: @unchecked Sendable {
                 let width = min(max(obj["max"] as? Int ?? 240, 64), 640)
                 requestStills(Array(ids.prefix(48)), width: width)
                 if let bundles = obj["icons"] as? [String] {
-                    let fresh = bundles.prefix(48).filter { iconsSent.insert($0).inserted }   // each icon once per session
-                    if !fresh.isEmpty { sendIcons(Array(fresh)) }
+                    let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
+                    if !fresh.isEmpty { sendIcons(fresh) }
                 }
                 if let ds = obj["displays"] as? [Int] { sendDisplayStills(ds.compactMap { UInt32(exactly: $0) }.prefix(8), width: width) }
             case WireMessage.appCatalogRequest:
@@ -395,10 +431,17 @@ final class WindowBrowserService: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             for bundle in bundles {
                 guard AppCatalog.shared.isKnown(bundle) || NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil,
-                      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { continue }
-                guard let png = Self.png(NSWorkspace.shared.icon(forFile: url.path), side: 96) else { continue }
+                      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle),
+                      let png = Self.png(NSWorkspace.shared.icon(forFile: url.path), side: 96) else {
+                    self?.queue.async { self?.icons.noIcon(bundle) }
+                    continue
+                }
                 let msg: [String: Any] = ["type": WireMessage.appIcon, "bundle": bundle, "png": png.base64EncodedString()]
-                self?.queue.async { if self?.active == true { self?.sendMessage?(msg) } }
+                self?.queue.async {
+                    guard let self, self.active else { return }
+                    self.icons.sent(bundle)
+                    self.sendMessage?(msg)
+                }
             }
         }
     }

@@ -364,15 +364,14 @@ struct StagePeekOverlay: View {
                 .foregroundStyle(.white)
             } else if let thumbnail {
                 Image(decorative: thumbnail, scale: 1).resizable().scaledToFill()
-            } else if let icon {
-                Image(decorative: icon, scale: 1).resizable().frame(width: 44, height: 44)
+            } else if let window {
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 44)
             } else {
                 Image(systemName: "macwindow").font(.title2).foregroundStyle(Color.white.opacity(0.6))
             }
-            if let icon, thumbnail != nil {
+            if let window, thumbnail != nil {
                 // The app's icon at the card's bottom-left, like Stage Manager.
-                Image(decorative: icon, scale: 1).resizable()
-                    .frame(width: roomy ? 30 : 24, height: roomy ? 30 : 24)
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: roomy ? 30 : 24)
                     .shadow(color: .black.opacity(0.5), radius: 3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
@@ -622,7 +621,7 @@ struct StagePeekOverlay: View {
         let icon = window.flatMap { model.icons[$0.bundleID] }
         let width = min(200, safe.width - 24)
         return HStack(spacing: 8) {
-            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
+            if let window { WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 22) }
             VStack(alignment: .leading, spacing: 1) {
                 Text(window?.app ?? String(localized: "Full Desktop")).font(.footnote.weight(.semibold)).lineLimit(1)
                 if window == nil {

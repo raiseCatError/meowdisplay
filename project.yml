@@ -336,6 +336,7 @@ targets:
       - Shared/ControlChunks.swift
       - Shared/AppMenu.swift
       - Shared/WorkspaceBrowse.swift
+      - Shared/PaneLabelInteraction.swift
       - Shared/ReceiverVideoTelemetry.swift
       - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift
