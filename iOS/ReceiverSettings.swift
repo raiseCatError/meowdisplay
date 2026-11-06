@@ -980,7 +980,7 @@ private struct ControlSettingsPage: View {
                                  ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
                                  : String(localized: "Normal uses the whole edge.")) : "")
                      + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")
-                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, shake it to switch between the two, or release it on Float."))
+                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, draw a circle with it (about a second) to switch between the two, or release it on Float."))
             }
             Section {
                 Picker("Control Profile", selection: Binding(

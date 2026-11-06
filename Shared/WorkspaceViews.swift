@@ -18,6 +18,40 @@ private extension WorkspaceRect {
     }
 }
 
+extension WorkspaceRect {
+    /// Points to points (the layering helpers work in picture points).
+    init(_ r: CGRect) { self.init(x: Double(r.minX), y: Double(r.minY), width: Double(r.width), height: Double(r.height)) }
+    var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+}
+
+/// An alpha mask: opaque over `size`, with `holes` (in the masked view's own coordinates) cut out.
+/// Lets an outline step aside where a float covers it without changing its shape elsewhere.
+struct WorkspaceHoleMask: View {
+    var size: CGSize
+    var holes: [CGRect]
+    var cornerRadius: CGFloat = 10
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle().fill(Color.black).frame(width: size.width, height: size.height)
+            ForEach(holes.indices, id: \.self) { i in
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(Color.black)
+                    .frame(width: max(holes[i].width, 0), height: max(holes[i].height, 0))
+                    .offset(x: holes[i].minX, y: holes[i].minY)
+                    .blendMode(.destinationOut)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .compositingGroup()
+    }
+}
+
+/// Several rectangles as one shape (a touch area with holes cut out of it).
+struct WorkspaceRectsShape: Shape {
+    var rects: [CGRect]
+    func path(in rect: CGRect) -> Path { Path { $0.addRects(rects) } }
+}
+
 /// Tile borders, state badges, title pills with the tile menu, drag-to-move
 /// with a drop preview, and divider grips while arranging. `picture` is where
 /// the Mac's picture is drawn, in this view's coordinates.
@@ -249,6 +283,9 @@ struct WorkspaceChromeView: View {
             PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
+                // A float's window is in the video, under this outline: the outline steps aside
+                // where a float (or its title) is, instead of showing through it.
+                .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
                 .allowsHitTesting(false)
                 // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
                 // never a tap through to the Mac.
@@ -272,9 +309,17 @@ struct WorkspaceChromeView: View {
         .position(x: rect.midX, y: rect.midY)
     }
 
-    /// Whether a shown floating pane overlaps `r` (on screen).
+    /// Whether a shown floating pane (its window or its title pill) overlaps `r` (on screen).
     private func coveredByFloat(_ r: CGRect, _ frames: WorkspaceFrames) -> Bool {
-        frames.floats.contains { frames.tiles[$0].map { $0.onScreen(picture).intersects(r) } ?? false }
+        WorkspaceFloatLayering.isCovered(WorkspaceRect(r), by: floatOccluders(frames).map(WorkspaceRect.init))
+    }
+
+    /// What the shown floats cover on screen: each one's window and title pill.
+    private func floatOccluders(_ frames: WorkspaceFrames) -> [CGRect] {
+        frames.floats.compactMap { frames.tiles[$0]?.onScreen(picture) }.flatMap { r -> [CGRect] in
+            let w = WorkspaceRect(r)
+            return [r, WorkspaceFloatLayering.pillBounds(w).cgRect]
+        }
     }
 
     /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
@@ -852,10 +897,18 @@ struct WorkspaceChromeView: View {
     /// windows' own edges still get their touches; a short tap there does nothing.
     @ViewBuilder
     private func dividerHolds(_ frames: WorkspaceFrames) -> some View {
+        // A divider takes touches only where no float covers it: a touch on a float drawn over a
+        // divider goes to that float's window, never to the divider under it. One view per divider
+        // (its identity never changes while it's held), its touch shape cut around the floats.
+        let covers = floatOccluders(frames).map(WorkspaceRect.init)
         ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, divider in
             let r = divider.hitRect.onScreen(picture)
             let horizontal = divider.axis == .horizontal
             let held = heldDivider == i
+            let size = CGSize(width: horizontal ? min(r.width, 14) : r.width, height: horizontal ? r.height : min(r.height, 14))
+            let strip = CGRect(x: r.midX - size.width / 2, y: r.midY - size.height / 2, width: size.width, height: size.height)
+            let parts = WorkspaceFloatLayering.uncovered(WorkspaceRect(strip), alongX: !horizontal, by: covers)
+                .map { $0.cgRect.offsetBy(dx: -strip.minX, dy: -strip.minY) }
             ZStack {
                 Color.white.opacity(0.001)
                 if held {
@@ -863,8 +916,8 @@ struct WorkspaceChromeView: View {
                         .frame(width: horizontal ? 6 : 44, height: horizontal ? 44 : 6)
                 }
             }
-            .frame(width: horizontal ? min(r.width, 14) : r.width, height: horizontal ? r.height : min(r.height, 14))
-            .contentShape(Rectangle())
+            .frame(width: size.width, height: size.height)
+            .contentShape(held ? WorkspaceRectsShape(rects: [CGRect(origin: .zero, size: size)]) : WorkspaceRectsShape(rects: parts))
             .position(x: r.midX, y: r.midY)
             .gesture(LongPressGesture(minimumDuration: 0.35, maximumDistance: 10)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("workspace")))
@@ -1268,13 +1321,20 @@ struct WorkspaceDropOverlay: View {
                 let target = model.dropTarget(forGlobal: d.location)
                 if let target { preview(target, item: d.item) }
                 if d.placement == .float, let f = model.floatDropPreview(forGlobal: d.location) { floatPreview(f) }
-                if model.canPlace(d.item, .float) || d.placement == .float { placementChip(d) }
+                // A float being docked shows it too: circling again turns it back into the float.
+                if model.canPlace(d.item, .float) || d.placement == .float || d.isFloat { placementChip(d) }
+                // Circling toward the other placement: a ring that fills just above the finger.
+                if model.placementSwitchProgress > 0, model.pictureGlobal.width > 0 {
+                    WorkspacePlacementRing(progress: model.placementSwitchProgress, toFloating: d.placement == .pane)
+                        .position(x: d.location.x - model.pictureGlobal.minX + picture.minX,
+                                  y: d.location.y - model.pictureGlobal.minY + picture.minY - WorkspacePlacementRing.lift)
+                }
                 let removable = model.canDropToRemove
                 let floatable = model.canDropToFloat
                 HStack(spacing: 12) {
                     cancelZone(over: model.overCancelZone(d.location), short: removable || floatable)
                     if floatable { floatZone(over: model.overFloatZone(d.location)) }
-                    if removable { removeZone(over: model.overRemoveZone(d.location)) }
+                    if removable { removeZone(over: model.overRemoveZone(d.location), float: d.isFloat) }
                 }
                 .padding(.horizontal, 12)
                 .frame(maxWidth: picture.width)
@@ -1346,13 +1406,13 @@ struct WorkspaceDropOverlay: View {
             .accessibilityHidden(true)
     }
 
-    /// Pane or Floating: what a release does now. A shake while holding switches it.
+    /// Pane or Floating: what a release does now. Circling while holding switches it.
     private func placementChip(_ d: WorkspaceDrag) -> some View {
         let floating = d.placement == .float
         return HStack(spacing: 6) {
             Image(systemName: floating ? "macwindow.on.rectangle" : "rectangle.split.2x1").accessibilityHidden(true)
             Text(floating ? "Floating" : "Pane").fontWeight(.semibold)
-            Text("· Shake to switch").foregroundStyle(.white.opacity(0.7))
+            Text("· Circle to switch").foregroundStyle(.white.opacity(0.7))
         }
         .font(.caption)
         .foregroundStyle(.white)
@@ -1364,7 +1424,7 @@ struct WorkspaceDropOverlay: View {
         .accessibilityHidden(true)
     }
 
-    /// Release here to float the window instead (no shake needed).
+    /// Release here to float the window instead (no circling needed).
     private func floatZone(over: Bool) -> some View {
         dropZone(over ? String(localized: "Release to Float") : String(localized: "Float"),
                  symbol: "macwindow.on.rectangle", over: over,
@@ -1384,9 +1444,11 @@ struct WorkspaceDropOverlay: View {
         }
     }
 
-    /// Takes the pane out of this device's layout. Never closes, minimizes or quits the Mac window.
-    private func removeZone(over: Bool) -> some View {
-        dropZone(over ? String(localized: "Release to Remove") : String(localized: "Remove from Layout"),
+    /// Takes the pane out of this device's layout, or a float being docked off this device (the
+    /// float menu's own Remove from This Device). Never closes, minimizes or quits the Mac window.
+    private func removeZone(over: Bool, float: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Remove")
+                      : (float ? String(localized: "Remove from This Device") : String(localized: "Remove from Layout")),
                  symbol: "rectangle.badge.minus", over: over,
                  fill: over ? Color.red.opacity(0.85) : Color(red: 0.35, green: 0.06, blue: 0.06, opacity: 0.72)) {
             model.removeZoneGlobal = $0
@@ -1652,4 +1714,32 @@ struct PaneMenuBar: View {
 private struct PaneMenuHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Circling while holding a drag switches it between Pane and Floating: this ring, just above the
+/// finger (where the finger doesn't hide it), fills as the loops add up and shows what it will
+/// switch to. Decoration only: the placement chip and its haptic say what happened.
+struct WorkspacePlacementRing: View {
+    var progress: Double
+    /// What it switches to: Floating (true) or Pane.
+    var toFloating: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let lift: CGFloat = 64
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.black.opacity(0.55))
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 4)
+            Circle().trim(from: 0, to: min(max(progress, 0), 1))
+                .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: toFloating ? "macwindow.on.rectangle" : "rectangle.split.2x1")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+        }
+        .frame(width: 46, height: 46)
+        .shadow(color: .black.opacity(0.45), radius: 2)
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: progress)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }

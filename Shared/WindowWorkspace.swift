@@ -576,6 +576,8 @@ struct WorkspaceBackdrop: @unchecked Sendable {
     var image: CGImage
     /// From before macOS paused the window.
     var stale: Bool
+    /// When this device received it.
+    var receivedAt = Date()
 }
 
 // MARK: - Layout tree
@@ -1582,6 +1584,12 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.last == layout { return }
         past.append(layout)
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
+    }
+
+    /// The last step recorded `layout` and the change came to nothing (a float's move cancelled
+    /// back to where it was): no undo step for it.
+    mutating func forget(_ layout: WorkspaceLayout) {
+        if past.last == layout { past.removeLast() }
     }
 
     /// The layout before the last change. With `current`, that change can be redone.
