@@ -384,6 +384,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private let queue = DispatchQueue(label: "meow.workspace.engine", qos: .userInteractive)
     /// When the last Stage Manager change a device asked for didn't take effect (sent as "failed" for a few seconds).
     private var stageManagerFailedAt: TimeInterval?
+    /// Stage Manager's one owner (counts Window-mode devices; tests pass a stand-in).
+    private let stageManager: any StageManagerCoordinating
+    /// This engine's place in that count, from start to stop.
+    private var stageManagerHold: StageManagerHold?
     /// Mission Control is open on the Mac: macOS pauses every window capture until it closes, so
     /// panes say so and nothing restarts (no reconnect loop); they resume when it closes.
     private var missionControlOpen = false
@@ -460,13 +464,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// with `layer: "float"` may overlap. Fixed for the session.
     let allowFloats: Bool
 
-    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false) {
+    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false,
+         stageManager: any StageManagerCoordinating = StageManagerController.shared) {
         self.hostID = hostID
         self.browser = browser
+        self.stageManager = stageManager
         self.canvas = canvas
         self.streamFPS = max(fps, 1)
         self.allowFloats = allowFloats
         targeting.canvas = canvas
+    }
+
+    deinit {
+        // Dropped without stop(): still leave the count, or Stage Manager would never come back on.
+        if let hold = stageManagerHold { stageManager.windowModeEnded(hold) }
     }
 
     /// The capture rate for `a`: the shared budget, lower for a pane floats hide, at least the
@@ -487,11 +498,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     self?.queue.async { self?.missionControlChanged(open) }
                 }
             }
-            if StageManagerSwitch.offDuringWindowMode {
-                StageManagerSwitch.inBackground({ StageManagerSwitch.turnOffForWindowMode() }) { [weak self] in self?.queue.async { self?.refreshSoon() } }
-            } else {
-                StageManagerSwitch.inBackground { _ = StageManagerSwitch.shortcutsReady() }   // for the state message
-            }
+            // Counted: with the owner's setting on, only the first device turns Stage Manager off.
+            stageManagerHold = stageManager.windowModeStarted { [weak self] in self?.queue.async { self?.refreshSoon() } }
             compositor?.resize(to: canvas)
             browser.onSnapshot = { [weak self] snap in self?.queue.async { self?.apply(snap) } }
             browser.liveFrame = { [weak self] id in self?.liveWholeFrame(id) }
@@ -514,7 +522,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     func stop(completion: (@Sendable () -> Void)? = nil) {
         queue.async { [self] in
-            if running { StageManagerSwitch.inBackground { StageManagerSwitch.restoreIfTurnedOffByUs() } }
+            // The last device to leave restores it (after a grace period a new start cancels).
+            if let hold = stageManagerHold { stageManager.windowModeEnded(hold); stageManagerHold = nil }
             running = false
             stopped = true
             if let watch = missionControlWatch { MissionControlMonitor.shared.removeListener(watch); missionControlWatch = nil }
@@ -1197,11 +1206,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             "limit": WorkspaceLayout.maximumTiles,
         ]
         // Stage Manager on or off: receivers offer Turn Off (owner-confirmed) and Turn On, control only.
-        let stageManagerOn = StageManagerSwitch.isOnRecently
+        let stageManagerOn = stageManager.isOnRecently
         msg["stageManagerState"] = stageManagerOn ? "on" : "off"
         if stageManagerOn { msg["stageManager"] = true }   // older receivers only read this
-        // "setup": the owner hasn't made the two shortcuts yet, so a device explains instead of offering it.
-        msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
+        // "setup": the owner hasn't made the two shortcuts yet (or they need setting up again so they
+        // leave the Dock alone), so a device explains instead of offering it.
+        msg["stageManagerControl"] = stageManager.wireControl
         if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         if StageStripAccess.isAvailable { msg["stageAddAvailable"] = true }
         // Receivers say video is paused and offer Exit Mission Control (control only).
@@ -1224,19 +1234,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         switch action {
         case "stageManager":
             // Confirmed on the device by a person with control (the caller checks the grant).
-            // Off: remembered and turned back on when Window mode ends. On: turns it on (from the
+            // Off: remembered and turned back on after Window mode ends. On: turns it on (from the
             // device's Settings), and then there is nothing left to restore.
             // Shortcuts take a moment: never on this queue. A change macOS didn't apply is reported.
             let off = obj["on"] as? Bool == false
-            StageManagerSwitch.inBackground({ [weak self] in
-                let ok = off ? StageManagerSwitch.turnOffForWindowMode() : StageManagerSwitch.turnOnFromDevice()
+            stageManager.deviceAsked(on: !off) { [weak self] ok in
                 self?.queue.async {
                     guard let self else { return }
                     self.stageManagerFailedAt = ok ? nil : ProcessInfo.processInfo.systemUptime
                     self.refreshSoon()
                     self.sendState(force: true)
                 }
-            })
+            }
         case "missionControl":
             // Exit Mission Control, asked by a person with control (the caller checks the grant).
             // The Mac checks it is open right now and only then sends Escape: never a blind toggle.

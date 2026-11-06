@@ -80,7 +80,9 @@ final class WindowWorkspaceEngineIntegrationTests: XCTestCase {
         let browser = WindowBrowserService(hostID: "test-mac")
         browser.includeOwnProcessForTesting = true
         browser.sendMessage = { box.add($0) }
-        let engine = WindowWorkspaceEngine(hostID: "test-mac", canvas: CGSize(width: 960, height: 480), fps: 30, browser: browser)
+        // A stand-in for Stage Manager: a test never runs the owner's shortcuts.
+        let engine = WindowWorkspaceEngine(hostID: "test-mac", canvas: CGSize(width: 960, height: 480), fps: 30, browser: browser,
+                                           stageManager: StageManagerStandIn())
         engine.deliverFrame = { box.add($0) }
         engine.sendMessage = { box.add($0) }
         engine.start()
