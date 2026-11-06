@@ -147,7 +147,29 @@ struct DemoWindowModeView: View {
     /// Where the picture is, in this view's coordinates.
     let area: CGRect
     let inputAllowed: Bool
+    /// The screen's safe area (this view's coordinates); nil: the whole picture.
+    var safeArea: CGRect?
+    /// The screen and the receiver's controls (global): tucked floats' strips keep clear of them
+    /// and of this view's toolbar, as in a live session.
+    var reservations = WorkspaceEdgeReservations()
     var onShowDesktop: () -> Void = {}
+    /// The toolbar (global).
+    @State private var toolbarFrame: CGRect = .zero
+    @State private var toolbarHeight: CGFloat = 40
+
+    private var safe: CGRect {
+        guard let s = safeArea, !s.isNull, !s.isEmpty else { return area }
+        return s
+    }
+
+    /// Above the band at the picture's bottom where tucked floats' strips take touches, so a
+    /// float thrown at the bottom edge waits there at full length, as it would in a session.
+    private var toolbarCentreY: CGFloat {
+        let bottom = min(area.maxY, safe.maxY, reservations.screen.height > 0
+                         ? reservations.screen.height - CGFloat(WorkspaceFloatGeometry.systemEdgeClearance) : area.maxY)
+        let y = bottom - CGFloat(WorkspaceFloatGeometry.touchDepth + WorkspaceFloatGeometry.tabSpacing) - 4 - toolbarHeight / 2
+        return max(y, area.minY + toolbarHeight / 2)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -165,11 +187,24 @@ struct DemoWindowModeView: View {
                 .accessibilityLabel(Text("Sample Mac windows"))
                 .accessibilityValue(Text("\(workspace.drawn.count) windows drawn"))
                 .accessibilityIdentifier("demoWindowPicture")
-            WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: area)
+            WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: safe)
             toolbar
-                .position(x: area.midX, y: area.maxY - 30)
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { toolbarFrame = g.frame(in: .global); toolbarHeight = g.size.height }
+                        .onChange(of: g.frame(in: .global)) { toolbarFrame = $0; toolbarHeight = $0.height }
+                })
+                .position(x: area.midX, y: toolbarCentreY)
         }
-        .onAppear { workspace.start() }
+        .onAppear { workspace.start(); publishReservations() }
+        .onChange(of: reservations) { _ in publishReservations() }
+        .onChange(of: toolbarFrame) { _ in publishReservations() }
+    }
+
+    private func publishReservations() {
+        var r = reservations
+        if !toolbarFrame.isEmpty { r.controls.append(toolbarFrame) }
+        if model.edgeReservationsGlobal != r { model.edgeReservationsGlobal = r }
     }
 
     /// What the sample Mac draws, in its paint order.

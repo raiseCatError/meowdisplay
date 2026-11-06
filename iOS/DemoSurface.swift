@@ -28,6 +28,9 @@ struct DemoReceiverScreen: View {
     @State private var bannerFrame: CGRect?
     /// Window view with sample windows (floating windows, tucking, docking), instead of the desktop.
     @State private var windowView = false
+    /// Where the control tray and its groups are (this view's coordinates): tucked floats' strips
+    /// give way to them, as in a live session.
+    @State private var controlFrames: [CGRect] = []
     @StateObject private var windowDemo = DemoWindowWorkspace(defaults: DemoSession.preferenceDefaults(demoActive: true))
 
     init(demo: DemoSession, store: ReceiverControlStore, showSettings: Binding<Bool>,
@@ -60,7 +63,13 @@ struct DemoReceiverScreen: View {
             ZStack(alignment: .topLeading) {
                 Color(white: 0.03).ignoresSafeArea()
                 if windowView {
+                    // The screen's safe area and what strips keep clear of, as a live session gives them.
+                    let origin = geo.frame(in: .global).origin
                     DemoWindowModeView(workspace: windowDemo, model: windowDemo.model, area: area, inputAllowed: demo.inputAllowed,
+                                       safeArea: insets.safeRect(in: geo.size).intersection(area),
+                                       reservations: WorkspaceEdgeReservations(
+                                           screen: CGRect(origin: origin, size: geo.size),
+                                           controls: controlFrames.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) }),
                                        onShowDesktop: { withAnimation(.easeInOut(duration: 0.2)) { windowView = false } })
                 } else {
                 if demo.videoEnabled {
@@ -118,7 +127,7 @@ struct DemoReceiverScreen: View {
                     reservedRegions: ControlReservedRegion.active(in: geo)
                         + (bannerFrame.map { [ControlReservedRegion(kind: .occlusion, frame: $0)] } ?? []),
                     haptics: haptics,
-                    onOccupiedFramesChange: { _ in },
+                    onOccupiedFramesChange: { controlFrames = $0 },
                     onCanvasChange: { padCanvas = $0 },
                     surfaceOrigin: canvas.origin)
                 chrome(canvas: canvas, insets: insets)
