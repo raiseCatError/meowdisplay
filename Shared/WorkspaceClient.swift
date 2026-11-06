@@ -461,7 +461,10 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var layout = WorkspaceLayout()
     @Published private(set) var stacked: [String] = []
     @Published private(set) var capacity = 1
-    @Published private(set) var remote: WorkspaceStateMessage?
+    @Published private(set) var remote: WorkspaceStateMessage? {
+        // Folded Mission Control notices last only while it stays open.
+        didSet { if remote?.missionControlOpen != true, !missionControlFolded.isEmpty { missionControlFolded = [] } }
+    }
     /// Shown for a few seconds after each connection: whether the Mac's Privacy Shield is on.
     @Published private(set) var privacyShieldNotice: Bool?
     private var privacyNoticeClear: DispatchWorkItem?
@@ -1019,8 +1022,49 @@ final class WorkspaceModel: ObservableObject {
         _ = send(WorkspaceRequests.stageManager(on: false))
     }
 
-    /// Mission Control is open on the Mac (Window mode): every paused pane says so.
+    /// Mission Control is open on the Mac (Window mode).
     var missionControlOpen: Bool { remote?.missionControlOpen == true }
+
+    /// Mission Control holds this pane's or float's picture: a window (never a display: Full
+    /// Desktop keeps showing the Mac's screen, Mission Control and all) that the Mac reports
+    /// paused, waiting or retrying while it is open. Only these show its notice.
+    func missionControlPaused(_ id: String) -> Bool {
+        guard missionControlOpen, let source = layout.tiles[id]?.source, !source.isDisplay,
+              let status = tileState(id)?.status else { return false }
+        return [.paused, .waiting, .retrying].contains(status)
+    }
+
+    /// A paused tile's notice: in full, or folded by its × to a small status that brings it back.
+    enum MissionControlNotice: Equatable, Sendable { case full, folded }
+
+    func missionControlNotice(_ id: String) -> MissionControlNotice? {
+        guard missionControlPaused(id) else { return nil }
+        return missionControlFolded.contains(id) ? .folded : .full
+    }
+
+    /// Notices folded by their ×, until Mission Control closes (see `remote`).
+    @Published private(set) var missionControlFolded: Set<String> = []
+
+    /// The notice's ×: folds it on this device only. Nothing is sent; Mission Control stays open.
+    func foldMissionControlNotice(_ id: String) {
+        if missionControlPaused(id) { missionControlFolded.insert(id) }
+    }
+
+    /// The folded status tapped: the notice again.
+    func unfoldMissionControlNotice(_ id: String) { missionControlFolded.remove(id) }
+
+    /// Where a float's notice goes (screen points): centred on the float's visible part, about the
+    /// notice's size (compact; folded, just the status). nil when a float in front covers that spot:
+    /// it hides the notice as it hides the window.
+    nonisolated static func missionControlNoticeSpot(on float: CGRect, folded: Bool, within bounds: CGRect,
+                                                     inFront: [CGRect]) -> CGRect? {
+        let seen = float.intersection(bounds)
+        let visible = seen.isNull || seen.isEmpty ? float : seen
+        let size = folded ? CGSize(width: min(float.width, 190), height: 30)
+                          : CGSize(width: max(min(float.width - 12, 300), 140), height: 96)
+        let spot = CGRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2, width: size.width, height: size.height)
+        return inFront.contains { $0.intersects(spot) } ? nil : spot
+    }
 
     /// Exit Mission Control on the Mac (needs the Mac's grant; the Mac re-checks before Escape).
     func exitMissionControl() {
@@ -1028,9 +1072,8 @@ final class WorkspaceModel: ObservableObject {
         _ = send(WorkspaceRequests.exitMissionControl)
     }
 
-    /// What the Mission Control banner offers while Mission Control is open on the Mac (nil when
-    /// it isn't). One banner for the whole Window view, above every pane and float: a button inside
-    /// one pane could be hidden by a float, and floats never had one.
+    /// What a paused tile's notice (and its pane's menu and accessibility action) offers while
+    /// Mission Control is open on the Mac (nil when it isn't).
     enum MissionControlAction: Equatable, Sendable {
         /// This device has control: Exit Mission Control (the Mac re-checks before it presses Escape).
         case exit
@@ -1052,7 +1095,7 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
-    /// The banner's button: Exit with control, else ask for control (never a blind Escape).
+    /// The notice's button: Exit with control, else ask for control (never a blind Escape).
     func performMissionControlAction() {
         switch missionControlAction {
         case .exit?: exitMissionControl()
