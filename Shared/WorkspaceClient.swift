@@ -542,6 +542,8 @@ final class WorkspaceModel: ObservableObject {
     @Published var arranging = false
     @Published private(set) var hovered: String?
     @Published private(set) var thumbnails: [UInt32: CGImage] = [:]
+    /// When each tucked float's window was last asked for a still (`requestTuckedStills`).
+    private var tuckedStillAskedAt: [UInt32: Date] = [:]
     /// Stills the Mac could only answer with an older capture (minimized now, say).
     @Published private(set) var staleThumbnails: Set<UInt32> = []
     /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
@@ -641,8 +643,9 @@ final class WorkspaceModel: ObservableObject {
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
     /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
-    /// Tucked floats' edge handles (global), for anything that wants to know where they are.
-    /// Stage Peek doesn't dodge them any more: they keep clear of it (`edgeReservationsGlobal`).
+    /// Where tucked floats' edge handles take touches (global): the dividers' holds above them
+    /// leave them free. Stage Peek doesn't dodge them any more: they keep clear of it
+    /// (`edgeReservationsGlobal`).
     @Published var floatHandlesGlobal: [CGRect] = []
     /// What tucked floats' edge handles keep clear of (global), set by the app next to where Stage
     /// Peek learns what to avoid: the screen (its top and bottom belong to the system's own edge
@@ -885,6 +888,7 @@ final class WorkspaceModel: ObservableObject {
             clipboard.setAvailable(false)
             // A new session's frames carry no echo of this one's views; stills are re-asked.
             composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
+            tuckedStillAskedAt = [:]
             zoomGesture = nil; zoomPreview = nil
             requestedFocus = nil; floatGestureStart = nil; drag = nil
             floatMove = nil; dockingFloat = nil
@@ -929,6 +933,7 @@ final class WorkspaceModel: ObservableObject {
         if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
+        requestTuckedStills()
         requestThumbnails()
     }
 
@@ -2542,6 +2547,23 @@ extension WorkspaceModel {
         let waiting = frame ?? WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: offset, in: size)
         edit { $0.tuckingFloat(id, edge: edge, offset: WorkspaceFloatMotion.along(waiting, edge), frame: waiting) }
         refocus(after: id)
+    }
+
+    /// A tucked float isn't captured, so one without a still of its own (after a reconnect, which
+    /// drops the stills) gets its window's thumbnail instead, as Stage Peek asks for them (read
+    /// only): its strip then shows the window itself, not only its icon. Asked again only after a
+    /// few seconds.
+    private func requestTuckedStills() {
+        guard windowMode, let c = catalog else { return }
+        let now = Date()
+        let ids = saved.floats.filter { $0.tuck != nil && backdrop($0.tile) == nil }
+            .compactMap { saved.tiles[$0.tile]?.source }
+            .filter { s in !s.isDisplay && thumbnails[s.windowID] == nil && c.windows.contains { $0.id == s.windowID } }
+            .map(\.windowID)
+            .filter { id in tuckedStillAskedAt[id].map { now.timeIntervalSince($0) > 5 } ?? true }
+        guard !ids.isEmpty else { return }
+        for id in ids { tuckedStillAskedAt[id] = now }
+        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: 560, icons: []))
     }
 
     /// A tucked float comes back with a slide drawn on this device: it's shown again now (so its
