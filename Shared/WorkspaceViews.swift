@@ -473,17 +473,43 @@ struct WorkspaceChromeView: View {
                 })
                 .onDisappear { labelStripEnd[id] = nil }
             }
-            if active, model.remote?.hostFocus.isMismatch == true {
-                Button { model.focus(id) } label: {
-                    Text(model.remote?.hostFocus == .otherWindowFocused
-                         ? "Typing paused: another window is in front on the Mac. Tap to resume."
-                         : "Typing paused: another app is in front on the Mac. Tap to resume.")
-                        .font(.caption).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+            VStack(spacing: 6) {
+                windowFrameStatus(id)
+                if active, model.remote?.hostFocus.isMismatch == true {
+                    Button { model.focus(id) } label: {
+                        Text(model.remote?.hostFocus == .otherWindowFocused
+                             ? "Typing paused: another window is in front on the Mac. Tap to resume."
+                             : "Typing paused: another app is in front on the Mac. Tap to resume.")
+                            .font(.caption).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(8)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(8)
+        }
+    }
+
+    /// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
+    @ViewBuilder
+    private func windowFrameStatus(_ id: String) -> some View {
+        if model.isResizingOnMac(id) {
+            HStack(spacing: 6) {
+                ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small)
+                Text("Resizing the window on the Mac…").font(.caption).foregroundStyle(.white)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+        } else if let notice = model.windowFrameNotice, notice.tile == id {
+            Button { model.clearWindowFrameNotice() } label: {
+                Label(notice.message, systemImage: notice.isError ? "exclamationmark.triangle" : "checkmark.circle")
+                    .font(.caption).foregroundStyle(.white).multilineTextAlignment(.leading)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text("Dismisses this message."))
+            .accessibilityIdentifier("windowFrameNotice")
         }
     }
 
@@ -711,6 +737,18 @@ struct WorkspaceChromeView: View {
             }
             if isWindow {
                 Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
+                if model.offersWindowFrameOnMac(m.tile) {
+                    // The real Mac window, not this pane's picture: only from these items, never a gesture.
+                    let ready = model.canControlMac && !model.isResizingOnMac(m.tile)
+                    menuRow("Fill Window on Mac", "arrow.up.and.down.and.arrow.left.and.right",
+                            hint: "Resizes the window on the Mac to fill its screen, below the menu bar and clear of the Dock. Not full screen.",
+                            enabled: ready) { model.fillWindowOnMac(m.tile) }
+                    if model.canRestoreOnMac(m.tile) {
+                        menuRow("Restore Previous Size on Mac", "arrow.uturn.backward",
+                                hint: "Puts the window on the Mac back to the size and place it had before Fill Window on Mac.",
+                                enabled: ready) { model.restoreWindowOnMac(m.tile) }
+                    }
+                }
                 menuRow("Minimize on Mac", "minus.rectangle", enabled: inputAllowed) { model.minimizeRemoteWindow(m.tile) }
                 menuRow("Close Window on Mac…", "xmark.square", destructive: true, enabled: inputAllowed) { confirmClose = m.tile }
                 if !inputAllowed {

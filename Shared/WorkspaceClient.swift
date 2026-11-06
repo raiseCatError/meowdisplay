@@ -59,6 +59,45 @@ struct WindowCloseNotice: Equatable, Sendable {
     }
 }
 
+/// The outcome of one Fill Window on Mac / Restore Previous Size on Mac, worded for the person who
+/// asked (shown briefly on the pane). These change the real Mac window, unlike the pane's own
+/// Fill/Show Whole Window, which only changes how this device draws it.
+struct WindowFrameNotice: Equatable, Sendable {
+    var tile: String
+    var windowID: UInt32
+    var op: WindowFrameOp
+    /// nil: no answer from the Mac in time.
+    var result: WindowFrameResult?
+
+    var isError: Bool { !(result?.succeeded ?? false) }
+
+    var message: String {
+        switch result {
+        case .filled: return String(localized: "The window now fills its screen on the Mac.")
+        case .limited: return String(localized: "Resized on the Mac as far as the app allows.")
+        case .alreadyFilled: return String(localized: "The window already fills its screen on the Mac.")
+        case .restored: return String(localized: "The window is back to its previous size on the Mac.")
+        case .nothingToRestore: return String(localized: "There’s no previous size to restore on the Mac.")
+        case .changed: return String(localized: "The window was moved or resized on the Mac since, so its previous size wasn’t restored.")
+        case .displayChanged: return String(localized: "The display the window was on isn’t connected now, so nothing was moved.")
+        case .stale: return String(localized: "That window isn’t available on the Mac any more.")
+        case .ambiguous: return String(localized: "The Mac couldn’t tell which window this is, so nothing was moved.")
+        case .notResizable: return String(localized: "This window can’t be resized on the Mac.")
+        case .fullScreen: return String(localized: "The window is in full screen on the Mac. Exit full screen there first.")
+        case .offscreen: return String(localized: "The window is minimized, hidden or on another Space on the Mac.")
+        case .stageStrip: return String(localized: "The window is in Stage Manager’s side strip. Show it on the Mac first.")
+        case .missionControl: return String(localized: "Mission Control is open on the Mac. Close it and try again.")
+        case .privacyShield: return String(localized: "The Mac is asking for its password to remove the Privacy Shield. Try again after that.")
+        case .control: return String(localized: "Resizing Mac windows needs control of the Mac. Use Request Control first.")
+        case .accessibility: return String(localized: "The Mac needs Accessibility permission for MeowDisplay to resize windows.")
+        case .failed:
+            return op == .fill ? String(localized: "The Mac couldn’t resize the window.")
+                : String(localized: "The Mac couldn’t restore the window’s previous size.")
+        case nil: return String(localized: "The Mac didn’t confirm resizing the window.")
+        }
+    }
+}
+
 struct CatalogAppItem: Equatable, Sendable { var bundleID: String; var name: String; var hasWindows: Bool }
 struct InstalledAppItem: Equatable, Sendable { var bundleID: String; var name: String }
 
@@ -103,6 +142,8 @@ struct RemoteTileItem: Equatable, Sendable {
     var inStageStrip = false
     /// The Mac accepted it as a floating pane (`layer: "float"`).
     var isFloat = false
+    /// The Mac can put this window back to its size before Fill Window on Mac (`restore`).
+    var restorable = false
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -146,6 +187,8 @@ enum WorkspaceEvent: Sendable {
     case closeResult(windowID: UInt32, result: WindowCloseResult)
     /// Lock This Mac (PROTOCOL.md 6.16).
     case lockResult(LockMacResult)
+    /// Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10).
+    case frameResult(WindowFrameReply)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Unified Clipboard (PROTOCOL.md 6.15).
@@ -202,7 +245,8 @@ enum WorkspaceEvent: Sendable {
                                       status: (t["state"] as? String).flatMap(RemoteTileStatus.init(rawValue:)) ?? .waiting,
                                       app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
                                       attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false,
-                                      isFloat: t["layer"] as? String == "float")
+                                      isFloat: t["layer"] as? String == "float",
+                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false)
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -243,6 +287,8 @@ enum WorkspaceEvent: Sendable {
             return .closeResult(windowID: id, result: r)
         case LockMacWire.result:
             return str(obj, "result", 32).flatMap(LockMacResult.init(rawValue:)).map { .lockResult($0) }
+        case WindowFrameWire.result:
+            return WindowFrameReply.parse(obj).map { .frameResult($0) }
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case ClipboardWire.type:
@@ -543,6 +589,15 @@ final class WorkspaceModel: ObservableObject {
     /// What happened to the last Close Window (shown briefly over Stage Peek).
     @Published var closeNotice: WindowCloseNotice?
     private var closeRequest = 0
+    /// The Mac offers Fill Window on Mac / Restore Previous Size on Mac (`windowFrame`).
+    @Published private(set) var canResizeWindowsOnMac = false
+    /// What happened to the last Fill/Restore on Mac (shown on its pane for 8 s).
+    @Published private(set) var windowFrameNotice: WindowFrameNotice?
+    /// Panes whose Fill/Restore on Mac hasn't been answered yet.
+    @Published private(set) var windowFramePending: Set<String> = []
+    private var windowFrameRequest = 0
+    private var windowFrameAsked: [Int: (tile: String, windowID: UInt32, op: WindowFrameOp)] = [:]
+    private var windowFrameNoticeClear: DispatchWorkItem?
     /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
     @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
     /// Cards on screen now, most important first: their stills are asked for first.
@@ -700,6 +755,7 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
@@ -786,6 +842,8 @@ final class WorkspaceModel: ObservableObject {
             finishClose(id, result: result)
         case .lockResult(let result):
             lockMacStatus = .done(result)
+        case .frameResult(let reply):
+            finishWindowFrame(reply)
         case .disconnected:
             sendTask?.cancel()
             leaveExtendRequest = nil
@@ -795,6 +853,8 @@ final class WorkspaceModel: ObservableObject {
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canLockMac = false; lockMacStatus = nil
+            canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
+            windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
             files.setAvailable(false)
             menus.setAvailable(false)
             clipboard.setAvailable(false)
@@ -1809,6 +1869,79 @@ final class WorkspaceModel: ObservableObject {
     func minimizeRemoteWindow(_ tile: String) {
         guard inputAllowed(), let source = layout.tiles[tile]?.source, let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.minimizeWindow(source.windowID, generation: gen))
+    }
+
+    // MARK: Fill Window on Mac / Restore Previous Size on Mac
+
+    /// The items belong in this pane's menu (or a float's ⋯ menu): the Mac offers them and the
+    /// pane shows a Mac window in Window view. Whether they are enabled: `canControlMac`.
+    func offersWindowFrameOnMac(_ tile: String) -> Bool {
+        guard canResizeWindowsOnMac, windowMode, let source = layout.tiles[tile]?.source else { return false }
+        return !source.isDisplay
+    }
+
+    /// Restore Previous Size on Mac: the Mac says it can put this pane's window back.
+    func canRestoreOnMac(_ tile: String) -> Bool {
+        guard offersWindowFrameOnMac(tile), let source = layout.tiles[tile]?.source, let state = tileState(tile) else { return false }
+        return state.restorable && state.windowID == source.windowID
+    }
+
+    /// A Fill or Restore for this pane is waiting for the Mac's answer.
+    func isResizingOnMac(_ tile: String) -> Bool { windowFramePending.contains(tile) }
+
+    /// Fills the usable area of the window's display on the Mac (not full screen). Only from the
+    /// explicit menu item: nothing about arranging, zooming or floating panes here calls it.
+    func fillWindowOnMac(_ tile: String) { requestWindowFrame(.fill, tile: tile) }
+
+    /// Puts the Mac window back to the frame it had before Fill Window on Mac.
+    func restoreWindowOnMac(_ tile: String) { requestWindowFrame(.restore, tile: tile) }
+
+    func clearWindowFrameNotice() { windowFrameNoticeClear?.cancel(); windowFrameNotice = nil }
+
+    private func requestWindowFrame(_ op: WindowFrameOp, tile: String) {
+        guard offersWindowFrameOnMac(tile), let source = layout.tiles[tile]?.source,
+              let gen = generation(source) ?? tileState(tile).flatMap({ $0.windowID == source.windowID ? $0.generation : nil })
+        else { return }
+        // View Only: say why here instead of asking (the Mac would refuse it anyway).
+        guard canControlMac else {
+            showWindowFrameNotice(WindowFrameNotice(tile: tile, windowID: source.windowID, op: op, result: .control))
+            return
+        }
+        guard !windowFramePending.contains(tile) else { return }
+        windowFrameRequest += 1
+        let req = windowFrameRequest
+        guard send(WindowFrameWire.requestMessage(op, window: source.windowID, generation: gen, req: req)) else {
+            showWindowFrameNotice(WindowFrameNotice(tile: tile, windowID: source.windowID, op: op, result: nil))
+            return
+        }
+        windowFrameAsked[req] = (tile, source.windowID, op)
+        windowFramePending.insert(tile)
+        windowFrameNoticeClear?.cancel()
+        windowFrameNotice = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, let asked = self.windowFrameAsked.removeValue(forKey: req) else { return }
+            self.windowFramePending.remove(asked.tile)
+            self.showWindowFrameNotice(WindowFrameNotice(tile: asked.tile, windowID: asked.windowID, op: asked.op, result: nil))
+        }
+    }
+
+    private func finishWindowFrame(_ reply: WindowFrameReply) {
+        let key = reply.req.flatMap { windowFrameAsked[$0] != nil ? $0 : nil }
+            ?? windowFrameAsked.first { $0.value.windowID == reply.windowID && $0.value.op == reply.op }?.key
+        guard let key, let asked = windowFrameAsked.removeValue(forKey: key), asked.windowID == reply.windowID else { return }
+        windowFramePending.remove(asked.tile)
+        showWindowFrameNotice(WindowFrameNotice(tile: asked.tile, windowID: reply.windowID, op: reply.op, result: reply.result))
+    }
+
+    private func showWindowFrameNotice(_ notice: WindowFrameNotice) {
+        windowFrameNotice = notice
+        windowFrameNoticeClear?.cancel()
+        let clear = DispatchWorkItem { [weak self] in
+            guard let self, self.windowFrameNotice == notice else { return }
+            self.windowFrameNotice = nil
+        }
+        windowFrameNoticeClear = clear
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: clear)
     }
     /// Makes `tile` the one typing goes to. `raise` false for anything that only arranges this
     /// device's view (moving, resizing, tucking, docking or zooming a window, fullscreen on this
