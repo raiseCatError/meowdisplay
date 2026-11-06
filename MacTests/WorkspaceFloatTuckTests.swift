@@ -859,6 +859,53 @@ final class WorkspaceFloatTuckTests: XCTestCase {
         XCTAssertEqual(m.layout.float(fid)?.tuck?.edge, .top)
     }
 
+    /// After a reconnect a tucked float has no still (the Mac can't capture it while it's tucked):
+    /// its window's thumbnail is asked for (read only), so its strip still shows the window. Not
+    /// asked again for every catalog; asked again after the next reconnect.
+    @MainActor
+    func testATuckedFloatsStripGetsAStillAfterAReconnect() throws {
+        var sent: [[String: Any]] = []
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature, WindowWorkspaceWire.floatLiftFeature]
+        let m = connectedModel(features: features) { sent.append($0) }
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        m.openFloating(w[1])
+        let fid = try XCTUnwrap(m.layout.floatIDs.first)
+        m.tuckFloat(fid, edge: .left, offset: 0.5)
+        settle()
+
+        func catalog() {
+            m.apply(WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
+                "type": WireMessage.windowCatalog, "host": "mac-a",
+                "windows": [10, 11, 12].map { ["id": $0, "gen": 5, "bundle": "app.\($0)", "app": "App\($0)", "title": "t", "w": 1600, "h": 1000, "state": "visible"] },
+                "apps": [], "displays": [],
+            ])!)
+        }
+        func asked() -> [[Int]] {
+            sent.filter { $0["type"] as? String == WireMessage.windowThumbnailRequest }.map { $0["ids"] as? [Int] ?? [] }
+        }
+        m.apply(.disconnected)
+        sent.removeAll()
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features(features))
+        m.apply(.mode(window: true))
+        catalog()
+        XCTAssertEqual(m.layout.float(fid)?.tuck?.edge, .left, "still tucked")
+        XCTAssertNil(m.backdrop(fid), "no still of its own")
+        XCTAssertEqual(asked(), [[11]], "its window's still, once")
+        catalog()
+        XCTAssertEqual(asked(), [[11]], "not again for every catalog")
+        XCTAssertTrue(sent.allSatisfy { Self.safeTypes.contains($0["type"] as? String ?? "") }, "\(sent.map { $0["type"] ?? "" })")
+
+        m.apply(.disconnected)
+        sent.removeAll()
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features(features))
+        m.apply(.mode(window: true))
+        catalog()
+        XCTAssertEqual(asked(), [[11]], "a new session asks again")
+    }
+
     /// A Mac without `floatLift`: restoring shows it again, never with `lift`.
     @MainActor
     func testRestoringOnAMacWithoutLift() throws {
