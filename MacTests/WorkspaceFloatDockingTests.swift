@@ -78,6 +78,66 @@ final class WorkspaceFloatDockingTests: XCTestCase {
         XCTAssertEqual(m.restoring(back.removing("f1")), back.removing("f1"), "gone: nothing to put back")
     }
 
+    /// Ordinary moves of a float, however they curve, never dock it: round another float (all the
+    /// way round it), a long sweeping loop, nudging it back and forth past its spot.
+    func testAnOrdinaryCurvedMoveNeverDocks() throws {
+        var m = try XCTUnwrap(WorkspaceFloatMove("f1", in: floats()))
+        // Round a 300 x 260 float, 40 pt clear of it, the whole way round and a bit, at 350 pt/s.
+        var t = 0.0
+        let corners: [(x: Double, y: Double, from: Double)] = [(450, 400, 0.5), (150, 400, 1), (150, 140, 1.5), (450, 140, 0)]
+        var points: [(x: Double, y: Double)] = []
+        for (x, y, from) in corners + [corners[0]] {
+            for i in 0...10 { let a = (from + Double(i) / 20) * .pi; points.append((x + 40 * cos(a), y + 40 * sin(a))) }
+        }
+        for (a, b) in zip(points, points.dropFirst()) {
+            let steps = max(Int(hypot(b.x - a.x, b.y - a.y) / (350.0 / 60)), 1)
+            for s in 1...steps {
+                t += 1.0 / 60
+                XCTAssertNil(m.add(x: a.x + (b.x - a.x) * Double(s) / Double(steps), y: a.y + (b.y - a.y) * Double(s) / Double(steps), at: t))
+            }
+        }
+        // A big loop and a half across the screen.
+        XCTAssertTrue(feed(&m, from: t + 1, seconds: 4.5) { t in (590 + 200 * cos(2 * .pi * 0.33 * t), 410 + 200 * sin(2 * .pi * 0.33 * t)) }.isEmpty)
+        // Back and forth past a spot, both ends turning the same way (a stretched loop).
+        XCTAssertTrue(feed(&m, from: t + 6, seconds: 4) { t in
+            let a = 2 * .pi * 0.8 * t
+            return (300 + 120 * cos(a) + 40 * cos(3 * a), 400 + 15 * sin(a))
+        }.isEmpty)
+        XCTAssertFalse(m.docking)
+    }
+
+    /// In one hold, with no pause: a circle docks; circling on doesn't undock; a circle the
+    /// other way round undocks at once; the first way round again docks again.
+    func testCirclingTheOtherWayUndocksAndDocksAgainInOneHold() throws {
+        var m = try XCTUnwrap(WorkspaceFloatMove("f1", in: floats()))
+        var t = 0.0, a = 0.0
+        var centre = (x: 300.0, y: 400.0)
+        var switches: [WorkspaceFloatMove.Switch] = []
+        // One loop a second, 50 pt round, clockwise on screen unless `ccw`. Each new circle starts
+        // where the finger is, heading on the way it was (an S, as a hand does it).
+        func circle(seconds: Double, ccw: Bool) {
+            for _ in 0..<Int(seconds * 60) {
+                t += 1.0 / 60
+                a += (ccw ? -1 : 1) * 2 * .pi / 60
+                if let s = m.add(x: centre.x + 50 * cos(a), y: centre.y + 50 * sin(a), at: t) { switches.append(s) }
+            }
+        }
+        func reverse() {
+            centre = (centre.x + 100 * cos(a), centre.y + 100 * sin(a))
+            a += .pi
+        }
+        circle(seconds: 3, ccw: false)
+        XCTAssertEqual(switches, [.dock], "one switch for three seconds of circling")
+        reverse()
+        circle(seconds: 1.4, ccw: true)
+        XCTAssertEqual(switches, [.dock, .float])
+        XCTAssertFalse(m.docking)
+        reverse()
+        circle(seconds: 1.4, ccw: false)
+        XCTAssertEqual(switches, [.dock, .float, .dock])
+        XCTAssertTrue(m.docking)
+    }
+
     // MARK: The model, as the float layer drives it
 
     @MainActor
@@ -328,6 +388,54 @@ final class WorkspaceFloatDockingTests: XCTestCase {
         XCTAssertEqual(back, .float)
         XCTAssertFalse(bare.liftedFloats.contains(f2), "no still to draw it from: the Mac draws it while it moves")
         bare.endFloatGesture(f2)
+    }
+
+    /// In the same hold, with no pause: circled into a card, a circle the other way round opens
+    /// it back into the float as soon as that circle is complete, the first way round again folds
+    /// it once more, and Cancel then puts it back exactly as the finger found it.
+    @MainActor
+    func testCirclingTheOtherWayTurnsTheCardBackAtOnce() throws {
+        let m = connectedModel { _ in }
+        let (_, _, front) = try arranged(m)
+        let before = m.layout
+        m.beginFloatGesture(front)
+        var (switched, t) = moveThenCircle(m, front, around: CGPoint(x: 700, y: 400))
+        XCTAssertEqual(switched, .dock)
+        // `moveThenCircle` circles 50 pt round (770, 460), one loop a second from 20/60 s.
+        var centre = CGPoint(x: 770, y: 460)
+        var a = (t - 20.0 / 60) * 2 * .pi
+        var steps: [WorkspaceFloatMove.Switch] = []
+        func circle(seconds: Double, ccw: Bool) {
+            for _ in 0..<Int(seconds * 60) {
+                t += 1.0 / 60
+                a += (ccw ? -1 : 1) * 2 * .pi / 60
+                if let s = m.moveFloatFinger(front, to: CGPoint(x: centre.x + 50 * cos(a), y: centre.y + 50 * sin(a)), at: t) { steps.append(s) }
+            }
+        }
+        func reverse() {   // straight on into a circle the other way round (an S)
+            centre = CGPoint(x: centre.x + 100 * cos(a), y: centre.y + 100 * sin(a))
+            a += .pi
+        }
+        circle(seconds: 1, ccw: false)
+        XCTAssertEqual(steps, [], "circling on: still a card")
+        XCTAssertEqual(m.dockingFloat, front)
+        reverse()
+        let reversed = t
+        circle(seconds: 1.4, ccw: true)
+        XCTAssertEqual(steps, [.float], "the other way round: the float again")
+        XCTAssertNil(m.dockingFloat)
+        XCTAssertNil(m.drag, "the drop targets go")
+        reverse()
+        circle(seconds: 1.4, ccw: false)
+        XCTAssertEqual(steps, [.float, .dock], "and back into a card, still the same hold")
+        XCTAssertEqual(m.dockingFloat, front)
+        XCTAssertGreaterThan(t - reversed, 2.4, "each switch took its own circle")
+        let onCancel = CGPoint(x: 460, y: 760)
+        m.moveFloatFinger(front, to: onCancel, at: t + 0.3)
+        XCTAssertFalse(m.endDockingFloat(front))
+        XCTAssertEqual(m.layout, before, "Cancel: back exactly as it was")
+        XCTAssertNil(m.dockingFloat)
+        XCTAssertNil(m.drag)
     }
 
     /// Shakes, zig-zags and plain moves of a float never dock it; a tap or a resize never does either.

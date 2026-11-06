@@ -535,6 +535,15 @@ enum WorkspaceFloatGeometry {
         return area.width > 0 && area.height > 0 ? area : nil
     }
 
+    /// Where tucked floats' strips are drawn (points): `handleArea`, else (nothing of the picture
+    /// is clear of the system's edges) the picture itself, so a tucked float always has a handle
+    /// to come back from. nil only without a usable picture.
+    static func waitingArea(picture: WorkspaceRect, safe: WorkspaceRect?, screen: WorkspaceRect?) -> WorkspaceRect? {
+        if let area = handleArea(picture: picture, safe: safe, screen: screen) { return area }
+        guard [picture.x, picture.y, picture.width, picture.height].allSatisfy(\.isFinite), picture.width > 0, picture.height > 0 else { return nil }
+        return picture
+    }
+
     /// Strips go along y on the left and right edges, along x on the top and bottom.
     private static func alongY(_ edge: WorkspaceEdge) -> Bool { edge.axis == .horizontal }
 
@@ -553,14 +562,82 @@ enum WorkspaceFloatGeometry {
         return (lo, hi)
     }
 
-    /// The edges a float may be tucked into here: those with room for a strip.
-    static func tuckEdges(area: WorkspaceRect?) -> Set<WorkspaceEdge> {
+    /// The edges a float may be thrown into here: those with room for a strip, beside the
+    /// controls in `reserved` or just inside them (`stripArea`). A throw toward an edge the
+    /// controls fill deeper than that glides back instead of vanishing under them.
+    static func tuckEdges(area: WorkspaceRect?, reserved: [WorkspaceRect] = []) -> Set<WorkspaceEdge> {
         guard let area, area.width > 0, area.height > 0 else { return [] }
-        return Set([WorkspaceEdge.left, .right, .top, .bottom].filter { e in
-            let r = run(e, in: area)
-            return r.hi - r.lo >= minimumStripLength - 1e-9
-                && (alongY(e) ? area.width : area.height) >= touchDepth
-        })
+        return Set([WorkspaceEdge.left, .right, .top, .bottom].filter { stripArea($0, in: area, avoiding: reserved) != nil })
+    }
+
+    /// The most the controls may move an edge's strips inward (a share of the area across that
+    /// edge); past that the edge has no room for strips.
+    static let maximumStripInset = 0.35
+
+    private static func usable(_ r: WorkspaceRect) -> Bool {
+        r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].allSatisfy(\.isFinite)
+    }
+
+    /// Where `edge`'s strips wait (points): `area`, or, where the controls fill that edge's run
+    /// (the control tray along the bottom of a phone in portrait, a column of keys down a side),
+    /// `area` up to the controls' inner side: the strips wait just inside the controls, as if
+    /// that were the edge, and their windows slide in under the controls. nil: no room on that
+    /// edge (its floats wait on another, `tuckHandles`).
+    static func stripArea(_ edge: WorkspaceEdge, in area: WorkspaceRect, avoiding reserved: [WorkspaceRect]) -> WorkspaceRect? {
+        guard usable(area) else { return nil }
+        let base = run(edge, in: area)
+        guard base.hi - base.lo >= minimumStripLength - 1e-9, (alongY(edge) ? area.width : area.height) >= touchDepth else { return nil }
+        let controls = reserved.filter(usable)
+        let limit = (alongY(edge) ? area.width : area.height) * maximumStripInset
+        var a = area
+        // A tray with a palette or a keypad above it: step inside each layer in turn.
+        for _ in 0..<4 {
+            if !freeRuns(edge, in: a, avoiding: controls).isEmpty { return a }
+            let r = run(edge, in: a)
+            // The controls in the edge's touch band, along its run.
+            let band: (lo: Double, hi: Double) = {
+                switch edge {
+                case .left: return (a.x, a.x + touchDepth)
+                case .right: return (a.maxX - touchDepth, a.maxX)
+                case .top: return (a.y, a.y + touchDepth)
+                case .bottom: return (a.maxY - touchDepth, a.maxY)
+                }
+            }()
+            let blocking = controls.filter { c in
+                let across = alongY(edge) ? (c.x, c.maxX) : (c.y, c.maxY), along = alongY(edge) ? (c.y, c.maxY) : (c.x, c.maxX)
+                return across.1 > band.lo && across.0 < band.hi && along.1 > r.lo && along.0 < r.hi
+            }
+            guard !blocking.isEmpty else { return nil }
+            switch edge {
+            case .left:
+                let x = (blocking.map(\.maxX).max() ?? a.x) + tabSpacing
+                a.width = a.maxX - x; a.x = x
+            case .right: a.width = (blocking.map(\.x).min() ?? a.maxX) - tabSpacing - a.x
+            case .top:
+                let y = (blocking.map(\.maxY).max() ?? a.y) + tabSpacing
+                a.height = a.maxY - y; a.y = y
+            case .bottom: a.height = (blocking.map(\.y).min() ?? a.maxY) - tabSpacing - a.y
+            }
+            let inset = alongY(edge) ? area.width - a.width : area.height - a.height
+            guard inset <= limit + 1e-9, (alongY(edge) ? a.width : a.height) >= touchDepth else { return nil }
+        }
+        return nil
+    }
+
+    /// Where a float tucked at an edge with no room for strips (`stripArea` nil) waits instead,
+    /// among the edges in `open`: the nearer of the two edges beside it, at its end next to the
+    /// float's own edge, else the opposite edge where it was along it. nil: none is open.
+    static func refuge(for tuck: WorkspaceFloatTuck, open: Set<WorkspaceEdge>) -> (edge: WorkspaceEdge, offset: Double)? {
+        let offset = tuck.offset.isFinite ? min(max(tuck.offset, 0), 1) : 0.5
+        let low = offset < 0.5   // nearer the top or left end of its own edge
+        let tries: [(WorkspaceEdge, Double)]
+        switch tuck.edge {
+        case .left: tries = [(low ? .top : .bottom, 0), (low ? .bottom : .top, 0), (.right, offset)]
+        case .right: tries = [(low ? .top : .bottom, 1), (low ? .bottom : .top, 1), (.left, offset)]
+        case .top: tries = [(low ? .left : .right, 0), (low ? .right : .left, 0), (.bottom, offset)]
+        case .bottom: tries = [(low ? .left : .right, 1), (low ? .right : .left, 1), (.top, offset)]
+        }
+        return tries.first { open.contains($0.0) }.map { (edge: $0.0, offset: $0.1) }
     }
 
     /// The parts of `edge`'s run no reserved rect reaches (each at least a shortest strip long). A
@@ -751,14 +828,61 @@ enum WorkspaceFloatGeometry {
     /// `reserved` (the control tray, the function tray, the shortcut column, keypads, Stage Peek's
     /// handle, folds), then the strips, which slide along their edge to the nearest free room,
     /// shorten to share a crowded edge, and share one stack when it has no room for each. Strips on
-    /// different edges never meet: the top and bottom ones stay clear of the corners.
+    /// different edges never meet: the top and bottom ones stay clear of the corners. Where the
+    /// controls fill an edge, its strips wait just inside them (`stripArea`); where they fill it
+    /// deeper than that, its floats wait on the nearest edge with room (`refuge`) until it has
+    /// room again, so a finger can always reach every tucked float (`unreachableTucked`).
     static func tuckHandles(_ floats: [WorkspaceFloat], picture: WorkspaceRect, area: WorkspaceRect, reserved: [WorkspaceRect] = []) -> [TuckTab] {
-        [WorkspaceEdge.left, .top, .right, .bottom].flatMap { edge in
-            tuckTabs(floats.compactMap { f in
-                f.tuck.flatMap { t in
-                    t.edge == edge ? (f.tile, t.offset, WorkspaceSize(width: f.frame.width * picture.width, height: f.frame.height * picture.height)) : nil
-                }
-            }, edge: edge, area: area, picture: picture, avoiding: reserved)
+        let edges: [WorkspaceEdge] = [.left, .top, .right, .bottom]
+        var areas: [WorkspaceEdge: WorkspaceRect] = [:]
+        for e in edges { areas[e] = stripArea(e, in: area, avoiding: reserved) }
+        let open = Set(areas.keys)
+        // A side whose strips wait inside the controls: the top and bottom strips keep clear of
+        // its corner there too.
+        for e in [WorkspaceEdge.top, .bottom] {
+            guard var a = areas[e] else { continue }
+            let lo = max(a.x, areas[.left]?.x ?? a.x), hi = min(a.maxX, areas[.right]?.maxX ?? a.maxX)
+            guard lo > a.x || hi < a.maxX else { continue }
+            a.x = lo
+            a.width = hi - lo
+            if usable(a), !freeRuns(e, in: a, avoiding: reserved).isEmpty { areas[e] = a }
+        }
+        var waiting: [WorkspaceEdge: [(id: String, offset: Double, size: WorkspaceSize)]] = [:]
+        for f in floats {
+            guard let t = f.tuck else { continue }
+            let at = open.contains(t.edge) ? (edge: t.edge, offset: t.offset) : (refuge(for: t, open: open) ?? (edge: t.edge, offset: t.offset))
+            waiting[at.edge, default: []].append((f.tile, at.offset, WorkspaceSize(width: f.frame.width * picture.width, height: f.frame.height * picture.height)))
+        }
+        // With no room anywhere they stay on their own edges, over whatever is there.
+        return edges.flatMap { e in tuckTabs(waiting[e] ?? [], edge: e, area: areas[e] ?? area, picture: picture, avoiding: reserved) }
+    }
+
+    /// Where a tucked float's handle takes touches (points): its visible slice and on in from its
+    /// edge to a `touchDepth` target, at least that long.
+    static func touchArea(_ tab: TuckTab) -> WorkspaceRect {
+        let d = touchDepth, r = tab.rect
+        let h = max(r.height, d), w = max(r.width, d)
+        switch tab.edge {
+        case .left: return WorkspaceRect(x: r.x, y: r.midY - h / 2, width: d, height: h)
+        case .right: return WorkspaceRect(x: r.maxX - d, y: r.midY - h / 2, width: d, height: h)
+        case .top: return WorkspaceRect(x: r.midX - w / 2, y: r.y, width: w, height: d)
+        case .bottom: return WorkspaceRect(x: r.midX - w / 2, y: r.maxY - d, width: w, height: d)
+        }
+    }
+
+    /// Whether every tucked float can be brought back by a finger: the tucked floats of `floats`
+    /// that aren't on exactly one of `handles`, or whose handle has no `touchDepth` of its touch
+    /// area clear of `reserved` (the controls are drawn over the strips). `tuckHandles` leaves
+    /// none while any edge has room. With none anywhere VoiceOver still reaches every handle, and
+    /// choosing the window in Stage Peek brings its float back.
+    static func unreachableTucked(_ floats: [WorkspaceFloat], handles: [TuckTab], reserved: [WorkspaceRect]) -> [String] {
+        let controls = reserved.filter(usable)
+        return floats.compactMap { f -> String? in
+            guard f.tuck != nil else { return nil }
+            let on = handles.filter { $0.ids.contains(f.tile) }
+            guard on.count == 1, let tab = on.first else { return f.tile }
+            let clear = WorkspaceFloatLayering.uncovered(touchArea(tab), alongX: !alongY(tab.edge), by: controls, minLength: touchDepth - 1e-9)
+            return clear.isEmpty ? f.tile : nil
         }
     }
 
@@ -811,6 +935,16 @@ enum WorkspaceFloatGeometry {
         if alongY(edge), waiting.midY.isFinite { r.y = waiting.midY - r.height / 2 }
         if !alongY(edge), waiting.midX.isFinite { r.x = waiting.midX - r.width / 2 }
         return reachable(r, in: size, safe: safe)
+    }
+
+    /// Where a tucked float comes back to when pulled out of its handle on `edge` (picture
+    /// shares): its frame flush with that edge of `area` (where that edge's strips wait, picture
+    /// shares) and moved along it to where it waits (`waiting`), kept reachable (`safe`). A
+    /// straight slide out of its strip even when it waits somewhere it wasn't tucked: past
+    /// controls that fill its edge, on another edge, or after the screen turned.
+    static func restoreFrame(_ frame: WorkspaceRect, waiting: WorkspaceRect, edge: WorkspaceEdge, in size: WorkspaceSize,
+                             area: WorkspaceRect?, safe: WorkspaceRect?) -> WorkspaceRect {
+        comingBack(tuckedFrame(frame, edge: edge, along: .nan, in: size, area: area, safe: safe), waiting: waiting, edge: edge, in: size, safe: safe)
     }
 
     /// A tucked float on its way out of its edge or back in, drawn as one picture: at `rect(p)`, its
@@ -1129,53 +1263,101 @@ enum WorkspaceOcclusion {
 // MARK: - Circling while holding (switch a drag between Pane and Floating)
 
 /// Switches a drag between Pane and Floating placement: drawing a circle and a bit while holding
-/// (like winding a dial), about a second at an easy pace, so it never happens by accident.
-/// Replaces the shake, which fired on any quick back-and-forth.
+/// (like winding a dial), about a second at an easy pace. Recognising a circle and rearming after
+/// a switch are separate rules, and neither is a timer. Pure: the same samples always decide the
+/// same. Works the same with a pointer.
 ///
-/// It follows the direction the finger (or pointer) travels: a loop turns that direction by a
-/// full turn, always the same way round. It counts only steps that curve, all one way, around
-/// loops of a plausible size; a sharp reversal (a shake, a zig-zag), a turn the other way, a
-/// straight move or a pause starts over. After it fires it stays quiet until the circling stops
-/// (a pause, or a straight move), so circling on never switches back and forth. `progress`
-/// (0...1) is for the ring drawn at the finger. Pure: the same samples always decide the same.
+/// The path is measured in 8 pt chords (`minStep`), so touch jitter doesn't count. The stretch it
+/// judges is the shortest recent one whose heading turned one and a quarter loops one way round
+/// (`requiredTurn`), never reaching back past a turn the other way of more than 90°.
 ///
-/// Fires when all of these hold for one run of steps: net turning of `requiredTurn` (1.25 loops)
-/// one way round, at least `minimumDuration` (1 s) since the run's first curving step, at least
-/// `consistency` (80 %) of all its turning the same way, loop radius (path length / net turning)
-/// 12-240 pt, no step turning more than about 100°, never `quiet` (0.4 s) without a curving step,
-/// and armed (it hasn't fired since the circling last stopped). Steps are 8 pt chords of the path.
+/// Recognising. It switches only when that stretch is a deliberate loop, all of:
+/// - a least-squares circle through its points has a radius of 12-150 pt (`minRadius`,
+///   `maxRadius`) and they stay close to it (RMS off it at most 25 % of the radius, `fitTolerance`);
+/// - they go round that centre the same way (at least 85 % of the heading's turning, at most
+///   10 % of the steps backwards), and the heading keeps turning that way: measured over 16 pt,
+///   at least 80 % of its turning is one way round (`steadiness`; a scribble's isn't);
+/// - the path is at most 1.35 times as long as the circle it winds round (`compactness`): no
+///   straight runs or detours;
+/// - it closes: where the heading was the same one loop back, the finger was within half the
+///   radius + 4 pt of where it is now (`closeTolerance`), so loops that travel across the screen
+///   don't count;
+/// - its last loop is round: 4πA/L² at least 0.6 (`roundness`; a 2:1 ellipse is 0.84, a stretched
+///   4:1 oval 0.54);
+/// - and it has been plausibly circling for at least `minimumDuration` (1 s).
+/// A step turning more than about 100° (`maxStepTurn`: a shake, a zig-zag's corner) or a rest
+/// (no 8 pt of travel for `quiet`, 0.3 s) starts the path over.
+///
+/// `progress` (0...1, the ring at the finger) is above 0 only while the stretch is plausibly a
+/// circle (the first three rules, once it has turned `showTurn`, five eighths of a loop) and that
+/// way round can switch; it fills to 1 at the switch.
+///
+/// Rearming. A switch starts the path over from that point, so the next circle is built only from
+/// motion after it, and the way round that switched (`latched`) can't switch again until that
+/// circling stops: the finger rests or turns sharply, turns the other way by 90°, goes 1.5 radii
+/// + 16 pt from the circle's centre, or travels three radii without going a quarter of the way
+/// round it (`stallRadii`). While it goes on circling, the circle it follows may drift (the same
+/// size, nearby). So circling on never switches back and forth; a circle the other way round
+/// switches as soon as it's complete; the same way round, once the finger has stopped, moved on
+/// or turned away.
 struct WorkspaceCircleGesture: Equatable, Sendable {
-    /// Net turning that makes the gesture: one and a quarter loops.
+    /// Which way round, on screen (y down).
+    enum Turn: Equatable, Sendable { case clockwise, counterclockwise }
+
+    /// Heading turned one way round by the stretch judged: one and a quarter loops.
     var requiredTurn = 1.25 * 2 * Double.pi
-    /// And at least this long circling (seconds): about a second at an easy pace.
+    /// And at least this long plausibly circling (seconds): about a second at an easy pace.
     var minimumDuration = 1.0
     /// Loop radius (points) that counts: smaller is a wobble, larger is a long curve.
     var minRadius = 12.0
-    var maxRadius = 240.0
-    /// Samples closer than this to the last one count together: the path is measured in chords
-    /// this long, so a fraction of a point of touch jitter can't turn a circle into a zig-zag.
+    var maxRadius = 150.0
+    /// The path is measured in chords this long, so a fraction of a point of touch jitter can't
+    /// turn a circle into a zig-zag.
     var minStep = 8.0
-    /// One step turning more than this (about 100°) is a reversal: starts over.
+    /// One step turning more than this (about 100°) is a sharp turn: starts over.
     var maxStepTurn = 1.75
-    /// This long without a curving step (a pause or a straight move) starts over and, after a
-    /// switch, lets the next one count.
-    var quiet = 0.4
-    /// Share of the turning that must go one way round.
-    var consistency = 0.8
+    /// This long without 8 pt of travel is a rest: starts over (and rearms either way round).
+    var quiet = 0.3
+    /// RMS distance off the fitted circle, as a share of its radius.
+    var fitTolerance = 0.25
+    /// Path length at most this many times the turning times the radius.
+    var compactness = 1.35
+    /// How far from closing one loop back, as a share of the radius (+ 4 pt).
+    var closeTolerance = 0.5
+    /// The last loop's 4πA/L² (1 for a circle).
+    var roundness = 0.6
+    /// Share of the heading's turning, over 16 pt steps, that goes the one way round.
+    var steadiness = 0.8
+    /// Turning before the ring shows (five eighths of a loop).
+    var showTurn = 1.25 * Double.pi
+    /// Rearming the way round that switched: this many radii (+ 16 pt) from its centre, or this
+    /// many radii of travel without a quarter of the way round it.
+    var leaveRadii = 1.5
+    var stallRadii = 3.0
 
-    private var lastX: Double?
-    private var lastY: Double?
-    private var heading: Double?
-    /// This run: signed and total turning, path length, when it began, its last curving step.
-    private var net = 0.0
-    private var total = 0.0
-    private var length = 0.0
-    private var started: Double?
-    private var lastCurve = -Double.infinity
-    /// False from a switch until the circling stops.
-    private(set) var armed = true
+    private struct Point: Equatable, Sendable {
+        var x, y, t: Double
+        /// Unwrapped heading of the chord that ends here (unused for the first point).
+        var heading: Double
+        /// Path length up to here.
+        var length: Double
+    }
+    private struct Circle: Equatable, Sendable { var x, y, r: Double }
+
+    /// The path since it last started over, in chords (at most `capacity` of them).
+    private var path: [Point] = []
+    private static let capacity = 180
+    /// When the current plausible circling began.
+    private var since: Double?
+    /// The way round that switched last, the circle it follows, and that circle's radius then.
+    private(set) var latched: Turn?
+    private var latchedCircle: Circle?
+    private var latchedRadius = 0.0
     /// How far along the current circling is (0...1); 0 while it doesn't count.
     private(set) var progress = 0.0
+
+    /// Whether a circle either way round can switch now (nothing latched).
+    var armed: Bool { latched == nil }
 
     init() {}
 
@@ -1185,60 +1367,254 @@ struct WorkspaceCircleGesture: Equatable, Sendable {
     private init(tuning t: WorkspaceCircleGesture) {
         requiredTurn = t.requiredTurn; minimumDuration = t.minimumDuration
         minRadius = t.minRadius; maxRadius = t.maxRadius; minStep = t.minStep
-        maxStepTurn = t.maxStepTurn; quiet = t.quiet; consistency = t.consistency
+        maxStepTurn = t.maxStepTurn; quiet = t.quiet; fitTolerance = t.fitTolerance
+        compactness = t.compactness; closeTolerance = t.closeTolerance; roundness = t.roundness; steadiness = t.steadiness
+        showTurn = t.showTurn; leaveRadii = t.leaveRadii; stallRadii = t.stallRadii
     }
 
-    private mutating func endRun() {
-        net = 0; total = 0; length = 0; started = nil; progress = 0
-    }
+    /// Whether the finger has rested at `t` (no 8 pt of travel for `quiet`), for fading the ring
+    /// when no samples come.
+    func isQuiet(at t: Double) -> Bool { t - (path.last?.t ?? -.infinity) > quiet }
 
-    /// Whether the circling has gone quiet at `t` (for fading the ring when no samples come).
-    func isQuiet(at t: Double) -> Bool { t - lastCurve > quiet }
-
-    /// One finger position (points) at time `t` (seconds). True once per gesture.
+    /// One finger position (points) at time `t` (seconds). True once per switch.
     mutating func add(x: Double, y: Double, at t: Double) -> Bool {
         guard x.isFinite, y.isFinite, t.isFinite else { return false }
-        if isQuiet(at: t) {
-            if started != nil { endRun() }
-            armed = true
+        guard let last = path.last else {
+            path = [Point(x: x, y: y, t: t, heading: 0, length: 0)]
+            return false
         }
-        guard let lx = lastX, let ly = lastY else { lastX = x; lastY = y; return false }
-        let dx = x - lx, dy = y - ly
+        let dx = x - last.x, dy = y - last.y
         let d = (dx * dx + dy * dy).squareRoot()
-        guard d >= minStep else { return false }
-        lastX = x; lastY = y
+        guard d >= minStep else {
+            if t - last.t >= quiet { progress = 0 }   // resting: the ring goes
+            return false
+        }
+        if t - last.t >= quiet {
+            // The finger stopped (or crawled): a new gesture from here, either way round.
+            restart(Point(x: last.x, y: last.y, t: t, heading: 0, length: 0))
+            unlatch()
+        }
         let h = atan2(dy, dx)
-        defer { heading = h }
-        guard let h0 = heading else { return false }
-        var turn = h - h0
-        if turn > .pi { turn -= 2 * .pi } else if turn <= -.pi { turn += 2 * .pi }
-        if abs(turn) > maxStepTurn {
-            endRun()
+        var heading = h
+        if path.count > 1 {
+            let previous = path[path.count - 1]
+            let turn = Self.wrapped(h - previous.heading)
+            if abs(turn) > maxStepTurn {
+                // A sharp turn (a shake, a zig-zag's corner): starts over from the corner.
+                restart(Point(x: previous.x, y: previous.y, t: previous.t, heading: 0, length: 0))
+                path.append(Point(x: x, y: y, t: t, heading: h, length: d))
+                progress = 0
+                unlatch()
+                return false
+            }
+            heading = previous.heading + turn
+        }
+        path.append(Point(x: x, y: y, t: t, heading: heading, length: path[path.count - 1].length + d))
+        if path.count > Self.capacity { path.removeFirst(path.count - Self.capacity) }
+        return evaluate(at: t)
+    }
+
+    // MARK: Recognising
+
+    private mutating func evaluate(at t: Double) -> Bool {
+        guard let w = window() else { progress = 0; since = nil; return false }
+        let turned = abs(w.turn)
+        rearm(w.way, turned: turned)
+        guard turned >= showTurn, let judged = judge(w) else { progress = 0; since = nil; return false }
+        let start = since ?? path[w.start].t
+        since = start
+        if latched == w.way {
+            // Still circling the way that switched: no ring, no switch. Follow that circle as it
+            // drifts (the same size, nearby), so it's still the one the finger is going round.
+            if let c = latchedCircle, hypot(judged.circle.x - c.x, judged.circle.y - c.y) <= 0.5 * latchedRadius + 8,
+               (0.75...1.33).contains(judged.circle.r / latchedRadius) {
+                latchedCircle = judged.circle
+            }
+            progress = 0
             return false
         }
-        // A step curves when it turns at least as tightly as the largest loop that counts.
-        if abs(turn) / d >= 1 / maxRadius {
-            if started == nil { started = t }
-            lastCurve = t
-        }
-        guard let begin = started else { return false }
-        net += turn
-        total += abs(turn)
-        length += d
-        let consistent = total > 0 && abs(net) / total >= consistency
-        if !consistent, total > .pi {
-            // Turning both ways round (a figure eight, a wiggle): not a circle.
-            endRun()
-            return false
-        }
-        let radius = length / max(abs(net), 1e-9)
-        let plausible = abs(net) < .pi || (radius >= minRadius && radius <= maxRadius)
-        guard armed, consistent, plausible else { progress = 0; return false }
-        progress = min(abs(net) / requiredTurn, (t - begin) / minimumDuration, 1)
-        guard progress >= 1 else { return false }
-        armed = false
-        endRun()
+        let turnPart = min((turned - showTurn) / (requiredTurn - showTurn), 1)
+        let timePart = minimumDuration > 0 ? min((t - start) / minimumDuration, 1) : 1
+        progress = max(min(turnPart, timePart, judged.deliberate ? 1 : 0.97), 0)
+        guard judged.deliberate, timePart >= 1 else { return false }
+        // Switch. The next circle is built only from what comes after this point.
+        progress = 0
+        latched = w.way
+        latchedCircle = judged.circle
+        latchedRadius = judged.circle.r
+        restart(Point(x: path[path.count - 1].x, y: path[path.count - 1].y, t: path[path.count - 1].t, heading: 0, length: 0))
         return true
+    }
+
+    /// The stretch to judge: from `start` to the newest point, its signed turning and which way
+    /// round. Complete once it has turned `requiredTurn`; until then (a partial loop) from where
+    /// it had already turned almost all of it, so a straight lead-in isn't judged with it.
+    private func window() -> (start: Int, turn: Double, way: Turn, complete: Bool)? {
+        let n = path.count - 1
+        guard n >= 2 else { return nil }
+        let newest = path[n].heading
+        var sign = 0.0, peak = 0.0, peakAt = n - 1
+        var k = n - 1
+        while k >= 0 {
+            let turned = newest - path[k + 1].heading
+            if sign == 0, abs(turned) >= .pi / 4 { sign = turned > 0 ? 1 : -1 }
+            if sign != 0 {
+                let v = turned * sign
+                if v >= requiredTurn { return (k, turned, Self.turn(sign), true) }
+                if v > peak + 1e-9 { peak = v; peakAt = k } else if v < peak - .pi / 2 { break }
+            }
+            k -= 1
+        }
+        guard sign != 0 else { return nil }
+        var start = peakAt
+        while start + 1 < n, (newest - path[start + 2].heading) * sign >= peak - 0.15 { start += 1 }
+        return (start, newest - path[start + 1].heading, Self.turn(sign), false)
+    }
+
+    /// Whether the stretch plausibly is a loop (else nil), and, once complete, a deliberate one.
+    private func judge(_ w: (start: Int, turn: Double, way: Turn, complete: Bool)) -> (circle: Circle, deliberate: Bool)? {
+        let n = path.count - 1
+        let points = path[w.start...n]
+        let turned = abs(w.turn)
+        let sign = Self.sign(w.way)
+        guard let fit = Self.fitCircle(points), fit.circle.r >= minRadius, fit.circle.r <= maxRadius,
+              fit.rms <= fitTolerance * fit.circle.r else { return nil }
+        let round = Self.winding(points, around: fit.circle, sign: sign)
+        guard round.angle >= 0.85 * turned, round.backwards <= 0.1 else { return nil }
+        guard path[n].length - path[w.start].length <= compactness * fit.circle.r * turned + 2 * minStep else { return nil }
+        // One way round all along: over 16 pt (two chords) the heading hardly ever turns back.
+        var total = 0.0, i = w.start + 1
+        while i + 2 <= n { total += abs(path[i + 2].heading - path[i].heading); i += 2 }
+        total += abs(path[n].heading - path[i].heading)
+        guard turned / max(total, 1e-9) >= steadiness else { return nil }
+        guard w.complete, let closing = closure(sign: sign), closing.gap <= closeTolerance * fit.circle.r + 4 else {
+            return (fit.circle, false)
+        }
+        return (fit.circle, Self.isoperimetric(path[closing.from...n]) >= roundness)
+    }
+
+    /// How far the finger is from where it was one full turn of heading back (the last chord's
+    /// middle against the point a loop back where the heading was the same, between chord
+    /// middles), and where that loop begins. A closed loop: about 0; a travelling one: how far it went.
+    private func closure(sign: Double) -> (gap: Double, from: Int)? {
+        let n = path.count - 1
+        guard n >= 3 else { return nil }
+        let newest = path[n].heading
+        let mx = (path[n].x + path[n - 1].x) / 2, my = (path[n].y + path[n - 1].y) / 2
+        var i = n - 1
+        while i >= 2 {
+            let a = (newest - path[i].heading) * sign, b = (newest - path[i - 1].heading) * sign
+            if a < 2 * .pi, 2 * .pi <= b {
+                let u = (2 * .pi - a) / max(b - a, 1e-9)
+                let x0 = (path[i].x + path[i - 1].x) / 2, y0 = (path[i].y + path[i - 1].y) / 2
+                let x1 = (path[i - 1].x + path[i - 2].x) / 2, y1 = (path[i - 1].y + path[i - 2].y) / 2
+                return (hypot(mx - (x0 + (x1 - x0) * u), my - (y0 + (y1 - y0) * u)), i - 1)
+            }
+            i -= 1
+        }
+        return nil
+    }
+
+    // MARK: Rearming
+
+    /// Whether the circling that switched has stopped (see the type's notes): then either way
+    /// round can switch again.
+    private mutating func rearm(_ way: Turn, turned: Double) {
+        guard let latched, let c = latchedCircle else { return }
+        let n = path.count - 1
+        if way != latched, turned >= .pi / 2 {
+            unlatch()   // turned the other way
+        } else if hypot(path[n].x - c.x, path[n].y - c.y) > leaveRadii * c.r + 16 {
+            unlatch()   // left the circle
+        } else if let round = roundSince(c, sign: Self.sign(latched), over: stallRadii * c.r), round < .pi / 2 {
+            unlatch()   // no longer going round it
+        }
+    }
+
+    private mutating func unlatch() { latched = nil; latchedCircle = nil }
+
+    /// How far (radians, the way round `sign`) the last `distance` of path went round `c`; nil
+    /// while the path since it last started over is shorter.
+    private func roundSince(_ c: Circle, sign: Double, over distance: Double) -> Double? {
+        let n = path.count - 1
+        guard path[n].length - path[0].length >= distance else { return nil }
+        var angle = 0.0
+        var previous = atan2(path[n].y - c.y, path[n].x - c.x)
+        var i = n - 1
+        while i >= 0 {
+            let a = atan2(path[i].y - c.y, path[i].x - c.x)
+            angle += Self.wrapped(previous - a) * sign
+            previous = a
+            if path[n].length - path[i].length >= distance { break }
+            i -= 1
+        }
+        return angle
+    }
+
+    private mutating func restart(_ p: Point) { path = [p]; since = nil }
+
+    // MARK: Geometry
+
+    private static func turn(_ sign: Double) -> Turn { sign > 0 ? .clockwise : .counterclockwise }
+    private static func sign(_ way: Turn) -> Double { way == .clockwise ? 1 : -1 }
+
+    /// `a` in (-π, π].
+    private static func wrapped(_ a: Double) -> Double {
+        var a = a
+        while a > .pi { a -= 2 * .pi }
+        while a <= -.pi { a += 2 * .pi }
+        return a
+    }
+
+    /// The algebraic (Kåsa) least-squares circle through the points, and the RMS distance off it.
+    private static func fitCircle(_ points: ArraySlice<Point>) -> (circle: Circle, rms: Double)? {
+        let count = Double(points.count)
+        guard points.count >= 4 else { return nil }
+        let mx = points.reduce(0) { $0 + $1.x } / count, my = points.reduce(0) { $0 + $1.y } / count
+        var suu = 0.0, suv = 0.0, svv = 0.0, suuu = 0.0, svvv = 0.0, suvv = 0.0, svuu = 0.0
+        for p in points {
+            let u = p.x - mx, v = p.y - my
+            let uu = u * u, vv = v * v
+            suu += uu; suv += u * v; svv += vv
+            suuu += uu * u; svvv += vv * v; suvv += u * vv; svuu += v * uu
+        }
+        let det = suu * svv - suv * suv
+        guard abs(det) >= 1e-9 else { return nil }
+        let a = 0.5 * (suuu + suvv), b = 0.5 * (svvv + svuu)
+        let uc = (a * svv - b * suv) / det, vc = (b * suu - a * suv) / det
+        let c = Circle(x: uc + mx, y: vc + my, r: (uc * uc + vc * vc + (suu + svv) / count).squareRoot())
+        let squares = points.reduce(0.0) { sum, p in
+            let e = hypot(p.x - c.x, p.y - c.y) - c.r
+            return sum + e * e
+        }
+        return (c, (squares / count).squareRoot())
+    }
+
+    /// How far the points go round `c` the way round `sign` (radians), and the share of their
+    /// steps that go back.
+    private static func winding(_ points: ArraySlice<Point>, around c: Circle, sign: Double) -> (angle: Double, backwards: Double) {
+        var angle = 0.0, back = 0
+        var previous = atan2(points[points.startIndex].y - c.y, points[points.startIndex].x - c.x)
+        for p in points.dropFirst() {
+            let a = atan2(p.y - c.y, p.x - c.x)
+            let step = wrapped(a - previous) * sign
+            if step < 0 { back += 1 }
+            angle += step
+            previous = a
+        }
+        return (angle, Double(back) / Double(max(points.count - 1, 1)))
+    }
+
+    /// 4πA/L² of the closed polygon through the points: 1 for a circle, less the more stretched.
+    private static func isoperimetric(_ points: ArraySlice<Point>) -> Double {
+        var area = 0.0, perimeter = 0.0
+        var previous = points[points.endIndex - 1]
+        for p in points {
+            area += previous.x * p.y - p.x * previous.y
+            perimeter += hypot(p.x - previous.x, p.y - previous.y)
+            previous = p
+        }
+        return 4 * .pi * abs(area / 2) / max(perimeter * perimeter, 1e-9)
     }
 }
 
@@ -1247,9 +1623,11 @@ struct WorkspaceCircleGesture: Equatable, Sendable {
 /// A finger moving a float by its title or grabber. Circling (`WorkspaceCircleGesture`) switches
 /// it into docking the float into the panes (`.dock`: it folds into a card under the finger and
 /// the pane drop targets show) and back (`.float`: the card opens into the float under the
-/// finger). A shake, a zig-zag, a figure eight, a straight move or a pause never switches, and
-/// circling on after a switch never switches back until it has stopped. It keeps how the float
-/// was before the finger took it, so Cancel puts it back exactly (`restoring`). Pure.
+/// finger). An ordinary move, however it curves, a shake, a zig-zag, a figure eight or a pause
+/// never switches. Circling on after a switch never switches back; a circle the other way round
+/// does at once, and so does the same way round once the finger has stopped, moved on or turned
+/// away. It keeps how the float was before the finger took it, so Cancel puts it back exactly
+/// (`restoring`). Pure.
 struct WorkspaceFloatMove: Equatable, Sendable {
     enum Switch: Equatable, Sendable { case dock, float }
 
