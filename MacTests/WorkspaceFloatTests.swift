@@ -703,6 +703,43 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(Set(m.layout.tiles.values.flatMap(\.windows).map(\.windowID)), [10, 11, 12], "every window still here")
     }
 
+    /// One hold: a circle switches a drag to Floating; circling on doesn't switch it back (and
+    /// shows no ring); a circle the other way round switches it back to Pane at once, no pause.
+    @MainActor
+    func testCirclingTheOtherWaySwitchesADragBackInTheSameHold() {
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        m.choose(w[1], asNewTile: true)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
+        m.beginDrag(.window(w[2]), at: CGPoint(x: 350, y: 300))
+        var t = 10.0
+        var placements: [WorkspacePlacement] = []
+        var ringAfter = 0.0
+        func move(_ p: CGPoint) {
+            t += 1.0 / 60
+            if m.moveDrag(to: p, at: t), let d = m.drag { placements.append(d.placement) }
+            if !placements.isEmpty { ringAfter = max(ringAfter, m.placementSwitchProgress) }
+        }
+        // Clockwise for three seconds, 50 pt round (300, 300): one switch.
+        for i in 1...180 {
+            let a = Double(i) / 60 * 2 * .pi
+            move(CGPoint(x: 300 + 50 * cos(a), y: 300 + 50 * sin(a)))
+        }
+        XCTAssertEqual(placements, [.float])
+        XCTAssertEqual(ringAfter, 0, "no ring while circling on after the switch")
+        // Straight on into a circle the other way round, 50 pt round (400, 300).
+        let reversed = t
+        for i in 1...150 {
+            let b = Double.pi - Double(i) / 60 * 2 * .pi
+            move(CGPoint(x: 400 + 50 * cos(b), y: 300 + 50 * sin(b)))
+            if placements.count == 2 { break }
+        }
+        XCTAssertEqual(placements, [.float, .pane])
+        XCTAssertEqual(t - reversed, 1.25, accuracy: 0.1, "a loop and a quarter the other way, nothing more")
+        m.cancelDrag()
+    }
+
     /// Without circling: the Float zone beside Cancel floats the dragged window. Default Window
     /// Placement applies to windows not in the layout yet; a window already floating comes back
     /// instead of opening twice. The circling tip shows once, ever.
