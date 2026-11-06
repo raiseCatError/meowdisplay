@@ -1346,6 +1346,7 @@ struct WindowOverviewView: View {
                 }
                 .modifier(OpenedWindowChoice(model: model))
                 TextField("Search windows and apps", text: $query).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("windowPickerSearch")
                 HStack(spacing: 8) {
                     Text("Full Desktop:").foregroundStyle(.white.opacity(0.7))
                     Button("Mirror") { model.closeOverview(); onMirror() }.buttonStyle(.bordered)
@@ -1389,8 +1390,10 @@ struct WindowOverviewView: View {
                                     titleVisibility: .visible, presenting: confirmApp) { app in
                     if canOpenApps {
                         Button(String(localized: "Open \(app.name)")) { model.openAppFromPicker(app) }
+                            .accessibilityIdentifier("pickerOpenAppConfirm")
                     } else if model.controlState() != .requestsDisabled {
                         Button("Request Control and Open") { model.openAppFromPicker(app, requestingControl: true) }
+                            .accessibilityIdentifier("pickerOpenAppRequestControl")
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: { app in
@@ -1448,6 +1451,7 @@ struct WindowOverviewView: View {
         }
         .buttonStyle(.plain)
         .disabled(model.appOpening?.bundleID == app.bundleID && model.appOpening?.isWaiting == true)
+        .accessibilityIdentifier("pickerOpenApp.\(app.bundleID)")
         .accessibilityLabel(app.running ? String(localized: "\(app.name), open with no window to show") : app.name)
         .accessibilityHint("Asks before opening it on the Mac")
         .accessibilityInputLabels(["Open \(app.name)", app.name])
@@ -1488,6 +1492,7 @@ struct WindowOverviewView: View {
         .padding(10)
         .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pickerAppOpening")
     }
 
     private func statusText(_ o: WorkspaceAppOpening) -> String {
