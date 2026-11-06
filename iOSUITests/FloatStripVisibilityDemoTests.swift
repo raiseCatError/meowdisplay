@@ -117,8 +117,21 @@ final class FloatStripVisibilityDemoTests: XCTestCase {
         switch edge {
         case .left: XCTAssertEqual(f.minX, strip.minX, accuracy: 3, "out of the left edge")
         case .right: XCTAssertEqual(f.maxX, strip.maxX, accuracy: 3, "out of the right edge")
-        case .top: XCTAssertEqual(f.minY, strip.minY, accuracy: 24, "out of the top edge (its title pill just inside)")
+        case .top:
+            // Its title bar's room (30 pt, `WorkspaceFloatGeometry.barHeight`) stays below the top,
+            // so its title pill is inside: on the iPhone it lands 30 pt below its strip.
+            XCTAssertGreaterThanOrEqual(f.minY, strip.minY - 1, "out of the top edge, not past it")
+            XCTAssertLessThanOrEqual(f.minY, strip.minY + 33, "out of the top edge, no lower than its title bar's room")
+            if let pill = pill(of: back, in: app) {
+                XCTAssertGreaterThanOrEqual(pill.screenPoint.y, picture.frame.minY, "its title pill inside")
+            }
         case .bottom: XCTAssertEqual(f.maxY, strip.maxY, accuracy: 3, "out of the bottom edge")
+        }
+        // A straight slide out of its strip: across it, where the strip was.
+        if edge == .top || edge == .bottom {
+            XCTAssertEqual(f.minX, strip.minX, accuracy: 4, "\(edge): straight out of its strip")
+        } else {
+            XCTAssertEqual(f.minY, strip.minY, accuracy: 4, "\(edge): straight out of its strip")
         }
         // Its strip's picture went with it: that slice shows the window now, not the card. (At the
         // top its dark title pill sits there now.)
