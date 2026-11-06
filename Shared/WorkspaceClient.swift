@@ -557,6 +557,8 @@ final class WorkspaceModel: ObservableObject {
     private var iconsConnected = false
     /// Every launchable Mac app (Finder first), from `appCatalog`.
     @Published private(set) var apps: [MacAppItem] = []
+    /// When to ask for `apps` again: on opening a browser, not on every refresh.
+    private var inventory = AppInventoryRequestPlanner()
     /// Apps opened from this device that haven't shown a window yet.
     @Published private(set) var launching: Set<String> = []
     @Published private(set) var launchFailed: String?
@@ -667,6 +669,8 @@ final class WorkspaceModel: ObservableObject {
     var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
     /// Whether this device extends the Mac now (outside Window view), as the Mac confirmed.
     var extending: () -> Bool = { false }
+    /// Seconds, for waits measured here (tests step it).
+    var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     /// A step that would start Window view from Extend, waiting for the person to confirm it.
     struct LeaveExtendRequest: Identifiable {
@@ -856,11 +860,18 @@ final class WorkspaceModel: ObservableObject {
             guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
             displayThumbnails[id] = image
         case .appCatalog(let rev, let list):
+            inventory.answered(now: clock())
             appRevision = rev
             if let list { apps = WorkspaceSearch.carouselOrder(list) }
             requestIcons()
         case .launchResult(let bundle, let ok):
             if !ok { launching.remove(bundle); launchFailed = bundle }
+            if var o = appOpening, o.bundleID == bundle {
+                let step = o.launchAnswered(ok: ok, now: clock())
+                Log.info("pickerOpen: launch answered bundle=\(bundle) ok=\(ok)")
+                appOpening = o
+                performAppOpening(step)
+            }
             requestCatalog()
         case .closeResult(let id, let result):
             finishClose(id, result: result)
@@ -872,7 +883,12 @@ final class WorkspaceModel: ObservableObject {
             sendTask?.cancel()
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
-            launchpadOpen = false; launching = []; planner.reset()
+            launchpadOpen = false; launching = []; planner.reset(); inventory.reset()
+            if var o = appOpening {
+                let step = o.disconnected()
+                appOpening = o
+                performAppOpening(step)
+            }
             iconsConnected = false; iconPlanner.reset(); iconRetry?.cancel(); iconRetry = nil
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
@@ -899,7 +915,8 @@ final class WorkspaceModel: ObservableObject {
         savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
         thumbnails = [:]; icons = [:]; iconArrival = []; iconPlanner.reset(); thumbAge = [:]; displayThumbnails = [:]
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
-        apps = []; appRevision = nil; launching = []
+        apps = []; appRevision = nil; launching = []; inventory.reset()
+        dismissAppOpening()
         generations = [:]
         publish()
     }
@@ -930,6 +947,7 @@ final class WorkspaceModel: ObservableObject {
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
         requestThumbnails()
+        advanceAppOpening()
     }
 
     private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
@@ -990,6 +1008,8 @@ final class WorkspaceModel: ObservableObject {
 
     func requestApps() { _ = send(WorkspaceRequests.appCatalog(revision: apps.isEmpty ? nil : appRevision)) }
 
+    /// Windows, running apps and displays. Apps to open come from `appCatalog` (`requestApps`):
+    /// current Macs don't answer the listing's old `installed` flag.
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
 
     // MARK: Space
@@ -1701,11 +1721,13 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// Opens an app on the Mac (explicit action; the Mac refuses it without control and never activates it).
-    func launch(_ bundle: String) {
-        guard inputAllowed() else { return }
+    /// False: nothing was sent.
+    @discardableResult
+    func launch(_ bundle: String) -> Bool {
+        guard inputAllowed() else { return false }
         launchFailed = nil
         launching.insert(bundle)
-        _ = send(WorkspaceRequests.appLaunch(bundle))
+        return send(WorkspaceRequests.appLaunch(bundle))
     }
 
     // MARK: Local fullscreen (receiver only)
@@ -1926,6 +1948,145 @@ final class WorkspaceModel: ObservableObject {
 
     func cancelAppDrop() { appDrop = nil }
 
+    // MARK: Opening an app from the window picker (WorkspaceAppOpening)
+
+    /// An app opening from the picker into the tile it was opened for (nil: none). The picker
+    /// shows its progress, the choice among several new windows, and what went wrong.
+    @Published private(set) var appOpening: WorkspaceAppOpening?
+    /// Still opening after a few seconds: the picker says it's taking a while.
+    @Published private(set) var appOpeningSlow = false
+    /// Bumped whenever the picker shows a new question about the opening (a choice, a failure),
+    /// so a dialog dismissed without an answer stops only the question it showed.
+    private(set) var appOpeningRound = 0
+    private var appOpeningTask: Task<Void, Never>?
+
+    /// The session's control as the opening needs it (live session and the Mac's grant).
+    private var appOpeningControl: WorkspaceAppOpening.Control {
+        WorkspaceAppOpening.Control(live: inputAllowed(), state: controlState())
+    }
+
+    private func appOpeningTileUnchanged(_ o: WorkspaceAppOpening) -> Bool {
+        o.tileUnchanged(o.tile.flatMap { arranged.tiles[$0] })
+    }
+
+    /// The person confirmed opening `app` (the picker asked). With control the Mac is asked to
+    /// launch exactly that app now; without (or `requestingControl`: the picker offered Request
+    /// Control), control is requested the usual way and the app opens once the Mac allows it. The
+    /// picker shows it waiting; Cancel or closing the picker stops it.
+    func openAppFromPicker(_ app: WorkspacePickerSearch.AppToOpen, requestingControl: Bool = false) {
+        guard overviewOpen, !app.bundleID.isEmpty else { return }
+        dismissAppOpening()
+        let tile = replacingTile
+        let control = appOpeningControl
+        let (o, step) = WorkspaceAppOpening.start(bundleID: app.bundleID, name: app.name, tile: tile,
+                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source },
+                                                  control: requestingControl && control == .allowed ? .off : control,
+                                                  windows: catalog?.windows ?? [], now: clock())
+        Log.info("pickerOpen: requested bundle=\(app.bundleID) tile=\(tile ?? "-") control=\(control) request=\(requestingControl)")
+        appOpening = o
+        appOpeningSlow = false
+        appOpeningRound += 1
+        if o.phase == .awaitingControl, control != .requesting {
+            Log.info("pickerOpen: control requested bundle=\(app.bundleID)")
+            requestControl()
+        }
+        performAppOpening(step)
+        if appOpening?.isFinished == false { runAppOpeningTimer() }
+    }
+
+    /// One of several new windows, picked by the person.
+    func pickOpenedWindow(_ w: CatalogWindowItem) {
+        guard var o = appOpening else { return }
+        let step = o.pick(w.id, generation: w.generation, windows: catalog?.windows ?? [], tileUnchanged: appOpeningTileUnchanged(o))
+        appOpening = o
+        performAppOpening(step)
+    }
+
+    /// Try Again after a failure: the same app, for the same tile.
+    func retryAppOpening() {
+        guard let o = appOpening, case .failed(let f) = o.phase, f.retryable else { return }
+        Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue)")
+        openAppFromPicker(WorkspacePickerSearch.AppToOpen(bundleID: o.bundleID, name: o.name, running: false))
+    }
+
+    /// Cancel, OK, or the picker closing: stop waiting; nothing is placed.
+    func dismissAppOpening() {
+        appOpeningTask?.cancel(); appOpeningTask = nil
+        guard let o = appOpening else { return }
+        if !o.isFinished { Log.info("pickerOpen: cancelled bundle=\(o.bundleID)") }
+        appOpening = nil
+        appOpeningSlow = false
+    }
+
+    /// A choice or failure dismissed without an answer: stops the opening if that is still the
+    /// question showing (an answer given meanwhile moved it on).
+    func dismissAppOpening(round: Int) {
+        guard round == appOpeningRound, let o = appOpening, !o.isWaiting else { return }
+        dismissAppOpening()
+    }
+
+    /// A new listing or a second passing: control granted, the app's window seen, or a wait over.
+    func advanceAppOpening() {
+        guard var o = appOpening, !o.isFinished else { return }
+        let seen = o.firstSeenAt != nil
+        let now = clock()
+        let step = o.advance(windows: catalog?.windows ?? [], now: now, control: appOpeningControl,
+                             tileUnchanged: appOpeningTileUnchanged(o))
+        if !seen, o.firstSeenAt != nil {
+            Log.info("pickerOpen: window seen bundle=\(o.bundleID) new=\(o.newWindows(catalog?.windows ?? []).map(\.id))")
+        }
+        if o != appOpening { appOpening = o }
+        let slow = o.isSlow(now: now)
+        if slow != appOpeningSlow { appOpeningSlow = slow }
+        performAppOpening(step)
+    }
+
+    private func performAppOpening(_ step: WorkspaceAppOpening.Step) {
+        guard var o = appOpening else { return }
+        switch step {
+        case .none:
+            break
+        case .launch:
+            Log.info("pickerOpen: launch sent bundle=\(o.bundleID) tile=\(o.tile ?? "-") known=\(o.known.count)")
+            if !launch(o.bundleID) {
+                let next = o.launchNotSent()
+                appOpening = o
+                performAppOpening(next)
+            }
+        case .place(let w):
+            Log.info("pickerOpen: placed bundle=\(o.bundleID) window=\(w.id) tile=\(o.tile ?? "-")")
+            appOpeningTask?.cancel(); appOpeningTask = nil
+            appOpening = nil
+            appOpeningSlow = false
+            // Exactly as if the person had picked this window for that tile.
+            replacingTile = o.tile
+            choose(w, asNewTile: false)
+        case .choose(let windows):
+            Log.info("pickerOpen: several windows bundle=\(o.bundleID) windows=\(windows.map(\.id)) stale=\(o.pickWasStale)")
+            appOpeningRound += 1
+            appOpeningSlow = false
+        case .fail(let f):
+            Log.info("pickerOpen: failed bundle=\(o.bundleID) reason=\(f.rawValue)")
+            appOpeningTask?.cancel(); appOpeningTask = nil
+            appOpeningSlow = false
+            appOpeningRound += 1
+        }
+    }
+
+    /// While an opening waits: the window listing every second (the Mac answers at most twice a
+    /// second) until it ends, at most `controlTimeout` + `answerTimeout` + `windowTimeout`.
+    private func runAppOpeningTimer() {
+        appOpeningTask?.cancel()
+        appOpeningTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self, let o = self.appOpening, !o.isFinished else { break }
+                if o.phase == .launching || o.phase == .waitingForWindow { self.requestCatalog() }
+                self.advanceAppOpening()
+            }
+        }
+    }
+
     private func placePendingAppWindow() {
         guard let p = pendingAppPlacement else { return }
         if Date() > p.until { pendingAppPlacement = nil; return }
@@ -2070,12 +2231,18 @@ final class WorkspaceModel: ObservableObject {
     // MARK: Overview, rail
 
     func openOverview(replacing tile: String? = nil) {
+        dismissAppOpening()   // an app opening for another tile stops here
         replacingTile = tile
         overviewOpen = true
         startRefreshing()
     }
 
-    func closeOverview() { overviewOpen = false; replacingTile = nil }
+    /// Closing the picker (Done, or a window chosen) also stops an app opening from it: nothing
+    /// is placed later behind the person's back.
+    func closeOverview() {
+        dismissAppOpening()
+        overviewOpen = false; replacingTile = nil
+    }
 
     /// The tile a switcher (Stage Peek) replaces: the active tile, the only
     /// one, else the first tile still waiting for a window, else the last.
@@ -2116,17 +2283,23 @@ final class WorkspaceModel: ObservableObject {
     private func startRefreshing() {
         refreshTask?.cancel()
         requestCatalog()
-        requestApps()
+        askForApps(opening: true)
         refreshTask = Task { [weak self] in
-            var tick = 0
             while let self, self.browsing {
                 try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen ? 3_000_000_000 : 5_000_000_000)
                 guard !Task.isCancelled, self.browsing else { break }
                 self.requestCatalog()
-                tick += 1
-                if tick % 5 == 0 { self.requestApps() }
+                self.askForApps(opening: false)
             }
         }
+    }
+
+    /// The Mac's app list: asked when a browser opens (with this device's revision, so an
+    /// unchanged list is a short `same` answer); a tick only repeats an unanswered ask.
+    private func askForApps(opening: Bool) {
+        let now = clock()
+        guard opening ? inventory.opened(now: now) : inventory.tick(now: now) else { return }
+        requestApps()
     }
 
     // MARK: Sending

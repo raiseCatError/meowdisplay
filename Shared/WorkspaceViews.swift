@@ -1139,6 +1139,9 @@ private extension View {
 }
 
 /// Mission Control-style overview: every shareable window grouped by app, plus layouts and whole-display modes.
+/// Its search also finds Mac apps with no window to show (any app on the Mac, from its app list):
+/// opening one is confirmed first, needs control, and the app's new window goes in the tile the
+/// picker was opened for (`WorkspaceAppOpening`); several new windows: the person picks one.
 struct WindowOverviewView: View {
     @ObservedObject var model: WorkspaceModel
     let macName: String
@@ -1148,11 +1151,20 @@ struct WindowOverviewView: View {
     /// Insets that keep the content clear of a notch and the home indicator; the backdrop fills the screen.
     var safeInsets = EdgeInsets()
     @State private var query = ""
+    /// The app tapped under Apps to Open, until the person confirms or cancels opening it.
+    @State private var confirmApp: WorkspacePickerSearch.AppToOpen?
+
+    /// Apps can be opened from here now (control, and input reaching the Mac).
+    private var canOpenApps: Bool { inputAllowed && model.canControlMac }
 
     var body: some View {
         if model.overviewOpen {
             let catalog = model.catalog
-            let windows = catalog?.search(query) ?? []
+            let results = WorkspacePickerSearch.results(query, windows: catalog?.windows ?? [], running: catalog?.apps ?? [],
+                                                        installed: model.apps)
+            let windows = results.windows
+            let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+            let iconBundles = results.apps.prefix(24).map(\.bundleID)
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text(model.replacingTile != nil ? "Choose a window for this tile" : "Windows on \(macName)")
@@ -1161,6 +1173,7 @@ struct WindowOverviewView: View {
                     Spacer()
                     Button("Done") { model.closeOverview() }.keyboardShortcut(.cancelAction)
                 }
+                .modifier(OpenedWindowChoice(model: model))
                 TextField("Search windows and apps", text: $query).textFieldStyle(.roundedBorder)
                 HStack(spacing: 8) {
                     Text("Full Desktop:").foregroundStyle(.white.opacity(0.7))
@@ -1178,15 +1191,18 @@ struct WindowOverviewView: View {
                         } }
                     }
                 }
+                if let opening = model.appOpening, opening.isWaiting { openingStatus(opening) }
                 if catalog == nil {
                     Text("Asking \(macName) for its windows…").foregroundStyle(.white.opacity(0.7))
                 } else if catalog?.unavailable == true {
                     Text("\(macName) can't list its windows right now. Check that MeowDisplay has Screen Recording permission on the Mac.")
                         .foregroundStyle(.white.opacity(0.8))
-                } else if windows.isEmpty, !query.isEmpty {
-                    Text("No windows match \"\(query)\".").foregroundStyle(.white.opacity(0.7))
+                } else if windows.isEmpty, searching {
+                    Text(results.apps.isEmpty ? "Nothing on \(macName) matches \"\(query)\"." : "No open windows match \"\(query)\".")
+                        .foregroundStyle(.white.opacity(0.7))
                 }
                 ScrollView {
+                    if !windows.isEmpty, !results.apps.isEmpty { sectionHeader("Open Windows") }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(windows) { w in
                             OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
@@ -1196,48 +1212,207 @@ struct WindowOverviewView: View {
                                              ? { model.choose(w, asNewTile: true) } : nil)
                         }
                     }
-                    appSections(catalog)
+                    appSection(results, searching: searching)
+                }
+                .confirmationDialog(confirmApp.map(openTitle) ?? "", isPresented: Binding(get: { confirmApp != nil }, set: { if !$0 { confirmApp = nil } }),
+                                    titleVisibility: .visible, presenting: confirmApp) { app in
+                    if canOpenApps {
+                        Button(String(localized: "Open \(app.name)")) { model.openAppFromPicker(app) }
+                    } else if model.controlState() != .requestsDisabled {
+                        Button("Request Control and Open") { model.openAppFromPicker(app, requestingControl: true) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: { app in
+                    Text(openMessage(app))
                 }
             }
             .padding(16)
             .padding(safeInsets)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(white: 0.06, opacity: 0.97).ignoresSafeArea())
+            .modifier(AppOpeningFailureAlert(model: model, macName: macName) { name in query = name })
+            .onAppear { model.requestIcons(iconBundles) }
+            .onChange(of: iconBundles) { model.requestIcons($0) }
         }
     }
 
+    private func sectionHeader(_ title: LocalizedStringKey) -> some View {
+        Text(title).font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7))
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Apps with no window to show, apart from the windows: tapping one asks before opening it.
     @ViewBuilder
-    private func appSections(_ catalog: WorkspaceCatalogMessage?) -> some View {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        let noWindow = (catalog?.apps ?? []).filter { !$0.hasWindows && (q.isEmpty || $0.name.localizedCaseInsensitiveContains(q)) }
-        let installed = (catalog?.installed ?? []).filter { q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) }
-        VStack(alignment: .leading, spacing: 6) {
-            if !noWindow.isEmpty {
-                Text("Running, no open window").font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(noWindow, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Bring Forward") }
-            }
-            if !installed.isEmpty {
-                Text(inputAllowed ? "Open an app" : "Open an app (needs control of the Mac)")
-                    .font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(installed, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Open") }
+    private func appSection(_ results: WorkspacePickerSearch.Results, searching: Bool) -> some View {
+        if !results.apps.isEmpty || results.moreApps {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Apps to Open")
+                Text(canOpenApps ? "Not open, or open with no window to show. An app opens on the Mac without coming to the front."
+                                 : "Opening an app needs control of the Mac.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+                ForEach(results.apps) { app in appRow(app) }
+                if results.moreApps {
+                    Text(searching ? "More apps match. Type more of the name." : "Search to find any app on \(macName).")
+                        .font(.caption).foregroundStyle(.white.opacity(0.6)).padding(.top, 2)
+                }
             }
         }
     }
 
-    private func appRow(_ name: String, bundle: String, action: String) -> some View {
-        HStack {
-            if let icon = model.icons[bundle] { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
-            Text(name).foregroundStyle(.white).lineLimit(1)
-            Spacer()
-            Button(action) { model.launch(bundle) }.disabled(!inputAllowed)
-                // Every row says "Open": name the app, and keep the short word for Voice Control.
-                .accessibilityLabel("\(action) \(name)")
-                .accessibilityInputLabels(["\(action) \(name)", action])
+    private func appRow(_ app: WorkspacePickerSearch.AppToOpen) -> some View {
+        Button { confirmApp = app } label: {
+            HStack(spacing: 10) {
+                WorkspaceAppIcon(icon: model.icons[app.bundleID], name: app.name, bundleID: app.bundleID, size: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(app.name).foregroundStyle(.white).lineLimit(1)
+                    if app.running { Text("Open, with no window to show").font(.caption2).foregroundStyle(.white.opacity(0.6)) }
+                }
+                Spacer()
+                Text("Open…").font(.callout.weight(.semibold)).foregroundStyle(workspaceAccent)
+            }
+            .padding(8)
+            .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
         }
-        .padding(8)
-        .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 10))
+        .buttonStyle(.plain)
+        .disabled(model.appOpening?.bundleID == app.bundleID && model.appOpening?.isWaiting == true)
+        .accessibilityLabel(app.running ? String(localized: "\(app.name), open with no window to show") : app.name)
+        .accessibilityHint("Asks before opening it on the Mac")
+        .accessibilityInputLabels(["Open \(app.name)", app.name])
+    }
+
+    private func openTitle(_ app: WorkspacePickerSearch.AppToOpen) -> String {
+        app.running ? String(localized: "\(app.name) has no window you can show. Open a new one on \(macName)?")
+                    : String(localized: "Open \(app.name) on \(macName)?")
+    }
+
+    private func openMessage(_ app: WorkspacePickerSearch.AppToOpen) -> String {
+        if !canOpenApps {
+            if model.controlState() == .requestsDisabled {
+                return String(localized: "\(macName) doesn’t accept control requests from this device, so apps can’t be opened from here.")
+            }
+            return model.replacingTile != nil
+                ? String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(app.name) opens and its window goes in this tile.")
+                : String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(app.name) opens and its window shows here.")
+        }
+        return model.replacingTile != nil
+            ? String(localized: "Its window goes in this tile; nothing else in your layout changes. It opens without coming to the front on the Mac.")
+            : String(localized: "Its window shows here when it opens. It opens without coming to the front on the Mac.")
+    }
+
+    /// The app opening now: what it's waiting for, and Cancel.
+    private func openingStatus(_ o: WorkspaceAppOpening) -> some View {
+        HStack(spacing: 10) {
+            ProgressView().tint(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(statusText(o)).foregroundStyle(.white)
+                Text(o.tile != nil ? "Its window goes in this tile." : "Its window shows here when it opens.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.7))
+            }
+            Spacer()
+            Button("Cancel") { model.dismissAppOpening() }.buttonStyle(.bordered)
+                .accessibilityLabel(String(localized: "Stop opening \(o.name)"))
+        }
+        .padding(10)
+        .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func statusText(_ o: WorkspaceAppOpening) -> String {
+        if o.phase == .awaitingControl {
+            return model.controlState() == .requesting
+                ? String(localized: "Waiting for \(macName) to allow control. \(o.name) opens then.")
+                : String(localized: "Requesting control to open \(o.name)…")
+        }
+        return model.appOpeningSlow ? String(localized: "\(o.name) is taking a while to open…")
+                                    : String(localized: "Opening \(o.name) on \(macName)…")
+    }
+}
+
+/// Several new windows after opening an app from the picker: which one goes in the tile. Never
+/// chosen for the person; Cancel leaves the tile as it was.
+private struct OpenedWindowChoice: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+
+    func body(content: Content) -> some View {
+        let windows: [CatalogWindowItem]? = { if case .choosing(let ws) = model.appOpening?.phase { return ws }; return nil }()
+        let round = model.appOpeningRound
+        content.confirmationDialog(model.appOpening.map { String(localized: "Which \($0.name) window?") } ?? "",
+                                   isPresented: Binding(get: { windows != nil },
+                                                        // Dismissed without a choice (a tap outside): stop, after any pick.
+                                                        set: { if !$0 { DispatchQueue.main.async { model.dismissAppOpening(round: round) } } }),
+                                   titleVisibility: .visible, presenting: windows) { ws in
+            ForEach(ws) { w in
+                Button(w.title.isEmpty ? String(localized: "Untitled Window") : w.title) { model.pickOpenedWindow(w) }
+            }
+            Button("Cancel", role: .cancel) { model.dismissAppOpening() }
+        } message: { _ in
+            Text(model.appOpening?.pickWasStale == true ? "That window closed. Choose another."
+                 : "It opened more than one window. Choose the one to show.")
+        }
+    }
+}
+
+/// An app opening from the picker that didn't end with its window in the tile: what happened,
+/// Try Again (or Request Control), Choose a Window (searches for the app), or Cancel.
+private struct AppOpeningFailureAlert: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+    let macName: String
+    let onChooseWindow: (String) -> Void
+
+    func body(content: Content) -> some View {
+        let opening = model.appOpening
+        let failure: WorkspaceAppOpening.Failure? = { if case .failed(let f) = opening?.phase { return f }; return nil }()
+        let round = model.appOpeningRound
+        let name = opening?.name ?? ""
+        content.alert(failure.map { title($0, name) } ?? "",
+                      isPresented: Binding(get: { failure != nil },
+                                           set: { if !$0 { DispatchQueue.main.async { model.dismissAppOpening(round: round) } } }),
+                      presenting: failure) { f in
+            if f.retryable, model.controlState() != .requestsDisabled {
+                Button([.controlDenied, .controlEnded].contains(f) ? String(localized: "Request Control Again") : String(localized: "Try Again")) {
+                    model.retryAppOpening()
+                }
+            }
+            Button("Choose a Window") { model.dismissAppOpening(); onChooseWindow(name) }
+            Button("Cancel", role: .cancel) { model.dismissAppOpening() }
+        } message: { f in
+            Text(message(f, name))
+        }
+    }
+
+    private func title(_ f: WorkspaceAppOpening.Failure, _ name: String) -> String {
+        switch f {
+        case .launchFailed: return String(localized: "Couldn’t Open \(name)")
+        case .noAnswer: return String(localized: "\(name) Didn’t Open")
+        case .noWindow: return String(localized: "No \(name) Window to Show")
+        case .controlDenied: return String(localized: "Control Wasn’t Allowed")
+        case .controlEnded: return String(localized: "Control Ended")
+        case .tileChanged: return String(localized: "The Tile Changed")
+        case .disconnected: return String(localized: "Disconnected")
+        }
+    }
+
+    private func message(_ f: WorkspaceAppOpening.Failure, _ name: String) -> String {
+        switch f {
+        case .launchFailed:
+            return String(localized: "\(macName) couldn’t open \(name). Try again, or choose a window instead.")
+        case .noAnswer:
+            return String(localized: "\(macName) didn’t answer. Check that this device still has control, then try again.")
+        case .noWindow:
+            return String(localized: "\(name) is open on \(macName), but no window you can show here appeared. Try again to ask it for a window, or choose a window instead.")
+        case .controlDenied:
+            return model.controlState() == .requestsDisabled
+                ? String(localized: "\(macName) doesn’t accept control requests from this device, so \(name) wasn’t opened.")
+                : String(localized: "\(name) wasn’t opened: opening apps needs control of the Mac.")
+        case .controlEnded:
+            return String(localized: "Control of \(macName) ended before \(name) opened, so it may not have opened.")
+        case .tileChanged:
+            return String(localized: "That tile changed or was removed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
+        case .disconnected:
+            return String(localized: "The connection to \(macName) ended while \(name) was opening.")
+        }
     }
 }
 
