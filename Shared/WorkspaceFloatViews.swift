@@ -342,6 +342,12 @@ struct WorkspaceFloatLayer: View {
         if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }
         else if active, model.remote?.hostFocus.isMismatch == true, !moved,
                 !covered(CGRect(x: rect.midX - 60, y: rect.maxY - 54, width: 120, height: 40)) { typingPaused(id, rect: rect) }
+        if (model.isResizingOnMac(id) || model.windowFrameNotice?.tile == id), !moved,
+           !covered(CGRect(x: rect.midX - 60, y: rect.minY + 8, width: 120, height: 40)) {
+            WorkspaceWindowFrameStatus(model: model, id: id)
+                .frame(maxWidth: max(rect.width - 24, 120))
+                .position(x: rect.midX, y: rect.minY + 34)
+        }
     }
 
     /// Typing to this float paused: the Mac's focus moved to another app or window after its
@@ -696,6 +702,14 @@ struct WorkspaceFloatLayer: View {
         var mac: [UIMenuElement] = []
         if model.tileState(id)?.status == .offscreen {
             mac.append(act(String(localized: "Show on Mac"), "macwindow", off) { model.showOnMac(id) })
+        }
+        if model.offersWindowFrameOnMac(id) {
+            // The real Mac window, not this float's view: only from these items, never a gesture.
+            let ready: UIMenuElement.Attributes = model.canControlMac && !model.isResizingOnMac(id) ? [] : [.disabled]
+            mac.append(act(String(localized: "Fill Window on Mac"), "arrow.up.and.down.and.arrow.left.and.right", ready) { model.fillWindowOnMac(id) })
+            if model.canRestoreOnMac(id) {
+                mac.append(act(String(localized: "Restore Previous Size on Mac"), "arrow.uturn.backward", ready) { model.restoreWindowOnMac(id) })
+            }
         }
         mac.append(act(String(localized: "Minimize on Mac"), "minus.rectangle", off) { model.minimizeRemoteWindow(id) })
         mac.append(act(String(localized: "Close Window on Mac…"), "xmark.square", off.union(.destructive)) { onClose(id) })

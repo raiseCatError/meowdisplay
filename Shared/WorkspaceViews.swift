@@ -490,28 +490,8 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    /// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
-    @ViewBuilder
-    private func windowFrameStatus(_ id: String) -> some View {
-        if model.isResizingOnMac(id) {
-            HStack(spacing: 6) {
-                ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small)
-                Text("Resizing the window on the Mac…").font(.caption).foregroundStyle(.white)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
-        } else if let notice = model.windowFrameNotice, notice.tile == id {
-            Button { model.clearWindowFrameNotice() } label: {
-                Label(notice.message, systemImage: notice.isError ? "exclamationmark.triangle" : "checkmark.circle")
-                    .font(.caption).foregroundStyle(.white).multilineTextAlignment(.leading)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint(Text("Dismisses this message."))
-            .accessibilityIdentifier("windowFrameNotice")
-        }
-    }
+    private func windowFrameStatus(_ id: String) -> some View { WorkspaceWindowFrameStatus(model: model, id: id) }
+
 
     // MARK: Labels (one per window in the pane; tabs side by side)
 
@@ -1776,5 +1756,33 @@ struct WorkspacePlacementRing: View {
         .animation(reduceMotion ? nil : .linear(duration: 0.08), value: progress)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+/// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
+/// Shown at the bottom of the pane or float the item was chosen on.
+struct WorkspaceWindowFrameStatus: View {
+    @ObservedObject var model: WorkspaceModel
+    let id: String
+
+    var body: some View {
+        if model.isResizingOnMac(id) {
+            HStack(spacing: 6) {
+                ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small)
+                Text("Resizing the window on the Mac…").font(.caption).foregroundStyle(.white)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+        } else if let notice = model.windowFrameNotice, notice.tile == id {
+            Button { model.clearWindowFrameNotice() } label: {
+                Label(notice.message, systemImage: notice.isError ? "exclamationmark.triangle" : "checkmark.circle")
+                    .font(.caption).foregroundStyle(.white).multilineTextAlignment(.leading)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text("Dismisses this message."))
+            .accessibilityIdentifier("windowFrameNotice")
+        }
     }
 }
