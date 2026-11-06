@@ -302,9 +302,11 @@ enum WorkspaceFloatGeometry {
             let v = lo > range.upperBound ? range.upperBound : range.lowerBound
             return v...v
         }
-        // The pill is centred on the content's top edge.
-        let pill = WorkspaceFloatLayering.pillBounds(WorkspaceRect(x: 0, y: 0, width: r.width * size.width, height: r.height * size.height))
-        let halfW = pill.width / 2 / size.width, halfH = pill.height / 2 / size.height
+        // The pill is centred on the content's top edge. Across, it's kept in as far as the
+        // content: its widest is a few points wider, and a float flush with an edge stays flush.
+        let content = WorkspaceRect(x: 0, y: 0, width: r.width * size.width, height: r.height * size.height)
+        let pill = WorkspaceFloatLayering.pillBounds(content)
+        let halfW = min(pill.width, content.width) / 2 / size.width, halfH = pill.height / 2 / size.height
         x = meet(x, safe.x + halfW - r.width / 2, safe.maxX - halfW - r.width / 2)
         y = meet(y, safe.y + halfH, safe.maxY - halfH)
         return (x, y)

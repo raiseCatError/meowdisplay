@@ -118,11 +118,13 @@ final class WorkspaceFloatTuckTests: XCTestCase {
     private let proMaxLandscape = WorkspaceSize(width: 932, height: 430)
     private let proMaxLandscapeSafe = WorkspaceRect(x: 59.0 / 932, y: 24.0 / 430, width: (932.0 - 118) / 932, height: (430.0 - 24 - 21) / 430)
 
-    /// The title pill of a float at `r` (shares of a picture of `size`).
+    /// The title pill of a float at `r` (shares of a picture of `size`), across as far as its
+    /// content (its widest is a few points wider: a float flush with an edge stays flush).
     private func pill(_ r: WorkspaceRect, _ size: WorkspaceSize) -> WorkspaceRect {
         let p = WorkspaceFloatLayering.pillBounds(WorkspaceRect(x: r.x * size.width, y: r.y * size.height,
                                                                 width: r.width * size.width, height: r.height * size.height))
-        return WorkspaceRect(x: p.x / size.width, y: p.y / size.height, width: p.width / size.width, height: p.height / size.height)
+        let w = min(p.width, r.width * size.width)
+        return WorkspaceRect(x: (p.midX - w / 2) / size.width, y: p.y / size.height, width: w / size.width, height: p.height / size.height)
     }
 
     private func assertComesBackReachable(_ o: WorkspaceFloatMotion.Outcome, _ size: WorkspaceSize, safe: WorkspaceRect, _ name: String,
