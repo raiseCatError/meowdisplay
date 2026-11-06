@@ -1028,13 +1028,37 @@ final class WorkspaceModel: ObservableObject {
         _ = send(WorkspaceRequests.exitMissionControl)
     }
 
-    /// The one pane that offers Exit Mission Control: the selected pane when macOS paused it,
-    /// otherwise the first paused pane (one button, not one per pane).
-    var missionControlActionPane: String? {
+    /// What the Mission Control banner offers while Mission Control is open on the Mac (nil when
+    /// it isn't). One banner for the whole Window view, above every pane and float: a button inside
+    /// one pane could be hidden by a float, and floats never had one.
+    enum MissionControlAction: Equatable, Sendable {
+        /// This device has control: Exit Mission Control (the Mac re-checks before it presses Escape).
+        case exit
+        /// No control yet: the normal Request Control flow, then Exit.
+        case requestControl
+        /// Asked; the Mac's owner hasn't answered.
+        case awaitingApproval
+        /// The Mac takes no control requests from this device: say how to close it there.
+        case closeOnMac
+    }
+
+    var missionControlAction: MissionControlAction? {
         guard missionControlOpen else { return nil }
-        let paused = { (id: String) in [.paused, .waiting, .retrying].contains(self.tileState(id)?.status) }
-        if let active = remote?.active, paused(active) { return active }
-        return remote?.tiles.first { paused($0.id) }?.id
+        if canControlMac { return .exit }
+        switch controlState() {
+        case .requesting: return .awaitingApproval
+        case .requestsDisabled: return .closeOnMac
+        case .off, .notAllowed, .allowed: return .requestControl
+        }
+    }
+
+    /// The banner's button: Exit with control, else ask for control (never a blind Escape).
+    func performMissionControlAction() {
+        switch missionControlAction {
+        case .exit?: exitMissionControl()
+        case .requestControl?: requestControl()
+        case .awaitingApproval?, .closeOnMac?, nil: break
+        }
     }
 
     /// Turn Stage Manager on on the Mac (Settings; control).

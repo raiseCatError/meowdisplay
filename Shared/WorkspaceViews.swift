@@ -143,6 +143,7 @@ struct WorkspaceChromeView: View {
                 }
                 #endif
                 WorkspaceDropOverlay(model: model, picture: picture)
+                if model.missionControlAction != nil, model.drag == nil { missionControlBanner }
                 if model.arranging {
                     arrangeControls(frames)
                 } else if model.localFullscreen == nil, !voiceOver {
@@ -186,6 +187,45 @@ struct WorkspaceChromeView: View {
         }
     }
 
+    /// Mission Control is open on the Mac: one banner at the top of Window view, above the panes
+    /// and floats, with the one thing this device can do about it.
+    private var missionControlBanner: some View {
+        let action = model.missionControlAction
+        let room = (safeArea.map { $0.intersection(picture) } ?? picture)
+        return VStack(spacing: 8) {
+            Label("Mission Control is open on your Mac. Video is paused.", systemImage: "rectangle.3.group")
+                .font(.callout.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
+            switch action {
+            case .closeOnMac?:
+                Text("Press Esc on the Mac to close it.").font(.footnote).foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+            default:
+                Button { model.performMissionControlAction() } label: {
+                    Label(action == .exit ? String(localized: "Exit Mission Control")
+                          : action == .awaitingApproval ? String(localized: "Awaiting Approval on the Mac…")
+                          : String(localized: "Request Control to Exit"),
+                          systemImage: action == .exit ? "xmark.rectangle" : "hand.raised")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.black)
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .background(.white, in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(action == .awaitingApproval)
+                .accessibilityIdentifier("exitMissionControl")
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.08, opacity: 0.92)))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.25), lineWidth: 1))
+        .environment(\.colorScheme, .dark)
+        .frame(maxWidth: min(room.width - 24, 460))
+        .fixedSize(horizontal: false, vertical: true)
+        .position(x: room.midX, y: room.minY + 64)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("missionControlBanner")
+    }
+
     /// What decides whose menus the bar shows: the focused pane, its app, and control.
     private var menuKey: String {
         let source = model.active.flatMap { model.layout.tiles[$0]?.source }
@@ -216,7 +256,7 @@ struct WorkspaceChromeView: View {
         guard let remote = model.tileState(id) else { return nil }
         let app = remote.app.isEmpty ? "This window" : remote.app
         if model.missionControlOpen, [.paused, .waiting, .retrying].contains(remote.status) {
-            return String(localized: "Mission Control is open on your Mac. Video is paused.")
+            return String(localized: "Paused while Mission Control is open")
         }
         switch remote.status {
         case .live: return nil
@@ -295,7 +335,10 @@ struct WorkspaceChromeView: View {
             Color.clear.allowsHitTesting(false)
             if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
-                    Button { model.openOverview(replacing: id) } label: {
+                    Button {
+                        // While Mission Control is open, the warning does what its banner offers.
+                        if model.missionControlOpen { model.performMissionControlAction() } else { model.openOverview(replacing: id) }
+                    } label: {
                         HStack(spacing: 8) {
                             // Still working: a live spinner (a still hourglass with Reduce Motion).
                             if let s = model.tileState(id)?.status, s == .waiting || s == .retrying {
@@ -315,21 +358,6 @@ struct WorkspaceChromeView: View {
                                 .background(workspaceChip, in: Capsule())
                         }
                         .buttonStyle(.plain)
-                    }
-                    if model.missionControlActionPane == id {
-                        // One pane offers it. Without control: ask for it here, then Exit.
-                        let granted = model.canControlMac
-                        Button { if granted { model.exitMissionControl() } else { model.requestControl() } } label: {
-                            Label(granted ? String(localized: "Exit Mission Control")
-                                  : model.controlState() == .requesting ? String(localized: "Awaiting Approval on the Mac…")
-                                  : String(localized: "Request Control to Exit Mission Control"),
-                                  systemImage: granted ? "xmark.rectangle" : "hand.raised").font(.callout.weight(.semibold))
-                                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
-                                .background(.white, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled([.requesting, .requestsDisabled].contains(model.controlState()))
-                        .accessibilityIdentifier("exitMissionControl")
                     }
                     if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed, !model.missionControlOpen {
                         HStack(spacing: 8) {

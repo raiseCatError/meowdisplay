@@ -87,14 +87,32 @@ final class MissionControlTests: XCTestCase {
         XCTAssertFalse(closed.missionControlOpen, "an older Mac never says it: nothing changes")
     }
 
-    func testOnePaneOffersExitPreferringTheSelectedOne() {
-        let m = model { _ in }
-        m.apply(state(missionControl: true, tiles: [("a", "paused"), ("b", "paused")], active: "b"))
-        XCTAssertEqual(m.missionControlActionPane, "b")
-        m.apply(state(missionControl: true, tiles: [("a", "paused"), ("b", "live")], active: "b"))
-        XCTAssertEqual(m.missionControlActionPane, "a", "the selected pane still shows a picture")
-        m.apply(state(missionControl: false, tiles: [("a", "paused"), ("b", "paused")], active: "b"))
-        XCTAssertNil(m.missionControlActionPane, "closed: nothing offered")
+    /// One banner for the whole Window view (above panes and floats), whatever is paused or
+    /// selected: a float or a float over a pane's title can't hide the way out any more.
+    func testTheBannerOffersTheOneThingThisDeviceCanDo() {
+        var sent: [[String: Any]] = []
+        var requested = 0
+        let m = model { sent.append($0) }
+        m.requestControl = { requested += 1 }
+        m.apply(state(missionControl: false, tiles: [("a", "paused")]))
+        XCTAssertNil(m.missionControlAction, "closed: nothing offered")
+
+        // A float is the only paused tile (it used to get no button at all).
+        m.apply(state(missionControl: true, tiles: [("a", "live"), ("f", "paused")], active: "f"))
+        m.controlState = { .allowed }
+        XCTAssertEqual(m.missionControlAction, .exit)
+        m.performMissionControlAction()
+        XCTAssertEqual(sent.filter { $0["action"] as? String == "missionControl" }.count, 1)
+
+        let expected: [(SessionInputWireState, WorkspaceModel.MissionControlAction)] =
+            [(.off, .requestControl), (.notAllowed, .requestControl), (.requesting, .awaitingApproval), (.requestsDisabled, .closeOnMac)]
+        for (s, action) in expected {
+            m.controlState = { s }
+            XCTAssertEqual(m.missionControlAction, action, "\(s)")
+            m.performMissionControlAction()
+        }
+        XCTAssertEqual(requested, 2, "Request Control only from off and declined, once each")
+        XCTAssertEqual(sent.filter { $0["action"] as? String == "missionControl" }.count, 1, "never an Exit (Escape) without control")
     }
 
     func testExitNeedsTheMacsGrantAndIsOneRequest() {
