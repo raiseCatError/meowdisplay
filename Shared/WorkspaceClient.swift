@@ -851,8 +851,8 @@ final class WorkspaceModel: ObservableObject {
         if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
-        requestThumbnails()
         requestTuckedStills()
+        requestThumbnails()
     }
 
     private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
