@@ -1467,7 +1467,8 @@ the same `gen`; anything else is rejected, never retargeted.
 `workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit,
 stageManager?, stageManagerControl?}`
 reports what the Mac shows: per tile `{id, window, gen, state, app, bundle,
-title, follow, rotation, fit}` with `state` one of `live`, `waiting`,
+title, follow, rotation, fit, restore?}` (`restore`: see Fill Window on Mac
+below) with `state` one of `live`, `waiting`,
 `offscreen`, `closed`, `failed`, `limit` (paused by the Mac's capture
 budget; the tile is kept). `active` is the tile keyboard input goes to;
 `hostFocus` is `deliver`, `noActiveTile`, `hostFocusElsewhere` (another
@@ -1503,6 +1504,57 @@ the owner answers on the Mac), `stillOpen`, `stale` (not that window any
 more), `control` (no input grant: View Only cannot close), `accessibility`
 (the Mac lacks the permission), `noButton` or `ambiguous` (more than one
 window matched; nothing was pressed). A fresh `windowCatalog` follows.
+
+**Fill Window on Mac / Restore Previous Size on Mac** (welcome feature
+`windowFrame`, listed only while Window mode is allowed; Window mode only).
+The only messages that change the size of a real Mac window. Receivers send
+them only from a window pane's own explicit menu items, never from a gesture,
+a pane or float resize, a zoom or Fullscreen on This Device, and label them
+"… on Mac" (the pane's own Fill/Show Whole Window only changes how the device
+draws the picture). Receiver → Mac:
+`{"type":"windowFrame","op":"fill"|"restore","window":ID,"gen":G,"req":N}`.
+Mac → receiver, always (also when it does nothing):
+`{"type":"windowFrameResult","op":…,"window":ID,"req":N,"result":R,"restorable":Bool}`.
+
+`fill` sets that one window's Accessibility position and size to the usable
+area of the display it overlaps most (below the menu bar, clear of the Dock,
+and clear of Stage Manager's strip when its items are on that display) — not
+macOS full screen: no new Space, no green button, no Window menu, no key
+shortcut, no AXRaise, no activation, and AXFullScreen is never written.
+`restore` puts back the frame the window had before the last `fill` from
+any device, only while the window is still exactly where that `fill` left it.
+
+The Mac acts only when all of these hold: the session is admitted and has
+control (Allow Input on, a grant for this connection, capture allows input),
+checked when the message arrives and again, without side effects, right
+before the first write (also not while the Privacy Shield asks for the
+password or Mission Control is open); the window is listed to this session
+with that `gen`, shown in one of this receiver's panes, on screen, not in
+Stage Manager's strip; the window server still lists that id for the same
+app (pid), as a normal on-screen window, with no other on-screen window of
+that app at the same bounds; exactly one standard Accessibility window of
+that app has those bounds (±2 points) and the listed title (exactly, when
+the listing has one); it isn't in full screen or minimized, and its position
+and size are settable. After writing, the Mac reads the frame back every
+0.1 s for up to 0.6 s until it settles and the window server reports the same
+bounds for that id; only then does it report success. If Accessibility
+changed but the window server's window didn't, the element is put back and
+the answer is `ambiguous`.
+
+R is one of `filled`, `limited` (resized, but the app kept its own size
+limits; restorable), `alreadyFilled` (nothing moved), `restored`,
+`nothingToRestore`, `changed` (moved or resized on the Mac since `fill`;
+nothing moved and the old size is forgotten), `displayChanged` (less than
+half of the old frame is on a connected display; nothing moved), `stale`,
+`ambiguous`, `notResizable`, `fullScreen`, `offscreen` (minimized, hidden or
+on another Space), `stageStrip`, `missionControl`, `privacyShield`,
+`control` (no control: nothing was attempted), `accessibility` or `failed`.
+`restorable` says whether a `restore` would be tried now. While a restorable
+frame is kept, that window's `workspaceState` tile carries `restore: true`.
+The Mac keeps at most 64 frames, in memory only, per window id and owner pid,
+and forgets one when the window closes, its id passes to another app, or a
+listing shows it moved since. Receivers show the outcome briefly and treat no
+answer within 8 s as failed.
 
 **Input.** Unchanged messages, canvas coordinates. The Mac maps a point to
 the tile under it, through that tile's fit and rotation, to the window. A
@@ -1551,8 +1603,8 @@ float is captured at no less than 15 fps. `workspaceState` echoes
 `layer: "float"` and `z` on the floats it accepted. A float the receiver has
 tucked to an edge or hidden is simply left out of the request: hiding is
 local, and nothing here closes, minimizes or moves a Mac window
-(`windowAction` and `windowClose` stay limited to the receiver's explicit,
-confirmed menu items). Arranging floats never brings a window forward on the
+(`windowAction`, `windowClose` and `windowFrame` stay limited to the
+receiver's explicit, confirmed menu items). Arranging floats never brings a window forward on the
 Mac either: the receiver sends `workspaceFocus` with `raise: false`. Floats are panes: an admitted session, the input grant and View
 Only apply to them unchanged.
 
@@ -2192,6 +2244,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
 | 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
+| 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.

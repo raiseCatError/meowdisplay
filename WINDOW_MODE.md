@@ -25,7 +25,7 @@ removed, and the arrangement comes back when the space returns.
 | Open the window overview | Hold three fingers still on the picture, or Settings → Display → Show Mac Windows… | Hold three fingers still, the rail, or Settings → Display → Choose Windows… | Windows in the title bar, or ⌃⌥W |
 | Quick switch | Stage Peek (default): touch and hold the left edge (or right, in Settings), slide to browse, lift (nothing changes), tap a window to show it in the active tile; tap outside to close. Drag inward or tap Expand for a larger browser. The top card, Full Desktop, returns to the whole Mac screen. Settings → Controls → Window Switcher → Rail brings back the window rail (a thin handle at the top by default; Move Rail for another edge) | Same (Settings → Display → Window Switcher) | Overview |
 | Switch view | From Window view: Stage Peek's Full Desktop card, or the overview's Mirror/Extend. From the whole screen: answer Yes to "Switch to Window view?" (offered once per launch when the Mac supports it), or open the overview. From Extend, a pick or drop that starts Window view asks first, since the extended display goes away | Same | — |
-| Pane/tab options | **Touch and hold a pane's title** (about 0.4 seconds), then **release without dragging** to open its menu: **Fullscreen on This Device / Exit Fullscreen**, Fill Pane / Show Whole Window, Change Window…, Arrange Panes, **Remove from Layout**, and (with control) Close Window on Mac…. A **single tap** selects the pane or switches tabs; it does not open the menu. **Double-tap** a pane's title to enter Fullscreen on This Device, and double-tap it again (it stays visible) to return to the same arrangement; the menu, the fullscreen strip's Exit Fullscreen button and the VoiceOver/TalkBack actions do the same. With one pane, use the rail's **Arrange** action to reveal its title | Hold a pane/tab title for options; a tap selects/switches tabs | Shared pane menu; Arrange shows the pane labels |
+| Pane/tab options | **Touch and hold a pane's title** (about 0.4 seconds), then **release without dragging** to open its menu: **Fullscreen on This Device / Exit Fullscreen**, Fill Pane / Show Whole Window, Change Window…, Arrange Panes, **Remove from Layout**, and (with control) **Fill Window on Mac**, **Restore Previous Size on Mac** (after a Fill), Minimize on Mac and Close Window on Mac…. A **single tap** selects the pane or switches tabs; it does not open the menu. **Double-tap** a pane's title to enter Fullscreen on This Device, and double-tap it again (it stays visible) to return to the same arrangement; the menu, the fullscreen strip's Exit Fullscreen button and the VoiceOver/TalkBack actions do the same. With one pane, use the rail's **Arrange** action to reveal its title | Hold a pane/tab title for options; a tap selects/switches tabs | Shared pane menu; Arrange shows the pane labels |
 | Move a tile | Press and hold its name, then drag: a highlighted area shows where it lands (middle swaps, an edge splits). Release on **Cancel** to leave everything as it was. With more than one pane, moving a whole pane also shows **Remove from Layout** beside Cancel: release there to take the pane off this device's layout (Undo brings it back; the Mac window stays open). Remove is not offered for tabs, for windows or apps dragged in from Stage Peek, or for the last pane | Same | Same, while Arrange is on |
 | Tabs in a pane | Drop a window on a pane's labels to add it as a tab; tap a label to switch (only the shown tab streams). Hold a tab's label and drag it: onto another pane's labels to move it there, onto an edge for a new pane, or along its own labels to reorder. Each tab keeps its own rotation, Fit/Fill and zoom. Remove This Tab only takes it out of the pane; the Mac window stays open | Same | — |
 | Drag an app in | In Stage Peek, press and hold an app in the carousel or in search results, then drag it onto a pane: one window goes straight in; with several, pick which; with none, you're offered to open it on the Mac (needs control) and its first new window lands there. Nothing opens just because a drag began | Same | — |
@@ -63,6 +63,47 @@ that window.
 
 Removing a tile never closes the Mac window. **Close Window on Mac…** is
 separate, asks first, and needs control of the Mac.
+
+### Fill Window on Mac and Restore Previous Size on Mac
+
+Sometimes the window on the Mac is simply small, and enlarging its picture
+here doesn't give the app more room. **Fill Window on Mac** (in a window
+pane's menu, with control) resizes the real Mac window to fill the usable
+area of the display it is on: below the menu bar, clear of the Dock, and
+clear of Stage Manager's strip when its items are showing there. It is not
+macOS full screen: no new Space is made. **Restore Previous Size on Mac**
+appears after a Fill and puts the window back exactly where it was. These
+are different from the pane's own **Fill Pane / Show Whole Window**, which
+only changes how this device draws the picture.
+
+Safety rules (PROTOCOL.md 6.10):
+
+- Only these two menu items do it. Moving, resizing, zooming, rotating,
+  floating, tucking or fullscreening a pane on the device never touches the
+  Mac window, and nothing does it automatically.
+- Needs control of the Mac. The Mac checks again right before it acts, and
+  does nothing while the Privacy Shield asks for its password or Mission
+  Control is open.
+- Only the exact window the pane shows: the same window id, app and
+  identity the Mac listed, matched to exactly one standard window by
+  Accessibility with the same frame and title. Anything less certain is
+  refused ("couldn't tell which window"), never guessed.
+- It sets that one window's position and size and nothing else: no green
+  button, no Window menu, no keyboard shortcut, the app isn't brought
+  forward, and full screen is never turned on.
+- It reads the result back from both Accessibility and the window server
+  before saying it worked. An app that won't go bigger (or smaller) than its
+  own limits is reported as resized "as far as the app allows".
+- Refused, with the reason shown on the pane: windows that can't be resized,
+  full-screen, minimized or hidden windows, windows in Stage Manager's strip,
+  windows that closed or reopened, and Macs without Accessibility permission
+  for MeowDisplay.
+- Restore only applies while the window is still exactly where Fill left it.
+  If it was moved or resized on the Mac since, Restore says so and forgets
+  the old size; if the display it was on is gone, nothing moves. The old
+  sizes are kept in memory only (at most 64), never saved.
+
+Not on Android yet.
 
 Each tile can be rotated on its own (0°, 90°, 180°, 270°). Only the picture
 turns; the Mac window doesn't, and clicks, drags, scrolling and Pencil land
@@ -103,7 +144,8 @@ when its tile first showed it is never brought back by the Mac on its own:
 it. **Show on Mac** restores it on request.
 
 So Window mode creates **no virtual display** and never moves, resizes or
-re-Spaces a window:
+re-Spaces a window on its own (only **Fill Window on Mac** / **Restore Previous
+Size on Mac**, chosen by a person with control, resize one):
 
 1. one ScreenCaptureKit stream per chosen window, scaled to its tile by the
    window server, at full rate for the active tile and reduced rates for the

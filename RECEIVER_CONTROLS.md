@@ -169,6 +169,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |
 | Pane options (Fullscreen on This Device, Fit/Fill, Change Window…, Rotate, Arrange Panes, Remove from Layout, Close Window on Mac…) | Yes. Hold title, then release | Yes | Yes | Yes (shared view) |
+| **Fill Window on Mac** / **Restore Previous Size on Mac** (pane menu, control only) | Yes | Yes | Not yet | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
 | Hinge-aware tiles on foldables | Yes. Geometry unit-tested only; not yet run on a half-open iPhone Duo or a posed simulator | n/a | Yes. Emulator only | n/a |
