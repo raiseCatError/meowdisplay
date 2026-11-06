@@ -283,6 +283,7 @@ targets:
       - Mac/WindowWorkspaceEngine.swift
       - Mac/StageManagerSwitch.swift
       - Mac/StageManagerShortcutInstaller.swift
+      - Mac/StageManagerController.swift
       - Shared/KnownDeviceCleanup.swift
       - Shared/ScreenAwakePolicy.swift
       - Mac/StageStripAccess.swift

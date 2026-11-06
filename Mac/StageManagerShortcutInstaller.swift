@@ -11,6 +11,10 @@ enum StageManagerShortcutInstaller {
     /// macOS): ActionKit's WFSetStageManagerIntent, operation "set" plus the state.
     static let actionIdentifier = "is.workflow.actions.stagemanager.set"
     static let names = [StageManagerSwitch.offShortcut, StageManagerSwitch.onShortcut]
+    /// 2: the action also carries `showDock` and `showRecentApps`, set to the owner's settings at
+    /// setup (1 left them unset, so every run turned Dock hiding off: the action defaults both to true).
+    /// Recorded in this app's defaults when the shortcuts are added (`StageManagerController`).
+    static let formatVersion = 2
 
     enum InstallError: Error, Equatable {
         case write
@@ -18,12 +22,15 @@ enum StageManagerShortcutInstaller {
         case open
     }
 
-    /// An unsigned shortcut file (binary property list) with the one action.
-    static func unsignedFile(on: Bool) -> Data {
+    /// An unsigned shortcut file (binary property list) with the one action. `settings` are the
+    /// Dock and recent-apps values the action writes on every run: pass the owner's current ones
+    /// so running it leaves them as they are.
+    static func unsignedFile(on: Bool, settings: DockSettings) -> Data {
         let shortcut: [String: Any] = [
             "WFWorkflowActions": [[
                 "WFWorkflowActionIdentifier": actionIdentifier,
-                "WFWorkflowActionParameters": ["operation": "set", "state": on],
+                "WFWorkflowActionParameters": ["operation": "set", "state": on,
+                                               "showDock": settings.showDock, "showRecentApps": settings.showRecentApps],
             ]],
             "WFWorkflowClientVersion": "2700.0.0",
             "WFWorkflowMinimumClientVersion": 900,
@@ -63,9 +70,10 @@ enum StageManagerShortcutInstaller {
         return base.appendingPathComponent(app, isDirectory: true).appendingPathComponent("Shortcuts", isDirectory: true)
     }
 
-    /// Writes and signs each named shortcut. Blocks (signing asks Apple's servers): call off the
-    /// main thread. Returns the signed files, named so Shortcuts uses the exact names.
-    static func prepare(_ wanted: [String], in folder: URL = folder) -> Result<[URL], InstallError> {
+    /// Writes and signs each named shortcut with these Dock settings. Blocks (signing asks Apple's
+    /// servers): call off the main thread. Returns the signed files, named so Shortcuts uses the exact names.
+    static func prepare(_ wanted: [String], settings: DockSettings, in folder: URL = folder,
+                        run: ([String]) -> ToolRun = StageManagerSwitch.runShortcuts) -> Result<[URL], InstallError> {
         let fm = FileManager.default
         let unsigned = folder.appendingPathComponent("unsigned", isDirectory: true)
         do { try fm.createDirectory(at: unsigned, withIntermediateDirectories: true) } catch { return .failure(.write) }
@@ -73,11 +81,11 @@ enum StageManagerShortcutInstaller {
         for name in wanted {
             let input = unsigned.appendingPathComponent(name + ".shortcut")
             let signed = folder.appendingPathComponent(name + ".shortcut")
-            do { try unsignedFile(on: name == StageManagerSwitch.onShortcut).write(to: input) } catch { return .failure(.write) }
+            do { try unsignedFile(on: name == StageManagerSwitch.onShortcut, settings: settings).write(to: input) } catch { return .failure(.write) }
             try? fm.removeItem(at: signed)
-            let r = StageManagerSwitch.runShortcuts(["sign", "--mode", "anyone", "--input", input.path, "--output", signed.path])
+            let r = run(["sign", "--mode", "anyone", "--input", input.path, "--output", signed.path])
             guard r.status == 0, fm.fileExists(atPath: signed.path) else {
-                Log.info("stage manager setup: signing \(name) failed (\(r.status))")
+                Log.info("stage manager setup: signing \(name) failed (\(r.status)) \(r.errorSummary ?? "")")
                 return .failure(.sign(r.status))
             }
             out.append(signed)
