@@ -547,6 +547,70 @@ enum WorkspaceFloatMotion {
     }
 }
 
+// MARK: - Chrome layering (receiver)
+
+/// The receiver draws every outline, title pill and handle in one layer above the video, while
+/// each float's window is pixels inside the video. So the chrome of anything behind a float must
+/// step aside where that float is, or it shows through it: a pane's outline through a float, a
+/// back float's grips and title over the front one. All rects here are picture points.
+enum WorkspaceFloatLayering {
+    /// The title pill straddles the float's top edge (half above it): what a float covers reaches
+    /// this far above its content, so the pill hides what's behind it too.
+    static let pillReach = 16.0
+    /// Height of the title pill's touch area.
+    static let pillHeight = 30.0
+
+    /// What a shown float hides behind it: its content and the band its title pill sits in.
+    static func occluder(_ content: WorkspaceRect) -> WorkspaceRect {
+        WorkspaceRect(x: content.x, y: content.y - pillReach, width: content.width, height: content.height + pillReach)
+    }
+
+    /// The title pill's largest extent for a float of `content` (it is never wider than this).
+    static func pillBounds(_ content: WorkspaceRect) -> WorkspaceRect {
+        let w = max(min(content.width - 28, 280), 90) + 34
+        return WorkspaceRect(x: content.midX - w / 2, y: content.y - pillHeight / 2, width: w, height: pillHeight)
+    }
+
+    /// For each float (back to front), what the floats in front of it cover.
+    static func covers(backToFront floats: [WorkspaceRect]) -> [[WorkspaceRect]] {
+        floats.indices.map { i in floats[(i + 1)...].map(occluder) }
+    }
+
+    /// Whether `r` meets any of `covers` by more than a sliver (`tolerance` points each way).
+    static func isCovered(_ r: WorkspaceRect, by covers: [WorkspaceRect], tolerance: Double = 0.5) -> Bool {
+        covers.contains { c in
+            guard let i = r.intersection(c) else { return false }
+            return i.width > tolerance && i.height > tolerance
+        }
+    }
+
+    /// The parts of a straight strip (a divider's touch area) that no float covers, each at least
+    /// `minLength` long: a divider stays draggable where it's visible and never takes a touch
+    /// meant for a float drawn over it.
+    static func uncovered(_ strip: WorkspaceRect, alongX: Bool, by covers: [WorkspaceRect], minLength: Double = 24) -> [WorkspaceRect] {
+        var free: [(Double, Double)] = [alongX ? (strip.x, strip.maxX) : (strip.y, strip.maxY)]
+        for c in covers {
+            guard strip.intersection(c) != nil else { continue }
+            let lo = alongX ? c.x : c.y, hi = alongX ? c.maxX : c.maxY
+            free = free.flatMap { seg -> [(Double, Double)] in
+                guard hi > seg.0, lo < seg.1 else { return [seg] }
+                return [(seg.0, min(lo, seg.1)), (max(hi, seg.0), seg.1)].filter { $0.1 > $0.0 }
+            }
+        }
+        return free.filter { $0.1 - $0.0 >= minLength }.map { seg in
+            alongX ? WorkspaceRect(x: seg.0, y: strip.y, width: seg.1 - seg.0, height: strip.height)
+                   : WorkspaceRect(x: strip.x, y: seg.0, width: strip.width, height: seg.1 - seg.0)
+        }
+    }
+
+    /// Resize grips and the bottom grabber show only while they're useful: on the selected float,
+    /// under the pointer, or while a finger moves or resizes it. Elsewhere they would clutter the
+    /// picture and take touches meant for the windows around them.
+    static func showsHandles(selected: Bool, hovered: Bool, manipulating: Bool) -> Bool {
+        selected || hovered || manipulating
+    }
+}
+
 // MARK: - Occlusion (Mac capture budget)
 
 enum WorkspaceOcclusion {
