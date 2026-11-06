@@ -535,6 +535,15 @@ enum WorkspaceFloatGeometry {
         return area.width > 0 && area.height > 0 ? area : nil
     }
 
+    /// Where tucked floats' strips are drawn (points): `handleArea`, else (nothing of the picture
+    /// is clear of the system's edges) the picture itself, so a tucked float always has a handle
+    /// to come back from. nil only without a usable picture.
+    static func waitingArea(picture: WorkspaceRect, safe: WorkspaceRect?, screen: WorkspaceRect?) -> WorkspaceRect? {
+        if let area = handleArea(picture: picture, safe: safe, screen: screen) { return area }
+        guard [picture.x, picture.y, picture.width, picture.height].allSatisfy(\.isFinite), picture.width > 0, picture.height > 0 else { return nil }
+        return picture
+    }
+
     /// Strips go along y on the left and right edges, along x on the top and bottom.
     private static func alongY(_ edge: WorkspaceEdge) -> Bool { edge.axis == .horizontal }
 
@@ -553,14 +562,82 @@ enum WorkspaceFloatGeometry {
         return (lo, hi)
     }
 
-    /// The edges a float may be tucked into here: those with room for a strip.
-    static func tuckEdges(area: WorkspaceRect?) -> Set<WorkspaceEdge> {
+    /// The edges a float may be thrown into here: those with room for a strip, beside the
+    /// controls in `reserved` or just inside them (`stripArea`). A throw toward an edge the
+    /// controls fill deeper than that glides back instead of vanishing under them.
+    static func tuckEdges(area: WorkspaceRect?, reserved: [WorkspaceRect] = []) -> Set<WorkspaceEdge> {
         guard let area, area.width > 0, area.height > 0 else { return [] }
-        return Set([WorkspaceEdge.left, .right, .top, .bottom].filter { e in
-            let r = run(e, in: area)
-            return r.hi - r.lo >= minimumStripLength - 1e-9
-                && (alongY(e) ? area.width : area.height) >= touchDepth
-        })
+        return Set([WorkspaceEdge.left, .right, .top, .bottom].filter { stripArea($0, in: area, avoiding: reserved) != nil })
+    }
+
+    /// The most the controls may move an edge's strips inward (a share of the area across that
+    /// edge); past that the edge has no room for strips.
+    static let maximumStripInset = 0.35
+
+    private static func usable(_ r: WorkspaceRect) -> Bool {
+        r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].allSatisfy(\.isFinite)
+    }
+
+    /// Where `edge`'s strips wait (points): `area`, or, where the controls fill that edge's run
+    /// (the control tray along the bottom of a phone in portrait, a column of keys down a side),
+    /// `area` up to the controls' inner side: the strips wait just inside the controls, as if
+    /// that were the edge, and their windows slide in under the controls. nil: no room on that
+    /// edge (its floats wait on another, `tuckHandles`).
+    static func stripArea(_ edge: WorkspaceEdge, in area: WorkspaceRect, avoiding reserved: [WorkspaceRect]) -> WorkspaceRect? {
+        guard usable(area) else { return nil }
+        let base = run(edge, in: area)
+        guard base.hi - base.lo >= minimumStripLength - 1e-9, (alongY(edge) ? area.width : area.height) >= touchDepth else { return nil }
+        let controls = reserved.filter(usable)
+        let limit = (alongY(edge) ? area.width : area.height) * maximumStripInset
+        var a = area
+        // A tray with a palette or a keypad above it: step inside each layer in turn.
+        for _ in 0..<4 {
+            if !freeRuns(edge, in: a, avoiding: controls).isEmpty { return a }
+            let r = run(edge, in: a)
+            // The controls in the edge's touch band, along its run.
+            let band: (lo: Double, hi: Double) = {
+                switch edge {
+                case .left: return (a.x, a.x + touchDepth)
+                case .right: return (a.maxX - touchDepth, a.maxX)
+                case .top: return (a.y, a.y + touchDepth)
+                case .bottom: return (a.maxY - touchDepth, a.maxY)
+                }
+            }()
+            let blocking = controls.filter { c in
+                let across = alongY(edge) ? (c.x, c.maxX) : (c.y, c.maxY), along = alongY(edge) ? (c.y, c.maxY) : (c.x, c.maxX)
+                return across.1 > band.lo && across.0 < band.hi && along.1 > r.lo && along.0 < r.hi
+            }
+            guard !blocking.isEmpty else { return nil }
+            switch edge {
+            case .left:
+                let x = (blocking.map(\.maxX).max() ?? a.x) + tabSpacing
+                a.width = a.maxX - x; a.x = x
+            case .right: a.width = (blocking.map(\.x).min() ?? a.maxX) - tabSpacing - a.x
+            case .top:
+                let y = (blocking.map(\.maxY).max() ?? a.y) + tabSpacing
+                a.height = a.maxY - y; a.y = y
+            case .bottom: a.height = (blocking.map(\.y).min() ?? a.maxY) - tabSpacing - a.y
+            }
+            let inset = alongY(edge) ? area.width - a.width : area.height - a.height
+            guard inset <= limit + 1e-9, (alongY(edge) ? a.width : a.height) >= touchDepth else { return nil }
+        }
+        return nil
+    }
+
+    /// Where a float tucked at an edge with no room for strips (`stripArea` nil) waits instead,
+    /// among the edges in `open`: the nearer of the two edges beside it, at its end next to the
+    /// float's own edge, else the opposite edge where it was along it. nil: none is open.
+    static func refuge(for tuck: WorkspaceFloatTuck, open: Set<WorkspaceEdge>) -> (edge: WorkspaceEdge, offset: Double)? {
+        let offset = tuck.offset.isFinite ? min(max(tuck.offset, 0), 1) : 0.5
+        let low = offset < 0.5   // nearer the top or left end of its own edge
+        let tries: [(WorkspaceEdge, Double)]
+        switch tuck.edge {
+        case .left: tries = [(low ? .top : .bottom, 0), (low ? .bottom : .top, 0), (.right, offset)]
+        case .right: tries = [(low ? .top : .bottom, 1), (low ? .bottom : .top, 1), (.left, offset)]
+        case .top: tries = [(low ? .left : .right, 0), (low ? .right : .left, 0), (.bottom, offset)]
+        case .bottom: tries = [(low ? .left : .right, 1), (low ? .right : .left, 1), (.top, offset)]
+        }
+        return tries.first { open.contains($0.0) }.map { (edge: $0.0, offset: $0.1) }
     }
 
     /// The parts of `edge`'s run no reserved rect reaches (each at least a shortest strip long). A
@@ -751,14 +828,61 @@ enum WorkspaceFloatGeometry {
     /// `reserved` (the control tray, the function tray, the shortcut column, keypads, Stage Peek's
     /// handle, folds), then the strips, which slide along their edge to the nearest free room,
     /// shorten to share a crowded edge, and share one stack when it has no room for each. Strips on
-    /// different edges never meet: the top and bottom ones stay clear of the corners.
+    /// different edges never meet: the top and bottom ones stay clear of the corners. Where the
+    /// controls fill an edge, its strips wait just inside them (`stripArea`); where they fill it
+    /// deeper than that, its floats wait on the nearest edge with room (`refuge`) until it has
+    /// room again, so a finger can always reach every tucked float (`unreachableTucked`).
     static func tuckHandles(_ floats: [WorkspaceFloat], picture: WorkspaceRect, area: WorkspaceRect, reserved: [WorkspaceRect] = []) -> [TuckTab] {
-        [WorkspaceEdge.left, .top, .right, .bottom].flatMap { edge in
-            tuckTabs(floats.compactMap { f in
-                f.tuck.flatMap { t in
-                    t.edge == edge ? (f.tile, t.offset, WorkspaceSize(width: f.frame.width * picture.width, height: f.frame.height * picture.height)) : nil
-                }
-            }, edge: edge, area: area, picture: picture, avoiding: reserved)
+        let edges: [WorkspaceEdge] = [.left, .top, .right, .bottom]
+        var areas: [WorkspaceEdge: WorkspaceRect] = [:]
+        for e in edges { areas[e] = stripArea(e, in: area, avoiding: reserved) }
+        let open = Set(areas.keys)
+        // A side whose strips wait inside the controls: the top and bottom strips keep clear of
+        // its corner there too.
+        for e in [WorkspaceEdge.top, .bottom] {
+            guard var a = areas[e] else { continue }
+            let lo = max(a.x, areas[.left]?.x ?? a.x), hi = min(a.maxX, areas[.right]?.maxX ?? a.maxX)
+            guard lo > a.x || hi < a.maxX else { continue }
+            a.x = lo
+            a.width = hi - lo
+            if usable(a), !freeRuns(e, in: a, avoiding: reserved).isEmpty { areas[e] = a }
+        }
+        var waiting: [WorkspaceEdge: [(id: String, offset: Double, size: WorkspaceSize)]] = [:]
+        for f in floats {
+            guard let t = f.tuck else { continue }
+            let at = open.contains(t.edge) ? (edge: t.edge, offset: t.offset) : (refuge(for: t, open: open) ?? (edge: t.edge, offset: t.offset))
+            waiting[at.edge, default: []].append((f.tile, at.offset, WorkspaceSize(width: f.frame.width * picture.width, height: f.frame.height * picture.height)))
+        }
+        // With no room anywhere they stay on their own edges, over whatever is there.
+        return edges.flatMap { e in tuckTabs(waiting[e] ?? [], edge: e, area: areas[e] ?? area, picture: picture, avoiding: reserved) }
+    }
+
+    /// Where a tucked float's handle takes touches (points): its visible slice and on in from its
+    /// edge to a `touchDepth` target, at least that long.
+    static func touchArea(_ tab: TuckTab) -> WorkspaceRect {
+        let d = touchDepth, r = tab.rect
+        let h = max(r.height, d), w = max(r.width, d)
+        switch tab.edge {
+        case .left: return WorkspaceRect(x: r.x, y: r.midY - h / 2, width: d, height: h)
+        case .right: return WorkspaceRect(x: r.maxX - d, y: r.midY - h / 2, width: d, height: h)
+        case .top: return WorkspaceRect(x: r.midX - w / 2, y: r.y, width: w, height: d)
+        case .bottom: return WorkspaceRect(x: r.midX - w / 2, y: r.maxY - d, width: w, height: d)
+        }
+    }
+
+    /// Whether every tucked float can be brought back by a finger: the tucked floats of `floats`
+    /// that aren't on exactly one of `handles`, or whose handle has no `touchDepth` of its touch
+    /// area clear of `reserved` (the controls are drawn over the strips). `tuckHandles` leaves
+    /// none while any edge has room. With none anywhere VoiceOver still reaches every handle, and
+    /// choosing the window in Stage Peek brings its float back.
+    static func unreachableTucked(_ floats: [WorkspaceFloat], handles: [TuckTab], reserved: [WorkspaceRect]) -> [String] {
+        let controls = reserved.filter(usable)
+        return floats.compactMap { f -> String? in
+            guard f.tuck != nil else { return nil }
+            let on = handles.filter { $0.ids.contains(f.tile) }
+            guard on.count == 1, let tab = on.first else { return f.tile }
+            let clear = WorkspaceFloatLayering.uncovered(touchArea(tab), alongX: !alongY(tab.edge), by: controls, minLength: touchDepth - 1e-9)
+            return clear.isEmpty ? f.tile : nil
         }
     }
 
@@ -811,6 +935,16 @@ enum WorkspaceFloatGeometry {
         if alongY(edge), waiting.midY.isFinite { r.y = waiting.midY - r.height / 2 }
         if !alongY(edge), waiting.midX.isFinite { r.x = waiting.midX - r.width / 2 }
         return reachable(r, in: size, safe: safe)
+    }
+
+    /// Where a tucked float comes back to when pulled out of its handle on `edge` (picture
+    /// shares): its frame flush with that edge of `area` (where that edge's strips wait, picture
+    /// shares) and moved along it to where it waits (`waiting`), kept reachable (`safe`). A
+    /// straight slide out of its strip even when it waits somewhere it wasn't tucked: past
+    /// controls that fill its edge, on another edge, or after the screen turned.
+    static func restoreFrame(_ frame: WorkspaceRect, waiting: WorkspaceRect, edge: WorkspaceEdge, in size: WorkspaceSize,
+                             area: WorkspaceRect?, safe: WorkspaceRect?) -> WorkspaceRect {
+        comingBack(tuckedFrame(frame, edge: edge, along: .nan, in: size, area: area, safe: safe), waiting: waiting, edge: edge, in: size, safe: safe)
     }
 
     /// A tucked float on its way out of its edge or back in, drawn as one picture: at `rect(p)`, its

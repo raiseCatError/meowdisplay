@@ -472,6 +472,185 @@ final class WorkspaceFloatTuckTests: XCTestCase {
         }
     }
 
+    // MARK: Never out of reach (round 3)
+
+    /// The control tray along the bottom of a phone in portrait fills that edge's run: its strips
+    /// wait just above the tray, at full length, their windows behind that line (under the tray),
+    /// and a throw at the bottom still tucks. A keypad over half the screen leaves the bottom no
+    /// room: a throw there doesn't tuck, and a float tucked there anyway (VoiceOver, an edge that
+    /// filled up later) waits on the nearest side edge, at its end by the bottom, reachable.
+    func testAnEdgeTheControlsFillTakesItsStripsJustInsideThem() throws {
+        let area = phoneSafe
+        let tray = WorkspaceRect(x: 8, y: 754, width: 374, height: 56)
+        XCTAssertTrue(WorkspaceFloatGeometry.freeRuns(.bottom, in: area, avoiding: [tray]).isEmpty, "the tray fills the bottom's run")
+        let inside = try XCTUnwrap(WorkspaceFloatGeometry.stripArea(.bottom, in: area, avoiding: [tray]))
+        XCTAssertEqual(inside.maxY, tray.y - WorkspaceFloatGeometry.tabSpacing, accuracy: 1e-9, "just above the tray")
+        XCTAssertEqual(inside.x, area.x)
+        XCTAssertEqual(inside.width, area.width)
+        XCTAssertEqual(WorkspaceFloatGeometry.stripArea(.left, in: area, avoiding: [tray]), area, "the other edges keep theirs")
+        XCTAssertEqual(WorkspaceFloatGeometry.tuckEdges(area: area, reserved: [tray]), WorkspaceFloatMotion.allEdges)
+
+        let bottom = [WorkspaceFloat(tile: "b", frame: WorkspaceRect(x: 0.25, y: 0.6, width: 180 / 390, height: 120 / 844),
+                                     tuck: WorkspaceFloatTuck(edge: .bottom, offset: 0.5))]
+        let tab = try XCTUnwrap(WorkspaceFloatGeometry.tuckHandles(bottom, picture: phoneScreen, area: area, reserved: [tray]).first)
+        XCTAssertEqual(tab.edge, .bottom)
+        XCTAssertEqual(tab.rect.width, 180, accuracy: 1e-9, "full length")
+        assertIsPartOfItsFloat(tab, area: inside)
+        XCTAssertNil(WorkspaceFloatGeometry.touchArea(tab).intersection(tray), "a finger reaches it above the tray")
+        XCTAssertEqual(WorkspaceFloatGeometry.unreachableTucked(bottom, handles: [tab], reserved: [tray]), [])
+        // A palette open above the tray: the strips step inside that too.
+        let palette = WorkspaceRect(x: 60, y: 690, width: 270, height: 56)
+        let above = try XCTUnwrap(WorkspaceFloatGeometry.stripArea(.bottom, in: area, avoiding: [tray, palette]))
+        XCTAssertEqual(above.maxY, palette.y - WorkspaceFloatGeometry.tabSpacing, accuracy: 1e-9)
+
+        // A keypad over the lower half: no room at the bottom.
+        let keypad = WorkspaceRect(x: 0, y: 450, width: 390, height: 394)
+        XCTAssertNil(WorkspaceFloatGeometry.stripArea(.bottom, in: area, avoiding: [keypad]))
+        XCTAssertFalse(WorkspaceFloatGeometry.tuckEdges(area: area, reserved: [keypad]).contains(.bottom), "a throw there glides back")
+        if case .tuck = WorkspaceFloatMotion.decide(release: WorkspaceRect(x: 0.3, y: 0.5, width: 0.4, height: 0.2), velocity: (x: 0, y: 3000),
+                                                    in: phone, edges: WorkspaceFloatGeometry.tuckEdges(area: area, reserved: [keypad])) {
+            XCTFail("a throw at a full edge glides back")
+        }
+        let lowLeft = [WorkspaceFloat(tile: "b", frame: WorkspaceRect(x: 0.1, y: 0.6, width: 180 / 390, height: 120 / 844),
+                                      tuck: WorkspaceFloatTuck(edge: .bottom, offset: 0.3))]
+        let moved = try XCTUnwrap(WorkspaceFloatGeometry.tuckHandles(lowLeft, picture: phoneScreen, area: area, reserved: [keypad]).first)
+        XCTAssertEqual(moved.edge, .left, "the nearer side")
+        XCTAssertEqual(moved.rect.height, 120, accuracy: 1e-9, "a strip of itself, full length")
+        XCTAssertEqual(moved.rect.maxY, keypad.y - WorkspaceFloatGeometry.tabSpacing, accuracy: 1e-9, "at the end by the bottom")
+        assertIsPartOfItsFloat(moved, area: area)
+        XCTAssertEqual(WorkspaceFloatGeometry.unreachableTucked(lowLeft, handles: [moved], reserved: [keypad]), [])
+        let right = WorkspaceFloatGeometry.refuge(for: WorkspaceFloatTuck(edge: .bottom, offset: 0.8), open: [.left, .right, .top])
+        XCTAssertEqual(right?.edge, .right)
+        XCTAssertEqual(right?.offset, 1)
+        XCTAssertEqual(WorkspaceFloatGeometry.refuge(for: WorkspaceFloatTuck(edge: .left, offset: 0.4), open: [.right])?.offset, 0.4,
+                       "the opposite edge where it was along it")
+        XCTAssertNil(WorkspaceFloatGeometry.refuge(for: WorkspaceFloatTuck(edge: .left, offset: 0.4), open: []))
+    }
+
+    /// Whatever the controls hold and however many floats are tucked where, every tucked float is
+    /// on exactly one handle, and a finger reaches each handle, while any edge has room; strips
+    /// never meet. Only with every edge full deeper than strips may go are some out of a finger's
+    /// reach (VoiceOver's handles and Stage Peek still bring them back).
+    func testEveryTuckedFloatStaysReachable() throws {
+        let ipadScreen = WorkspaceRect(x: 0, y: 0, width: 1180, height: 820)
+        let ipadSafe = WorkspaceRect(x: 0, y: 24, width: 1180, height: 776)
+        for (screen, safe) in [(phoneScreen, phoneSafe), (landscapeScreen, landscapeSafe), (ipadScreen, ipadSafe)] {
+            let area = try XCTUnwrap(WorkspaceFloatGeometry.handleArea(picture: screen, safe: safe, screen: screen))
+            let w = screen.width, h = screen.height
+            let peek = StagePeekLayout.strip(edge: .left, safe: CGRect(x: area.x, y: area.y, width: area.width, height: area.height))
+                .map { WorkspaceRect(x: Double($0.minX), y: Double($0.minY), width: Double($0.width), height: Double($0.height)) }
+            let controls: [[WorkspaceRect]] = [
+                [],
+                [WorkspaceRect(x: 8, y: area.maxY - 56, width: w - 16, height: 56)],                       // a tray along the bottom
+                [WorkspaceRect(x: area.maxX - 60, y: area.y, width: 56, height: area.height)],             // a column down the right
+                [WorkspaceRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)],                            // a keypad over the lower half
+                [WorkspaceRect(x: 8, y: area.maxY - 56, width: w - 16, height: 56),
+                 WorkspaceRect(x: area.maxX - 60, y: area.y, width: 56, height: area.height)],
+                peek.map { [$0] } ?? [],
+                [WorkspaceRect(x: 0, y: 0, width: w * 0.5, height: h), WorkspaceRect(x: w * 0.5, y: 0, width: w * 0.5, height: h)],   // everything
+            ]
+            let edges: [WorkspaceEdge] = [.left, .top, .right, .bottom]
+            for reserved in controls {
+                let open = WorkspaceFloatGeometry.tuckEdges(area: area, reserved: reserved)
+                for count in [1, 2, 3, 5, 9] {
+                    for k in 0..<4 {
+                        let floats = (0..<count).map { i -> WorkspaceFloat in
+                            let width = 120 + Double((i * 37 + k * 11) % 260), height = 90 + Double((i * 53 + k * 7) % 210)
+                            return WorkspaceFloat(tile: "f\(i)", frame: WorkspaceRect(x: 0.1, y: 0.1, width: width / w, height: height / h),
+                                                  tuck: WorkspaceFloatTuck(edge: edges[(k + i * (k + 1)) % 4], offset: Double((i * 29 + k * 13) % 100) / 100))
+                        }
+                        let tabs = WorkspaceFloatGeometry.tuckHandles(floats, picture: screen, area: area, reserved: reserved)
+                        let ids = tabs.flatMap(\.ids)
+                        XCTAssertEqual(ids.sorted(), floats.map(\.tile).sorted(), "each on exactly one handle: \(screen) \(reserved) \(count)")
+                        let unreachable = WorkspaceFloatGeometry.unreachableTucked(floats, handles: tabs, reserved: reserved)
+                        if open.isEmpty {
+                            XCTAssertFalse(reserved.isEmpty)
+                        } else {
+                            XCTAssertEqual(unreachable, [], "\(screen) \(reserved) \(count) \(k): \(tabs.map { ($0.ids, $0.edge, $0.rect) })")
+                            assertApart(tabs)
+                            for t in tabs {
+                                XCTAssertTrue(open.contains(t.edge), "only on edges with room: \(t)")
+                                XCTAssertGreaterThanOrEqual(t.rect.x, area.x - 1e-9)
+                                XCTAssertLessThanOrEqual(t.rect.maxX, area.maxX + 1e-9)
+                                XCTAssertGreaterThanOrEqual(t.rect.y, area.y - 1e-9)
+                                XCTAssertLessThanOrEqual(t.rect.maxY, area.maxY + 1e-9)
+                            }
+                        }
+                    }
+                }
+            }
+            // The last configuration fills every edge: none of them takes a throw.
+            XCTAssertTrue(WorkspaceFloatGeometry.tuckEdges(area: area, reserved: controls.last!).isEmpty)
+        }
+        // Lost handles are caught.
+        let one = [WorkspaceFloat(tile: "a", frame: WorkspaceRect(x: 0, y: 0, width: 0.3, height: 0.3), tuck: WorkspaceFloatTuck(edge: .left, offset: 0.5))]
+        XCTAssertEqual(WorkspaceFloatGeometry.unreachableTucked(one, handles: [], reserved: []), ["a"])
+        let tab = try XCTUnwrap(WorkspaceFloatGeometry.tuckHandles(one, picture: phoneScreen, area: phoneSafe).first)
+        XCTAssertEqual(WorkspaceFloatGeometry.unreachableTucked(one, handles: [tab, tab], reserved: []), ["a"], "two handles for one")
+        XCTAssertEqual(WorkspaceFloatGeometry.unreachableTucked(one, handles: [tab], reserved: [WorkspaceFloatGeometry.touchArea(tab)]), ["a"],
+                       "a handle under a control")
+    }
+
+    /// A picture with nothing clear of the system's edges still shows a handle for each tucked
+    /// float (over the picture itself), so none is ever left without one.
+    func testATuckedFloatAlwaysHasAHandle() throws {
+        let thin = WorkspaceRect(x: 0, y: 0, width: 390, height: 20)
+        XCTAssertNil(WorkspaceFloatGeometry.handleArea(picture: thin, safe: nil, screen: phoneScreen))
+        let area = try XCTUnwrap(WorkspaceFloatGeometry.waitingArea(picture: thin, safe: nil, screen: phoneScreen))
+        XCTAssertEqual(area, thin)
+        let floats = floats([("a", .left, 0.5), ("b", .bottom, 0.3)])
+        let tabs = WorkspaceFloatGeometry.tuckHandles(floats, picture: thin, area: area)
+        XCTAssertEqual(Set(tabs.flatMap(\.ids)), ["a", "b"])
+        XCTAssertEqual(WorkspaceFloatGeometry.waitingArea(picture: phoneScreen, safe: phoneSafe, screen: phoneScreen), phoneSafe)
+        XCTAssertNil(WorkspaceFloatGeometry.waitingArea(picture: WorkspaceRect(x: .nan, y: 0, width: 10, height: 10), safe: nil, screen: nil))
+    }
+
+    /// A float pulled out of its handle comes straight out of the edge that handle is on, flush
+    /// with it: as tucked; after the screen turned (it was flush with the picture's edge, the
+    /// strips wait at the safe area's); waiting just above the tray; waiting on another edge.
+    func testAFloatComesBackFlushWithTheEdgeItsHandleIsOn() throws {
+        let size = WorkspaceSize(width: 390, height: 844)
+        func shares(_ r: WorkspaceRect) -> WorkspaceRect { WorkspaceRect(x: r.x / 390, y: r.y / 844, width: r.width / 390, height: r.height / 844) }
+        let safe = shares(phoneSafe)
+        let frame = WorkspaceFloatGeometry.tuckedFrame(WorkspaceRect(x: 0.2, y: 0.4, width: 200 / 390, height: 140 / 844), edge: .left,
+                                                       along: 0.45, in: size, area: safe, safe: safe)
+        let tab = try XCTUnwrap(WorkspaceFloatGeometry.tuckHandles([WorkspaceFloat(tile: "a", frame: frame, tuck: WorkspaceFloatTuck(edge: .left, offset: 0.45))],
+                                                                  picture: phoneScreen, area: phoneSafe).first)
+        let back = WorkspaceFloatGeometry.restoreFrame(frame, waiting: shares(tab.float), edge: .left, in: size, area: safe, safe: safe)
+        XCTAssertEqual(back, WorkspaceFloatGeometry.comingBack(frame, waiting: shares(tab.float), edge: .left, in: size, safe: safe), "as tucked")
+
+        // Landscape, the Island's side on the left: flush with the picture's edge after a turn,
+        // it comes back flush with the safe area's.
+        let land = WorkspaceSize(width: 844, height: 390)
+        let landSafe = WorkspaceRect(x: 59.0 / 844, y: 0, width: 726.0 / 844, height: 369.0 / 390)
+        let turned = WorkspaceRect(x: 0, y: 0.3, width: 200.0 / 844, height: 140.0 / 390)
+        let out = WorkspaceFloatGeometry.restoreFrame(turned, waiting: WorkspaceRect(x: -0.1, y: 0.3, width: turned.width, height: turned.height),
+                                                      edge: .left, in: land, area: landSafe, safe: landSafe)
+        XCTAssertEqual(out.x, landSafe.x, accuracy: 1e-9, "out of the safe area's edge, not from under the Island")
+
+        // Tucked at the bottom, waiting on the right (the bottom full): out of the right edge, where its strip is.
+        let low = WorkspaceRect(x: 0.3, y: 1 - 140.0 / 844 - 34.0 / 844, width: 200.0 / 390, height: 140.0 / 844)
+        let keypad = WorkspaceRect(x: 0, y: 450, width: 390, height: 394)
+        let onRight = try XCTUnwrap(WorkspaceFloatGeometry.tuckHandles([WorkspaceFloat(tile: "a", frame: low, tuck: WorkspaceFloatTuck(edge: .bottom, offset: 0.8))],
+                                                                       picture: phoneScreen, area: phoneSafe, reserved: [keypad]).first)
+        XCTAssertEqual(onRight.edge, .right)
+        let fromRight = WorkspaceFloatGeometry.restoreFrame(low, waiting: shares(onRight.float), edge: .right, in: size, area: safe, safe: safe)
+        XCTAssertEqual(fromRight.maxX, safe.maxX, accuracy: 1e-9, "flush with the right edge")
+        XCTAssertEqual(fromRight.midY * 844, onRight.float.midY, accuracy: 1e-6, "straight out of its strip")
+        XCTAssertEqual(fromRight.width, low.width, accuracy: 1e-9, "its own size")
+        let path = WorkspaceFloatGeometry.EdgePath(edge: .right, from: onRight.float,
+                                                   to: WorkspaceRect(x: fromRight.x * 390, y: fromRight.y * 844, width: fromRight.width * 390, height: fromRight.height * 844),
+                                                   clipFrom: onRight.rect, clipTo: phoneScreen)
+        XCTAssertEqual(path.rect(0.5).y, onRight.float.y, accuracy: 1e-6, "a straight slide")
+        XCTAssertEqual(path.travel, 200 - WorkspaceFloatGeometry.stripDepth, accuracy: 1e-6)
+
+        // Just above the tray: comes back resting on that line, not under the tray.
+        let tray = WorkspaceRect(x: 8, y: 754, width: 374, height: 56)
+        let inside = shares(try XCTUnwrap(WorkspaceFloatGeometry.stripArea(.bottom, in: phoneSafe, avoiding: [tray])))
+        let up = WorkspaceFloatGeometry.restoreFrame(low, waiting: low, edge: .bottom, in: size, area: inside, safe: safe)
+        XCTAssertEqual(up.maxY * 844, tray.y - WorkspaceFloatGeometry.tabSpacing, accuracy: 1e-6)
+    }
+
     // MARK: Pulling back out
 
     /// The way out of an edge is one picture: at its strip at 0 and at its frame at 1, its size

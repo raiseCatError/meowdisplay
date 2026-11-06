@@ -778,10 +778,13 @@ struct WorkspaceFloatLayer: View {
     /// carrying `velocity` (points/s). A fade with Reduce Motion.
     private func tuckAway(_ id: String, edge: WorkspaceEdge, along: Double, from: CGRect, velocity: (x: Double, y: Double) = (0, 0)) {
         guard let f = model.layout.float(id) else { return }
-        let waiting = WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: along, in: pictureSize, area: restArea, safe: restArea)
+        let waiting = WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: along, in: pictureSize,
+                                                         area: stripArea(edge).map(shares) ?? restArea, safe: restArea)
         motion.drop(id)
         withAnimation(reduceMotion ? .easeOut(duration: 0.2) : nil) { model.tuckFloat(id, edge: edge, offset: along, frame: waiting) }
-        if !reduceMotion, let w = waitingPlace(id) {
+        // Where it waits now: on that edge, or, where the controls fill it, on the nearest edge with room.
+        let w = waitingPlace(id)
+        if !reduceMotion, let w {
             let open = WorkspaceRect(picture.union(from).insetBy(dx: -1, dy: -1))
             let path = WorkspaceFloatGeometry.EdgePath(edge: w.edge, from: WorkspaceRect(from), to: w.float, clipFrom: open, clipTo: w.clip)
             // The throw's speed along the way in, as a share of the way per second.
@@ -789,21 +792,34 @@ struct WorkspaceFloatLayer: View {
             let v = d2 > 1 ? (velocity.x * dx + velocity.y * dy) / d2 : 0
             motion.glideEdge(id, path: path, from: 0, to: 1, velocity: v, kind: .tucking)
         }
-        tucked(id, edge)
+        tucked(id, w?.edge ?? edge)
     }
 
     // MARK: Tucked floats
 
     private struct Handle { var key: String; var tab: WorkspaceFloatGeometry.TuckTab }
 
+    /// The screen (workspace points), when the app has said where it is.
+    private var screenHere: WorkspaceRect? {
+        let screen = model.edgeReservationsGlobal.screen, o = toGlobal
+        return screen.width > 0 && screen.height > 0 ? WorkspaceRect(screen.offsetBy(dx: -o.x, dy: -o.y)) : nil
+    }
+
     /// Where tucked floats wait (workspace points): the picture in the safe area, clear of the
     /// system's edge bands at the screen's top and bottom. Its edges are where they go behind.
     private var handleArea: WorkspaceRect? {
-        let screen = model.edgeReservationsGlobal.screen
-        let o = toGlobal
-        return WorkspaceFloatGeometry.handleArea(
-            picture: WorkspaceRect(picture), safe: safeArea.map { WorkspaceRect($0) },
-            screen: screen.width > 0 && screen.height > 0 ? WorkspaceRect(screen.offsetBy(dx: -o.x, dy: -o.y)) : nil)
+        WorkspaceFloatGeometry.handleArea(picture: WorkspaceRect(picture), safe: safeArea.map { WorkspaceRect($0) }, screen: screenHere)
+    }
+
+    /// Where strips are drawn: `handleArea`, else the picture, so a tucked float always has one.
+    private var waitingArea: WorkspaceRect? {
+        WorkspaceFloatGeometry.waitingArea(picture: WorkspaceRect(picture), safe: safeArea.map { WorkspaceRect($0) }, screen: screenHere)
+    }
+
+    /// Where `edge`'s strips wait (workspace points): `waitingArea`, up to the controls where they
+    /// fill that edge; nil: no room there.
+    private func stripArea(_ edge: WorkspaceEdge) -> WorkspaceRect? {
+        waitingArea.flatMap { WorkspaceFloatGeometry.stripArea(edge, in: $0, avoiding: reservedHere) }
     }
 
     /// The fixed controls and Stage Peek's handle (workspace points): strips give way to them.
@@ -812,8 +828,9 @@ struct WorkspaceFloatLayer: View {
         return model.edgeReservationsGlobal.controls.map { WorkspaceRect($0.offsetBy(dx: -o.x, dy: -o.y)) }
     }
 
-    /// The edges a float may be thrown into now (those with room for a strip).
-    private var tuckEdges: Set<WorkspaceEdge> { WorkspaceFloatGeometry.tuckEdges(area: handleArea) }
+    /// The edges a float may be thrown into now (those with room for a strip, beside or just
+    /// inside the controls): a throw at an edge the controls fill glides back instead.
+    private var tuckEdges: Set<WorkspaceEdge> { WorkspaceFloatGeometry.tuckEdges(area: handleArea, reserved: reservedHere) }
 
     /// Picture points as shares of the picture.
     private func shares(_ r: WorkspaceRect) -> WorkspaceRect {
@@ -826,9 +843,10 @@ struct WorkspaceFloatLayer: View {
     /// flush with. nil: the whole picture.
     private var restArea: WorkspaceRect? { handleArea.map(shares) }
 
-    /// Every tucked float's strip (or stack), in reading order around the edges (left, top, right, bottom).
+    /// Every tucked float's strip (or stack), in reading order around the edges (left, top, right,
+    /// bottom). Never fewer than the tucked floats while there's a picture (`waitingArea`).
     private func tuckHandles() -> [Handle] {
-        guard let area = handleArea else { return [] }
+        guard let area = waitingArea else { return [] }
         return WorkspaceFloatGeometry.tuckHandles(model.layout.floats, picture: WorkspaceRect(picture), area: area, reserved: reservedHere)
             .map { Handle(key: "\($0.edge.rawValue)-" + $0.ids.joined(separator: ","), tab: $0) }
     }
@@ -842,19 +860,22 @@ struct WorkspaceFloatLayer: View {
     /// Where tucked float `id` waits (points): the float behind its strip and the strip that shows,
     /// or, in a stack, all of it behind the edge at the stack's handle with nothing showing.
     private func waitingPlace(_ id: String) -> (edge: WorkspaceEdge, float: WorkspaceRect, clip: WorkspaceRect)? {
-        guard let f = model.layout.float(id), f.tuck != nil, let area = handleArea,
+        guard let f = model.layout.float(id), f.tuck != nil, let area = waitingArea,
               let tab = tuckHandles().first(where: { $0.tab.ids.contains(id) })?.tab else { return nil }
         guard tab.isStack else { return (tab.edge, tab.float, tab.rect) }
         let size = WorkspaceSize(width: f.frame.width * Double(picture.width), height: f.frame.height * Double(picture.height))
-        let h = WorkspaceFloatGeometry.hidden(size, edge: tab.edge, area: area, along: tab.edge.axis == .horizontal ? tab.rect.midY : tab.rect.midX)
+        let h = WorkspaceFloatGeometry.hidden(size, edge: tab.edge, area: stripArea(tab.edge) ?? area,
+                                              along: tab.edge.axis == .horizontal ? tab.rect.midY : tab.rect.midX)
         return (tab.edge, h.float, h.line)
     }
 
     /// The way tucked float `id` comes out of its edge: straight out from where it waits (behind
-    /// its strip, wherever that slid along the edge to) to its frame there, kept reachable.
+    /// its strip, wherever that slid along the edge to, on whichever edge it waits) to its frame
+    /// flush with that edge there, kept reachable.
     private func pullPath(_ id: String) -> WorkspaceFloatGeometry.EdgePath? {
         guard let f = model.layout.float(id), let w = waitingPlace(id) else { return nil }
-        let back = WorkspaceFloatGeometry.comingBack(f.frame, waiting: shares(w.float), edge: w.edge, in: pictureSize, safe: restArea)
+        let back = WorkspaceFloatGeometry.restoreFrame(f.frame, waiting: shares(w.float), edge: w.edge, in: pictureSize,
+                                                       area: stripArea(w.edge).map(shares) ?? restArea, safe: restArea)
         return WorkspaceFloatGeometry.EdgePath(edge: w.edge, from: w.float, to: WorkspaceRect(back.screen(in: picture)),
                                                clipFrom: w.clip, clipTo: WorkspaceRect(picture))
     }
@@ -862,12 +883,22 @@ struct WorkspaceFloatLayer: View {
     /// Brings a tucked float back: the same picture comes on out of its edge (from where a peek or
     /// a pull left it, carrying the finger's speed, `velocity`: share of the way per second) to
     /// where it comes back to, and the Mac's live window takes over where it lands (lifted on the
-    /// way where the Mac can, so it's never on screen twice). It fades in there with Reduce Motion.
-    /// One haptic.
+    /// way where the Mac can, so it's never on screen twice). It fades in there with Reduce Motion,
+    /// or when there's no way out to draw. One haptic.
     private func restore(_ id: String, velocity: Double = 0) {
         if motion.edges[id]?.kind == .restoring { return }   // on its way out already
+        guard model.layout.float(id)?.tuck != nil else { motion.dropEdge(id); return }
         let held = motion.edges[id].flatMap { $0.kind == .tucking ? nil : $0 }
-        guard model.layout.float(id)?.tuck != nil, let path = held?.path ?? pullPath(id) else { motion.dropEdge(id); return }
+        guard let path = held?.path ?? pullPath(id) else {
+            // Nowhere to draw its way out: never left behind, it comes back where it waited.
+            Self.haptic(.drop)
+            withAnimation(.easeOut(duration: 0.2)) {
+                motion.dropEdge(id)
+                model.beginRestoringFloat(id)
+                model.endFloatGesture(id)
+            }
+            return
+        }
         let back = shares(path.to)
         Self.haptic(.drop)
         if reduceMotion {
@@ -907,7 +938,7 @@ struct WorkspaceFloatLayer: View {
         let edges = tuckEdges
         ForEach(Array(moving).sorted(), id: \.self) { id in
             if model.dockingFloat != id, let f = held[id] ?? motion.frames[id], let edge = WorkspaceFloatMotion.pulledEdge(f, edges: edges),
-               let area = handleArea {
+               let area = stripArea(edge) {
                 let mark = armedMark(f, edge: edge, area: area)
                 Capsule()
                     .fill(floatAccent)
@@ -1034,17 +1065,6 @@ struct WorkspaceFloatLayer: View {
         .transition(.opacity)
     }
 
-    /// Where a strip takes touches: its visible slice, `touchDepth` in from its edge (at least 44 pt long).
-    private func touchFrame(_ r: CGRect, _ edge: WorkspaceEdge) -> CGRect {
-        let d = CGFloat(WorkspaceFloatGeometry.touchDepth)
-        switch edge {
-        case .left: return CGRect(x: r.minX, y: r.midY - max(r.height, 44) / 2, width: d, height: max(r.height, 44))
-        case .right: return CGRect(x: r.maxX - d, y: r.midY - max(r.height, 44) / 2, width: d, height: max(r.height, 44))
-        case .top: return CGRect(x: r.midX - max(r.width, 44) / 2, y: r.minY, width: max(r.width, 44), height: d)
-        case .bottom: return CGRect(x: r.midX - max(r.width, 44) / 2, y: r.maxY - d, width: max(r.width, 44), height: d)
-        }
-    }
-
     /// Against its edge inside a larger frame.
     private func edgeAlignment(_ edge: WorkspaceEdge) -> Alignment {
         switch edge {
@@ -1080,7 +1100,7 @@ struct WorkspaceFloatLayer: View {
     /// slides back in); tap it and it slides out; slide it along the edge to move it. The picture
     /// is drawn by `edgePicture`; this takes no more room than the slice and a 44 pt target.
     private func stripTouch(_ id: String, tab: WorkspaceFloatGeometry.TuckTab) -> some View {
-        let target = touchFrame(tab.rect.cgRect, tab.edge)
+        let target = WorkspaceFloatGeometry.touchArea(tab).cgRect
         return Color.clear
             .frame(width: target.width, height: target.height)
             .contentShape(Rectangle())
@@ -1115,7 +1135,7 @@ struct WorkspaceFloatLayer: View {
     private func stackHandle(_ tab: WorkspaceFloatGeometry.TuckTab) -> some View {
         let r = tab.rect.cgRect
         let edge = tab.edge
-        let target = touchFrame(r, edge)
+        let target = WorkspaceFloatGeometry.touchArea(tab).cgRect
         let centre = anchored(target.size, at: r, edge)
         let marks = Group {
             Text("\(tab.ids.count)").font(.caption.weight(.bold)).monospacedDigit().foregroundStyle(.white)
@@ -1186,7 +1206,9 @@ struct WorkspaceFloatLayer: View {
         }
         if t.mode == .peek, hypot(v.translation.width, v.translation.height) >= Self.decideDistance {
             let (inward, along) = split(v.translation, tab.edge)
-            t.mode = abs(along) > abs(inward) ? .slide : (inward > 0 ? .pull : .away)
+            // A strip waiting on another edge than its own (its own is full of controls) isn't slid.
+            let slides = model.layout.float(id)?.tuck?.edge == tab.edge
+            t.mode = abs(along) > abs(inward) ? (slides ? .slide : .away) : (inward > 0 ? .pull : .away)
             if t.mode != .pull {
                 // Slid along its edge or pushed back in: the peek goes back in.
                 withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.26, dampingFraction: 0.86)) { motion.dropEdge(id) }
