@@ -327,8 +327,15 @@ struct WorkspaceFloatLayer: View {
         return String(localized: "Window")
     }
 
-    private func icon(_ id: String) -> CGImage? {
-        model.layout.tiles[id]?.source?.bundleID.flatMap { model.icons[$0] }
+    private func hasApp(_ id: String) -> Bool { model.layout.tiles[id]?.source?.bundleID != nil }
+
+    /// Its app's icon, or the same placeholder as everywhere until the Mac sends it (nothing
+    /// without an app).
+    @ViewBuilder
+    private func appIcon(_ id: String, size: CGFloat) -> some View {
+        if let bundle = model.layout.tiles[id]?.source?.bundleID {
+            WorkspaceAppIcon(icon: model.icons[bundle], name: model.tileState(id)?.app ?? title(id), bundleID: bundle, size: size)
+        }
     }
 
     /// One float's chrome. `covers`: what the floats in front of it cover (picture points). Its
@@ -455,10 +462,7 @@ struct WorkspaceFloatLayer: View {
         let maxWidth = max(min(rect.width - 28, 280), 90)
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
-                if let bundle = model.layout.tiles[id]?.source?.bundleID {
-                    // Its icon, or the same placeholder as everywhere until the Mac sends it.
-                    WorkspaceAppIcon(icon: model.icons[bundle], name: model.tileState(id)?.app ?? title(id), bundleID: bundle, size: 14)
-                }
+                appIcon(id, size: 14)
                 Text(title(id)).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(Color.white.opacity(active ? 1 : 0.8))
                     .frame(maxWidth: max(maxWidth - 64, 40))
@@ -536,10 +540,7 @@ struct WorkspaceFloatLayer: View {
         } else {
             ZStack {
                 RoundedRectangle(cornerRadius: corner, style: .continuous).fill(Color(red: 0.07, green: 0.07, blue: 0.08))
-                if let icon = icon(id) {
-                    let side = min(max(min(size.width, size.height) * 0.3, 14), 48)
-                    Image(decorative: icon, scale: 1).resizable().frame(width: side, height: side)
-                }
+                appIcon(id, size: min(max(min(size.width, size.height) * 0.3, 14), 48))
             }
             .frame(width: size.width, height: size.height)
         }
@@ -1011,7 +1012,7 @@ struct WorkspaceFloatLayer: View {
         // How far it shows past the edge: the grip stays through a peek, gone 24 pt further out.
         let shownDepth = visible.isNull ? 0 : Double(alongY ? visible.width : visible.height)
         let gripShown = min(max(1 - (shownDepth - WorkspaceFloatGeometry.peekDepth) / 24, 0), 1)
-        let badge = stillImage(id) == nil ? icon(id) : nil
+        let badge = stillImage(id) == nil && hasApp(id)
         return ZStack {
             ZStack {
                 floatPicture(id, size: rect.size, corner: floatCorner)
@@ -1027,9 +1028,9 @@ struct WorkspaceFloatLayer: View {
                     .shadow(color: .black.opacity(0.45), radius: 1.5)
                     .opacity(gripShown)
                     .position(grip)
-                if let badge {
+                if badge {
                     // No still yet: its app's icon beside the grip, so the slice says whose it is.
-                    Image(decorative: badge, scale: 1).resizable().frame(width: 14, height: 14)
+                    appIcon(id, size: 14)
                         .opacity(gripShown)
                         .position(x: alongY ? grip.x : grip.x - gripLength / 2 - 12, y: alongY ? grip.y - gripLength / 2 - 12 : grip.y)
                 }
@@ -1295,8 +1296,8 @@ struct WorkspaceFloatLayer: View {
                     .opacity(c.collapsed ? 0 : 1)
             }
             HStack(spacing: 8) {
-                if let icon = icon(c.id) {
-                    Image(decorative: icon, scale: 1).resizable().interpolation(.high).frame(width: 24, height: 24)
+                if hasApp(c.id) {
+                    appIcon(c.id, size: 24)
                 } else {
                     Image(systemName: "macwindow").foregroundStyle(.white)
                 }
