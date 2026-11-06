@@ -866,7 +866,10 @@ final class WorkspaceModel: ObservableObject {
         case .appCatalog(let rev, let list):
             inventory.answered(now: clock())
             appRevision = rev
-            if let list { apps = WorkspaceSearch.carouselOrder(list) }
+            if let list {
+                apps = WorkspaceSearch.carouselOrder(list)
+                if let c = catalog, !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
+            }
             requestIcons()
         case .launchResult(let bundle, let ok):
             if !ok { launching.remove(bundle); launchFailed = bundle }
@@ -930,7 +933,7 @@ final class WorkspaceModel: ObservableObject {
         Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
         if c.starting { return }
         catalog = c
-        defer { placePendingAppWindow() }
+        if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var missing = Set<String>()
         var rebased = saved
@@ -1933,8 +1936,9 @@ final class WorkspaceModel: ObservableObject {
         var floatAt: WorkspacePoint? = nil
     }
     @Published var appDrop: AppDrop?
-    /// Opened from a drop: its first new window goes where it was dropped (for up to 20 s).
-    private var pendingAppPlacement: (bundle: String, target: WorkspaceWindowDrop, known: Set<UInt32>, until: Date)?
+    /// Bumped to ask Stage Peek to close (an app dropped from it is opening: its progress, and
+    /// then its window, show in the layout).
+    @Published private(set) var stagePeekCloseRequest = 0
 
     /// The window picked for an app drop.
     func completeAppDrop(_ d: AppDrop, with w: CatalogWindowItem) {
@@ -1943,14 +1947,21 @@ final class WorkspaceModel: ObservableObject {
         _ = place(w, on: d.target)
     }
 
-    /// Open the dropped app on the Mac (explicit; needs control), then place its first window.
-    func launchForAppDrop(_ d: AppDrop) {
+    /// Open the dropped app on the Mac (explicit), then put its new window where it was dropped.
+    /// The same opening as the picker's (`WorkspaceAppOpening`): with control it launches now;
+    /// without (or `requestingControl`) control is requested the usual way first. Stage Peek
+    /// closes so the layout, with the opening's progress, shows; nothing else changes.
+    func openAppForDrop(_ d: AppDrop, requestingControl: Bool = false) {
         appDrop = nil
-        guard inputAllowed() else { return }
-        pendingAppPlacement = (d.app.bundleID, d.target, Set((catalog?.windows ?? []).filter { $0.bundleID == d.app.bundleID }.map(\.id)),
-                               Date().addingTimeInterval(20))
-        launch(d.app.bundleID)
+        guard !d.app.bundleID.isEmpty, d.windows.isEmpty else { return }
+        let tile = d.target.tile
+        let drop = WorkspaceAppOpening.Drop(target: d.target, floatAt: d.floatAt, panes: paneOrder)
+        beginAppOpening(bundleID: d.app.bundleID, name: d.app.name, tile: tile, drop: drop, requestingControl: requestingControl)
+        stagePeekCloseRequest += 1
     }
+
+    /// The layout's panes in order (floats aside): what a split or empty-slot drop is relative to.
+    private var paneOrder: [String] { arranged.orderedTileIDs.filter { !arranged.isFloat($0) } }
 
     func cancelAppDrop() { appDrop = nil }
 
@@ -1972,7 +1983,10 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func appOpeningTileUnchanged(_ o: WorkspaceAppOpening) -> Bool {
-        o.tileUnchanged(o.tile.flatMap { arranged.tiles[$0] })
+        guard o.tileUnchanged(o.tile.flatMap { arranged.tiles[$0] }) else { return false }
+        // A drop on a split edge or an empty slot names a position: only while the panes are the same.
+        if let d = o.drop, d.floatAt == nil, d.target.tile == nil { return paneOrder == d.panes }
+        return true
     }
 
     /// The person confirmed opening `app` (the picker asked). With control the Mac is asked to
@@ -1981,19 +1995,22 @@ final class WorkspaceModel: ObservableObject {
     /// picker shows it waiting; Cancel or closing the picker stops it.
     func openAppFromPicker(_ app: WorkspacePickerSearch.AppToOpen, requestingControl: Bool = false) {
         guard overviewOpen, !app.bundleID.isEmpty else { return }
+        beginAppOpening(bundleID: app.bundleID, name: app.name, tile: replacingTile, drop: nil, requestingControl: requestingControl)
+    }
+
+    private func beginAppOpening(bundleID: String, name: String, tile: String?, drop: WorkspaceAppOpening.Drop?, requestingControl: Bool) {
         dismissAppOpening()
-        let tile = replacingTile
         let control = appOpeningControl
-        let (o, step) = WorkspaceAppOpening.start(bundleID: app.bundleID, name: app.name, tile: tile,
-                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source },
+        let (o, step) = WorkspaceAppOpening.start(bundleID: bundleID, name: name, tile: tile,
+                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source }, drop: drop,
                                                   control: requestingControl && control == .allowed ? .off : control,
                                                   windows: catalog?.windows ?? [], now: clock())
-        Log.info("pickerOpen: requested bundle=\(app.bundleID) tile=\(tile ?? "-") control=\(control) request=\(requestingControl)")
+        Log.info("pickerOpen: requested bundle=\(bundleID) tile=\(tile ?? "-") drop=\(drop != nil) control=\(control) request=\(requestingControl)")
         appOpening = o
         appOpeningSlow = false
         appOpeningRound += 1
         if o.phase == .awaitingControl, control != .requesting {
-            Log.info("pickerOpen: control requested bundle=\(app.bundleID)")
+            Log.info("pickerOpen: control requested bundle=\(bundleID)")
             requestControl()
         }
         performAppOpening(step)
@@ -2012,6 +2029,10 @@ final class WorkspaceModel: ObservableObject {
     func retryAppOpening() {
         guard let o = appOpening, case .failed(let f) = o.phase, f.retryable else { return }
         Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue)")
+        if let drop = o.drop {
+            beginAppOpening(bundleID: o.bundleID, name: o.name, tile: o.tile, drop: drop, requestingControl: false)
+            return
+        }
         openAppFromPicker(WorkspacePickerSearch.AppToOpen(bundleID: o.bundleID, name: o.name, running: false))
     }
 
@@ -2064,6 +2085,12 @@ final class WorkspaceModel: ObservableObject {
             appOpeningTask?.cancel(); appOpeningTask = nil
             appOpening = nil
             appOpeningSlow = false
+            if let drop = o.drop {
+                // Exactly as if this window had been dropped there.
+                if let at = drop.floatAt { openFloating(w, at: at) } else { _ = place(w, on: drop.target) }
+                stagePeekCloseRequest += 1
+                return
+            }
             // Exactly as if the person had picked this window for that tile.
             replacingTile = o.tile
             choose(w, asNewTile: false)
@@ -2091,14 +2118,6 @@ final class WorkspaceModel: ObservableObject {
                 self.advanceAppOpening()
             }
         }
-    }
-
-    private func placePendingAppWindow() {
-        guard let p = pendingAppPlacement else { return }
-        if Date() > p.until { pendingAppPlacement = nil; return }
-        guard let w = catalog?.windows.first(where: { $0.bundleID == p.bundle && !p.known.contains($0.id) }) else { return }
-        pendingAppPlacement = nil
-        _ = place(w, on: p.target)
     }
 
     /// A window dropped on a pane (or, outside Window mode, beside the desktop).
