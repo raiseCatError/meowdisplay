@@ -64,6 +64,19 @@ that window.
 Removing a tile never closes the Mac window. **Close Window on Mac…** is
 separate, asks first, and needs control of the Mac.
 
+Window mode's own overlays keep out of the notch, the Dynamic Island, the
+status bar and the Home indicator, and off the receiver's controls, moving
+only where they would actually collide. While you drag, the **Pane / Floating**
+chip sits below the Island (beside the pane titles at the top, or just below
+them when the row has no room), the first-use circling tip below the chip and
+clear of the titles, and **Cancel / Float / Remove** stay above the Home
+indicator and above the control tray, its Settings gear, the function tray,
+an open arrow keypad and the keyboard; Arrange's bar does the same. A float
+resting with its top edge under the Island or the status bar (or a landscape
+side's) keeps its title pill just inside the safe area on the float, and its
+grabber above the Home indicator; the float itself stays where it is, and
+while your finger carries it the pill stays under your finger.
+
 ### Fill Window on Mac and Restore Previous Size on Mac
 
 Sometimes the window on the Mac is simply small, and enlarging its picture

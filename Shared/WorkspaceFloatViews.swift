@@ -178,6 +178,11 @@ struct WorkspaceFloatLayer: View {
     let inputAllowed: Bool
     /// Close Window on Mac… (asks first, in the chrome).
     var onClose: (String) -> Void
+    /// Pane titles and floats' title pills: the first-use tip keeps clear of them.
+    var tipAvoiding: [CGRect] = []
+    /// Where the drag's placement chip is drawn: the tip goes beside or below it.
+    var placementChip: CGRect?
+    @State private var tipSize: CGSize?
     @StateObject private var motion = WorkspaceFloatMotionDriver()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
@@ -330,11 +335,20 @@ struct WorkspaceFloatLayer: View {
         .accessibilityAction { model.raiseFloat(id); model.focus(id, raise: false) }   // selects it here only
         .modifier(FloatAccessibilityActions(model: model, id: id, front: front))
 
-        if !covered(WorkspaceFloatLayering.pillBounds(WorkspaceRect(rect)).cgRect) {
-            titlePill(id, rect: rect, active: active, outline: outline)
+        // The pill keeps out of the notch, the Dynamic Island and the status bar, the grabber off the
+        // Home indicator (the float stays put). Under a finger both keep the places they had when
+        // the finger took it: they never jump from under it.
+        let held = start[id].map { $0.screen(in: picture) } ?? rect
+        let pill = WorkspaceOverlayPlacement.floatPill(
+            content: held, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size, safe: safeArea, picture: picture)
+            .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
+        if !covered(pill) {
+            titlePill(id, rect: rect, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline)
         }
         if handles {
-            if !covered(CGRect(x: rect.midX - 38, y: rect.maxY - 4, width: 76, height: 28)) { grabber(id, rect: rect, active: active) }
+            let grab = CGPoint(x: rect.midX, y: WorkspaceOverlayPlacement.grabberMidY(content: held, picture: picture, safe: safeArea)
+                + rect.maxY - held.maxY)
+            if !covered(CGRect(x: grab.x - 38, y: grab.y - 14, width: 76, height: 28)) { grabber(id, at: grab, active: active) }
             if !covered(CGRect(x: rect.minX - 28, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
             if !covered(CGRect(x: rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
         }
@@ -394,7 +408,7 @@ struct WorkspaceFloatLayer: View {
 
     /// The title in a pill on the top edge, part of the outline. Drag it to move (fling to glide,
     /// at an edge to tuck); tap to select, double-tap for Fullscreen on This Device; ⋯ for options.
-    private func titlePill(_ id: String, rect: CGRect, active: Bool, outline: Color) -> some View {
+    private func titlePill(_ id: String, rect: CGRect, at centre: CGPoint, active: Bool, outline: Color) -> some View {
         let maxWidth = max(min(rect.width - 28, 280), 90)
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
@@ -423,18 +437,17 @@ struct WorkspaceFloatLayer: View {
         .background(Capsule().fill(floatChip))
         .overlay(Capsule().strokeBorder(outline, lineWidth: active ? 2 : 1).allowsHitTesting(false))
         .environment(\.colorScheme, .dark)
-        .position(x: rect.midX, y: rect.minY)
+        .position(centre)
     }
 
     /// A short bar under the window: the same move as the title.
-    private func grabber(_ id: String, rect: CGRect, active: Bool) -> some View {
-        let below = rect.maxY + 12 <= picture.maxY - 4
+    private func grabber(_ id: String, at centre: CGPoint, active: Bool) -> some View {
         return Capsule().fill(Color.white.opacity(active ? 0.9 : 0.55))
             .overlay(Capsule().stroke(Color.black.opacity(0.45), lineWidth: 0.5))
             .frame(width: 40, height: 5)
             .frame(width: 76, height: 28)
             .contentShape(Rectangle())
-            .position(x: rect.midX, y: below ? rect.maxY + 10 : rect.maxY - 10)
+            .position(centre)
             .gesture(moveGesture(id))
             .hoverEffect(.highlight)
             .accessibilityHidden(true)   // the float's own actions move it
@@ -1107,9 +1120,21 @@ struct WorkspaceFloatLayer: View {
         .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(floatChip))
         .frame(maxWidth: min(picture.width - 32, 440))
-        .position(x: picture.midX, y: max(picture.minY, safeArea?.minY ?? 0) + 44)
+        .background(GeometryReader { g in
+            Color.clear.onAppear { tipSize = g.size }.onChange(of: g.size) { tipSize = $0 }
+        })
+        // Inside the safe area, clear of the chip and of the titles (it covered a pane's title
+        // under the Dynamic Island, iPhone QA 2026-11-06).
+        .position(tipCentre)
         .transition(.opacity)
         .accessibilityIdentifier("placementTip")
+    }
+
+    private var tipCentre: CGPoint {
+        let size = tipSize ?? CGSize(width: min(picture.width - 32, 440), height: 96)
+        let r = WorkspaceOverlayPlacement.tip(size: size, picture: picture, safe: safeArea,
+                                              chip: placementChip, avoiding: tipAvoiding)
+        return CGPoint(x: r.midX, y: r.midY)
     }
 
     private func hideTipSoon() {

@@ -257,7 +257,7 @@ final class WorkspaceOverlayPlacementTests: XCTestCase {
 
     func testTipClearsAFloatPillNearTheTop() {
         let pill = P.floatPill(content: CGRect(x: 40, y: 140, width: 300, height: 220), size: CGSize(width: 306, height: 30),
-                               safe: portraitSafe)
+                               safe: portraitSafe, picture: portrait)
         let chip = P.chip(size: chipSize, picture: portrait, safe: portraitSafe, avoiding: [pill])
         let tip = P.tip(size: CGSize(width: 398, height: 120), picture: portrait, safe: portraitSafe,
                         chip: chip, avoiding: [pill])
@@ -283,7 +283,7 @@ final class WorkspaceOverlayPlacementTests: XCTestCase {
         let size = pillSize(content)
         let raw = CGRect(x: content.midX - size.width / 2, y: content.minY - size.height / 2, width: size.width, height: size.height)
         XCTAssertTrue(raw.intersects(island), "where it was")
-        let pill = P.floatPill(content: content, size: size, safe: portraitSafe)
+        let pill = P.floatPill(content: content, size: size, safe: portraitSafe, picture: portrait)
         XCTAssertFalse(pill.intersects(island))
         XCTAssertGreaterThanOrEqual(pill.minY, portraitSafe.minY)
         XCTAssertEqual(pill.midX, content.midX)
@@ -295,7 +295,7 @@ final class WorkspaceOverlayPlacementTests: XCTestCase {
             let content = side == .leading ? CGRect(x: 0, y: 150, width: 240, height: 160)
                                            : CGRect(x: 692, y: 150, width: 240, height: 160)
             let size = pillSize(content)
-            let pill = P.floatPill(content: content, size: size, safe: landscapeSafe)
+            let pill = P.floatPill(content: content, size: size, safe: landscapeSafe, picture: landscape)
             XCTAssertFalse(pill.intersects(islandBand(side)), "\(side)")
             XCTAssertEqual(pill.midY, content.minY, "still on the top edge")
             XCTAssertTrue(landscapeSafe.contains(pill))
@@ -305,15 +305,87 @@ final class WorkspaceOverlayPlacementTests: XCTestCase {
     func testAPillInsideTheSafeAreaIsUntouched() {
         let content = CGRect(x: 60, y: 300, width: 300, height: 200)
         let size = pillSize(content)
-        XCTAssertEqual(P.floatPill(content: content, size: size, safe: portraitSafe),
+        XCTAssertEqual(P.floatPill(content: content, size: size, safe: portraitSafe, picture: portrait),
                        CGRect(x: content.midX - size.width / 2, y: 300 - size.height / 2, width: size.width, height: size.height))
-        XCTAssertEqual(P.floatPill(content: content, size: size, safe: nil).midY, 300)
+        XCTAssertEqual(P.floatPill(content: content, size: size, safe: nil, picture: portrait).midY, 300)
     }
 
     func testAPillNeverLeavesItsFloat() {
-        // A float almost wholly under the status bar: the pill goes no lower than the float's own bottom.
-        let content = CGRect(x: 100, y: -150, width: 200, height: 180)
-        let pill = P.floatPill(content: content, size: CGSize(width: 206, height: 30), safe: portraitSafe)
+        // The shortest float a phone allows (80 pt), resting as high as it may: the pill goes no
+        // lower than the float's own bottom.
+        let content = CGRect(x: 100, y: 30, width: 200, height: 80)
+        let pill = P.floatPill(content: content, size: CGSize(width: 206, height: 30), safe: portraitSafe, picture: portrait)
         XCTAssertLessThanOrEqual(pill.midY, content.maxY)
+        XCTAssertGreaterThanOrEqual(pill.midY, content.minY)
+    }
+
+    func testAPillMovesWithAFloatComingInPastTheTopEdge() {
+        // Restoring out of a top-edge tuck: the pill keeps the place it has at the edge, moving
+        // with the float instead of sliding over it, and nothing jumps where it crosses the edge.
+        let size = CGSize(width: 206, height: 30)
+        func offset(_ y: CGFloat) -> CGFloat {
+            let content = CGRect(x: 100, y: y, width: 200, height: 180)
+            return P.floatPill(content: content, size: size, safe: portraitSafe, picture: portrait).midY - content.minY
+        }
+        XCTAssertEqual(offset(-150), offset(-40))
+        XCTAssertEqual(offset(-40), offset(0))
+        XCTAssertEqual(offset(-0.001), offset(0), accuracy: 0.01)
+        XCTAssertEqual(offset(0), portraitSafe.minY + 15, "at the edge: just inside the safe area")
+    }
+
+    func testAPillMovesWithAFloatComingInPastASideEdge() {
+        let size = CGSize(width: 206, height: 30)
+        // Portrait: nothing unsafe at the sides, the pill stays centred on the float, off screen with it.
+        for x: CGFloat in [-150, 330] {
+            let content = CGRect(x: x, y: 300, width: 250, height: 180)
+            XCTAssertEqual(P.floatPill(content: content, size: size, safe: portraitSafe, picture: portrait).midX, content.midX)
+        }
+        // Landscape, the Island's side: inside the safe area at the edge, then with the float.
+        func offset(_ x: CGFloat) -> CGFloat {
+            let content = CGRect(x: x, y: 150, width: 240, height: 160)
+            return P.floatPill(content: content, size: size, safe: landscapeSafe, picture: landscape).midX - content.midX
+        }
+        XCTAssertEqual(offset(-200), offset(0))
+        XCTAssertEqual(offset(-0.001), offset(0), accuracy: 0.01)
+        let atEdge = P.floatPill(content: CGRect(x: 0, y: 150, width: 240, height: 160), size: size,
+                                 safe: landscapeSafe, picture: landscape)
+        XCTAssertEqual(atEdge.minX, landscapeSafe.minX, "at the edge: just inside the safe area")
+    }
+
+    // MARK: Floats' grabbers
+
+    private func grabber(_ content: CGRect) -> CGRect {
+        let y = P.grabberMidY(content: content, picture: portrait, safe: portraitSafe)
+        return CGRect(x: content.midX - 38, y: y - 14, width: 76, height: 28)
+    }
+
+    func testTheOldGrabberSatOnTheHomeIndicator() {
+        // Below the float whenever the picture's bottom left room: here, on the Home indicator.
+        let content = CGRect(x: 100, y: 600, width: 230, height: 300)
+        let old = content.maxY + 12 <= portrait.maxY - 4 ? content.maxY + 10 : content.maxY - 10
+        XCTAssertTrue(CGRect(x: content.midX - 38, y: old - 14, width: 76, height: 28).intersects(homeIndicator))
+        XCTAssertLessThanOrEqual(grabber(content).maxY, homeIndicator.minY)
+    }
+
+    func testAGrabberWithRoomStaysBelowItsFloat() {
+        let content = CGRect(x: 100, y: 300, width: 230, height: 300)
+        XCTAssertEqual(P.grabberMidY(content: content, picture: portrait, safe: portraitSafe), content.maxY + 10)
+        XCTAssertEqual(P.grabberMidY(content: content, picture: portrait, safe: nil), content.maxY + 10)
+    }
+
+    func testAFloatRestingAtTheBottomKeepsItsGrabberAboveTheHomeIndicator() {
+        let content = CGRect(x: 100, y: 632, width: 230, height: 300)
+        let g = grabber(content)
+        XCTAssertLessThanOrEqual(g.maxY, portraitSafe.maxY)
+        XCTAssertTrue(content.contains(CGPoint(x: g.midX, y: g.midY)), "inside the float")
+    }
+
+    func testAGrabberMovesWithAFloatComingInPastTheBottomEdge() {
+        func offset(_ y: CGFloat) -> CGFloat {
+            let content = CGRect(x: 100, y: y, width: 230, height: 300)
+            return P.grabberMidY(content: content, picture: portrait, safe: portraitSafe) - content.maxY
+        }
+        XCTAssertEqual(offset(900), offset(700))
+        XCTAssertEqual(offset(632.001), offset(632), accuracy: 0.01)
     }
 }

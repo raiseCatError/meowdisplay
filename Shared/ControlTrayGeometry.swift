@@ -812,16 +812,34 @@ enum WorkspaceOverlayPlacement {
     /// A float's title pill (its largest extent, `WorkspaceFloatLayering.pillBounds`), centred on
     /// the float's top edge. While the float rests partly under the notch, the Dynamic Island or
     /// the status bar (or a landscape side's), the pill moves inward just enough to be in the safe
-    /// area, never off the float; the float itself stays where it is.
-    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?) -> CGRect {
-        var c = CGPoint(x: content.midX, y: content.minY)
+    /// area, never off the float; the float itself stays where it is. Past the picture's top or
+    /// side (gliding into or out of an edge) it keeps the place it has at that edge and moves
+    /// with the float, instead of sliding along it.
+    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect) -> CGRect {
+        // Placed as on the same float just inside the picture, then moved back with it.
+        let dx = max(picture.minX - content.minX, 0) + min(picture.maxX - content.maxX, 0)
+        let dy = max(picture.minY - content.minY, 0)
+        let inside = content.offsetBy(dx: dx, dy: dy)
+        var c = CGPoint(x: inside.midX, y: inside.minY)
         if let safe {
             let hw = size.width / 2, hh = size.height / 2
-            if c.y - hh < safe.minY { c.y = min(safe.minY + hh, max(content.minY, content.maxY - hh)) }
-            if c.x - hw < safe.minX { c.x = min(safe.minX + hw, content.maxX) }
-            if c.x + hw > safe.maxX { c.x = max(safe.maxX - hw, content.minX) }
+            if c.y - hh < safe.minY { c.y = min(safe.minY + hh, max(inside.minY, inside.maxY - hh)) }
+            if c.x - hw < safe.minX { c.x = min(safe.minX + hw, inside.maxX) }
+            if c.x + hw > safe.maxX { c.x = max(safe.maxX - hw, inside.minX) }
         }
-        return CGRect(x: c.x - size.width / 2, y: c.y - size.height / 2, width: size.width, height: size.height)
+        return CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+    }
+
+    /// The centre of a float's grabber (a 28 pt tall touch area under the window): just below it,
+    /// or inside its bottom edge where below would reach the Home indicator (the safe area's
+    /// bottom) or the picture's bottom. Past the picture's bottom (gliding into or out of that
+    /// edge) it keeps the place it has at the edge and moves with the float.
+    static func grabberMidY(content: CGRect, picture: CGRect, safe: CGRect?) -> CGFloat {
+        let bottom = min(picture.maxY, safe?.maxY ?? .infinity)
+        let lift = max(content.maxY - picture.maxY, 0)
+        let c = content.offsetBy(dx: 0, dy: -lift)
+        let y = c.maxY + 12 <= bottom - 4 ? c.maxY + 10 : max(min(c.maxY - 10, bottom - 14), c.minY + 14)
+        return y + lift
     }
 
     /// Closer than `gap` (a hair of tolerance: exactly `gap` away doesn't count).

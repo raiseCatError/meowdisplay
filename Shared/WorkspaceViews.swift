@@ -70,6 +70,9 @@ struct WorkspaceChromeView: View {
     /// The screen's safe area (clear of a notch, Dynamic Island and the home indicator) in
     /// this view's coordinates. The picture may run under them; labels and buttons don't.
     var safeArea: CGRect?
+    /// The receiver's own controls (the tray or its gear, the Function Tray, the arrow keypad, the
+    /// keyboard and its bar) in this view's coordinates: the drop bar and Arrange's bar sit above them.
+    var controls: [CGRect] = []
     /// Opens the receiver's settings (the fullscreen strip's Settings button).
     var onSettings: (() -> Void)?
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
@@ -96,6 +99,9 @@ struct WorkspaceChromeView: View {
     @State private var tabsCollapseTask: Task<Void, Never>?
     /// Where each pane's label strip ends (workspace coordinates): the menu bar starts there.
     @State private var labelStripEnd: [String: CGFloat] = [:]
+    /// Where the drag's placement chip was last drawn: the first-use tip keeps clear of it.
+    @State private var placementChip: CGRect?
+    @State private var arrangeBarSize: CGSize?
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -156,7 +162,7 @@ struct WorkspaceChromeView: View {
                     }
                 }
                 if let id = model.active, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
-                   multi || model.localFullscreen == id, !coveredByFloat(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 44), frames) {
+                   multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     // While all its tabs are shown and leave too little room, the bar steps aside.
                     let e = unsafeInsets(of: rect)
@@ -169,14 +175,16 @@ struct WorkspaceChromeView: View {
                         PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
                     }
                 }
+                let titles = titleZones(frames)
                 #if os(iOS)
                 // Floating panes over the arrangement, back to front, and tucked floats' edge handles.
                 if !model.arranging {
                     WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
-                                        onClose: { confirmClose = $0 })
+                                        onClose: { confirmClose = $0 }, tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
-                WorkspaceDropOverlay(model: model, picture: picture)
+                WorkspaceDropOverlay(model: model, picture: picture, safeArea: safeArea, controls: controls + divisions,
+                                     titles: titles, onChipFrame: { placementChip = $0 })
                 if model.arranging {
                     arrangeControls(frames)
                 } else if model.localFullscreen == nil, !voiceOver {
@@ -295,7 +303,7 @@ struct WorkspaceChromeView: View {
                 .accessibilityAddTraits(active ? .isSelected : [])
                 .accessibilityAction { model.focus(id) }
             // Where a floating pane covers this pane's titles, they step aside: touches there go to the float.
-            let covered = coveredByFloat(CGRect(x: rect.minX, y: rect.minY, width: min(rect.width, 260), height: 44), frames)
+            let covered = coveredByFloat(titleRow(rect, width: 260), frames)
             tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
                 .padding(unsafeInsets(of: rect))
                 .opacity(covered ? 0 : 1)
@@ -314,12 +322,39 @@ struct WorkspaceChromeView: View {
         WorkspaceFloatLayering.isCovered(WorkspaceRect(r), by: floatOccluders(frames).map(WorkspaceRect.init))
     }
 
-    /// What the shown floats cover on screen: each one's window and title pill.
+    /// What the shown floats cover on screen: each one's window and title pill (where it rests).
     private func floatOccluders(_ frames: WorkspaceFrames) -> [CGRect] {
         frames.floats.compactMap { frames.tiles[$0]?.onScreen(picture) }.flatMap { r -> [CGRect] in
-            let w = WorkspaceRect(r)
-            return [r, WorkspaceFloatLayering.pillBounds(w).cgRect]
+            [r, floatPill(r)]
         }
+    }
+
+    /// A float's title pill where it rests: on its top edge, moved into the safe area when that
+    /// edge is under the notch, the Dynamic Island or the status bar.
+    private func floatPill(_ content: CGRect) -> CGRect {
+        WorkspaceOverlayPlacement.floatPill(content: content, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(content)).cgRect.size,
+                                            safe: safeArea, picture: picture)
+    }
+
+    /// The panes' label strips and the floats' title pills on screen: the drag's chip and the
+    /// first-use tip keep clear of them.
+    private func titleZones(_ frames: WorkspaceFrames) -> [CGRect] {
+        let panes = frames.tiles.compactMap { id, r -> CGRect? in
+            guard !frames.isFloat(id), let end = labelStripEnd[id] else { return nil }
+            let rect = r.onScreen(picture), e = unsafeInsets(of: rect)
+            let x = rect.minX + e.leading
+            return end > x ? CGRect(x: x, y: rect.minY + e.top, width: end - x, height: WorkspaceOverlayPlacement.paneTitleHeight) : nil
+        }
+        // A float being docked is drawn only as its card under the finger: no pill to avoid.
+        var docked: String?
+        if case .float(let id)? = model.drag?.item { docked = id }
+        return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
+    }
+
+    /// Where a pane's label strip starts: its top-left corner inside the safe area.
+    private func titleRow(_ rect: CGRect, width: CGFloat) -> CGRect {
+        let e = unsafeInsets(of: rect)
+        return CGRect(x: rect.minX + e.leading, y: rect.minY + e.top, width: min(rect.width - e.leading, width), height: 44)
     }
 
     /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
@@ -901,7 +936,11 @@ struct WorkspaceChromeView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(workspaceChip, in: Capsule())
-        .position(x: picture.midX, y: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44)
+        .background(GeometryReader { g in
+            Color.clear.onAppear { arrangeBarSize = g.size }.onChange(of: g.size) { arrangeBarSize = $0 }
+        })
+        // Where it was, unless that is on the tray or its gear: then just above them.
+        .position(arrangeBarCentre)
         .alert("Save Layout", isPresented: $savingLayout) {
             TextField("Name", text: $layoutName)
             Button("Save") { model.saveLayout(named: layoutName) }
@@ -909,6 +948,14 @@ struct WorkspaceChromeView: View {
         } message: {
             Text("Saved layouts are kept for this Mac. Their windows are matched again when you use one.")
         }
+    }
+
+    private var arrangeBarCentre: CGPoint {
+        let bar = WorkspaceOverlayPlacement.bottomBar(
+            size: arrangeBarSize ?? CGSize(width: 260, height: 36),
+            preferredMidY: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44,
+            picture: picture, safe: safeArea, avoiding: controls + divisions)
+        return CGPoint(x: bar.midX, y: bar.midY)
     }
 
     /// Outside Arrange: press and hold a divider, then drag it. The strip is narrow so the
@@ -1330,7 +1377,19 @@ struct WorkspaceDropOverlay: View {
     @ObservedObject var model: WorkspaceModel
     /// The picture, in this view's coordinates.
     let picture: CGRect
+    /// The screen's safe area in this view's coordinates (nil: all of it). The chip and the drop
+    /// bar stay inside it: clear of the notch, the Dynamic Island and the Home indicator.
+    var safeArea: CGRect? = nil
+    /// The receiver's controls (and the keyboard) in this view's coordinates: the drop bar sits
+    /// above any it would cover (`WorkspaceOverlayPlacement.bottomBar`).
+    var controls: [CGRect] = []
+    /// Pane titles and floats' title pills: the chip slides or steps aside from them.
+    var titles: [CGRect] = []
+    /// Where the chip is drawn, for the first-use tip to keep clear of it.
+    var onChipFrame: ((CGRect) -> Void)? = nil
     @State private var lastKey = ""
+    @State private var chipSize: CGSize?
+    @State private var barSize: CGSize?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1348,14 +1407,27 @@ struct WorkspaceDropOverlay: View {
                 }
                 let removable = model.canDropToRemove
                 let floatable = model.canDropToFloat
+                // Inside the safe area and above the receiver's controls (the Settings gear sat on
+                // Float, iPhone QA 2026-11-06). The zones report where they are drawn, so what a
+                // release does follows the bar wherever it sits.
+                let bar = dropBarFrame
                 HStack(spacing: 12) {
                     cancelZone(over: model.overCancelZone(d.location), short: removable || floatable)
                     if floatable { floatZone(over: model.overFloatZone(d.location)) }
                     if removable { removeZone(over: model.overRemoveZone(d.location)) }
                 }
                 .padding(.horizontal, 12)
-                .frame(maxWidth: picture.width)
-                .position(x: picture.midX, y: picture.maxY - 64)
+                .background(GeometryReader { g in
+                    Color.clear.onAppear { barSize = g.size }.onChange(of: g.size) { barSize = $0 }
+                })
+                .frame(maxWidth: WorkspaceOverlayPlacement.usable(picture: picture, safe: safeArea).width)
+                .position(x: bar.midX, y: bar.midY)
+                #if DEBUG
+                .onChange(of: bar) { b in
+                    Log.info("notchTrace: dragHUD picture=\(picture) safe=\(safeArea.map { "\($0)" } ?? "none") "
+                             + "bar=\(b) controls=\(controls)")
+                }
+                #endif
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1423,9 +1495,22 @@ struct WorkspaceDropOverlay: View {
             .accessibilityHidden(true)
     }
 
-    /// Pane or Floating: what a release does now. Circling while holding switches it.
+    /// Where the drop bar sits: centred at the bottom as before, kept above the Home indicator and
+    /// the controls. Until it is measured, a phone-wide guess, so it never flashes under the gear.
+    private var dropBarFrame: CGRect {
+        let usable = WorkspaceOverlayPlacement.usable(picture: picture, safe: safeArea)
+        return WorkspaceOverlayPlacement.bottomBar(
+            size: barSize ?? CGSize(width: min(usable.width, 420), height: 44),
+            preferredMidY: picture.maxY - WorkspaceOverlayPlacement.dropBarLift,
+            picture: picture, safe: safeArea, avoiding: controls)
+    }
+
+    /// Pane or Floating: what a release does now. Circling while holding switches it. Below the
+    /// notch, the Dynamic Island and the status bar, beside or below the titles at the top.
     private func placementChip(_ d: WorkspaceDrag) -> some View {
         let floating = d.placement == .float
+        let frame = WorkspaceOverlayPlacement.chip(size: chipSize ?? CGSize(width: 240, height: 30),
+                                                   picture: picture, safe: safeArea, avoiding: titles)
         return HStack(spacing: 6) {
             Image(systemName: floating ? "macwindow.on.rectangle" : "rectangle.split.2x1").accessibilityHidden(true)
             Text(floating ? "Floating" : "Pane").fontWeight(.semibold)
@@ -1436,7 +1521,12 @@ struct WorkspaceDropOverlay: View {
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(Capsule().fill(floating ? Color(white: 0.16, opacity: 0.92) : workspaceChip))
         .overlay(Capsule().stroke(Color.white.opacity(floating ? 0.7 : 0.3), lineWidth: 1))
-        .position(x: picture.midX, y: picture.minY + 34)
+        .background(GeometryReader { g in
+            Color.clear.onAppear { chipSize = g.size }.onChange(of: g.size) { chipSize = $0 }
+        })
+        .position(x: frame.midX, y: frame.midY)
+        .onAppear { onChipFrame?(frame) }
+        .onChange(of: frame) { onChipFrame?($0) }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: floating)
         .accessibilityHidden(true)
     }
