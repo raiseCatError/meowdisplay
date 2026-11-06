@@ -777,6 +777,22 @@ and the stylus would go dead; the fallback keeps it usable.)
   only while that key is held and MUST ignore it otherwise; a sender that
   doesn't know the field treats it as the duplicate down it already
   ignores.
+* `exactModifiers` (bool, additive, no `pv` bump) MAY be carried by
+  `"press"`, `"down"` and `"up"`. By default a sender posts a key with its
+  own `modifiers` **plus** every modifier the receiver holds down with
+  `"modifierDown"` (the Mac Receiver forwards Shift as a held modifier and
+  relies on that). `true` asks for exactly the message's own `modifiers`,
+  none of the held ones. A sender that understands it lists
+  `"exactKeyModifiers"` in `welcome.features`; a receiver sends the field
+  only to such a sender, and treats every other sender as adding the held
+  modifiers. Such a sender SHOULD keep the flags a key went down with for
+  that key's repeats, its `"up"` and any release on cancellation, whatever
+  those messages say. It changes only how a key's flags are composed:
+  every input gate (consent, Allow Input, View Only, revocation) applies
+  exactly as before. Anything but `true` means the default. The official
+  iOS receiver uses it for the arrow keypad's own Shift, Option and
+  Command, so they never mix with the tray's latched modifiers.
+  `{"type":"keyboard","action":"down","usage":79,"modifiers":["shift"],"exactModifiers":true}`
 * `"modifierDown"` / `"modifierUp"` (pv 6) — a synthetic modifier's held
   lifecycle: `modifier` is one of `"command"`, `"option"`, `"control"`, or
   `"shift"`. Every down MUST be followed by an up; senders MUST also release
@@ -2141,6 +2157,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 (additive) | Lifted floats (section 6.10): `welcome.features: ["floatLift"]`, float tile `lift: true` (left out of the picture and input while the receiver draws it); gated by capability, no bump |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
+| 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |
 
 ---
 
@@ -2244,6 +2261,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
 | 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
+| 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 

@@ -263,20 +263,34 @@ final class MacSenderInputRevocationTests: XCTestCase {
 /// Records what `InputInjector` would have posted to the HID event tap.
 final class RecordingEventSink: SyntheticEventSink, @unchecked Sendable {
     struct Posted: Equatable, CustomStringConvertible {
+        /// The modifier flags a test can reason about (the event may also
+        /// carry bookkeeping bits such as non-coalesced).
+        static let modifierMask: CGEventFlags = [.maskShift, .maskControl, .maskAlternate, .maskCommand, .maskAlphaShift]
+
         let type: CGEventType
         let keyCode: Int64?
+        /// Shift, Control, Option, Command and Caps Lock, as posted.
+        let flags: CGEventFlags
+        /// A key-down posted as the key's own repeat.
+        let isAutorepeat: Bool
 
         init(_ event: CGEvent) {
             type = event.type
+            flags = event.flags.intersection(Self.modifierMask)
             switch event.type {
             case .keyDown, .keyUp, .flagsChanged:
                 keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             default:
                 keyCode = nil
+                isAutorepeat = false
             }
         }
 
-        var description: String { "\(type.rawValue)\(keyCode.map { ":\($0)" } ?? "")" }
+        var description: String {
+            "\(type.rawValue)\(keyCode.map { ":\($0)" } ?? "")\(flags.isEmpty ? "" : " flags=\(flags.rawValue)")"
+                + (isAutorepeat ? " repeat" : "")
+        }
     }
 
     private let lock = NSLock()

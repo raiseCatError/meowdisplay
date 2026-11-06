@@ -236,10 +236,10 @@ final class WindowFrameTests: XCTestCase {
     }
 
     func testTheMacOffersItOnlyWhileWindowModeIsAllowed() {
-        XCTAssertTrue(MacSender.welcomeFeatures(windowModeAllowed: true).contains(WindowFrameWire.welcomeFeature))
-        XCTAssertFalse(MacSender.welcomeFeatures(windowModeAllowed: false).contains(WindowFrameWire.welcomeFeature))
-        XCTAssertFalse(MacSender.welcomeFeatures(windowModeAllowed: false).contains(WindowWorkspaceWire.welcomeFeature))
-        XCTAssertTrue(MacSender.welcomeFeatures(windowModeAllowed: false).contains(LockMacWire.welcomeFeature), "the rest is unchanged")
+        XCTAssertTrue(MacSender.welcomeFeatures(windowStreamingAllowed: true).contains(WindowFrameWire.welcomeFeature))
+        XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(WindowFrameWire.welcomeFeature))
+        XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(WindowWorkspaceWire.welcomeFeature))
+        XCTAssertTrue(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(LockMacWire.welcomeFeature), "the rest is unchanged")
     }
 
     // MARK: Engine

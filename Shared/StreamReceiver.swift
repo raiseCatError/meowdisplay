@@ -926,6 +926,10 @@ final class StreamReceiver: ObservableObject {
     /// The connected Mac advertised `textCaret` in its welcome features: it
     /// follows the focused text caret for Zoom While Typing (PROTOCOL.md 6.11).
     @MainActor private(set) var macSupportsTextCaret = false
+    /// The connected Mac advertised `exactKeyModifiers`: a key marked
+    /// `exactModifiers` posts with only its own modifiers, so the arrow
+    /// keypad's ⇧ ⌥ ⌘ never mix with the tray's latch (PROTOCOL.md `keyboard`).
+    @MainActor @Published private(set) var macSupportsExactKeyModifiers = false
 
     @MainActor
     func noteWorkspaceEvent(_ event: WorkspaceEvent) {
@@ -933,8 +937,11 @@ final class StreamReceiver: ObservableObject {
         case .features(let features):
             macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
             macSupportsTextCaret = features.contains(TextCaretWire.welcomeFeature)
+            macSupportsExactKeyModifiers = features.contains(ExactKeyModifiersWire.welcomeFeature)
         case .mode(let window): windowModeActive = window
-        case .disconnected: macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
+        case .disconnected:
+            macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
+            macSupportsExactKeyModifiers = false
         default: break
         }
     }
@@ -3369,6 +3376,15 @@ final class StreamReceiver: ObservableObject {
     /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
     /// keyboard-page usage number.
     @MainActor func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
+        sendKeyboardPress(usage: usage, modifiers: modifiers, exactModifiers: false)
+    }
+
+    /// `exactModifiers`: the key carries only `modifiers`, never the ones
+    /// this device holds down with `modifierDown` (the arrow keypad's own).
+    /// The field goes only to a Mac that advertised `exactKeyModifiers`; an
+    /// older Mac adds the held ones, so callers gate on
+    /// `macSupportsExactKeyModifiers` where that matters.
+    @MainActor func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
         #if DEBUG
         // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
@@ -3378,8 +3394,9 @@ final class StreamReceiver: ObservableObject {
             Log.info("keyboardDebug: specialPress sent usage=\(usage)")
         }
         #endif
-        sendUIControl(["type": "keyboard", "action": "press", "usage": usage,
-                     "modifiers": modifiers])
+        sendUIControl(ExactKeyModifiersWire.keyMessage(
+            action: "press", usage: usage, modifiers: modifiers,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     @MainActor func sendModifier(_ modifier: ControlModifier, down: Bool) {
@@ -3741,16 +3758,28 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: isRepeat, exactModifiers: false)
+    }
+
+    /// `exactModifiers`: see `sendKeyboardPress(usage:modifiers:exactModifiers:)`.
+    /// The Mac keeps a key's exact flags from its down for its repeats and up.
+    @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
-        var message: [String: Any] = ["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers]
-        if isRepeat { message["repeat"] = true }
-        sendUIControl(message)
+        sendUIControl(ExactKeyModifiersWire.keyMessage(
+            action: "down", usage: usage, modifiers: modifiers, isRepeat: isRepeat,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     /// The matching release for `sendKeyboardDown`.
     @MainActor func sendKeyboardUp(usage: Int, modifiers: [String]) {
+        sendKeyboardUp(usage: usage, modifiers: modifiers, exactModifiers: false)
+    }
+
+    @MainActor func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendUIControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
+        sendUIControl(ExactKeyModifiersWire.keyMessage(
+            action: "up", usage: usage, modifiers: modifiers,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
