@@ -1322,6 +1322,12 @@ struct WorkspaceDropOverlay: View {
                 if let target { preview(target, item: d.item) }
                 if d.placement == .float, let f = model.floatDropPreview(forGlobal: d.location) { floatPreview(f) }
                 if model.canPlace(d.item, .float) || d.placement == .float { placementChip(d) }
+                // Circling toward the other placement: a ring that fills just above the finger.
+                if model.placementSwitchProgress > 0, model.pictureGlobal.width > 0 {
+                    WorkspacePlacementRing(progress: model.placementSwitchProgress, toFloating: d.placement == .pane)
+                        .position(x: d.location.x - model.pictureGlobal.minX + picture.minX,
+                                  y: d.location.y - model.pictureGlobal.minY + picture.minY - WorkspacePlacementRing.lift)
+                }
                 let removable = model.canDropToRemove
                 let floatable = model.canDropToFloat
                 HStack(spacing: 12) {
@@ -1399,13 +1405,13 @@ struct WorkspaceDropOverlay: View {
             .accessibilityHidden(true)
     }
 
-    /// Pane or Floating: what a release does now. A shake while holding switches it.
+    /// Pane or Floating: what a release does now. Circling while holding switches it.
     private func placementChip(_ d: WorkspaceDrag) -> some View {
         let floating = d.placement == .float
         return HStack(spacing: 6) {
             Image(systemName: floating ? "macwindow.on.rectangle" : "rectangle.split.2x1").accessibilityHidden(true)
             Text(floating ? "Floating" : "Pane").fontWeight(.semibold)
-            Text("· Shake to switch").foregroundStyle(.white.opacity(0.7))
+            Text("· Circle to switch").foregroundStyle(.white.opacity(0.7))
         }
         .font(.caption)
         .foregroundStyle(.white)
@@ -1417,7 +1423,7 @@ struct WorkspaceDropOverlay: View {
         .accessibilityHidden(true)
     }
 
-    /// Release here to float the window instead (no shake needed).
+    /// Release here to float the window instead (no circling needed).
     private func floatZone(over: Bool) -> some View {
         dropZone(over ? String(localized: "Release to Float") : String(localized: "Float"),
                  symbol: "macwindow.on.rectangle", over: over,
@@ -1705,4 +1711,32 @@ struct PaneMenuBar: View {
 private struct PaneMenuHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Circling while holding a drag switches it between Pane and Floating: this ring, just above the
+/// finger (where the finger doesn't hide it), fills as the loops add up and shows what it will
+/// switch to. Decoration only: the placement chip and its haptic say what happened.
+struct WorkspacePlacementRing: View {
+    var progress: Double
+    /// What it switches to: Floating (true) or Pane.
+    var toFloating: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let lift: CGFloat = 64
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.black.opacity(0.55))
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 4)
+            Circle().trim(from: 0, to: min(max(progress, 0), 1))
+                .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: toFloating ? "macwindow.on.rectangle" : "rectangle.split.2x1")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+        }
+        .frame(width: 46, height: 46)
+        .shadow(color: .black.opacity(0.45), radius: 2)
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: progress)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }

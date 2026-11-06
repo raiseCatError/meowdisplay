@@ -439,14 +439,14 @@ struct WorkspaceDrag: Equatable {
         /// An app from Stage Peek's carousel, search or Launchpad: its window when it has one;
         /// several → the person picks; none → offered to open it (never just because a drag began).
         case app(MacAppItem)
-        /// A floating pane, shaken (or switched) into Pane placement: it docks where it's dropped.
+        /// A floating pane, circled (or switched) into Pane placement: it docks where it's dropped.
         case float(String)
     }
     var item: Item
     /// Global (screen) coordinates.
     var location: CGPoint
     /// Where a drop goes: into the panes (tab, split, swap) or floating at the finger. Switched
-    /// with a shake while holding, or the drag's Float/Dock control; Cancel keeps everything.
+    /// by circling while holding (`WorkspaceCircleGesture`), or the Float zone; Cancel keeps everything.
     var placement: WorkspacePlacement = .pane
 }
 
@@ -563,12 +563,15 @@ final class WorkspaceModel: ObservableObject {
     /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
     var removeZoneGlobal: CGRect = .zero
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
-    /// floats the window instead (the way that needs no shake).
+    /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
     /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
     @Published var floatHandlesGlobal: [CGRect] = []
-    /// The first-use tip about shaking a drag (shown once, ever, on this device).
-    @Published private(set) var shakeTipVisible = false
+    /// The first-use tip about circling while dragging (shown once, ever, on this device).
+    @Published private(set) var placementTipVisible = false
+    /// How far circling while dragging has got toward switching Pane / Floating (0...1), for the
+    /// ring at the finger. 0 while it can't switch.
+    @Published private(set) var placementSwitchProgress = 0.0
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -1575,15 +1578,17 @@ final class WorkspaceModel: ObservableObject {
         d.placement = placement ?? initialPlacement(for: item)
         if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
         drag = d
-        shake.reset()
-        if canPlace(item, .float), !defaults.bool(forKey: Self.shakeTipKey) {
-            defaults.set(true, forKey: Self.shakeTipKey)   // never repeated, even if dismissed unseen
-            shakeTipVisible = true
+        circling.reset()
+        placementSwitchProgress = 0
+        // A new tip for the new gesture (people who saw the old shake tip see this one once too).
+        if canPlace(item, .float), !defaults.bool(forKey: Self.placementTipKey) {
+            defaults.set(true, forKey: Self.placementTipKey)   // never repeated, even if dismissed unseen
+            placementTipVisible = true
         }
     }
 
-    static let shakeTipKey = "workspace.shakeTipShown"
-    func dismissShakeTip() { shakeTipVisible = false }
+    static let placementTipKey = "workspace.circleTipShown"
+    func dismissPlacementTip() { placementTipVisible = false }
 
     /// The Float zone is offered while dragging in Pane placement something that can float, in Window view.
     var canDropToFloat: Bool {
@@ -1596,15 +1601,32 @@ final class WorkspaceModel: ObservableObject {
         canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
     }
 
-    /// Moves the drag; a shake while holding switches its placement (true when it switched).
+    /// Moves the drag; about two seconds of circling while holding switches its placement (true
+    /// when it switched). Progress shows as a ring at the finger, only when it can switch.
     @discardableResult
     func moveDrag(to global: CGPoint, at time: TimeInterval = CACurrentMediaTime()) -> Bool {
-        guard drag != nil else { return false }
+        guard let d = drag else { return false }
         drag?.location = global
-        guard shake.add(x: Double(global.x), y: Double(global.y), at: time) else { return false }
+        let fired = circling.add(x: Double(global.x), y: Double(global.y), at: time)
+        let other: WorkspacePlacement = d.placement == .pane ? .float : .pane
+        let switchable = canPlace(d.item, other)
+        placementSwitchProgress = switchable ? circling.progress : 0
+        if placementSwitchProgress > 0 { fadeRingWhenQuiet() }
+        guard fired, switchable else { return false }
         return toggleDragPlacement()
     }
-    func cancelDrag() { drag = nil }
+    func cancelDrag() { drag = nil; placementSwitchProgress = 0 }
+
+    /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
+    private func fadeRingWhenQuiet() {
+        ringFade?.cancel()
+        let quiet = circling.quiet
+        ringFade = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((quiet + 0.05) * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.circling.isQuiet(at: CACurrentMediaTime()) else { return }
+            self.placementSwitchProgress = 0
+        }
+    }
 
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
@@ -1659,6 +1681,7 @@ final class WorkspaceModel: ObservableObject {
     /// picture: nothing changes. Returns whether anything changed.
     @discardableResult
     func endDrag() -> Bool {
+        placementSwitchProgress = 0
         guard let d = drag else { return false }
         if d.placement == .float {
             drag = nil
@@ -1790,8 +1813,9 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var floatGesture: String?
     /// The layout before the current float gesture, recorded as one undo step once it changes something.
     private var floatGestureStart: WorkspaceLayout?
-    /// Shake while dragging (pane label, Stage Peek window, float title).
-    var shake = WorkspaceShakeDetector()
+    /// Circling while dragging (pane label, Stage Peek window, float title).
+    var circling = WorkspaceCircleGesture()
+    private var ringFade: Task<Void, Never>?
 
     /// The hardware pointer at a normalized canvas point: hover only, never focus.
     func hover(at p: CGPoint?) {
@@ -2238,7 +2262,7 @@ extension WorkspaceModel {
         }
     }
 
-    /// Switches the drag between Pane and Floating placement (a shake, or the drag's control).
+    /// Switches the drag between Pane and Floating placement (circling, or the drag's control).
     /// True when it switched.
     @discardableResult
     func toggleDragPlacement() -> Bool {

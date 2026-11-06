@@ -333,31 +333,6 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(WorkspaceFloatMotion.projection(1000), 199, accuracy: 0.5)
     }
 
-    // MARK: Shake to switch placement
-
-    func testAShakeSwitchesPlacementButDragCorrectionsDoNot() {
-        var s = WorkspaceShakeDetector()
-        // An ordinary drag with one overshoot and a correction.
-        var t = 0.0
-        for x in stride(from: 0.0, through: 300, by: 10) { t += 0.016; XCTAssertFalse(s.add(x: x, y: 100, at: t)) }
-        for x in stride(from: 300.0, through: 260, by: -10) { t += 0.016; XCTAssertFalse(s.add(x: x, y: 100, at: t)) }
-        // A small wobble (under the amplitude) never counts.
-        s.reset(); t = 0
-        for i in 0..<60 { t += 0.016; XCTAssertFalse(s.add(x: 200 + (i % 2 == 0 ? 8 : -8), y: 100, at: t)) }
-        // Slow back-and-forth (one swing a second) isn't a shake.
-        s.reset(); t = 0
-        for x in [0.0, 60, 0, 60, 0] { t += 1.0; XCTAssertFalse(s.add(x: x, y: 0, at: t)) }
-        // A real shake: four quick swings.
-        s.reset(); t = 0
-        var fired = 0
-        for x in [0.0, 50, 0, 50, 0, 50, 0] { t += 0.09; if s.add(x: x, y: 0, at: t) { fired += 1 } }
-        XCTAssertEqual(fired, 1, "once per shake, then a cooldown")
-        // After the cooldown another shake counts again (switching back).
-        t += 1
-        for x in [0.0, 50, 0, 50, 0] { t += 0.09; if s.add(x: x, y: 0, at: t) { fired += 1 } }
-        XCTAssertEqual(fired, 2)
-    }
-
     func testOcclusionLowersTheCoveredPanesRate() {
         XCTAssertEqual(WorkspaceOcclusion.coveredFraction(of: .unit, by: [WorkspaceRect(x: 0, y: 0, width: 0.5, height: 1)]), 0.5, accuracy: 0.01)
         XCTAssertEqual(WorkspaceOcclusion.coveredFraction(of: .unit, by: []), 0)
@@ -641,10 +616,11 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(m.layout.float(front)?.frame, before.float(front)?.frame)
     }
 
-    /// Dragging: Pane placement keeps the existing drops; a shake (or the control) switches to
-    /// Floating, where a drop floats the window at the finger; Cancel changes nothing.
+    /// Dragging: Pane placement keeps the existing drops; about two seconds of circling (or the
+    /// control) switches to Floating, where a drop floats the window at the finger; Cancel
+    /// changes nothing. The ring's progress shows only while it can switch.
     @MainActor
-    func testShakeSwitchesADragBetweenPaneAndFloatingPlacement() {
+    func testCirclingSwitchesADragBetweenPaneAndFloatingPlacement() {
         let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
         let w = m.catalog!.windows
         m.choose(w[0], asNewTile: false)
@@ -655,10 +631,24 @@ final class WorkspaceFloatTests: XCTestCase {
 
         m.beginDrag(.window(w[2]), at: CGPoint(x: 300, y: 300))
         XCTAssertEqual(m.drag?.placement, .pane, "Pane placement by default")
+        // A shake no longer switches anything.
         var t = 0.0
         var switched = false
-        for x in [300.0, 360, 300, 360, 300, 360] { t += 0.08; switched = m.moveDrag(to: CGPoint(x: x, y: 300), at: t) || switched }
+        for x in [300.0, 360, 300, 360, 300, 360, 300, 360] { t += 0.08; switched = m.moveDrag(to: CGPoint(x: x, y: 300), at: t) || switched }
+        XCTAssertFalse(switched, "a shake isn't a circle")
+        XCTAssertEqual(m.drag?.placement, .pane)
+        // Circling: the ring fills, then it switches once.
+        t += 1
+        var progressSeen = 0.0
+        for i in 0...150 {
+            let a = Double(i) / 60 * 2 * .pi
+            t += 1.0 / 60
+            switched = m.moveDrag(to: CGPoint(x: 300 + 50 * cos(a), y: 300 + 50 * sin(a)), at: t) || switched
+            if !switched { progressSeen = max(progressSeen, m.placementSwitchProgress) }
+        }
         XCTAssertTrue(switched)
+        XCTAssertGreaterThan(progressSeen, 0.8, "the ring filled before it switched")
+        XCTAssertEqual(m.placementSwitchProgress, 0, "no ring right after the switch")
         XCTAssertEqual(m.drag?.placement, .float)
         XCTAssertNil(m.dropTarget(forGlobal: CGPoint(x: 360, y: 300)), "no pane targets while floating")
         XCTAssertNotNil(m.floatDropPreview(forGlobal: CGPoint(x: 360, y: 300)))
@@ -677,7 +667,7 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(f.frame.midX, 0.5, accuracy: 0.02)
         XCTAssertEqual(before.orderedTileIDs, m.layout.orderedTileIDs, "the panes are untouched")
 
-        // A float shaken into Pane placement docks as a tab where it's dropped, never replacing.
+        // A float circled into Pane placement docks as a tab where it's dropped, never replacing.
         let fid = m.layout.floatIDs[0]
         m.beginDrag(.float(fid), at: CGPoint(x: 200, y: 400))
         XCTAssertEqual(m.drag?.placement, .pane)
@@ -689,9 +679,9 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(Set(m.layout.tiles.values.flatMap(\.windows).map(\.windowID)), [10, 11, 12], "every window still here")
     }
 
-    /// Without a shake: the Float zone beside Cancel floats the dragged window. Default Window
+    /// Without circling: the Float zone beside Cancel floats the dragged window. Default Window
     /// Placement applies to windows not in the layout yet; a window already floating comes back
-    /// instead of opening twice. The shake tip shows once, ever.
+    /// instead of opening twice. The circling tip shows once, ever.
     @MainActor
     func testFloatZoneDefaultPlacementAndTheOneTimeTip() {
         let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
@@ -702,9 +692,9 @@ final class WorkspaceFloatTests: XCTestCase {
         m.floatZoneGlobal = CGRect(x: 540, y: 760, width: 120, height: 44)
         let before = m.layout.orderedTileIDs
 
-        XCTAssertFalse(m.shakeTipVisible)
+        XCTAssertFalse(m.placementTipVisible)
         m.beginDrag(.window(w[1]), at: CGPoint(x: 300, y: 300))
-        XCTAssertTrue(m.shakeTipVisible, "the first drag that can float shows the tip")
+        XCTAssertTrue(m.placementTipVisible, "the first drag that can float shows the tip")
         XCTAssertTrue(m.canDropToFloat)
         m.moveDrag(to: CGPoint(x: 600, y: 780), at: 1)
         XCTAssertTrue(m.overFloatZone(CGPoint(x: 600, y: 780)))
@@ -712,9 +702,9 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertTrue(m.endDrag())
         XCTAssertEqual(m.layout.floatIDs.count, 1)
         XCTAssertEqual(m.layout.orderedTileIDs, before)
-        m.dismissShakeTip()
+        m.dismissPlacementTip()
         m.beginDrag(.window(w[2]), at: CGPoint(x: 300, y: 300))
-        XCTAssertFalse(m.shakeTipVisible, "never repeated")
+        XCTAssertFalse(m.placementTipVisible, "never repeated")
         m.cancelDrag()
 
         // Stage Peek's tap: a floating window comes back (untucked), never a second copy.
@@ -793,7 +783,7 @@ final class WorkspaceFloatTests: XCTestCase {
                        "Automatic: the main display")
     }
 
-    /// From Extend nothing floats, by menu, drag, shake or tap: leaving Extend removes this
+    /// From Extend nothing floats, by menu, drag, circling or tap: leaving Extend removes this
     /// device's extended display, and macOS would move the windows on it.
     @MainActor
     func testNothingFloatsFromExtend() {
@@ -817,8 +807,8 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertFalse(m.canPlace(.window(w[1]), .float))
         m.beginDrag(.window(w[1]), at: CGPoint(x: 300, y: 300))
         XCTAssertEqual(m.drag?.placement, .pane, "Floating placement isn't offered")
-        XCTAssertFalse(m.toggleDragPlacement(), "a shake can't switch to it")
-        XCTAssertFalse(m.shakeTipVisible)
+        XCTAssertFalse(m.toggleDragPlacement(), "circling can't switch to it")
+        XCTAssertFalse(m.placementTipVisible)
         m.cancelDrag()
         m.switchTo(w[1])
         XCTAssertTrue(m.layout.floats.isEmpty, "a tap never floats either")

@@ -662,69 +662,111 @@ enum WorkspaceOcclusion {
     }
 }
 
-// MARK: - Shake to switch placement
+// MARK: - Circling while holding (switch a drag between Pane and Floating)
 
-/// An intentional back-and-forth shake while holding a dragged window (Dropover-style): it
-/// switches between Pane and Floating placement. Ordinary drag corrections don't count: each
-/// swing must be at least `amplitude` long, `reversals` of them inside `window` seconds, and
-/// after a switch nothing more counts for `cooldown` seconds. Pure: fed the finger's points.
-struct WorkspaceShakeDetector: Equatable, Sendable {
-    /// Points one swing must cover (hysteresis: a wobble smaller than this is ignored).
-    var amplitude = 26.0
-    /// Direction changes that make a shake (left-right-left-right is three).
-    var reversals = 3
-    /// Seconds all of them must fall within.
-    var window = 0.9
-    /// Seconds after a shake before another can count.
-    var cooldown = 0.7
+/// Switches a drag between Pane and Floating placement: about two seconds of drawing circles
+/// while holding (like winding a dial), so it never happens by accident. Replaces the shake,
+/// which fired on any quick back-and-forth.
+///
+/// It follows the direction the finger (or pointer) travels: a loop turns that direction by a
+/// full turn, always the same way round. It counts only steps that curve, all one way, around
+/// loops of a plausible size; a sharp reversal (a shake, a zig-zag), a turn the other way, a
+/// straight move or a pause starts over. After it fires it stays quiet until the circling stops
+/// (a pause, or a straight move), so circling on never switches back and forth. `progress`
+/// (0...1) is for the ring drawn at the finger. Pure: the same samples always decide the same.
+struct WorkspaceCircleGesture: Equatable, Sendable {
+    /// Net turning that makes the gesture: one and three-quarter loops.
+    var requiredTurn = 1.75 * 2 * Double.pi
+    /// And at least this long circling (seconds): about two seconds in all at an easy pace.
+    var minimumDuration = 1.5
+    /// Loop radius (points) that counts: smaller is a wobble, larger is a long curve.
+    var minRadius = 12.0
+    var maxRadius = 240.0
+    /// Samples closer than this to the last one count together (touch jitter).
+    var minStep = 3.0
+    /// One step turning more than this (about 100°) is a reversal: starts over.
+    var maxStepTurn = 1.75
+    /// This long without a curving step (a pause or a straight move) starts over and, after a
+    /// switch, lets the next one count.
+    var quiet = 0.4
+    /// Share of the turning that must go one way round.
+    var consistency = 0.8
 
-    private struct Axis: Equatable, Sendable {
-        var anchor: Double?
-        var peak = 0.0
-        var direction = 0.0
-    }
-    private var x = Axis()
-    private var y = Axis()
-    private var turns: [Double] = []
-    private var quietUntil = -Double.infinity
+    private var lastX: Double?
+    private var lastY: Double?
+    private var heading: Double?
+    /// This run: signed and total turning, path length, when it began, its last curving step.
+    private var net = 0.0
+    private var total = 0.0
+    private var length = 0.0
+    private var started: Double?
+    private var lastCurve = -Double.infinity
+    /// False from a switch until the circling stops.
+    private(set) var armed = true
+    /// How far along the current circling is (0...1); 0 while it doesn't count.
+    private(set) var progress = 0.0
 
-    init(amplitude: Double = 26, reversals: Int = 3, window: Double = 0.9, cooldown: Double = 0.7) {
-        self.amplitude = amplitude
-        self.reversals = reversals
-        self.window = window
-        self.cooldown = cooldown
-    }
+    init() {}
 
     /// Starts over (a new drag).
-    mutating func reset() {
-        x = Axis(); y = Axis(); turns = []; quietUntil = -Double.infinity
+    mutating func reset() { self = WorkspaceCircleGesture(tuning: self) }
+
+    private init(tuning t: WorkspaceCircleGesture) {
+        requiredTurn = t.requiredTurn; minimumDuration = t.minimumDuration
+        minRadius = t.minRadius; maxRadius = t.maxRadius; minStep = t.minStep
+        maxStepTurn = t.maxStepTurn; quiet = t.quiet; consistency = t.consistency
     }
 
-    /// One finger position (points) at time `t` (seconds). True once per shake.
-    mutating func add(x px: Double, y py: Double, at t: Double) -> Bool {
-        guard px.isFinite, py.isFinite, t.isFinite else { return false }
-        let turnedX = step(&x, px), turnedY = step(&y, py)
-        if turnedX || turnedY { turns.append(t) }
-        turns.removeAll { t - $0 > window }
-        guard t >= quietUntil, turns.count >= reversals else { return false }
-        turns = []
-        quietUntil = t + cooldown
-        return true
+    private mutating func endRun() {
+        net = 0; total = 0; length = 0; started = nil; progress = 0
     }
 
-    /// Follows one axis; true when it turned back after a full swing.
-    private func step(_ a: inout Axis, _ v: Double) -> Bool {
-        guard let anchor = a.anchor else { a.anchor = v; a.peak = v; return false }
-        if a.direction == 0 {
-            if abs(v - anchor) >= amplitude { a.direction = v > anchor ? 1 : -1; a.peak = v }
+    /// Whether the circling has gone quiet at `t` (for fading the ring when no samples come).
+    func isQuiet(at t: Double) -> Bool { t - lastCurve > quiet }
+
+    /// One finger position (points) at time `t` (seconds). True once per gesture.
+    mutating func add(x: Double, y: Double, at t: Double) -> Bool {
+        guard x.isFinite, y.isFinite, t.isFinite else { return false }
+        if isQuiet(at: t) {
+            if started != nil { endRun() }
+            armed = true
+        }
+        guard let lx = lastX, let ly = lastY else { lastX = x; lastY = y; return false }
+        let dx = x - lx, dy = y - ly
+        let d = (dx * dx + dy * dy).squareRoot()
+        guard d >= minStep else { return false }
+        lastX = x; lastY = y
+        let h = atan2(dy, dx)
+        defer { heading = h }
+        guard let h0 = heading else { return false }
+        var turn = h - h0
+        if turn > .pi { turn -= 2 * .pi } else if turn <= -.pi { turn += 2 * .pi }
+        if abs(turn) > maxStepTurn {
+            endRun()
             return false
         }
-        if (v - a.peak) * a.direction > 0 { a.peak = v; return false }
-        guard abs(a.peak - v) >= amplitude else { return false }
-        // A full swing back: the old peak is where this swing started.
-        a.anchor = a.peak
-        a.direction = -a.direction
-        a.peak = v
+        // A step curves when it turns at least as tightly as the largest loop that counts.
+        if abs(turn) / d >= 1 / maxRadius {
+            if started == nil { started = t }
+            lastCurve = t
+        }
+        guard let begin = started else { return false }
+        net += turn
+        total += abs(turn)
+        length += d
+        let consistent = total > 0 && abs(net) / total >= consistency
+        if !consistent, total > .pi {
+            // Turning both ways round (a figure eight, a wiggle): not a circle.
+            endRun()
+            return false
+        }
+        let radius = length / max(abs(net), 1e-9)
+        let plausible = abs(net) < .pi || (radius >= minRadius && radius <= maxRadius)
+        guard armed, consistent, plausible else { progress = 0; return false }
+        progress = min(abs(net) / requiredTurn, (t - begin) / minimumDuration, 1)
+        guard progress >= 1 else { return false }
+        armed = false
+        endRun()
         return true
     }
 }

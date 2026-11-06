@@ -5,7 +5,7 @@ import UIKit
 
 // Floating panes' chrome on iPhone and iPad (PROTOCOL.md 6.10, WINDOW_MODE.md): the outline,
 // the title pill on the top edge, the bottom grabber, the curved corner grips, edge handles for
-// tucked floats and the first-use shake tip. The Mac draws the floats' windows into the picture;
+// tucked floats and the first-use circling tip. The Mac draws the floats' windows into the picture;
 // everything here is the receiver's own: moving, flinging, tucking and resizing never send
 // pointer input or a window action, only the arrangement (`workspaceRequest`).
 
@@ -156,15 +156,24 @@ struct WorkspaceFloatLayer: View {
     @State private var moving: Set<String> = []
     @State private var samples: [String: [Sample]] = [:]
     @State private var lastTap: (id: String, at: Date)?
-    /// A float's title shaken during a move: now docking it (the pane drop targets show).
+    /// A float's title circled during a move: now docking it (the pane drop targets show, and the
+    /// float is drawn as a card under the finger).
     @State private var docking: String?
-    @State private var shake = WorkspaceShakeDetector()
+    @State private var circling = WorkspaceCircleGesture()
+    /// Circling toward the other placement: where the finger is and how far along.
+    @State private var ring: Ring?
+    /// The float folded into a card while it's being docked.
+    @State private var card: DockCard?
+    @State private var finger: CGPoint = .zero
+    @State private var ringFade: Task<Void, Never>?
     @State private var resizeStart: [String: WorkspaceRect] = [:]
     @State private var handleDrag: [String: CGSize] = [:]
     @State private var tipHide: Task<Void, Never>?
     @GestureState private var pressing: Set<String> = []
 
     private struct Sample { var point: CGPoint; var time: TimeInterval }
+    private struct Ring { var at: CGPoint; var progress: Double; var toFloating: Bool }
+    private struct DockCard { var id: String; var from: CGRect; var collapsed: Bool }
 
     private var highContrast: Bool { contrast == .increased }
     private var pictureSize: WorkspaceSize { WorkspaceSize(width: max(picture.width, 1), height: max(picture.height, 1)) }
@@ -178,7 +187,8 @@ struct WorkspaceFloatLayer: View {
         let handles = model.localFullscreen == nil ? tuckTabs() : []
         // Where each float is drawn now, and what the floats in front of it cover: its chrome
         // steps aside there (the front float's window is in the video, under all the chrome).
-        let shown = frames.floats.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
+        // A float being docked is drawn only as its card under the finger.
+        let shown = frames.floats.filter { $0 != docking }.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
         let covers = WorkspaceFloatLayering.covers(backToFront: shown.map { WorkspaceRect($0.rect) })
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
@@ -189,17 +199,23 @@ struct WorkspaceFloatLayer: View {
                 floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: covers[i].map(\.cgRect))
             }
             ForEach(handles, id: \.key) { h in handle(h.tab, edge: h.edge) }
-            if model.shakeTipVisible { shakeTip }
+            if let c = card, docking == c.id { dockCard(c) }
+            if let r = ring, r.progress > 0 {
+                WorkspacePlacementRing(progress: r.progress, toFloating: r.toFloating)
+                    .position(x: r.at.x, y: r.at.y - WorkspacePlacementRing.lift)
+            }
+            if model.placementTipVisible { placementTip }
         }
         .onAppear { motion.model = model; publishHandles(handles) }
         .onChange(of: handles.map(\.tab.rect)) { _ in publishHandles(handles) }
-        .onChange(of: model.drag == nil) { ended in if ended, model.shakeTipVisible { hideTipSoon() } }
+        .onChange(of: model.drag == nil) { ended in if ended, model.placementTipVisible { hideTipSoon() } }
         .onChange(of: pressing) { held in
             // A move the system cancelled (no end event): settle where it is.
             for id in start.keys where !held.contains(id) {
                 let f = motion.frames[id]
                 start[id] = nil; moving.remove(id); samples[id] = nil
-                if docking == id { docking = nil; model.cancelDrag() }
+                if docking == id { docking = nil; card = nil; model.cancelDrag() }
+                ring = nil
                 if !motion.isGliding(id) { motion.drop(id); model.endFloatGesture(id, frame: f) }
             }
         }
@@ -399,7 +415,8 @@ struct WorkspaceFloatLayer: View {
                     start[id] = motion.catchFloat(id) ?? model.layout.float(id)?.frame
                     model.beginFloatGesture(id)
                     samples[id] = []
-                    shake.reset()
+                    circling.reset()
+                    ring = nil
                 }
                 guard let s = start[id] else { return }
                 var list = samples[id] ?? []
@@ -412,19 +429,33 @@ struct WorkspaceFloatLayer: View {
                     model.liftFloat(id)   // drawn here from now; a tap never lifts
                 }
                 let global = CGPoint(x: v.location.x + toGlobal.x, y: v.location.y + toGlobal.y)
-                // Shaken while held: switch between moving it and docking it into the layout.
-                if shake.add(x: v.location.x, y: v.location.y, at: v.time.timeIntervalSinceReferenceDate) {
+                finger = v.location
+                // About two seconds of circling while held: switch between moving it and docking
+                // it into the layout. A ring above the finger fills as it goes.
+                let switched = circling.add(x: v.location.x, y: v.location.y, at: v.time.timeIntervalSinceReferenceDate)
+                ring = circling.progress > 0 ? Ring(at: v.location, progress: circling.progress, toFloating: docking == id) : nil
+                if ring != nil { fadeRingWhenQuiet() }
+                if switched {
                     if docking == id {
+                        // Back to moving it: the card opens into the float under the finger.
                         docking = nil
+                        card = nil
                         model.cancelDrag()
                         model.liftFloat(id)
                     } else {
+                        // Docking: the float folds into a card under the finger. It stays lifted (the
+                        // Mac doesn't draw it), so it's on screen once, as the card; a cancelled drop
+                        // puts it back where the move began.
+                        let from = (motion.frames[id] ?? model.layout.float(id)?.frame)?.screen(in: picture)
                         docking = id
                         motion.drop(id)
-                        model.landFloat(id)   // back where it was, drawn by the Mac
                         model.updateFloatFrame(id, s)
+                        model.liftFloat(id)
                         model.beginDrag(.float(id), at: global)
+                        card = DockCard(id: id, from: from ?? CGRect(x: v.location.x - 80, y: v.location.y - 50, width: 160, height: 100), collapsed: false)
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { card?.collapsed = true }
                     }
+                    ring = nil
                     Self.haptic(.toggle)
                 }
                 if docking == id { model.moveDrag(to: global); return }
@@ -442,8 +473,10 @@ struct WorkspaceFloatLayer: View {
                 let s = start[id]
                 let list = samples[id] ?? []
                 start[id] = nil; moving.remove(id); samples[id] = nil
+                ring = nil
                 if docking == id {
                     docking = nil
+                    card = nil
                     motion.drop(id)
                     model.endFloatGesture(id)
                     if model.endDrag() { Self.haptic(.drop) }
@@ -675,12 +708,12 @@ struct WorkspaceFloatLayer: View {
 
     // MARK: First-use tip
 
-    private var shakeTip: some View {
+    private var placementTip: some View {
         HStack(spacing: 10) {
-            Image(systemName: "hand.draw").foregroundStyle(floatAccent).accessibilityHidden(true)
-            Text("Tip: shake a window while you drag it to switch between a pane and a floating window.")
+            Image(systemName: "arrow.clockwise.circle").foregroundStyle(floatAccent).accessibilityHidden(true)
+            Text("Tip: while you drag a window, draw circles for about two seconds to switch between a pane and a floating window. A ring shows how close it is.")
                 .font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
-            Button { model.dismissShakeTip() } label: {
+            Button { model.dismissPlacementTip() } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.85))
                     .frame(width: 30, height: 30).contentShape(Rectangle())
             }
@@ -691,7 +724,7 @@ struct WorkspaceFloatLayer: View {
         .frame(maxWidth: min(picture.width - 32, 440))
         .position(x: picture.midX, y: max(picture.minY, safeArea?.minY ?? 0) + 44)
         .transition(.opacity)
-        .accessibilityIdentifier("shakeTip")
+        .accessibilityIdentifier("placementTip")
     }
 
     private func hideTipSoon() {
@@ -699,8 +732,53 @@ struct WorkspaceFloatLayer: View {
         tipHide = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.3)) { model.dismissShakeTip() }
+            withAnimation(.easeOut(duration: 0.3)) { model.dismissPlacementTip() }
         }
+    }
+
+    /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
+    private func fadeRingWhenQuiet() {
+        ringFade?.cancel()
+        let wait = circling.quiet + 0.05
+        ringFade = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, circling.isQuiet(at: Date().timeIntervalSinceReferenceDate) else { return }
+            ring = nil
+        }
+    }
+
+    /// The float being docked, folded into a card above the finger: its last picture shrinks
+    /// into the card as it folds, then its icon and title. Drawn only here; the Mac leaves the
+    /// float out while it's lifted.
+    private func dockCard(_ c: DockCard) -> some View {
+        let w = min(max(picture.width * 0.42, 150), 230), h: CGFloat = 46
+        let target = CGRect(x: finger.x - w / 2, y: finger.y - h - 22, width: w, height: h)
+        let r = c.collapsed ? target : c.from
+        return ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.13, opacity: 0.95))
+            if let image = model.backdrop(c.id)?.image {
+                Image(decorative: image, scale: 1).resizable().scaledToFill()
+                    .frame(width: r.width, height: r.height).clipped()
+                    .opacity(c.collapsed ? 0 : 1)
+            }
+            HStack(spacing: 8) {
+                if let icon = icon(c.id) {
+                    Image(decorative: icon, scale: 1).resizable().interpolation(.high).frame(width: 24, height: 24)
+                } else {
+                    Image(systemName: "macwindow").foregroundStyle(.white)
+                }
+                Text(title(c.id)).font(.footnote.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .opacity(c.collapsed ? 1 : 0)
+        }
+        .frame(width: r.width, height: r.height)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.6), lineWidth: 1))
+        .shadow(color: .black.opacity(0.4), radius: 6)
+        .position(x: r.midX, y: r.midY)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     // MARK: Haptics
