@@ -119,6 +119,14 @@ enum WindowFrameGeometry {
         return .failed
     }
 
+    /// What Restore should go back to after a Fill from `current`: the frame before the earlier Fill
+    /// when the window is still where that Fill left it (Fill again on a window its app limited),
+    /// otherwise `current`.
+    static func frameBeforeFill(previous: WindowFrameMemoryEntry?, current: CGRect) -> CGRect {
+        guard let previous, matches(previous.after, current) else { return current }
+        return previous.before
+    }
+
     /// Share of `rect` on these displays (0...1).
     static func visibleShare(_ rect: CGRect, displays: [CGRect]) -> CGFloat {
         let area = rect.width * rect.height
@@ -319,6 +327,7 @@ enum WindowFrameSetter {
     private static func run(_ job: Job, memory: WindowFrameMemory) -> WindowFrameResult {
         guard AXIsProcessTrusted() else { return .accessibility }
         let key = WindowFrameMemoryKey(windowID: job.windowID, pid: job.pid)
+        let previous = memory.entry(key)
 
         // 1. The window server's own record for this id, now: same owner, a normal window, on screen.
         let server = serverWindows()
@@ -368,7 +377,7 @@ enum WindowFrameSetter {
             destination = target
             displayID = screen.displayID
         case .restore:
-            switch WindowFrameGeometry.restoreDecision(entry: memory.entry(key), current: bounds, displays: screens.map(\.bounds)) {
+            switch WindowFrameGeometry.restoreDecision(entry: previous, current: bounds, displays: screens.map(\.bounds)) {
             case .nothingToRestore: return .nothingToRestore
             case .changed: memory.forget(key); return .changed
             case .displayChanged: return .displayChanged
@@ -396,13 +405,16 @@ enum WindowFrameSetter {
                 Log.info("workspace: frame change for window \(job.windowID) moved another element; put back")
                 return .ambiguous
             }
-            return job.op == .fill ? .notResizable : .failed
+            guard job.op == .fill else { return .failed }
+            // Unchanged after an earlier Fill left it here: as large as the app allows already.
+            return previous.map { WindowFrameGeometry.matches($0.after, bounds) } == true ? .limited : .notResizable
         }
         // The window moved. Only a frame both sides agree on proves it was this window.
         let agreed = axAfter.map { WindowFrameGeometry.matches($0, serverAfter) } ?? false
         switch job.op {
         case .fill:
-            memory.remember(key, WindowFrameMemoryEntry(before: bounds, after: serverAfter, displayID: displayID, title: job.title,
+            let before = WindowFrameGeometry.frameBeforeFill(previous: previous, current: bounds)
+            memory.remember(key, WindowFrameMemoryEntry(before: before, after: serverAfter, displayID: displayID, title: job.title,
                                                         at: ProcessInfo.processInfo.systemUptime))
             return agreed ? WindowFrameGeometry.gradeFill(before: bounds, target: destination, after: serverAfter) : .failed
         case .restore:

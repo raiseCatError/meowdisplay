@@ -165,6 +165,18 @@ final class WindowFrameTests: XCTestCase {
         XCTAssertEqual(WindowFrameGeometry.restoreDecision(entry: half, current: after, displays: displays), .restore(half.before))
     }
 
+    /// Fill again on a window its app limited keeps the frame from before the first Fill; after a
+    /// move by hand, the new frame is what Restore goes back to.
+    func testFillingAgainKeepsTheOriginalFrameForRestore() {
+        let original = CGRect(x: 300, y: 200, width: 400, height: 300)
+        let limited = CGRect(x: 0, y: 33, width: 1200, height: 800)
+        let e = entry(before: original, after: limited)
+        XCTAssertEqual(WindowFrameGeometry.frameBeforeFill(previous: nil, current: limited), limited)
+        XCTAssertEqual(WindowFrameGeometry.frameBeforeFill(previous: e, current: limited.offsetBy(dx: 1, dy: 0)), original)
+        let moved = limited.offsetBy(dx: 200, dy: 40)
+        XCTAssertEqual(WindowFrameGeometry.frameBeforeFill(previous: e, current: moved), moved)
+    }
+
     func testTheMemoryIsBoundedAndForgetsClosedReusedAndHandMovedWindows() {
         var m = WindowFrameMemoryStore()
         let a = CGRect(x: 0, y: 33, width: 1512, height: 879), b = CGRect(x: 10, y: 50, width: 400, height: 300)
