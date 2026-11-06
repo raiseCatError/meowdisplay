@@ -1806,6 +1806,19 @@ final class WorkspaceModel: ObservableObject {
     }
     func cancelDrag() { drag = nil; placementSwitchProgress = 0 }
 
+    /// A drag (or a float move) whose finger is gone without an end: the view carrying its gesture
+    /// went away mid-gesture, the app left the foreground, or the screen turned. Undone as a
+    /// cancel, whatever was dragged, so no preview, card, drop target or hidden float is left
+    /// behind (owner, QA 9000024: an icon dragged from Stage Peek's search stayed frozen in
+    /// Floating placement). Nothing on the Mac changes.
+    func abandonDrag(reason: String) {
+        guard drag != nil || dockingFloat != nil || floatGesture != nil else { return }
+        Log.info("drag: abandoned (\(reason)) item=\(drag.map { String(describing: $0.item).prefix(40) } ?? "-") docking=\(dockingFloat ?? "-") float=\(floatGesture ?? "-")")
+        if let id = dockingFloat { cancelDockingFloat(id) }
+        if drag != nil { cancelDrag() }
+        if let id = floatGesture { endFloatGesture(id) }
+    }
+
     /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
     private func fadeRingWhenQuiet() {
         ringFade?.cancel()
@@ -1898,6 +1911,8 @@ final class WorkspaceModel: ObservableObject {
         guard let target else { return false }
         switch d.item {
         case .window(let w):
+            // Closed (or its id now names another window) while it was dragged: nothing to place.
+            if let c = catalog, !c.windows.contains(where: { $0.id == w.id && $0.generation == w.generation }) { return false }
             return place(w, on: target)
         case .pane(let id, let tab):
             if let tab, case .tab(let t, _) = target, t == id { return reorderTab(id, from: tab, at: d.location) }
