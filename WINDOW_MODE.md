@@ -29,6 +29,7 @@ removed, and the arrangement comes back when the space returns.
 | Move a tile | Press and hold its name, then drag: a highlighted area shows where it lands (middle swaps, an edge splits). Release on **Cancel** to leave everything as it was. With more than one pane, moving a whole pane also shows **Remove from Layout** beside Cancel: release there to take the pane off this device's layout (Undo brings it back; the Mac window stays open). Remove is not offered for tabs, for windows or apps dragged in from Stage Peek, or for the last pane | Same | Same, while Arrange is on |
 | Tabs in a pane | Drop a window on a pane's labels to add it as a tab; tap a label to switch (only the shown tab streams). Hold a tab's label and drag it: onto another pane's labels to move it there, onto an edge for a new pane, or along its own labels to reorder. Each tab keeps its own rotation, Fit/Fill and zoom. Remove This Tab only takes it out of the pane; the Mac window stays open | Same | — |
 | Drag an app in | In Stage Peek, press and hold an app in the carousel or in search results, then drag it onto a pane: one window goes straight in; with several, pick which; with none, you're offered to open it on the Mac (needs control) and its first new window lands there. Nothing opens just because a drag began | Same | — |
+| Open an app into a tile | In **Choose a window for this tile** (a pane's **Change Window…**) or the overview, search finds the Mac's open windows and, under **Apps to Open**, any app on the Mac that has no window to show (not running, or running without one), each listed once. Tap one and confirm **Open**: the Mac opens exactly that app, without bringing it forward, and its new window goes into that tile (or, from the overview, where a picked window would go); nothing else in the layout changes and no Mac window is moved. Without control, **Request Control and Open** sends the usual control request and the app opens only once the Mac allows it. Several new windows: you pick one. No window within 20 s, a failed launch, no answer within 15 s, control ending before the Mac opened it, or the tile changing meanwhile: it stops, says so, and offers **Try Again** or **Choose a Window**. **Cancel**, or closing the picker, stops waiting; a window that shows later is never placed by itself | — | Same picker; ask for control first |
 | Resize | Arrange Tiles, then drag the grips between tiles | Same | Same |
 | App icons | Pane and float titles, Stage Peek and its dock show each app's icon from the Mac; until it arrives, or when the Mac has none, the same neutral tile with the app's initial everywhere. A pane's or float's icon is asked for as soon as the window is shown (not only while browsing) and again after every reconnect; an unanswered ask is repeated a few times (4, 8, 16 s), and the Mac answers an icon asked for again on a new connection, or later on the same one | — | Same for pane titles |
 
@@ -179,6 +180,18 @@ does its app's sound unless another pane shows that app (Window view plays
 the sound of the apps on screen). The Mac
 accepts floats only from a receiver that says it can show them; older
 receivers, including Android 2.0, see Window view exactly as before.
+
+**Apps to open** in the window picker come from the Mac's app list (`appCatalog`, the same
+list as Stage Peek and Launchpad: Spotlight's index of the app folders, kept up to date by the
+Mac, so asking for it doesn't enumerate the disk again). The picker asks for it when it opens,
+with the revision it holds, so an unchanged list is a one-line `same` answer; the window
+listing's refresh every few seconds doesn't ask again (an unanswered ask is repeated a few
+times). An app is opened only with control (`appLaunch`, checked when it arrives and again
+right before the app opens), by bundle id, without activating it; the receiver waits for a
+window of that app that wasn't listed before and puts it in the tile the picker was opened
+for, after checking the tile still shows what it showed. Each step is logged on the receiver
+as `pickerOpen:` (requested, control requested, launch sent, launch answered, window seen,
+several windows, placed, failed, cancelled) and on the Mac as `workspace: appLaunch`.
 
 From **Mirror**, a window opened floating (Stage Peek's **Open as Floating
 Window**, a drag in Floating placement, or a tap with Default Window

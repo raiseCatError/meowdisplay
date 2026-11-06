@@ -1425,8 +1425,9 @@ with `windowCatalog`:
   shows a tilted thumbnail, so it has no current picture until it is on
   the stage again (`w`/`h` are still the real window's);
 * `apps` — running regular apps `{bundle, name, windows}`;
-* `installed` — only when asked: apps the receiver may ask to open
-  `{bundle, name}`.
+* `installed` — only when asked, and only by Macs before the full app list
+  below: apps the receiver may ask to open `{bundle, name}`. Current Macs
+  ignore the flag; receivers list apps to open from `appCatalog`.
 
 MeowDisplay's own windows, system UI (Dock, menu bar, Stage Manager strip,
 password and authentication prompts) and windows that opted out of capture
@@ -1463,7 +1464,11 @@ scan when Spotlight is off), one per bundle id, Finder first, at most 900:
 since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
 `appLaunch {bundle}` needs the input grant, opens only an app the Mac listed,
 never activates it (no focus change on the Mac), and is answered with
-`appLaunchResult {bundle, ok}`. `windowAction` also takes
+`appLaunchResult {bundle, ok}`. Without the grant when it arrives it is
+ignored (not answered); the grant is checked again right before the app
+opens, and if it ended nothing opens and `ok` is false. Receivers ask for
+`appCatalog` when a browser opens (the window picker, Stage Peek,
+Launchpad), not on every catalog refresh. `windowAction` also takes
 `minimize {window, gen}` (input grant; the real Mac window; never activates).
 The Mac brings a tile's minimized or hidden window back only when the tile
 first shows it that way; a window minimized later stays minimized until
