@@ -545,6 +545,13 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var unavailableThumbnails: Set<UInt32> = []
     @Published private(set) var displayThumbnails: [UInt32: CGImage] = [:]
     @Published private(set) var icons: [String: CGImage] = [:]
+    /// Which icons to ask the Mac for, and when to ask again (once per connection, with backoff).
+    private var iconPlanner = AppIconRequestPlanner()
+    /// Icons in the order they came, for making room past `AppIconRequestPlanner.keep`.
+    private var iconArrival: [String] = []
+    private var iconRetry: DispatchWorkItem?
+    /// Admitted to this Mac: icon asks before that would be dropped by the Mac.
+    private var iconsConnected = false
     /// Every launchable Mac app (Finder first), from `appCatalog`.
     @Published private(set) var apps: [MacAppItem] = []
     /// Apps opened from this device that haven't shown a window yet.
@@ -744,6 +751,11 @@ final class WorkspaceModel: ObservableObject {
         switch event {
         case .connected(let peer):
             if peer != host { load(for: peer) }
+            // A new connection: every app shown here gets its icon asked for again if it's missing
+            // (this device may have restarted while the Mac kept its session).
+            iconsConnected = true
+            iconPlanner.reset()
+            requestShownIcons()
         case .privacyShield(let on):
             privacyShieldNotice = on
             privacyNoticeClear?.cancel()
@@ -826,8 +838,17 @@ final class WorkspaceModel: ObservableObject {
                 thumbnails[oldest] = nil; thumbAge[oldest] = nil; planner.forget(oldest)
             }
         case .icon(let bundle, let data):
-            guard icons.count < 400, let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            guard let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            iconPlanner.received(bundle)
+            if icons[bundle] == nil, icons.count >= AppIconRequestPlanner.keep {
+                // Full: the oldest not shown in a pane or float makes room (asked again when it's wanted).
+                guard let old = AppIconRequestPlanner.evict(arrival: iconArrival, shown: Set(shownAppBundles)) else { return }
+                icons[old] = nil
+                iconArrival.removeAll { $0 == old }
+            }
             icons[bundle] = image
+            iconArrival.removeAll { $0 == bundle }
+            iconArrival.append(bundle)
         case .displayThumbnail(let id, let data):
             guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
             displayThumbnails[id] = image
@@ -849,6 +870,7 @@ final class WorkspaceModel: ObservableObject {
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
             launchpadOpen = false; launching = []; planner.reset()
+            iconsConnected = false; iconPlanner.reset(); iconRetry?.cancel(); iconRetry = nil
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
@@ -871,7 +893,7 @@ final class WorkspaceModel: ObservableObject {
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
         savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
-        thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
+        thumbnails = [:]; icons = [:]; iconArrival = []; iconPlanner.reset(); thumbAge = [:]; displayThumbnails = [:]
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []
         generations = [:]
@@ -912,18 +934,54 @@ final class WorkspaceModel: ObservableObject {
     private func requestThumbnails() {
         guard browsing, let c = catalog else { return }
         let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
-        let wantedIcons = Array(Set(c.windows.map(\.bundleID) + c.apps.map(\.bundleID)).filter { icons[$0] == nil }.prefix(48))
+        let wantedIcons = iconPlanner.plan(c.windows.map(\.bundleID) + c.apps.map(\.bundleID), has: { icons[$0] != nil },
+                                           now: Date().timeIntervalSinceReferenceDate)
         let displays = (stagePeekOpen || overviewOpen) ? c.displays.map(\.id) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
-        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays))
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+            iconPlanner.unsent(wantedIcons)
+        }
+        scheduleIconRetry()
     }
 
     /// Icons for the app carousel and Launchpad, a page at a time.
     func requestIcons(_ bundles: [String]? = nil) {
-        let wanted = (bundles ?? apps.prefix(64).map(\.bundleID)).filter { icons[$0] == nil }
-        guard browsing, !wanted.isEmpty else { return }
-        _ = send(WorkspaceRequests.thumbnails([], maxWidth: 320, icons: Array(wanted.prefix(48))))
+        askForIcons(bundles ?? apps.prefix(64).map(\.bundleID))
+    }
+
+    /// Every app shown in a pane, a tab or a float (its title's icon), Stage Peek or not.
+    private var shownAppBundles: [String] {
+        saved.tiles.keys.sorted().flatMap { saved.tiles[$0]?.windows ?? [] }
+            .filter { !$0.isDisplay }.compactMap { $0.bundleID ?? windowItem($0)?.bundleID }
+    }
+
+    /// The icons of the apps in panes and floats, when missing: asked for on connecting and as
+    /// the layout changes, not only while browsing.
+    private func requestShownIcons() {
+        guard iconsConnected, available else { return }
+        askForIcons(shownAppBundles)
+    }
+
+    /// Asks for the missing icons among `bundles` (each once per connection, then with backoff).
+    private func askForIcons(_ bundles: [String]) {
+        let wanted = iconPlanner.plan(bundles, has: { icons[$0] != nil }, now: Date().timeIntervalSinceReferenceDate)
+        guard !wanted.isEmpty else { return }
+        if !send(WorkspaceRequests.thumbnails([], maxWidth: 320, icons: wanted)) { iconPlanner.unsent(wanted) }
+        scheduleIconRetry()
+    }
+
+    /// One timer for every unanswered ask (the Mac may have dropped it, or not have the icon).
+    private func scheduleIconRetry() {
+        guard iconRetry == nil, let due = iconPlanner.nextRetry(has: { icons[$0] != nil }) else { return }
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.iconRetry = nil
+            self.askForIcons(self.iconPlanner.outstanding(has: { self.icons[$0] != nil }))
+            self.scheduleIconRetry()   // asks not due yet
+        }
+        iconRetry = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(due - Date().timeIntervalSinceReferenceDate, 0.5), execute: retry)
     }
 
     func requestApps() { _ = send(WorkspaceRequests.appCatalog(revision: apps.isEmpty ? nil : appRevision)) }
@@ -959,6 +1017,8 @@ final class WorkspaceModel: ObservableObject {
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
         canRedo = history.canRedo
+        // A window just put in a pane or float (or a layout restored) shows its app's icon.
+        requestShownIcons()
     }
 
     // MARK: Editing
