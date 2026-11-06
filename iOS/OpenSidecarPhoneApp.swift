@@ -264,6 +264,24 @@ struct ReceiverScreen: View {
             voiceOverRunning: voiceOverEnabled) ? .all : []
     }
 
+    /// What tucked floating windows' edge handles give way to, in global coordinates: the
+    /// screen (the system's own edge gestures start at its top and bottom), the controls
+    /// (control tray, function tray, shortcut column, keypads, calculator), folds, and Stage
+    /// Peek's edge handle, placed from the very values Stage Peek places it with. Stage Peek
+    /// itself doesn't dodge the handles, so neither chases the other along an edge.
+    private func workspaceEdgeReservations(geo: GeometryProxy, canvas: CGRect, peekSafe: CGRect, peekAvoiding: [CGRect],
+                                           reservedRegions: [ControlReservedRegion]) -> WorkspaceEdgeReservations {
+        let origin = geo.frame(in: .global).origin
+        var controls = occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions)
+        if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
+           let strip = StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding) {
+            controls.append(strip.offsetBy(dx: canvas.minX, dy: canvas.minY))
+        }
+        return WorkspaceEdgeReservations(
+            screen: CGRect(origin: origin, size: geo.size),
+            controls: controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) })
+    }
+
     /// Where Window view's chrome goes, in screen coordinates (issue #92).
     /// `drawn` is where the picture actually is: with the on-screen keyboard
     /// up, the video slides (and with Zoom While Typing, scales) to keep the
@@ -544,12 +562,24 @@ struct ReceiverScreen: View {
                     // Window mode: tile chrome and the window rail over the picture,
                     // under the MeowDisplay controls (which stay on top).
                     let picture = workspacePicture(canvas: canvas)
+                    // Stage Peek's safe area and what it keeps clear of (overlay coordinates): the
+                    // same values place its edge handle and reserve it from tucked floats' handles.
+                    let peekSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
+                                          width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
+                                          height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
+                        .intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                    let peekAvoiding = (occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                        .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
+                    let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
+                                                                     peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
                     WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
                                         layoutPicture: picture.layout, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
                                         onSettings: { showSettings = true },
                                         onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
+                        .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
+                        .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)
@@ -606,17 +636,12 @@ struct ReceiverScreen: View {
                         // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
                         // Opening, browsing, searching and expanding never change the mode; only
                         // tapping a window switches (to Window mode, with that window).
-                        let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
-                                                width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
-                                                height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
                         StagePeekOverlay(
                             model: model.workspace,
                             edge: controlStore.preferences.stagePeekEdge,
                             frame: canvas,
-                            safe: screenSafe.intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY),
-                            avoiding: (occupiedControlFrames
-                                       + ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                            safe: peekSafe,
+                            avoiding: peekAvoiding,
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             dock: controlStore.preferences.stagePeekDock,

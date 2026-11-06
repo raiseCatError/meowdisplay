@@ -29,7 +29,10 @@ struct StagePeekOverlay: View {
     let frame: CGRect
     /// The safe part of `frame`, in overlay coordinates.
     let safe: CGRect
-    /// Controls and hinges the strip must stay clear of, in overlay coordinates.
+    /// Controls and hinges the strip must stay clear of, in overlay coordinates. Tucked floats'
+    /// handles aren't among them: they keep clear of the strip (`StagePeekLayout.strip` with these
+    /// same inputs is what the app reserves for it), never the other way round, so the two never
+    /// chase each other along the edge.
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
     var naturalScrolling = true
@@ -162,7 +165,7 @@ struct StagePeekOverlay: View {
                     .zIndex(60)
             }
             if !machine.ids.isEmpty, !model.overviewOpen, !launchpad,
-               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding + floatHandles) {
+               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
                 stripView(strip, cards: cards)
             }
         }
@@ -699,11 +702,6 @@ struct StagePeekOverlay: View {
     }
 
     private func toolbarX(_ column: CGFloat) -> CGFloat { min(max(column, safe.minX + 130), safe.maxX - 130) }
-
-    /// Tucked floating windows' edge handles here: the hold strip keeps clear of them.
-    private var floatHandles: [CGRect] {
-        model.floatHandlesGlobal.map { $0.offsetBy(dx: -overlayOrigin.x, dy: -overlayOrigin.y) }
-    }
 
     /// Bottom of the stack's column, lifted above any control under it (the
     /// settings button, a tray): found on iPhone, where they collided.
