@@ -143,7 +143,10 @@ struct WorkspaceChromeView: View {
                 }
                 #endif
                 WorkspaceDropOverlay(model: model, picture: picture)
-                if model.missionControlAction != nil, model.drag == nil { missionControlBanner }
+                #if os(iOS)
+                // Mission Control: the notices of the floats it pauses, each on its own window.
+                if !model.arranging, model.drag == nil { floatMissionControlNotices(frames) }
+                #endif
                 if model.arranging {
                     arrangeControls(frames)
                 } else if model.localFullscreen == nil, !voiceOver {
@@ -187,43 +190,123 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    /// Mission Control is open on the Mac: one banner at the top of Window view, above the panes
-    /// and floats, with the one thing this device can do about it.
-    private var missionControlBanner: some View {
-        let action = model.missionControlAction
-        let room = (safeArea.map { $0.intersection(picture) } ?? picture)
-        return VStack(spacing: 8) {
-            Label("Mission Control is open on your Mac. Video is paused.", systemImage: "rectangle.3.group")
-                .font(.callout.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
-            switch action {
-            case .closeOnMac?:
-                Text("Press Esc on the Mac to close it.").font(.footnote).foregroundStyle(.white.opacity(0.85))
-                    .multilineTextAlignment(.center)
-            default:
-                Button { model.performMissionControlAction() } label: {
-                    Label(action == .exit ? String(localized: "Exit Mission Control")
-                          : action == .awaitingApproval ? String(localized: "Awaiting Approval on the Mac…")
-                          : String(localized: "Request Control to Exit"),
-                          systemImage: action == .exit ? "xmark.rectangle" : "hand.raised")
-                        .font(.callout.weight(.semibold)).foregroundStyle(.black)
-                        .padding(.horizontal, 14).padding(.vertical, 9)
-                        .background(.white, in: Capsule())
-                        .contentShape(Capsule())
+    // MARK: Mission Control (only on the windows it pauses)
+
+    /// Mission Control holds this window's picture: what's happening and the one thing this device
+    /// can do about it (that button is the only way out: never an Escape on its own). The × folds
+    /// it to a small status that brings it back; Mission Control stays open, nothing is sent.
+    @ViewBuilder
+    private func missionControlNotice(_ id: String, compact: Bool, width: CGFloat) -> some View {
+        let animation: Animation? = reduceMotion ? nil : .easeOut(duration: 0.18)
+        if model.missionControlNotice(id) == .folded {
+            Button { withAnimation(animation) { model.unfoldMissionControlNotice(id) } } label: {
+                Label("Paused · Mission Control", systemImage: "pause.circle")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(workspaceChip, in: Capsule())
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Paused while Mission Control is open"))
+            .accessibilityHint(Text("Shows the notice again."))
+            .modifier(MissionControlAccess(model: model, id: id, saysState: false))
+            .accessibilityIdentifier("missionControlStatus")
+        } else {
+            let action = model.missionControlAction
+            let font = (compact ? Font.footnote : .callout).weight(.semibold)
+            VStack(spacing: compact ? 6 : 8) {
+                HStack(alignment: .top, spacing: 4) {
+                    Label("Paused while Mission Control is open", systemImage: "rectangle.3.group")
+                        .font(font).foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button { withAnimation(animation) { model.foldMissionControlNotice(id) } } label: {
+                        Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 22, height: 22).background(Color.white.opacity(0.16), in: Circle())
+                            .frame(width: 34, height: 34).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, -7).padding(.trailing, -9)
+                    .accessibilityLabel(Text("Hide Notice"))
+                    .accessibilityHint(Text("Mission Control stays open on the Mac. A small status stays on this window."))
+                    .accessibilityIdentifier("missionControlNoticeHide")
                 }
-                .buttonStyle(.plain)
-                .disabled(action == .awaitingApproval)
-                .accessibilityIdentifier("exitMissionControl")
+                switch action {
+                case .closeOnMac?:
+                    Text("Press Esc on the Mac to close it.").font(compact ? .caption : .footnote)
+                        .foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                case nil:
+                    EmptyView()
+                default:
+                    Button { model.performMissionControlAction() } label: {
+                        Label(action == .exit ? String(localized: "Exit Mission Control")
+                              : action == .awaitingApproval ? String(localized: "Awaiting Approval on the Mac…")
+                              : String(localized: "Request Control to Exit"),
+                              systemImage: action == .exit ? "xmark.rectangle" : "hand.raised")
+                            .font(font).foregroundStyle(.black).lineLimit(1).minimumScaleFactor(0.8)
+                            .padding(.horizontal, compact ? 11 : 14).padding(.vertical, compact ? 7 : 9)
+                            .background(.white, in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(action == .awaitingApproval)
+                    .accessibilityIdentifier("exitMissionControl")
+                }
+            }
+            .padding(.horizontal, compact ? 12 : 14).padding(.vertical, compact ? 9 : 11)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(white: 0.08, opacity: 0.9)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .environment(\.colorScheme, .dark)
+            .frame(maxWidth: max(min(width - (compact ? 12 : 24), compact ? 300 : 380), 140))
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("missionControlNotice")
+        }
+    }
+
+    #if os(iOS)
+    /// The floats Mission Control pauses: each one's notice, compact, on its own window (drawn
+    /// here, above the floats). Not while a finger moves that float, and not where a float in
+    /// front covers the notice's spot: that float hides it as it hides the window.
+    @ViewBuilder
+    private func floatMissionControlNotices(_ frames: WorkspaceFrames) -> some View {
+        let ids = frames.floats
+        let bounds = safeArea.map { $0.intersection(picture) } ?? picture
+        ForEach(ids, id: \.self) { id in
+            if let notice = model.missionControlNotice(id), model.floatGesture != id,
+               let i = ids.firstIndex(of: id), let rect = frames.tiles[id]?.onScreen(picture),
+               let spot = WorkspaceModel.missionControlNoticeSpot(on: rect, folded: notice == .folded, within: bounds,
+                                                                  inFront: ids[(i + 1)...].compactMap { frames.tiles[$0]?.onScreen(picture) }) {
+                missionControlNotice(id, compact: true, width: rect.width)
+                    .position(x: spot.midX, y: spot.midY)
             }
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.08, opacity: 0.92)))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.white.opacity(0.25), lineWidth: 1))
-        .environment(\.colorScheme, .dark)
-        .frame(maxWidth: min(room.width - 24, 460))
-        .fixedSize(horizontal: false, vertical: true)
-        .position(x: room.midX, y: room.minY + 64)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("missionControlBanner")
+    }
+    #endif
+
+    /// On a window Mission Control pauses: its state as the accessibility value (`saysState`) and
+    /// Exit Mission Control (or Request Control to exit it) as an action. Nothing on any other.
+    private struct MissionControlAccess: ViewModifier {
+        @ObservedObject var model: WorkspaceModel
+        let id: String
+        var saysState = true
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if model.missionControlPaused(id) {
+                let action = model.missionControlAction
+                let stated = content.accessibilityValue(saysState ? Text("Paused while Mission Control is open") : Text(verbatim: ""))
+                if action == .exit || action == .requestControl {
+                    stated.accessibilityAction(named: action == .exit ? Text("Exit Mission Control") : Text("Request Control to Exit Mission Control")) {
+                        model.performMissionControlAction()
+                    }
+                } else {
+                    stated
+                }
+            } else {
+                content
+            }
+        }
     }
 
     /// What decides whose menus the bar shows: the focused pane, its app, and control.
@@ -255,9 +338,6 @@ struct WorkspaceChromeView: View {
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
         guard let remote = model.tileState(id) else { return nil }
         let app = remote.app.isEmpty ? "This window" : remote.app
-        if model.missionControlOpen, [.paused, .waiting, .retrying].contains(remote.status) {
-            return String(localized: "Paused while Mission Control is open")
-        }
         switch remote.status {
         case .live: return nil
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
@@ -297,6 +377,8 @@ struct WorkspaceChromeView: View {
                 .accessibilityIdentifier("workspacePane")
                 .accessibilityAddTraits(active ? .isSelected : [])
                 .accessibilityAction { model.focus(id) }
+                // Paused by Mission Control: said here and the way out, even under a float or folded.
+                .modifier(MissionControlAccess(model: model, id: id))
             // Where a floating pane covers this pane's titles, they step aside: touches there go to the float.
             let covered = coveredByFloat(CGRect(x: rect.minX, y: rect.minY, width: min(rect.width, 260), height: 44), frames)
             tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
@@ -333,12 +415,13 @@ struct WorkspaceChromeView: View {
     private func tileLabels(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, multi: Bool) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
-            if let text = status(for: id, tile: tile) {
+            if model.missionControlNotice(id) != nil {
+                // Mission Control holds this window's picture: its notice (folded: a small status).
+                missionControlNotice(id, compact: rect.width < 320, width: rect.width)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
-                    Button {
-                        // While Mission Control is open, the warning does what its banner offers.
-                        if model.missionControlOpen { model.performMissionControlAction() } else { model.openOverview(replacing: id) }
-                    } label: {
+                    Button { model.openOverview(replacing: id) } label: {
                         HStack(spacing: 8) {
                             // Still working: a live spinner (a still hourglass with Reduce Motion).
                             if let s = model.tileState(id)?.status, s == .waiting || s == .retrying {
@@ -655,6 +738,14 @@ struct WorkspaceChromeView: View {
         let isDesktop = tile.source?.isDisplay == true
         let isWindow = tile.source != nil && !isDesktop
         return VStack(alignment: .leading, spacing: 0) {
+            if model.missionControlPaused(m.tile), let action = model.missionControlAction {
+                // Mission Control holds this window's picture: the way out, notice folded or not.
+                menuRow(action == .exit ? "Exit Mission Control" : action == .requestControl ? "Request Control to Exit Mission Control"
+                        : action == .awaitingApproval ? "Awaiting Approval on the Mac…" : "Press Esc on the Mac to Close Mission Control",
+                        action == .exit ? "xmark.rectangle" : action == .closeOnMac ? "escape" : "hand.raised",
+                        enabled: action == .exit || action == .requestControl) { model.performMissionControlAction() }
+                Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
+            }
             menuRow(full ? "Exit Fullscreen" : "Fullscreen on This Device",
                     full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                     hint: full ? "Brings back the other panes." : "Shows only this pane on this device. The Mac is unchanged. Double-tap the pane title to toggle.") {
