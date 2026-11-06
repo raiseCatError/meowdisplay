@@ -881,8 +881,11 @@ final class WorkspaceFloatTuckTests: XCTestCase {
                 "apps": [], "displays": [],
             ])!)
         }
+        // Window stills only: the same message also carries icon asks (a pane's or float's app
+        // icon on connecting, #212) with no window ids.
         func asked() -> [[Int]] {
-            sent.filter { $0["type"] as? String == WireMessage.windowThumbnailRequest }.map { $0["ids"] as? [Int] ?? [] }
+            sent.filter { $0["type"] as? String == WireMessage.windowThumbnailRequest }
+                .compactMap { ($0["ids"] as? [Int]).flatMap { $0.isEmpty ? nil : $0 } }
         }
         m.apply(.disconnected)
         sent.removeAll()
