@@ -330,7 +330,7 @@ enum WorkspaceRequests {
                           generation: (WorkspaceSource) -> UInt64?,
                           displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
                           viewEpoch: (String) -> Int? = { _ in nil },
-                          floats: Bool = false) -> [String: Any] {
+                          floats: Bool = false, lifted: Set<String> = []) -> [String: Any] {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
@@ -349,7 +349,11 @@ enum WorkspaceRequests {
             }
             if let z = tile.zoom { t["zoom"] = z.wire }
             if let e = viewEpoch(id) { t["view"] = e }
-            if let z = floating.firstIndex(of: id) { t["layer"] = "float"; t["z"] = z }
+            if let z = floating.firstIndex(of: id) {
+                t["layer"] = "float"; t["z"] = z
+                // Drawn here under the finger for now: the Mac leaves it out (`floatLift`).
+                if lifted.contains(id) { t["lift"] = true }
+            }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
@@ -435,15 +439,18 @@ struct WorkspaceDrag: Equatable {
         /// An app from Stage Peek's carousel, search or Launchpad: its window when it has one;
         /// several → the person picks; none → offered to open it (never just because a drag began).
         case app(MacAppItem)
-        /// A floating pane, shaken (or switched) into Pane placement: it docks where it's dropped.
+        /// A floating pane, circled (or switched) into Pane placement: it docks where it's dropped.
         case float(String)
     }
     var item: Item
     /// Global (screen) coordinates.
     var location: CGPoint
     /// Where a drop goes: into the panes (tab, split, swap) or floating at the finger. Switched
-    /// with a shake while holding, or the drag's Float/Dock control; Cancel keeps everything.
+    /// by circling while holding (`WorkspaceCircleGesture`), or the Float zone; Cancel keeps everything.
     var placement: WorkspacePlacement = .pane
+
+    /// A float being docked (circled into a card while it moved).
+    var isFloat: Bool { if case .float = item { return true } else { return false } }
 }
 
 /// The two ways a dragged window lands in one workspace (never a global mode).
@@ -452,6 +459,17 @@ enum WorkspacePlacement: String, CaseIterable, Sendable {
     case pane
     /// Floating, where it is dropped.
     case float
+}
+
+/// What tucked floats' edge handles give way to, in global (window) coordinates. Who wins,
+/// highest first: the system's edge bands (the top and bottom of `screen`), then `controls`,
+/// then the handles (`WorkspaceFloatGeometry.tuckHandles`).
+struct WorkspaceEdgeReservations: Equatable {
+    /// The screen the receiver fills; zero: unknown (only the safe area is kept clear).
+    var screen: CGRect = .zero
+    /// The fixed controls (the control tray, the function tray, the shortcut column and other
+    /// trays), folds, and Stage Peek's own edge handle.
+    var controls: [CGRect] = []
 }
 
 @MainActor
@@ -478,6 +496,8 @@ final class WorkspaceModel: ObservableObject {
     @Published var arranging = false
     @Published private(set) var hovered: String?
     @Published private(set) var thumbnails: [UInt32: CGImage] = [:]
+    /// When each tucked float's window was last asked for a still (`requestTuckedStills`).
+    private var tuckedStillAskedAt: [UInt32: Date] = [:]
     /// Stills the Mac could only answer with an older capture (minimized now, say).
     @Published private(set) var staleThumbnails: Set<UInt32> = []
     /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
@@ -493,6 +513,20 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var canCloseWindows = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
+    /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
+    /// the finger while it moves or resizes and it's never on screen twice.
+    @Published private(set) var canLiftFloats = false
+    /// Floats this device draws itself right now (a finger moves or resizes them): sent with `lift`.
+    @Published private(set) var liftedFloats: Set<String> = []
+    /// Floats just let go of: still drawn here until the Mac's picture shows them where they
+    /// landed (its view echo, plus a moment for that frame to reach the screen), at most
+    /// `landingHold` seconds.
+    @Published private(set) var landingFloats: [String: Date] = [:]
+    static let landingHold: TimeInterval = 1.0
+    /// After the Mac says it composed the landed float: about the time its frame takes to arrive.
+    static let landingSettle: TimeInterval = 0.1
+    /// Floats a finger has started to move or resize, waiting for a still to be lifted with.
+    private var liftWanted: Set<String> = []
     /// This receiver has floating-pane chrome (iPhone and iPad). The Mac Receiver doesn't yet:
     /// it says `ws` 1 and never floats a pane.
     nonisolated static let floatsDrawnHere: Bool = {
@@ -545,12 +579,21 @@ final class WorkspaceModel: ObservableObject {
     /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
     var removeZoneGlobal: CGRect = .zero
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
-    /// floats the window instead (the way that needs no shake).
+    /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
-    /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
+    /// Where tucked floats' edge handles take touches (global): the dividers' holds above them
+    /// leave them free. Stage Peek doesn't dodge them any more: they keep clear of it
+    /// (`edgeReservationsGlobal`).
     @Published var floatHandlesGlobal: [CGRect] = []
-    /// The first-use tip about shaking a drag (shown once, ever, on this device).
-    @Published private(set) var shakeTipVisible = false
+    /// What tucked floats' edge handles keep clear of (global), set by the app next to where Stage
+    /// Peek learns what to avoid: the screen (its top and bottom belong to the system's own edge
+    /// gestures), then the fixed controls and Stage Peek's handle. Handles give way to all of it.
+    @Published var edgeReservationsGlobal = WorkspaceEdgeReservations()
+    /// The first-use tip about circling while dragging (shown once, ever, on this device).
+    @Published private(set) var placementTipVisible = false
+    /// How far circling while dragging has got toward switching Pane / Floating (0...1), for the
+    /// ring at the finger. 0 while it can't switch.
+    @Published private(set) var placementSwitchProgress = 0.0
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -664,6 +707,7 @@ final class WorkspaceModel: ObservableObject {
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
+            canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
@@ -677,6 +721,13 @@ final class WorkspaceModel: ObservableObject {
             menus.applyResult(ok: ok, error: error)
         case .view(let tiles):
             composedViewEpochs.merge(tiles) { old, new in max(old, new) }
+            // A float let go of is drawn here until the Mac shows it where it landed.
+            for id in landingFloats.keys where tiles[id] != nil && viewComposed(id) {
+                let at = landingFloats[id]
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingSettle) { [weak self] in
+                    if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+                }
+            }
         case .backdrop(let tile, let window, let data, let stale):
             guard layout.tiles[tile]?.source?.windowID == window || window == 0,
                   let image = WorkspaceImageDecoder.image(data, maxSide: 1600) else { return }
@@ -684,6 +735,8 @@ final class WorkspaceModel: ObservableObject {
                 Log.info("workspace: backdrop \(tile) \(image.width)x\(image.height) after \(Int(Date().timeIntervalSince(asked) * 1000)) ms\(zoomGesture?.tile == tile ? " (mid-gesture)" : "")")
             }
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
+            // A float picked up before its still arrived is lifted now.
+            if floatGesture == tile, liftWanted.contains(tile) { liftFloat(tile) }
         case .mode(let window):
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
@@ -746,14 +799,17 @@ final class WorkspaceModel: ObservableObject {
             launchpadOpen = false; launching = []; planner.reset()
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
+            canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canLockMac = false; lockMacStatus = nil
             files.setAvailable(false)
             menus.setAvailable(false)
             clipboard.setAvailable(false)
             // A new session's frames carry no echo of this one's views; stills are re-asked.
             composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
+            tuckedStillAskedAt = [:]
             zoomGesture = nil; zoomPreview = nil
             requestedFocus = nil; floatGestureStart = nil; drag = nil
+            floatMove = nil; dockingFloat = nil
         }
     }
 
@@ -795,6 +851,7 @@ final class WorkspaceModel: ObservableObject {
         if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
+        requestTuckedStills()
         requestThumbnails()
     }
 
@@ -826,6 +883,23 @@ final class WorkspaceModel: ObservableObject {
 
     func updateSpace(_ newSize: WorkspaceSize, hinge newHinge: WorkspaceHinge?) {
         guard newSize != size || newHinge != hinge else { return }
+        // Floats keep their size in points across a rotation or a window resize (their frames are
+        // shares of the picture, which would stretch a phone's float into a strip). Not an edit:
+        // no undo step. Not while a finger holds one.
+        if newSize != size, size.width > 0, size.height > 0, newSize.width > 0, newSize.height > 0,
+           !saved.floats.isEmpty, floatGesture == nil {
+            var carried = saved
+            for i in carried.floats.indices {
+                var f = WorkspaceFloatGeometry.carried(carried.floats[i].frame, from: size, to: newSize)
+                if let t = carried.floats[i].tuck {
+                    // A tucked float waits flush with its edge, where its strip is.
+                    f = WorkspaceFloatGeometry.tuckedFrame(f, edge: t.edge, along: t.offset, in: newSize)
+                    carried.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, t.edge)
+                }
+                carried.floats[i].frame = f
+            }
+            saved = carried
+        }
         size = newSize; hinge = newHinge
         publish(); scheduleSend()
     }
@@ -981,7 +1055,8 @@ final class WorkspaceModel: ObservableObject {
         for (id, tile) in layout.tiles {
             let r = frames.tiles[id]
             let z = tile.zoom ?? .identity
-            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)"
+            // Lifted or not is part of the view: a float let go of waits for the frame that draws it again.
+            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(id))"
             if viewSignatures[id] != sig {
                 viewSignatures[id] = sig
                 viewEpochs[id] = nextViewEpoch
@@ -1263,8 +1338,11 @@ final class WorkspaceModel: ObservableObject {
     /// lands on a float. Splits count the tree's panes only.
     func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
         let f = frames
-        if let hit = f.hitTest(p), f.isFloat(hit) {
-            if case .float? = drag?.item { return nil }
+        // A float being docked is drawn only as its card: what's under its old frame counts.
+        var docked: String?
+        if case .float(let id)? = drag?.item { docked = id }
+        if let hit = f.floats.last(where: { $0 != docked && f.tiles[$0]?.contains(p) == true }) {
+            if docked != nil { return nil }
             if case .pane(let id, _)? = drag?.item, id == hit { return nil }
             return f.tiles[hit].map { .replace(tile: hit, preview: $0) }
         }
@@ -1280,8 +1358,17 @@ final class WorkspaceModel: ObservableObject {
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
         // Never an empty pane: a window that leaves a pane closes it up and the rest grow.
-        let next = change(arranged).compacted()
-        guard next != arranged else { return }
+        let changed = change(arranged).compacted()
+        guard changed != arranged else { return }
+        // A float tucked here only because the Mac can't draw floats isn't saved tucked by an
+        // unrelated change: it shows again on a Mac that can.
+        var next = changed
+        for i in next.floats.indices {
+            let id = next.floats[i].tile
+            if saved.float(id).map({ $0.tuck == nil }) == true, let shown = arranged.float(id)?.tuck, next.floats[i].tuck == shown {
+                next.floats[i].tuck = nil
+            }
+        }
         history.record(saved)
         var updated = next
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
@@ -1534,15 +1621,17 @@ final class WorkspaceModel: ObservableObject {
         d.placement = placement ?? initialPlacement(for: item)
         if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
         drag = d
-        shake.reset()
-        if canPlace(item, .float), !defaults.bool(forKey: Self.shakeTipKey) {
-            defaults.set(true, forKey: Self.shakeTipKey)   // never repeated, even if dismissed unseen
-            shakeTipVisible = true
+        circling.reset()
+        placementSwitchProgress = 0
+        // A new tip for the new gesture (people who saw the old shake tip see this one once too).
+        if canPlace(item, .float), !defaults.bool(forKey: Self.placementTipKey) {
+            defaults.set(true, forKey: Self.placementTipKey)   // never repeated, even if dismissed unseen
+            placementTipVisible = true
         }
     }
 
-    static let shakeTipKey = "workspace.shakeTipShown"
-    func dismissShakeTip() { shakeTipVisible = false }
+    static let placementTipKey = "workspace.circleTipShown"
+    func dismissPlacementTip() { placementTipVisible = false }
 
     /// The Float zone is offered while dragging in Pane placement something that can float, in Window view.
     var canDropToFloat: Bool {
@@ -1555,15 +1644,32 @@ final class WorkspaceModel: ObservableObject {
         canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
     }
 
-    /// Moves the drag; a shake while holding switches its placement (true when it switched).
+    /// Moves the drag; circling while holding (a circle and a bit, about a second) switches its
+    /// placement (true when it switched). Progress shows as a ring at the finger, only when it can switch.
     @discardableResult
     func moveDrag(to global: CGPoint, at time: TimeInterval = CACurrentMediaTime()) -> Bool {
-        guard drag != nil else { return false }
+        guard let d = drag else { return false }
         drag?.location = global
-        guard shake.add(x: Double(global.x), y: Double(global.y), at: time) else { return false }
+        let fired = circling.add(x: Double(global.x), y: Double(global.y), at: time)
+        let other: WorkspacePlacement = d.placement == .pane ? .float : .pane
+        let switchable = canPlace(d.item, other)
+        placementSwitchProgress = switchable ? circling.progress : 0
+        if placementSwitchProgress > 0 { fadeRingWhenQuiet() }
+        guard fired, switchable else { return false }
         return toggleDragPlacement()
     }
-    func cancelDrag() { drag = nil }
+    func cancelDrag() { drag = nil; placementSwitchProgress = 0 }
+
+    /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
+    private func fadeRingWhenQuiet() {
+        ringFade?.cancel()
+        let quiet = circling.quiet
+        ringFade = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((quiet + 0.05) * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.circling.isQuiet(at: CACurrentMediaTime()) else { return }
+            self.placementSwitchProgress = 0
+        }
+    }
 
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
@@ -1593,10 +1699,14 @@ final class WorkspaceModel: ObservableObject {
 
     /// Remove from Layout is offered only while repositioning a whole pane that is already in the
     /// layout (its label, not one of its tabs), with another pane left: never for a window or app
-    /// from Stage Peek, a new pane or a tab. It removes the pane here only; the Mac window is untouched.
+    /// from Stage Peek, a new pane or a tab. A float being docked (circled into a card) is offered
+    /// Remove from This Device. Either removes it here only; the Mac window is untouched.
     var canDropToRemove: Bool {
-        guard windowMode, case .pane(let id, nil)? = drag?.item else { return false }
-        return canRemoveFromLayout(id)
+        guard windowMode else { return false }
+        switch drag?.item {
+        case .pane(let id, nil)?, .float(let id)?: return canRemoveFromLayout(id)
+        default: return false
+        }
     }
 
     /// Whether a pane may come off this device's layout (its menu and the drop
@@ -1618,6 +1728,7 @@ final class WorkspaceModel: ObservableObject {
     /// picture: nothing changes. Returns whether anything changed.
     @discardableResult
     func endDrag() -> Bool {
+        placementSwitchProgress = 0
         guard let d = drag else { return false }
         if d.placement == .float {
             drag = nil
@@ -1632,6 +1743,10 @@ final class WorkspaceModel: ObservableObject {
         drag = nil
         if remove, case .pane(let id, nil) = d.item {
             removeTile(id)   // one undo step; never a request to close the window on the Mac
+            return true
+        }
+        if remove, case .float(let id) = d.item {
+            removeFloat(id)   // the float's own Remove from This Device: the Mac window stays open
             return true
         }
         guard let target else { return false }
@@ -1749,8 +1864,14 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var floatGesture: String?
     /// The layout before the current float gesture, recorded as one undo step once it changes something.
     private var floatGestureStart: WorkspaceLayout?
-    /// Shake while dragging (pane label, Stage Peek window, float title).
-    var shake = WorkspaceShakeDetector()
+    /// Circling while dragging (pane label, Stage Peek window, float title).
+    var circling = WorkspaceCircleGesture()
+    private var ringFade: Task<Void, Never>?
+    /// The float a finger is moving by its title or grabber: circling switches it into docking.
+    private(set) var floatMove: WorkspaceFloatMove?
+    /// The float being docked: folded into a card under the finger (a `.float` drag), drawn
+    /// nowhere else, here or on the Mac, until it's dropped, cancelled or circled back.
+    @Published private(set) var dockingFloat: String?
 
     /// The hardware pointer at a normalized canvas point: hover only, never focus.
     func hover(at p: CGPoint?) {
@@ -1858,7 +1979,7 @@ final class WorkspaceModel: ObservableObject {
                                              host: host, focus: focusNow, generation: generation,
                                              displayID: { [weak self] in self?.display(for: $0)?.id },
                                              viewEpoch: { [weak self] in self?.viewEpochs[$0] },
-                                             floats: canFloat))
+                                             floats: canFloat, lifted: canLiftFloats ? liftedFloats.filter { sendable.isFloat($0) } : []))
     }
 
     private func persist() {
@@ -1896,13 +2017,19 @@ extension WorkspaceModel {
 
     /// The window's width / height as the pane draws it (turned a quarter: swapped).
     func windowAspect(_ id: String) -> Double? {
-        guard let tile = layout.tiles[id], let s = tile.source, let w = windowItem(s), w.width > 0, w.height > 0 else { return nil }
-        let a = Double(w.width) / Double(w.height)
-        return tile.rotation.isQuarterTurn ? 1 / a : a
+        guard let tile = layout.tiles[id], let source = windowSize(tile) else { return nil }
+        // As drawn: a turned window's box (any angle).
+        let r = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), source: source,
+                                     rotation: tile.rotation, fit: .fit).rotatedSourceSize
+        return r.width > 0 && r.height > 0 ? r.width / r.height : nil
     }
 
+    /// Where a new float opens: where it was dropped, else the next place in the cascade that no
+    /// shown float sits on (a phone shows several, like an iPad).
     private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
-        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
+        if let center { return WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, center: center) }
+        let shown = space == nil ? layout.floats.filter { $0.tuck == nil }.map(\.frame) : []
+        return WorkspaceFloatGeometry.openingFrame(aspect: aspect, in: space ?? size, avoiding: shown)
     }
 
     /// A window can open floating from here: in Window view, or over the mirrored desktop (Window
@@ -1952,7 +2079,6 @@ extension WorkspaceModel {
         let id = "w\(nextTile)"; nextTile += 1
         let frame = newFloatFrame(aspect: aspect, at: center)
         edit { $0.addingFloat(WorkspaceTile(id: id, source: source), frame: frame) }
-        if compactSpace { tuckOthers(than: id) }
         focus(id, raise: false)
     }
 
@@ -1974,7 +2100,6 @@ extension WorkspaceModel {
             if localFullscreen == id { localFullscreen = nil }
             edit { $0.floatingPane(id, frame: frame) }
         }
-        if compactSpace { tuckOthers(than: floated) }
         focus(floated, raise: false)
     }
 
@@ -2012,9 +2137,57 @@ extension WorkspaceModel {
         guard layout.isFloat(id) else { return }
         floatGesture = id
         floatGestureStart = saved
+        if dockingFloat == nil { floatMove = WorkspaceFloatMove(id, in: saved) }   // before it's raised
         raiseFloat(id)
         if active != id { focus(id, raise: false) }   // arranging only: the Mac window stays put
-        requestBackdrop(id)
+        // A fresh still to draw under the finger (the one kept may be a while old).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        requestBackdrop(id, refresh: age > 1)
+    }
+
+    /// The finger started moving or resizing float `id`: from now this device draws it (its last
+    /// still, in its own view) and the Mac leaves it out, so it's never drawn twice: once under
+    /// the finger and once, a moment behind, by the Mac. Needs `floatLift` and a recent still;
+    /// without them the Mac keeps drawing it, as before.
+    func liftFloat(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        liftWanted.insert(id)
+        guard canLiftFloats, !liftedFloats.contains(id), hasFreshStill(id) else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
+    }
+    /// A still older than this isn't drawn in place of the live window.
+    static let liftStillMaxAge: TimeInterval = 6
+
+    private func hasFreshStill(_ id: String) -> Bool {
+        backdrop(id).map { Date().timeIntervalSince($0.receivedAt) < Self.liftStillMaxAge } ?? false
+    }
+
+    /// Let go (or the gesture ended): the Mac draws it again where it is;
+    /// this device keeps drawing it until the Mac's frame with it is out (or `landingHold` passes).
+    /// The caller sends the layout (the lift's end changes the float's view epoch).
+    func landFloat(_ id: String) {
+        liftWanted.remove(id)
+        guard liftedFloats.remove(id) != nil else { return }
+        let at = Date()
+        landingFloats[id] = at
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingHold) { [weak self] in
+            if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+        }
+    }
+
+    /// Whether this device draws float `id` itself now (lifted, or landing).
+    func drawsFloatHere(_ id: String) -> Bool {
+        liftedFloats.contains(id) || landingFloats[id] != nil
+    }
+
+    /// Float `id`'s view (Fit or Fill, zoom, rotation) at `width` x `height` points, placed as the
+    /// Mac composes it: what this device draws while it holds the float.
+    func floatContentTransform(_ id: String, width: Double, height: Double) -> TileContentTransform? {
+        guard let tile = layout.tiles[id], let source = windowSize(tile), width > 0, height > 0 else { return nil }
+        return TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: width, height: height), source: source,
+                                    rotation: tile.rotation, fit: effectiveFit(id), zoom: tile.zoom ?? .identity)
     }
 
     /// The float's frame while the finger moves (kept usable; the Mac follows at most ~30 times a second).
@@ -2031,6 +2204,8 @@ extension WorkspaceModel {
         if let frame { updateFloatFrame(id, frame) }
         floatGesture = nil
         floatGestureStart = nil
+        if floatMove?.id == id, dockingFloat != id { floatMove = nil }
+        landFloat(id)
         persist(); publish(); sendNow()
     }
 
@@ -2059,6 +2234,13 @@ extension WorkspaceModel {
         edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
     }
 
+    /// Size > Match Window: the float takes the window's shape as drawn (same area and centre),
+    /// so Fit shows the whole window with no bars. The view (zoom, rotation) is kept.
+    func matchWindowShape(_ id: String) {
+        guard let f = layout.float(id), let a = windowAspect(id), size.width > 0 else { return }
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.matched(f.frame, aspect: a, in: size)) }
+    }
+
     /// Accessibility Move Left / Right / Up / Down: a tenth of the picture per step.
     func nudgeFloat(_ id: String, dx: Double, dy: Double) {
         guard let f = layout.float(id) else { return }
@@ -2067,28 +2249,162 @@ extension WorkspaceModel {
         edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
     }
 
+    // MARK: Docking by circling while it moves
+
+    /// One finger position of float `id`'s move by its title or grabber (global points, `time` in
+    /// seconds). Circling switches between moving it and docking it into the panes
+    /// (`WorkspaceFloatMove`); a shake, a zig-zag or an ordinary move never does. While it docks
+    /// the finger moves the drag. Returns the switch it made, if any (one haptic each).
+    @discardableResult
+    func moveFloatFinger(_ id: String, to global: CGPoint, at time: TimeInterval) -> WorkspaceFloatMove.Switch? {
+        guard var move = floatMove, move.id == id, layout.isFloat(id) else { return nil }
+        let step = move.add(x: Double(global.x), y: Double(global.y), at: time)
+        floatMove = move
+        switch step {
+        case .dock?: startDocking(move, at: global)
+        case .float?: resumeMoving(id)
+        case nil: break
+        }
+        if dockingFloat == id, dragsFloat(id) { moveDrag(to: global) }
+        return step
+    }
+
+    /// Circling while moving it: the float folds into a card under the finger and the pane drop
+    /// targets show, as for a pane drag. It goes back to where the move began, and it's lifted
+    /// even without a recent still: the Mac leaves it out of its picture and input, and nothing
+    /// here draws it, so the card is the only thing shown for it.
+    private func startDocking(_ move: WorkspaceFloatMove, at global: CGPoint) {
+        let id = move.id
+        dockingFloat = id
+        saved = saved.settingFloatFrame(id, move.frame)
+        liftWanted.insert(id)
+        if canLiftFloats { liftedFloats.insert(id); landingFloats[id] = nil }
+        publish(); sendNow()
+        beginDrag(.float(id), at: global)
+    }
+
+    /// Circling again while it docks: the card opens back into the float under the finger, which
+    /// moves on as before (drawn here from its still; without a recent one the Mac draws it again).
+    private func resumeMoving(_ id: String) {
+        dockingFloat = nil
+        if dragsFloat(id) { cancelDrag() }
+        if liftedFloats.contains(id), !hasFreshStill(id) { liftedFloats.remove(id); sendNow() }
+    }
+
+    /// The finger let go of float `id` while it docks. On a pane target it docks there as a pane
+    /// drag would (a tab, a new pane or a split; never replacing a window); on Remove from This
+    /// Device it's removed here only (the Mac window stays open). Anywhere else (Cancel, outside
+    /// the picture) it's put back as it was (frame, size, view, place among the floats) and the
+    /// Mac draws it again. A dock or a removal is one undo step, a cancel none. True when the
+    /// layout changed.
+    @discardableResult
+    func endDockingFloat(_ id: String) -> Bool {
+        guard dockingFloat == id, let move = floatMove, move.id == id else { return false }
+        putBack(move)
+        let changed = dragsFloat(id) ? endDrag() : false
+        finishDocking(id)
+        return changed
+    }
+
+    /// The system cancelled the move while it docks (a call, Control Center): put back as it was.
+    func cancelDockingFloat(_ id: String) {
+        guard dockingFloat == id, let move = floatMove, move.id == id else { return }
+        if dragsFloat(id) { cancelDrag() }
+        putBack(move)
+        finishDocking(id)
+    }
+
+    private func dragsFloat(_ id: String) -> Bool {
+        if case .float(let f)? = drag?.item { return f == id }
+        return false
+    }
+
+    /// The float as the finger found it, and no undo step left for a move that came to nothing.
+    private func putBack(_ move: WorkspaceFloatMove) {
+        saved = move.restoring(saved)
+        history.forget(saved)
+        publish()
+    }
+
+    private func finishDocking(_ id: String) {
+        dockingFloat = nil
+        floatMove = nil
+        if saved.isFloat(id) {
+            endFloatGesture(id)   // the Mac draws it again; this device until its frame is out
+        } else {
+            // Docked or removed: no float left to land.
+            liftedFloats.remove(id); liftWanted.remove(id); landingFloats[id] = nil
+            floatGesture = nil; floatGestureStart = nil
+            persist(); publish(); sendNow()
+        }
+    }
+
     // MARK: Tucking
 
-    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched.
-    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double) {
-        guard layout.isFloat(id) else { return }
-        edit { $0.tuckingFloat(id, edge: edge, offset: offset) }
+    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched. It waits
+    /// at its own size flush with that edge where its strip is (`frame`, the view's place for it;
+    /// nil: flush with the picture's edge at `offset`), so pulling it back out is a straight
+    /// slide back to that place.
+    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double, frame: WorkspaceRect? = nil) {
+        guard let f = layout.float(id) else { return }
+        // A fresh still for its strip at the edge, asked for while it's still sent (the Mac
+        // answers from the capture that stops with the tuck).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        if age > 2 { requestBackdrop(id, refresh: true) }
+        let waiting = frame ?? WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: offset, in: size)
+        edit { $0.tuckingFloat(id, edge: edge, offset: WorkspaceFloatMotion.along(waiting, edge), frame: waiting) }
         refocus(after: id)
     }
 
-    /// Back where it was, in front and focused. On a compact screen the float shown before
-    /// tucks in its place (one shows at a time there).
-    func untuckFloat(_ id: String) {
+    /// A tucked float isn't captured, so one without a still of its own (after a reconnect, which
+    /// drops the stills) gets its window's thumbnail instead, as Stage Peek asks for them (read
+    /// only): its strip then shows the window itself, not only its icon. Asked again only after a
+    /// few seconds.
+    private func requestTuckedStills() {
+        guard windowMode, let c = catalog else { return }
+        let now = Date()
+        let ids = saved.floats.filter { $0.tuck != nil && backdrop($0.tile) == nil }
+            .compactMap { saved.tiles[$0.tile]?.source }
+            .filter { s in !s.isDisplay && thumbnails[s.windowID] == nil && c.windows.contains { $0.id == s.windowID } }
+            .map(\.windowID)
+            .filter { id in tuckedStillAskedAt[id].map { now.timeIntervalSince($0) > 5 } ?? true }
+        guard !ids.isEmpty else { return }
+        for id in ids { tuckedStillAskedAt[id] = now }
+        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: 560, icons: []))
+    }
+
+    /// A tucked float comes back with a slide drawn on this device: it's shown again now (so its
+    /// capture starts during the slide) but lifted where the Mac can lift floats, so the Mac
+    /// leaves it out until it has landed (`endFloatGesture`) and it's never on screen twice.
+    /// `frame`: where it comes back to (nil: where it waited). Its still may be old: it's only
+    /// drawn for the moment of the slide.
+    func beginRestoringFloat(_ id: String, frame: WorkspaceRect? = nil) {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
-        edit { $0.untuckingFloat(id) }
-        if compactSpace { tuckOthers(than: id) }
+        untuckFloat(id, frame: frame)
+        guard canLiftFloats, saved.float(id)?.tuck == nil, !liftedFloats.contains(id) else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
+    }
+
+    /// Back where it waited (or at `frame`), in front and focused. The other floats stay as they
+    /// are, on a phone too.
+    func untuckFloat(_ id: String, frame: WorkspaceRect? = nil) {
+        guard layout.isFloat(id) || saved.isFloat(id) else { return }
+        edit { $0.untuckingFloat(id, frame: frame) }
         focus(id, raise: false)
     }
 
-    /// A tab dragged along its edge (no undo step; tucked floats aren't sent).
+    /// A strip slid along its edge (no undo step; tucked floats aren't sent): the float waits
+    /// there now, as far from the edge as before, and comes back out there.
     func moveTuckTab(_ id: String, offset: Double) {
-        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), saved.floats[i].tuck != nil else { return }
-        saved.floats[i].tuck?.offset = min(max(offset.isFinite ? offset : 0.5, 0), 1)
+        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), let tuck = saved.floats[i].tuck else { return }
+        var f = saved.floats[i].frame
+        let along = offset.isFinite ? min(max(offset, 0), 1) : 0.5
+        if tuck.edge.axis == .horizontal { f.y = along - f.height / 2 } else { f.x = along - f.width / 2 }
+        f = WorkspaceFloatGeometry.clamped(f, in: size)
+        saved.floats[i].frame = f
+        saved.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, tuck.edge)
         persist(); publish()
     }
 
@@ -2098,17 +2414,6 @@ extension WorkspaceModel {
         if localFullscreen == id { localFullscreen = nil }
         edit { $0.removing(id) }
         refocus(after: id)
-    }
-
-    private var compactSpace: Bool { WorkspaceFloatGeometry.visibleLimit(for: size) <= 1 }
-
-    private func tuckOthers(than id: String) {
-        let others = saved.visibleFloatIDs.filter { $0 != id }
-        guard !others.isEmpty else { return }
-        var next = saved
-        for (i, o) in others.enumerated() { next = next.tuckingFloat(o, edge: .right, offset: min(0.3 + Double(i) * 0.12, 0.85)) }
-        saved = next
-        persist(); publish(); scheduleSend()
     }
 
     /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,
@@ -2143,7 +2448,7 @@ extension WorkspaceModel {
         }
     }
 
-    /// Switches the drag between Pane and Floating placement (a shake, or the drag's control).
+    /// Switches the drag between Pane and Floating placement (circling, or the drag's control).
     /// True when it switched.
     @discardableResult
     func toggleDragPlacement() -> Bool {

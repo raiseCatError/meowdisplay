@@ -1556,13 +1556,35 @@ confirmed menu items). Arranging floats never brings a window forward on the
 Mac either: the receiver sends `workspaceFocus` with `raise: false`. Floats are panes: an admitted session, the input grant and View
 Only apply to them unchanged.
 
+**Lifted floats** (welcome feature `floatLift`, additive, no `pv` bump). A
+Mac that lists `"floatLift"` next to `"windowFloat"` accepts `lift: true` on
+a float tile: while a finger moves or resizes that float the receiver draws
+it itself (from the tile's whole-source still, `workspaceBackdrop`, with the
+tile's own `fit`, `zoom` and `rotation` at its current size), and the Mac
+leaves it out of the picture and out of input mapping (a point there goes to
+the float behind it or the tiled pane) and doesn't count it as covering a
+pane. Its capture keeps running (same assignment, no restart), so it is drawn
+again in the next frame after the receiver sends it without `lift`. Dropping
+`lift` changes the tile's `view` epoch; the receiver keeps drawing its own
+copy until `workspaceView` echoes that epoch (plus a moment for the frame to
+arrive, at most about a second), so the float is never on screen twice and
+never missing. `lift` on a tiled pane, or from a receiver that hasn't sent
+`hello.ws` 2, is ignored. `workspaceState` echoes `lift: true` on a lifted
+float. A receiver never sends `lift` to a Mac without `floatLift`; there the
+Mac keeps drawing a moving float a moment behind the finger, as before.
+
 Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
 `schema` 3 and byte-identical while a layout has no floats. A layout with
 floats is `schema` 4 and adds `floats: [{tile, x, y, w, h, tuck?,
-offset?}]` (back to front; `tuck` is `left` or `right` with `offset` the
-handle's height 0–1). Its `tree` and `tiles` are as before, so a reader that
-ignores `floats` keeps the tiled arrangement and drops the floating tiles
-(nothing in its tree refers to them).
+offset?}]` (back to front; `tuck` is `left`, `right`, `top` or `bottom` with
+`offset` where its strip is along that edge, 0–1 from its top or left end;
+`x`, `y`, `w`, `h` are where it comes back to, flush with that edge at its own
+size). A reader that doesn't know a `tuck` value (builds from before `top` and
+`bottom`) shows that float untucked there; tucks are receiver-local
+and never reach the Mac (a tucked float is left out of the request). Its
+`tree` and `tiles` are as before, so a reader that ignores `floats` keeps the
+tiled arrangement and drops the floating tiles (nothing in its tree refers to
+them).
 
 ### 6.11 Text caret (`keyboardState` / `textCaret`)
 
@@ -2065,6 +2087,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
 | 22 (additive) | Floating panes (section 6.10): `hello.ws` 2, `welcome.features: ["windowFloat"]`, `workspaceRequest`/`workspaceState` tile `layer: "float"` and `z`, saved-layout `schema` 4 `floats`; gated by capability, no bump, ws-1 receivers unchanged |
+| 22 (additive) | Lifted floats (section 6.10): `welcome.features: ["floatLift"]`, float tile `lift: true` (left out of the picture and input while the receiver draws it); gated by capability, no bump |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 

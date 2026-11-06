@@ -576,6 +576,8 @@ struct WorkspaceBackdrop: @unchecked Sendable {
     var image: CGImage
     /// From before macOS paused the window.
     var stale: Bool
+    /// When this device received it.
+    var receivedAt = Date()
 }
 
 // MARK: - Layout tree
@@ -1525,7 +1527,7 @@ enum WorkspaceAdaptation {
         guard ordered.count > capacity else {
             guard !saved.floats.isEmpty else { return Result(visible: saved, stacked: []) }
             var visible = saved
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             return Result(visible: visible, stacked: [])
         }
         var shown = Array(ordered.prefix(capacity))
@@ -1540,7 +1542,7 @@ enum WorkspaceAdaptation {
         if !saved.floats.isEmpty {
             // Floats don't take the tree's room: they stay, fitted to this space.
             for f in saved.floats { visible.tiles[f.tile] = saved.tiles[f.tile] }
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             visible.normalize()
         }
         if let m = saved.maximized, shown.contains(m) || saved.isFloat(m) { visible.maximized = m }
@@ -1582,6 +1584,12 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.last == layout { return }
         past.append(layout)
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
+    }
+
+    /// The last step recorded `layout` and the change came to nothing (a float's move cancelled
+    /// back to where it was): no undo step for it.
+    mutating func forget(_ layout: WorkspaceLayout) {
+        if past.last == layout { past.removeLast() }
     }
 
     /// The layout before the last change. With `current`, that change can be redone.
@@ -1699,9 +1707,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var y: Double
         var w: Double
         var h: Double
-        /// "left" or "right" while tucked; absent while shown.
+        /// "left", "right", "top" or "bottom" while tucked; absent while shown. A reader that
+        /// knows fewer edges shows a float tucked to one it doesn't know where it was (untucked).
         var tuck: String?
-        /// The tucked tab's place along its edge (0 top, 1 bottom).
+        /// The tucked handle's place along its edge (0 top or left, 1 bottom or right).
         var offset: Double?
     }
 
@@ -1780,7 +1789,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         }
         let floating = (floats ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { f -> WorkspaceFloat? in
             guard [f.x, f.y, f.w, f.h].allSatisfy(\.isFinite), f.w > 0, f.h > 0 else { return nil }
-            let edge = f.tuck.flatMap(WorkspaceEdge.init(rawValue:)).flatMap { $0.axis == .horizontal ? $0 : nil }
+            // An edge this build doesn't know: shown where it was, untucked.
+            let edge = f.tuck.flatMap(WorkspaceEdge.init(rawValue:))
             return WorkspaceFloat(tile: f.tile, frame: WorkspaceRect(x: f.x, y: f.y, width: f.w, height: f.h),
                                   tuck: edge.map { WorkspaceFloatTuck(edge: $0, offset: f.offset ?? 0.5) })
         }

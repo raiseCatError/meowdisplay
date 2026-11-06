@@ -602,7 +602,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         lastComposeAt = now
         let targetingNow = inputLock.withLock { targeting }
         var drawn: [String: Int] = [:]
-        let items = assignments.map { a -> WorkspaceCompositor.Item in
+        // A lifted float isn't drawn (the receiver draws it under the finger); its view is echoed
+        // once it is drawn again.
+        let items = assignments.filter(\.isOnCanvas).map { a -> WorkspaceCompositor.Item in
             let capture = captures[a.tileID]
             let frame = capture?.assignmentGeneration == a.assignmentGeneration ? capture?.latestFrame() : nil
             let state = tileState[a.tileID]
@@ -1184,6 +1186,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             if entry?.inStageStrip == true { tile["strip"] = true }
             // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
             if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
+            if a.isLifted { tile["lift"] = true }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"
