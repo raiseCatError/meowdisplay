@@ -10,6 +10,21 @@
     "Arrow Keys Side" : {
 
     },
+    "%@ for Arrows" : {
+      "comment" : "The arrow keypad's own modifier key, e.g. Shift for Arrows. It applies to the arrow keys only."
+    },
+    "Arrow %@" : {
+      "comment" : "Short spoken name for the arrow keypad's own modifier key, e.g. Arrow Shift."
+    },
+    "Arrow Key Modifiers" : {
+      "comment" : "The arrow keypad's own Shift, Option and Command keys."
+    },
+    "Only the arrow keys use it." : {
+      "comment" : "Hint for the arrow keypad's own Shift, Option and Command."
+    },
+    "Unavailable while a tray modifier is on. Update MeowDisplay on the Mac to use both." : {
+      "comment" : "Hint for an arrow keypad modifier on a Mac too old to keep it apart from the tray's modifiers."
+    },
     "Arrows" : {
 
     },

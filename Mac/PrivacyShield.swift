@@ -462,10 +462,6 @@ final class PrivacyShield {
     }
 }
 
-private extension NSScreen {
-    var displayID: CGDirectDisplayID? { (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value }
-}
-
 /// A cover's content: black (an OLED panel's pixels are off) with the message in a fixed-size
 /// subview that AppKit moves and dims. SwiftUI only draws the message's text: it can't size the
 /// window or react to the camera notch's safe area.

@@ -92,16 +92,17 @@ enum ArrowButtonGesture {
     }
 }
 
-/// One message for the Mac's existing keyboard path.
+/// One message for the Mac's existing keyboard path. `modifiers` are the
+/// keypad's own (`ArrowKeypadModifiers`), fixed when the key went down.
 enum ArrowKeyEvent: Equatable {
     /// Key down (`action: "down"`).
-    case down(ArrowKeyDirection)
+    case down(ArrowKeyDirection, modifiers: Set<ControlModifier> = [])
     /// A repeat of the key still held (`action: "down"`, `repeat: true`). The
     /// Mac posts it as an autorepeat key-down only while the key is held, so
     /// a late repeat after `up` or a cancel can never become a new press.
-    case `repeat`(ArrowKeyDirection)
+    case `repeat`(ArrowKeyDirection, modifiers: Set<ControlModifier> = [])
     /// Key up (`action: "up"`).
-    case up(ArrowKeyDirection)
+    case up(ArrowKeyDirection, modifiers: Set<ControlModifier> = [])
 }
 
 /// A finger on the keypad, as the keyboard messages it means.
@@ -122,20 +123,28 @@ struct ArrowKeyHold: Equatable {
     private(set) var held: ArrowKeyDirection?
     /// When the next repeat is due; nil while nothing is held.
     private(set) var nextRepeatAt: TimeInterval?
+    /// The modifiers the held key went down with. Its repeats and its up
+    /// carry exactly these, so toggling a keypad modifier mid-hold can't
+    /// change a key that is already down.
+    private(set) var heldModifiers: Set<ControlModifier> = []
 
     var isHolding: Bool { held != nil }
 
     /// The finger is now on `direction`, or on no key (nil). Moving to
-    /// another key releases the first, then presses the new one.
-    mutating func move(to direction: ArrowKeyDirection?, now: TimeInterval) -> [ArrowKeyEvent] {
+    /// another key releases the first (with its own modifiers), then presses
+    /// the new one with `modifiers`.
+    mutating func move(to direction: ArrowKeyDirection?, now: TimeInterval,
+                       modifiers: Set<ControlModifier> = []) -> [ArrowKeyEvent] {
         guard direction != held else { return [] }
         var events: [ArrowKeyEvent] = []
-        if let held { events.append(.up(held)) }
+        if let held { events.append(.up(held, modifiers: heldModifiers)) }
         held = direction
         if let direction {
-            events.append(.down(direction))
+            heldModifiers = modifiers
+            events.append(.down(direction, modifiers: modifiers))
             nextRepeatAt = now + Self.initialDelay
         } else {
+            heldModifiers = []
             nextRepeatAt = nil
         }
         return events
@@ -148,13 +157,103 @@ struct ArrowKeyHold: Equatable {
         var next = due + Self.interval
         if next <= now { next = now + Self.interval }   // came late: no catching up
         nextRepeatAt = next
-        return .repeat(held)
+        return .repeat(held, modifiers: heldModifiers)
     }
 
     /// Lift, cancel or reset: the key up for a held key, or nil. Safe to call
     /// any number of times.
     mutating func release() -> ArrowKeyEvent? {
         move(to: nil, now: 0).first
+    }
+}
+
+/// The arrow keypad's own Shift, Option and Command, kept apart from the
+/// tray's chord: keypad arrows carry only these, and the tray's latch keeps
+/// working for every other control exactly as before. Pure state, never sent
+/// as `modifierDown`, so nothing it does can stay held on the Mac; each arrow
+/// names them in its own key messages, marked `exactModifiers`.
+///
+/// Touching a modifier applies it at once. Lifting it toggles its latch,
+/// unless an arrow went down while it was touched: then it was a hold, and
+/// it ends with the finger. A latch lasts until it is tapped again or the
+/// keypad closes (`clear`).
+struct ArrowKeypadModifiers: Equatable {
+    /// Top to bottom in a column, left to right in a row.
+    static let keys: [ControlModifier] = [.shift, .option, .command]
+
+    private(set) var latched: Set<ControlModifier> = []
+    /// Modifiers a finger is on, each with whether an arrow went down since.
+    private(set) var touched: [ControlModifier: Bool] = [:]
+
+    /// What an arrow going down now carries (while `isAvailable`).
+    var active: Set<ControlModifier> { latched.union(touched.keys) }
+
+    var isEmpty: Bool { latched.isEmpty && touched.isEmpty }
+
+    /// A Mac that takes exact modifiers keeps the two sets apart. An older
+    /// Mac adds whatever the tray holds down to every key, so there the
+    /// keypad's modifiers work only while the tray holds none; otherwise an
+    /// arrow would carry both.
+    static func isAvailable(macSupportsExactModifiers: Bool, trayChord: Set<ControlModifier>) -> Bool {
+        macSupportsExactModifiers || trayChord.isEmpty
+    }
+
+    /// A finger touched `modifier`: on until it lifts.
+    mutating func touchDown(_ modifier: ControlModifier) {
+        guard Self.keys.contains(modifier), touched[modifier] == nil else { return }
+        touched[modifier] = false
+    }
+
+    /// The finger lifted on `modifier`: a tap toggles its latch, a hold that
+    /// carried an arrow just ends. Returns whether the latch changed.
+    @discardableResult
+    mutating func lift(_ modifier: ControlModifier) -> Bool {
+        guard let carriedAnArrow = touched.removeValue(forKey: modifier) else { return false }
+        guard !carriedAnArrow else { return false }
+        return toggle(modifier)
+    }
+
+    /// The system took the touch, or the finger slid off: nothing toggles.
+    mutating func cancelTouch(_ modifier: ControlModifier) {
+        touched[modifier] = nil
+    }
+
+    /// A tap from VoiceOver, Voice Control or Switch Control: toggles the latch.
+    @discardableResult
+    mutating func toggle(_ modifier: ControlModifier) -> Bool {
+        guard Self.keys.contains(modifier) else { return false }
+        if latched.remove(modifier) == nil { latched.insert(modifier) }
+        return true
+    }
+
+    /// An arrow goes down now: the modifiers it carries (none while the
+    /// keypad's modifiers are unavailable), and every touched modifier
+    /// becomes a hold that ends with its finger.
+    mutating func keyDown(available: Bool) -> Set<ControlModifier> {
+        let modifiers = available ? active : []
+        for modifier in touched.keys { touched[modifier] = true }
+        return modifiers
+    }
+
+    /// The keypad closed, or input was reset: nothing latched, nothing touched.
+    mutating func clear() {
+        latched.removeAll()
+        touched.removeAll()
+    }
+
+    /// Unavailable now (an older Mac and a tray modifier on): everything is
+    /// dropped rather than kept hidden, so nothing comes back unannounced
+    /// when the tray's modifier goes. Returns whether anything was dropped.
+    @discardableResult
+    mutating func reconcile(available: Bool) -> Bool {
+        guard !available, !isEmpty else { return false }
+        clear()
+        return true
+    }
+
+    /// Wire names, in the protocol's usual order.
+    static func wireNames(_ modifiers: Set<ControlModifier>) -> [String] {
+        ControlModifier.allCases.filter(modifiers.contains).map(\.rawValue)
     }
 }
 
@@ -186,13 +285,94 @@ enum ArrowKeypadGeometry {
     }
 }
 
+/// Where the keypad's own ⇧ ⌥ ⌘ sit against the T.
+enum ArrowKeypadModifierPlacement: Equatable, CaseIterable {
+    /// A column left of the T.
+    case leading
+    /// A column right of the T.
+    case trailing
+    /// A row under the T, between it and the button.
+    case below
+
+    var isColumn: Bool { self != .below }
+}
+
+extension ArrowKeypadGeometry {
+    /// One modifier key: as wide as an arrow key and two thirds as tall, so
+    /// three stack exactly the T's height and three in a row span its width.
+    static func modifierKeySize(key: CGFloat) -> CGSize {
+        CGSize(width: key, height: (key * 2 / 3).rounded(.down))
+    }
+
+    /// The strip of three modifier keys.
+    static func modifierStripSize(_ placement: ArrowKeypadModifierPlacement, key: CGFloat, gap: CGFloat) -> CGSize {
+        let keypad = size(key: key, gap: gap)
+        return placement.isColumn ? CGSize(width: key, height: keypad.height)
+                                  : CGSize(width: keypad.width, height: modifierKeySize(key: key).height)
+    }
+
+    /// The T and its strip as one block, `gap` apart: what the placement code
+    /// moves around the other controls.
+    static func blockSize(_ placement: ArrowKeypadModifierPlacement, key: CGFloat, gap: CGFloat) -> CGSize {
+        let keypad = size(key: key, gap: gap)
+        let strip = modifierStripSize(placement, key: key, gap: gap)
+        return placement.isColumn ? CGSize(width: keypad.width + gap + strip.width, height: keypad.height)
+                                  : CGSize(width: keypad.width, height: keypad.height + gap + strip.height)
+    }
+
+    /// A placed block, split into the T and the strip.
+    static func split(_ block: CGRect, placement: ArrowKeypadModifierPlacement,
+                      key: CGFloat, gap: CGFloat) -> (keypad: CGRect, modifiers: CGRect) {
+        let keypad = size(key: key, gap: gap)
+        let strip = modifierStripSize(placement, key: key, gap: gap)
+        switch placement {
+        case .leading:
+            return (CGRect(x: block.maxX - keypad.width, y: block.minY, width: keypad.width, height: keypad.height),
+                    CGRect(x: block.minX, y: block.minY, width: strip.width, height: strip.height))
+        case .trailing:
+            return (CGRect(x: block.minX, y: block.minY, width: keypad.width, height: keypad.height),
+                    CGRect(x: block.maxX - strip.width, y: block.minY, width: strip.width, height: strip.height))
+        case .below:
+            return (CGRect(x: block.minX, y: block.minY, width: keypad.width, height: keypad.height),
+                    CGRect(x: block.minX, y: block.maxY - strip.height, width: strip.width, height: strip.height))
+        }
+    }
+
+    /// The space between two modifier keys: the arrow keys' gap in a row;
+    /// in a column, whatever is left once three keys stack the T's height.
+    static func modifierGap(_ placement: ArrowKeypadModifierPlacement, key: CGFloat, gap: CGFloat) -> CGFloat {
+        guard placement.isColumn else { return gap }
+        return max(0, (size(key: key, gap: gap).height - 3 * modifierKeySize(key: key).height) / 2)
+    }
+
+    /// Each modifier key's frame inside a strip drawn at `strip`.
+    static func modifierKeyFrames(in strip: CGRect, placement: ArrowKeypadModifierPlacement,
+                                  key: CGFloat, gap: CGFloat) -> [ControlModifier: CGRect] {
+        let keySize = modifierKeySize(key: key)
+        let between = modifierGap(placement, key: key, gap: gap)
+        var frames: [ControlModifier: CGRect] = [:]
+        for (index, modifier) in ArrowKeypadModifiers.keys.enumerated() {
+            let step = CGFloat(index)
+            frames[modifier] = placement.isColumn
+                ? CGRect(x: strip.minX, y: strip.minY + step * (keySize.height + between),
+                         width: keySize.width, height: keySize.height)
+                : CGRect(x: strip.minX + step * (keySize.width + between), y: strip.minY,
+                         width: keySize.width, height: keySize.height)
+        }
+        return frames
+    }
+}
+
 /// Where the compact arrow button and its keypad sit.
 struct ArrowKeysLayout: Equatable {
     var toggle: CGRect
-    /// nil while the keypad is closed.
+    /// The T; nil while the keypad is closed.
     var keypad: CGRect?
+    /// The keypad's own ⇧ ⌥ ⌘ beside or under the T; nil while it is closed.
+    var modifiers: CGRect? = nil
+    var modifierPlacement: ArrowKeypadModifierPlacement? = nil
 
-    var occupied: [CGRect] { [toggle] + (keypad.map { [$0] } ?? []) }
+    var occupied: [CGRect] { [toggle] + [keypad, modifiers].compactMap { $0 } }
 }
 
 extension ControlTrayGeometry {
@@ -273,6 +453,87 @@ extension ControlTrayGeometry {
         keypad = avoidingReservedRegions(keypad, obstacles: reserved, within: bounds,
                                          alsoAvoiding: obstacles + [toggle])
         return ArrowKeysLayout(toggle: toggle, keypad: keypad)
+    }
+}
+
+extension ControlTrayGeometry {
+    /// Where the keypad's modifier strip is tried, best first: a column on
+    /// the side with room (toward the middle of the screen from the button,
+    /// so the T stays over the button when the button is near an edge), a
+    /// column on the other side, then a row under the T.
+    static func arrowKeypadModifierPlacements(toggle: CGRect, container: CGRect) -> [ArrowKeypadModifierPlacement] {
+        let towardMiddle: ArrowKeypadModifierPlacement = toggle.midX > container.midX ? .leading : .trailing
+        return [towardMiddle, towardMiddle == .leading ? .trailing : .leading, .below]
+    }
+
+    /// `arrowKeysLayout` for the keypad with its ⇧ ⌥ ⌘ strip: the T and the
+    /// strip are placed as one block by the same obstacle-avoiding code, so
+    /// the strip clears everything the T clears. The first placement (see
+    /// `arrowKeypadModifierPlacements`) whose block lands clear of the other
+    /// controls, the button, reserved regions and (with Avoid Notch) the
+    /// unsafe edges wins; with no clear one, the first. The button never
+    /// moves for the keypad.
+    ///
+    /// - Parameters: as `arrowKeysLayout`, with the keypad's `key` and `gap`
+    ///   instead of its size; `keypadOpen` false lays out the button alone.
+    static func arrowKeysLayoutWithModifiers(container: CGRect, safeInsets: ControlSafeInsets, portrait: Bool,
+                                             side: LandscapeTraySide, toggleSize: CGSize,
+                                             keypadOpen: Bool, key: CGFloat, gap: CGFloat,
+                                             mainTrayFrame: CGRect, obstacles: [CGRect],
+                                             avoidNotch: Bool, notchSide: LandscapeTraySide? = nil,
+                                             reservedRegions: [ControlReservedRegion] = [],
+                                             spacing: CGFloat = 10) -> ArrowKeysLayout {
+        func place(_ keypadSize: CGSize?) -> ArrowKeysLayout {
+            arrowKeysLayout(container: container, safeInsets: safeInsets, portrait: portrait, side: side,
+                            toggleSize: toggleSize, keypadSize: keypadSize, mainTrayFrame: mainTrayFrame,
+                            obstacles: obstacles, avoidNotch: avoidNotch, notchSide: notchSide,
+                            reservedRegions: reservedRegions, spacing: spacing)
+        }
+        let closed = place(nil)
+        guard keypadOpen else { return closed }
+        let bounds = container.insetBy(dx: 12, dy: 12)
+        let blocked = obstacles.filter { !$0.isNull && !$0.isEmpty }
+            + reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
+            + (avoidNotch ? unsafeRegions(in: container, safeInsets: safeInsets, portrait: portrait,
+                                          notchSide: notchSide) : [])
+        var fallback: ArrowKeysLayout?
+        for placement in arrowKeypadModifierPlacements(toggle: closed.toggle, container: container) {
+            let placed = place(ArrowKeypadGeometry.blockSize(placement, key: key, gap: gap))
+            guard let block = placed.keypad else { continue }
+            let parts = ArrowKeypadGeometry.split(block, placement: placement, key: key, gap: gap)
+            let layout = ArrowKeysLayout(toggle: placed.toggle, keypad: parts.keypad,
+                                         modifiers: parts.modifiers, modifierPlacement: placement)
+            if fallback == nil { fallback = layout }
+            if bounds.contains(block), !block.intersects(placed.toggle),
+               !blocked.contains(where: { $0.intersects(block) }) {
+                return layout
+            }
+        }
+        return fallback ?? closed
+    }
+
+    /// `keyboardBarKeypadFrame` for the keypad with its ⇧ ⌥ ⌘ strip, placed
+    /// as one block: the first placement that fits inside the safe area
+    /// clear of the bar and an open palette wins (in iPhone landscape that
+    /// is usually the row, beside the bar); with none, the first. Never
+    /// lower than the bar, so never over the keyboard. `toggle` is `item`.
+    static func keyboardBarArrowKeysLayout(safe: CGRect, bar: CGRect, item: CGRect, key: CGFloat, gap: CGFloat,
+                                           palette: CGRect?, spacing: CGFloat = 10) -> ArrowKeysLayout {
+        let bounds = safe.insetBy(dx: 12, dy: 12)
+        var fallback: ArrowKeysLayout?
+        for placement in arrowKeypadModifierPlacements(toggle: item, container: safe) {
+            let block = keyboardBarKeypadFrame(safe: safe, bar: bar, item: item,
+                                               keypadSize: ArrowKeypadGeometry.blockSize(placement, key: key, gap: gap),
+                                               palette: palette, spacing: spacing)
+            let parts = ArrowKeypadGeometry.split(block, placement: placement, key: key, gap: gap)
+            let layout = ArrowKeysLayout(toggle: item, keypad: parts.keypad,
+                                         modifiers: parts.modifiers, modifierPlacement: placement)
+            if fallback == nil { fallback = layout }
+            if bounds.contains(block), !block.intersects(bar), !(palette?.intersects(block) ?? false) {
+                return layout
+            }
+        }
+        return fallback ?? ArrowKeysLayout(toggle: item, keypad: nil)
     }
 }
 

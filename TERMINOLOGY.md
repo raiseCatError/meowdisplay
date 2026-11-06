@@ -74,6 +74,7 @@ sentences where one is shown. Where an app differs today, the
 | **Hidden on this screen** | tiles that no longer fit | Stacked, Offscreen |
 | **Arrange**, **Maximize**, **Restore Layout**, **Rotate**, **Fill Tile** / **Show Whole Window**, **Remove Tile** | tile actions | |
 | **Close Window on Mac…** | closes the real Mac window (always confirmed) | close tile |
+| **Fill Window on Mac** / **Restore Previous Size on Mac** | resize the real Mac window to its display's usable area, and put it back (control only, never automatic; not macOS full screen) | Maximize, Zoom, Fill Window (that's the pane's own picture), Full Screen |
 | **Typing paused** | a tile that is not receiving keys because another app is in front on the Mac | |
 | **Switch to Window view?** | the one-time offer on the Full Desktop. **Yes** / **No**; it leaves by itself after 8 seconds | |
 

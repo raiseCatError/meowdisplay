@@ -22,6 +22,16 @@ protocol ReceiverControlSource: ObservableObject {
     /// receiver (the Mac never repeats a key on its own).
     func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool)
     func sendKeyboardUp(usage: Int, modifiers: [String])
+    /// The Mac posts a key marked `exactModifiers` with only its own
+    /// modifiers (welcome feature `exactKeyModifiers`). An older Mac adds
+    /// whatever the tray holds down.
+    var macSupportsExactKeyModifiers: Bool { get }
+    /// The arrow keypad's keys: `modifiers` are the keypad's own, never the
+    /// tray's chord, and `exactModifiers` asks the Mac not to add the
+    /// modifiers the tray holds down (ignored by a Mac without the feature).
+    func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool)
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool)
+    func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool)
     func sendModifier(_ modifier: ControlModifier, down: Bool)
     func sendGesture(name: String)
 }
@@ -216,6 +226,20 @@ extension DemoSession: ReceiverControlSource {
     }
 
     func sendKeyboardUp(usage: Int, modifiers: [String]) {}
+
+    /// The sample desktop holds no modifiers for the tray, so every key
+    /// already carries exactly what it names.
+    var macSupportsExactKeyModifiers: Bool { true }
+
+    func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool) {
+        sendKeyboardPress(usage: usage, modifiers: modifiers)
+    }
+
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: isRepeat)
+    }
+
+    func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) {}
 
     func sendModifier(_ modifier: ControlModifier, down: Bool) {
         if down, inputAllowed { workspace.show(.modifierHeld(modifier)) }

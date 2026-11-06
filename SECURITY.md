@@ -110,6 +110,13 @@ other end. It does not by itself admit a session:
   Allow Input master switch, an admitted session, and a grant for the
   current connection. Grants never carry over to a new connection; the
   receiver asks again.
+- **Changing a Mac window needs the same grant.** Minimize, Close, and Fill
+  Window on Mac / Restore Previous Size on Mac act on one listed window only
+  (its id, app and session identity) and need control. Fill and Restore are
+  checked again right before the Mac acts (without side effects), refuse an
+  ambiguous match instead of guessing, set only that window's position and
+  size through Accessibility (never full screen, the app's menus or keys),
+  and are verified before the device is told they worked.
 - **Forget and Block revoke.** They withdraw approval prompts still waiting
   for that device, end connections that are waiting to take over the
   session, and drop remembered acceptances; answering a prompt afterwards
@@ -240,7 +247,7 @@ Settings ▸ System. Each connected device is told whether it's on.
   unlocked, paired Apple Watch). MeowDisplay never sees the password. While
   macOS asks, nothing a device sends changes the Mac: MeowDisplay handles
   only liveness and connection messages and drops everything else (input,
-  window actions, menus, app launches, Lock Mac, files, clipboard, window
+  window actions and resizing, menus, app launches, Lock Mac, files, clipboard, window
   lists and thumbnails), and only lets go of keys or buttons a device was
   holding. Devices keep the last picture from before the prompt (no new
   frame is sent until it closes), so they don't see it.

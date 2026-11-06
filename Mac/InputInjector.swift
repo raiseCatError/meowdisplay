@@ -188,8 +188,11 @@ final class InputInjector {
         penClickSession = nil
         penLastClick = nil
 
+        // A key sent with exact modifiers goes up with the flags it went down
+        // with, never the held ones it was kept apart from.
+        let exactFlags = heldKeys.exactFlags
         for usage in heldKeys.releaseAll() {
-            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: heldModifiers.flags)
+            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: exactFlags[usage] ?? heldModifiers.flags)
         }
         for modifier in heldModifiers.releaseAll() {
             postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
@@ -442,12 +445,13 @@ final class InputInjector {
     }
 
     /// An atomic special key from the software keyboard (no held state to
-    /// track — down and up post back to back).
-    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
+    /// track — down and up post back to back). `exactModifiers`: post with
+    /// exactly `modifiers`, never adding the held ones (`KeyEventFlags`).
+    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = [], exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(), keyboardTargetReady() else { return }
-        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        let flags = KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: exactModifiers)
         #if DEBUG
         if usage == .deleteOrBackspace {
             Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) down")
@@ -479,28 +483,40 @@ final class InputInjector {
     /// is ignored rather than re-posted — unless it is marked `repeat` (a
     /// receiving Mac's own key repeat), which posts an auto-repeat key-down
     /// for the held key.
-    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
+    ///
+    /// `exactModifiers`: the key posts with exactly `modifiers`, never adding
+    /// the held ones, and keeps those flags for its repeats and its up (and a
+    /// cancellation) whatever those messages say, so a modifier latched or
+    /// released mid-hold can't change it.
+    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false,
+                            exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(), keyboardTargetReady() else { return }
-        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
         if isRepeat {
             guard heldKeys.allowsRepeat(usage) else { return }
+            let flags = heldKeys.exactFlags(for: usage)
+                ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: exactModifiers)
             postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags, autorepeat: true)
             return
         }
-        guard heldKeys.down(usage) else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+        let exact = exactModifiers ? KeyModifier.flags(named: modifiers) : nil
+        guard heldKeys.down(usage, exactFlags: exact) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true,
+                     flags: exact ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: false))
     }
 
     /// The matching release. A spurious up for a key that isn't held (e.g.
-    /// after cancellation already released it) is ignored.
-    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String]) {
+    /// after cancellation already released it) is ignored. A key that went
+    /// down with exact modifiers goes up with the same flags.
+    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String], exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
+        let stored = heldKeys.exactFlags(for: usage)
         guard heldKeys.up(usage) else { return }
         postKeyEvent(keyCode: usage.keyCode, keyDown: false,
-                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
+                     flags: stored ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags,
+                                                            exact: exactModifiers))
     }
 
     private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags, autorepeat: Bool = false) {
