@@ -285,6 +285,42 @@ enum WorkspaceFloatGeometry {
         return WorkspaceRect(x: x, y: y, width: w, height: h)
     }
 
+    /// Where a float of `r`'s size may come to rest (its origin, picture shares): inside the
+    /// picture with room for its title bar (`clamped`) and, given `safe` (picture shares: the safe
+    /// area, clear of the system's edge bands), its title pill (its title and ⋯ button) inside
+    /// that. The picture wins where the two can't both be met. Only for where a float settles or
+    /// comes back to: a finger may hold it anywhere, past any edge.
+    static func reachableOrigins(_ r: WorkspaceRect, in size: WorkspaceSize, safe: WorkspaceRect?) -> (x: ClosedRange<Double>, y: ClosedRange<Double>) {
+        let bar = size.height > 0 ? min(barHeight / size.height, 0.5) : 0
+        var x = 0...max(1 - r.width, 0), y = bar...max(1 - r.height, bar)
+        guard let safe, size.width > 0, size.height > 0, safe.width > 0, safe.height > 0,
+              [safe.x, safe.y, safe.width, safe.height, r.width, r.height].allSatisfy(\.isFinite) else { return (x, y) }
+        func meet(_ range: ClosedRange<Double>, _ lo: Double, _ hi: Double) -> ClosedRange<Double> {
+            guard hi >= lo else { return range }
+            let a = max(range.lowerBound, lo), b = min(range.upperBound, hi)
+            if a <= b { return a...b }
+            let v = lo > range.upperBound ? range.upperBound : range.lowerBound
+            return v...v
+        }
+        // The pill is centred on the content's top edge.
+        let pill = WorkspaceFloatLayering.pillBounds(WorkspaceRect(x: 0, y: 0, width: r.width * size.width, height: r.height * size.height))
+        let halfW = pill.width / 2 / size.width, halfH = pill.height / 2 / size.height
+        x = meet(x, safe.x + halfW - r.width / 2, safe.maxX - halfW - r.width / 2)
+        y = meet(y, safe.y + halfH, safe.maxY - halfH)
+        return (x, y)
+    }
+
+    /// `rect` kept usable (`clamped`) and moved the least for its title pill to be inside `safe`
+    /// (see `reachableOrigins`).
+    static func reachable(_ rect: WorkspaceRect, in size: WorkspaceSize, safe: WorkspaceRect?) -> WorkspaceRect {
+        var r = clamped(rect, in: size)
+        guard size.width > 0, size.height > 0 else { return r }
+        let o = reachableOrigins(r, in: size, safe: safe)
+        r.x = min(max(r.x, o.x.lowerBound), o.x.upperBound)
+        r.y = min(max(r.y, o.y.lowerBound), o.y.upperBound)
+        return r
+    }
+
     /// Where a new float opens. `aspect`: the window's width / height when known. `index`: its
     /// place in the cascade: each one steps `cascade` points from the one before (up and across
     /// from the bottom on a phone, down and across on a larger screen), starting over on an axis
@@ -677,9 +713,17 @@ enum WorkspaceFloatMotion {
         min(max(edge.axis == .horizontal ? r.midY : r.midX, 0), 1)
     }
 
-    /// The edge `r` hangs at least `pastEdge` past (an armed tuck: letting go slowly tucks it).
+    /// The edge `r` hangs at least `pastEdge` past (an armed tuck: letting go slowly tucks it). In
+    /// a corner, past two edges, the one more of it hangs over (left and right first on a tie).
     static func pulledEdge(_ r: WorkspaceRect, edges: Set<WorkspaceEdge> = allEdges) -> WorkspaceEdge? {
-        [WorkspaceEdge.left, .right, .top, .bottom].first { edges.contains($0) && past(r, $0) >= pastEdge }
+        furthest(r, among: [WorkspaceEdge.left, .right, .top, .bottom].filter { edges.contains($0) })
+    }
+
+    /// Of `candidates`, the edge `r` hangs furthest past, at least `pastEdge` (the first on a tie).
+    private static func furthest(_ r: WorkspaceRect, among candidates: [WorkspaceEdge]) -> WorkspaceEdge? {
+        var best: (edge: WorkspaceEdge, share: Double)?
+        for e in candidates where past(r, e) >= pastEdge && past(r, e) > (best?.share ?? -1) { best = (e, past(r, e)) }
+        return best?.edge
     }
 
     /// The first edge a float at `r` moving by (`dx`, `dy`) (picture shares) is carried
@@ -702,12 +746,13 @@ enum WorkspaceFloatMotion {
         return (best.edge, along(at, best.edge))
     }
 
-    /// `frame`: where the float is when let go (normalized; while dragging it may hang past an
-    /// edge). `velocity`: its release velocity in points per second. `canTuck`: false while the
-    /// float can't be tucked (it isn't a float of a live workspace). `edges`: where it may tuck
-    /// (those with room for a handle, `WorkspaceFloatGeometry.tuckEdges`).
+    /// `frame`: where the float is when let go (normalized; while dragging it may hang past any
+    /// edge, a corner too). `velocity`: its release velocity in points per second. `canTuck`: false
+    /// while the float can't be tucked (it isn't a float of a live workspace). `edges`: where it may
+    /// tuck (those with room for a strip, `WorkspaceFloatGeometry.tuckEdges`). `safe`: where its
+    /// title pill must be when it settles (picture shares, see `reachableOrigins`); nil: the picture.
     static func decide(release frame: WorkspaceRect, velocity: (x: Double, y: Double), in size: WorkspaceSize,
-                       canTuck: Bool = true, edges: Set<WorkspaceEdge> = allEdges) -> Outcome {
+                       canTuck: Bool = true, edges: Set<WorkspaceEdge> = allEdges, safe: WorkspaceRect? = nil) -> Outcome {
         guard size.width > 0, size.height > 0, frame.width > 0, frame.height > 0,
               [frame.x, frame.y, frame.width, frame.height].allSatisfy(\.isFinite) else {
             return .settle(frame: WorkspaceFloatGeometry.clamped(frame, in: size), glide: false)
@@ -716,17 +761,17 @@ enum WorkspaceFloatMotion {
         let speed = (vx * vx + vy * vy).squareRoot()
         if canTuck, !edges.isEmpty {
             // Pulled more than halfway past an edge on purpose and let go there (slowly or not,
-            // as long as it isn't being thrown back in).
-            for edge in [WorkspaceEdge.left, .right, .top, .bottom] where edges.contains(edge) && past(frame, edge) >= pastEdge {
-                let inward: Double
+            // as long as it isn't being thrown back in); in a corner, the edge more of it is past.
+            func inward(_ edge: WorkspaceEdge) -> Double {
                 switch edge {
-                case .left: inward = vx
-                case .right: inward = -vx
-                case .top: inward = vy
-                case .bottom: inward = -vy
+                case .left: return vx
+                case .right: return -vx
+                case .top: return vy
+                case .bottom: return -vy
                 }
-                if inward < flingSpeed { return .tuck(edge: edge, offset: along(frame, edge)) }
             }
+            let held = [WorkspaceEdge.left, .right, .top, .bottom].filter { edges.contains($0) && inward($0) < flingSpeed }
+            if let edge = furthest(frame, among: held) { return .tuck(edge: edge, offset: along(frame, edge)) }
             // Thrown: fast enough, and its projected path carries it past an edge (from the
             // middle or from the far side alike): tucked into the first edge that path crosses,
             // where it crosses it. A corner throw takes whichever edge it meets first.
@@ -736,25 +781,31 @@ enum WorkspaceFloatMotion {
                 return .tuck(edge: hit.edge, offset: hit.offset)
             }
         }
-        let held = WorkspaceFloatGeometry.clamped(frame, in: size)
-        guard speed >= glideSpeed else { return .settle(frame: snapped(held, in: size), glide: snapped(held, in: size) != frame) }
+        // Let go inside, or hanging less than halfway past an edge (or a corner): it comes to rest
+        // where its title pill can be reached, gliding back in from wherever the finger left it.
+        let held = WorkspaceFloatGeometry.reachable(frame, in: size, safe: safe)
+        guard speed >= glideSpeed else {
+            let rest = snapped(held, in: size, safe: safe)
+            return .settle(frame: rest, glide: rest != frame)
+        }
         var target = frame
         target.x += projection(vx) / size.width
         target.y += projection(vy) / size.height
-        let landed = snapped(WorkspaceFloatGeometry.clamped(target, in: size), in: size)
+        let landed = snapped(WorkspaceFloatGeometry.reachable(target, in: size, safe: safe), in: size, safe: safe)
         return .settle(frame: landed, glide: landed != frame)
     }
 
-    /// Close to an edge of the picture (within `WorkspaceFloatGeometry.snap` points): flush with it.
-    static func snapped(_ r: WorkspaceRect, in size: WorkspaceSize) -> WorkspaceRect {
+    /// Close to where it may rest at an edge (within `WorkspaceFloatGeometry.snap` points of the
+    /// picture's edge, or of where its title pill meets `safe`): flush with it.
+    static func snapped(_ r: WorkspaceRect, in size: WorkspaceSize, safe: WorkspaceRect? = nil) -> WorkspaceRect {
         guard size.width > 0, size.height > 0 else { return r }
         var c = r
+        let o = WorkspaceFloatGeometry.reachableOrigins(r, in: size, safe: safe)
         let sx = WorkspaceFloatGeometry.snap / size.width, sy = WorkspaceFloatGeometry.snap / size.height
-        let bar = min(WorkspaceFloatGeometry.barHeight / size.height, 0.5)
-        if c.x > 0, c.x < sx { c.x = 0 }
-        if c.maxX < 1, 1 - c.maxX < sx { c.x = 1 - c.width }
-        if c.y > bar, c.y - bar < sy { c.y = bar }
-        if c.maxY < 1, 1 - c.maxY < sy { c.y = 1 - c.height }
+        if c.x > o.x.lowerBound, c.x - o.x.lowerBound < sx { c.x = o.x.lowerBound }
+        if c.x < o.x.upperBound, o.x.upperBound - c.x < sx { c.x = o.x.upperBound }
+        if c.y > o.y.lowerBound, c.y - o.y.lowerBound < sy { c.y = o.y.lowerBound }
+        if c.y < o.y.upperBound, o.y.upperBound - c.y < sy { c.y = o.y.upperBound }
         return c
     }
 

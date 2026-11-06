@@ -109,6 +109,84 @@ final class WorkspaceFloatTuckTests: XCTestCase {
         XCTAssertNil(WorkspaceFloatMotion.pulledEdge(middle))
     }
 
+    // MARK: Let go off-screen
+
+    /// iPhone 14 Pro Max (430 x 932 pt; the Dynamic Island's 59 pt at the top, the Home
+    /// indicator's 34 below), its safe area as shares of the picture, portrait and landscape.
+    private let proMax = WorkspaceSize(width: 430, height: 932)
+    private let proMaxSafe = WorkspaceRect(x: 0, y: 59.0 / 932, width: 1, height: (932.0 - 59 - 34) / 932)
+    private let proMaxLandscape = WorkspaceSize(width: 932, height: 430)
+    private let proMaxLandscapeSafe = WorkspaceRect(x: 59.0 / 932, y: 24.0 / 430, width: (932.0 - 118) / 932, height: (430.0 - 24 - 21) / 430)
+
+    /// The title pill of a float at `r` (shares of a picture of `size`).
+    private func pill(_ r: WorkspaceRect, _ size: WorkspaceSize) -> WorkspaceRect {
+        let p = WorkspaceFloatLayering.pillBounds(WorkspaceRect(x: r.x * size.width, y: r.y * size.height,
+                                                                width: r.width * size.width, height: r.height * size.height))
+        return WorkspaceRect(x: p.x / size.width, y: p.y / size.height, width: p.width / size.width, height: p.height / size.height)
+    }
+
+    private func assertComesBackReachable(_ o: WorkspaceFloatMotion.Outcome, _ size: WorkspaceSize, safe: WorkspaceRect, _ name: String,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        guard case .settle(let r, let glide) = o else { return XCTFail("\(name): \(o)", file: file, line: line) }
+        XCTAssertTrue(glide, "\(name): glides back from where it was let go", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(r.x, -1e-9, name, file: file, line: line)
+        XCTAssertLessThanOrEqual(r.maxX, 1 + 1e-9, name, file: file, line: line)
+        XCTAssertLessThanOrEqual(r.maxY, 1 + 1e-9, name, file: file, line: line)
+        let p = pill(r, size)
+        XCTAssertGreaterThanOrEqual(p.y, safe.y - 1e-9, "\(name): its title pill clear of the top", file: file, line: line)
+        XCTAssertLessThanOrEqual(p.maxY, safe.maxY + 1e-9, "\(name): and of the bottom", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(p.x, safe.x - 1e-9, "\(name): and of the sides", file: file, line: line)
+        XCTAssertLessThanOrEqual(p.maxX, safe.maxX + 1e-9, name, file: file, line: line)
+    }
+
+    /// A float held partly off-screen past any edge or a corner and let go: more than halfway
+    /// past, it tucks into that edge (in a corner, the one more of it is past); less, it glides
+    /// back to where its title pill can be reached, clear of the Dynamic Island, the Home indicator
+    /// and a landscape notch. Only where it rests is kept reachable: the finger may hold it anywhere.
+    func testLettingGoOffScreenTucksOrComesBackReachable() {
+        for (size, safe) in [(proMax, proMaxSafe), (proMaxLandscape, proMaxLandscapeSafe)] {
+            let w = 240 / size.width, h = 160 / size.height
+            func at(_ x: Double, _ y: Double) -> WorkspaceRect { WorkspaceRect(x: x, y: y, width: w, height: h) }
+            func let_(_ f: WorkspaceRect, _ v: (Double, Double) = (0, 0), edges: Set<WorkspaceEdge> = WorkspaceFloatMotion.allEdges) -> WorkspaceFloatMotion.Outcome {
+                WorkspaceFloatMotion.decide(release: f, velocity: (x: v.0, y: v.1), in: size, edges: edges, safe: safe)
+            }
+            // Less than halfway past each edge and corner, let go slowly: back in, reachable.
+            let short: [(String, WorkspaceRect)] = [
+                ("left", at(-0.3 * w, 0.4)), ("right", at(1 - 0.7 * w, 0.4)), ("top", at(0.3, -0.3 * h)), ("bottom", at(0.3, 1 - 0.7 * h)),
+                ("top-left", at(-0.3 * w, -0.3 * h)), ("top-right", at(1 - 0.7 * w, -0.4 * h)),
+                ("bottom-left", at(-0.4 * w, 1 - 0.6 * h)), ("bottom-right", at(1 - 0.6 * w, 1 - 0.7 * h)),
+            ]
+            for (name, f) in short { assertComesBackReachable(let_(f), size, safe: safe, "\(size) \(name)") }
+            // Inside the picture but its pill under the status bar or the Dynamic Island: down into the safe area.
+            assertComesBackReachable(let_(at(0.3, 8 / size.height)), size, safe: safe, "\(size) under the top band")
+            // Pushed back in from past an edge: it glides in and stays reachable.
+            assertComesBackReachable(let_(at(1 - 0.7 * w, 0.4), (-700, 0)), size, safe: safe, "\(size) pushed back in")
+            assertComesBackReachable(let_(at(0.3, -0.3 * h), (0, 600)), size, safe: safe, "\(size) pushed down from the top")
+
+            // More than halfway past: tucked into that edge, where it is along it.
+            XCTAssertEqual(let_(at(-0.6 * w, 0.4)), .tuck(edge: .left, offset: 0.4 + h / 2))
+            XCTAssertEqual(let_(at(1 - 0.4 * w, 0.4)), .tuck(edge: .right, offset: 0.4 + h / 2))
+            XCTAssertEqual(let_(at(0.3, -0.7 * h)), .tuck(edge: .top, offset: 0.3 + w / 2))
+            XCTAssertEqual(let_(at(0.3, 1 - 0.3 * h)), .tuck(edge: .bottom, offset: 0.3 + w / 2))
+            // Corners: the edge more of it is past.
+            guard case .tuck(.right, _) = let_(at(1 - 0.3 * w, 1 - 0.6 * h)) else { return XCTFail("\(size): right 70%, bottom 40%") }
+            guard case .tuck(.bottom, _) = let_(at(1 - 0.4 * w, 1 - 0.2 * h)) else { return XCTFail("\(size): right 60%, bottom 80%") }
+            guard case .tuck(.top, _) = let_(at(-0.55 * w, -0.8 * h)) else { return XCTFail("\(size): left 55%, top 80%") }
+            guard case .tuck(.left, _) = let_(at(-0.7 * w, 1 - 0.4 * h)) else { return XCTFail("\(size): left 70%, bottom 60%") }
+            // An edge without room for a strip doesn't take it: back in, reachable.
+            assertComesBackReachable(let_(at(0.3, -0.7 * h), edges: [.left, .right, .bottom]), size, safe: safe, "\(size) no room at the top")
+        }
+        // Flush against the notch side in landscape: the pill moves out from under the notch.
+        let flush = WorkspaceRect(x: 1 - 240 / proMaxLandscape.width, y: 0.4, width: 240 / proMaxLandscape.width, height: 160 / proMaxLandscape.height)
+        let rest = WorkspaceFloatGeometry.reachable(flush, in: proMaxLandscape, safe: proMaxLandscapeSafe)
+        XCTAssertLessThanOrEqual(pill(rest, proMaxLandscape).maxX, proMaxLandscapeSafe.maxX + 1e-9)
+        XCTAssertEqual(rest.y, flush.y, "only as far as it must")
+        // Without a safe area: just inside the picture, as before.
+        XCTAssertEqual(WorkspaceFloatGeometry.reachable(flush, in: proMaxLandscape, safe: nil), WorkspaceFloatGeometry.clamped(flush, in: proMaxLandscape))
+        XCTAssertEqual(WorkspaceFloatMotion.decide(release: middle, velocity: (x: 80, y: 40), in: ipad, safe: nil),
+                       .settle(frame: middle, glide: false), "let go slowly in the middle: stays exactly there")
+    }
+
     // MARK: Model
 
     /// Every edge is a tuck; a decoded tuck is kept on its edge with a usable offset.

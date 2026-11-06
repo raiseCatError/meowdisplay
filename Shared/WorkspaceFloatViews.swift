@@ -182,6 +182,8 @@ struct WorkspaceFloatLayer: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
     @State private var start: [String: WorkspaceRect] = [:]
+    /// Where the finger holds each moving float (picture shares, past any edge).
+    @State private var held: [String: WorkspaceRect] = [:]
     @State private var moving: Set<String> = []
     @State private var samples: [String: [Sample]] = [:]
     @State private var lastTap: (id: String, at: Date)?
@@ -303,8 +305,8 @@ struct WorkspaceFloatLayer: View {
         let handles = WorkspaceFloatLayering.showsHandles(selected: active, hovered: model.hovered == id, manipulating: moved)
         // While a finger moves or resizes it the Mac leaves it out (`floatLift`) and it's drawn
         // here, from its last still, in its own view at this size. A Mac without lift keeps
-        // drawing it a moment behind, so the still goes with the finger as before.
-        let drawnHere = model.drawsFloatHere(id) || (moved && !model.canLiftFloats)
+        // drawing it (inside the picture): only its picture shows then, never a second copy.
+        let drawnHere = model.drawsFloatHere(id)
         ZStack {
             if drawnHere, let image = model.backdrop(id)?.image,
                let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
@@ -543,11 +545,13 @@ struct WorkspaceFloatLayer: View {
                 var f = s
                 f.x += v.translation.width / max(picture.width, 1)
                 f.y += v.translation.height / max(picture.height, 1)
-                // Up and down it stays reachable; sideways it may be pulled past an edge (to tuck it).
-                let bar = WorkspaceFloatGeometry.barHeight / max(picture.height, 1)
-                f.y = min(max(f.y, bar), 1 - min(f.height, 1) * 0.25)
-                motion.drag(id, f)
+                // It follows the finger past any edge (a corner too), clipped by the screen; where
+                // it comes to rest is decided when it's let go. What's sent is kept inside the
+                // picture. Lifted, this device draws it where the finger holds it; otherwise the
+                // Mac draws it (inside), and its outline stays with that one picture.
+                held[id] = f
                 model.updateFloatFrame(id, f)
+                motion.drag(id, model.drawsFloatHere(id) ? f : (model.layout.float(id)?.frame ?? f))
             }
             .onEnded { v in
                 let wasMoving = moving.contains(id)
@@ -569,7 +573,7 @@ struct WorkspaceFloatLayer: View {
                     model.endFloatGesture(id)
                     return
                 }
-                release(id, frame: motion.frames[id] ?? model.layout.float(id)?.frame ?? .unit, velocity: velocity(list))
+                release(id, frame: held[id] ?? motion.frames[id] ?? model.layout.float(id)?.frame ?? .unit, velocity: velocity(list))
             }
     }
 
@@ -582,13 +586,17 @@ struct WorkspaceFloatLayer: View {
     }
 
     /// Stays, glides on, or tucks into the edge its throw reaches (`WorkspaceFloatMotion.decide`).
+    /// `frame`: where the finger let go of it, past any edge. Let go short of a tuck it comes to
+    /// rest where its title pill is reachable, gliding from where it's drawn.
     private func release(_ id: String, frame: WorkspaceRect, velocity: (x: Double, y: Double)) {
         let size = pictureSize
         let shares = (x: velocity.x / size.width, y: velocity.y / size.height)
-        switch WorkspaceFloatMotion.decide(release: frame, velocity: velocity, in: size, edges: tuckEdges) {
+        let drawn = motion.frames[id] ?? model.layout.float(id)?.frame ?? frame
+        held[id] = nil
+        switch WorkspaceFloatMotion.decide(release: frame, velocity: velocity, in: size, edges: tuckEdges, safe: restArea) {
         case .settle(let target, let glide):
             if glide, !reduceMotion {
-                motion.glide(id, from: frame, to: target, velocity: shares, kind: .settle)
+                motion.glide(id, from: drawn, to: target, velocity: shares, kind: .settle)
             } else {
                 motion.drop(id)
                 model.endFloatGesture(id, frame: target)
@@ -598,7 +606,7 @@ struct WorkspaceFloatLayer: View {
             withAnimation(reduceMotion ? .easeOut(duration: 0.2) : nil) { model.tuckFloat(id, edge: edge, offset: offset) }
             // On along its throw, into the edge where its path crossed it.
             if reduceMotion { motion.drop(id) }
-            else { motion.glide(id, from: frame, to: WorkspaceFloatMotion.hiddenFrame(frame, edge: edge, along: offset), velocity: shares, kind: .tucking) }
+            else { motion.glide(id, from: drawn, to: WorkspaceFloatMotion.hiddenFrame(drawn, edge: edge, along: offset), velocity: shares, kind: .tucking) }
             tucked(id, edge)
         }
     }
@@ -740,6 +748,14 @@ struct WorkspaceFloatLayer: View {
     /// The edges a float may be thrown into now (those with room for a handle).
     private var tuckEdges: Set<WorkspaceEdge> { WorkspaceFloatGeometry.tuckEdges(area: handleArea) }
 
+    /// `handleArea` as shares of the picture: where a float's title pill must be when it comes to
+    /// rest (in the safe area, clear of the system's edge bands). nil: the whole picture.
+    private var restArea: WorkspaceRect? {
+        guard let a = handleArea, picture.width > 0, picture.height > 0 else { return nil }
+        return WorkspaceRect(x: (a.x - Double(picture.minX)) / Double(picture.width), y: (a.y - Double(picture.minY)) / Double(picture.height),
+                             width: a.width / Double(picture.width), height: a.height / Double(picture.height))
+    }
+
     /// Every handle, in reading order around the edges (left, top, right, bottom).
     private func tuckHandles() -> [Handle] {
         guard let area = handleArea else { return [] }
@@ -808,7 +824,7 @@ struct WorkspaceFloatLayer: View {
     private var armedEdges: some View {
         let edges = tuckEdges
         ForEach(Array(moving).sorted(), id: \.self) { id in
-            if docking != id, let f = motion.frames[id], let edge = WorkspaceFloatMotion.pulledEdge(f, edges: edges),
+            if docking != id, let f = held[id] ?? motion.frames[id], let edge = WorkspaceFloatMotion.pulledEdge(f, edges: edges),
                let area = handleArea {
                 let mark = armedMark(f, edge: edge, area: area)
                 Capsule()
