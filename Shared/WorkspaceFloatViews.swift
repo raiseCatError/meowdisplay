@@ -101,6 +101,10 @@ final class WorkspaceFloatMotionDriver: NSObject, ObservableObject {
         /// Path per second.
         var v: Double
         var start: CFTimeInterval
+        /// The spring's response (seconds).
+        var response = 0.42
+        /// A finger holds it (a peek): it stays where it got to.
+        var held = false
         var done: (@MainActor () -> Void)?
     }
 
@@ -150,6 +154,23 @@ final class WorkspaceFloatMotionDriver: NSObject, ObservableObject {
         startLink()
     }
 
+    /// A finger came down on a tucked float's strip: it comes `p` of the way out (a peek) with a
+    /// quick spring from where it's drawn now, and stays there under the finger. Every later move
+    /// (a pull, letting go, sliding back in) carries on from wherever it is drawn, never from
+    /// where a separate animation was heading, so it never jumps.
+    func peekEdge(_ id: String, path: WorkspaceFloatGeometry.EdgePath, to p: Double) {
+        let from = edges[id].map { $0.path == path ? $0.p : 0 } ?? 0
+        edges[id] = EdgeState(path: path, p: from, kind: nil)
+        edgeGlides[id] = EdgeGlide(from: from, to: p, v: 0, start: CACurrentMediaTime(), response: 0.26, held: true)
+        startLink()
+    }
+
+    /// How fast a tucked float is moving along its edge path now (path per second).
+    func edgeVelocity(_ id: String) -> Double {
+        guard let g = edgeGlides[id] else { return 0 }
+        return WorkspaceFloatMotion.spring(from: g.from, to: g.to, velocity: g.v, t: CACurrentMediaTime() - g.start, response: g.response).velocity
+    }
+
     /// Back to its strip at rest (or gone, once it's out).
     func dropEdge(_ id: String) { edges[id] = nil; edgeGlides[id] = nil; stopIfIdle() }
 
@@ -184,10 +205,10 @@ final class WorkspaceFloatMotionDriver: NSObject, ObservableObject {
         for (id, g) in edgeGlides {
             if now - g.start >= Self.duration {
                 edgeGlides[id] = nil
-                edges[id] = nil
+                if g.held { edges[id]?.p = g.to } else { edges[id] = nil }
                 g.done?()
             } else {
-                edges[id]?.p = WorkspaceFloatMotion.spring(from: g.from, to: g.to, velocity: g.v, t: now - g.start).value
+                edges[id]?.p = WorkspaceFloatMotion.spring(from: g.from, to: g.to, velocity: g.v, t: now - g.start, response: g.response).value
             }
         }
         stopIfIdle()
@@ -300,10 +321,7 @@ struct WorkspaceFloatLayer: View {
             Task { @MainActor in
                 for id in handleTouches.keys where !handlesHeld.contains(id) {
                     guard let t = handleTouches.removeValue(forKey: id) else { continue }
-                    if t.mode == .pull { pullFellShort(id) }
-                    else if t.mode == .peek, motion.edges[id]?.kind == nil {
-                        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.26, dampingFraction: 0.86)) { motion.dropEdge(id) }
-                    }
+                    if t.mode == .pull || t.mode == .peek { pullFellShort(id) }
                 }
             }
         }
@@ -884,8 +902,9 @@ struct WorkspaceFloatLayer: View {
     /// a pull left it, carrying the finger's speed, `velocity`: share of the way per second) to
     /// where it comes back to, and the Mac's live window takes over where it lands (lifted on the
     /// way where the Mac can, so it's never on screen twice). It fades in there with Reduce Motion,
-    /// or when there's no way out to draw. One haptic.
-    private func restore(_ id: String, velocity: Double = 0) {
+    /// or when there's no way out to draw. One haptic. `velocity` nil: as fast as it's moving now
+    /// (a tap while it peeks).
+    private func restore(_ id: String, velocity: Double? = nil) {
         if motion.edges[id]?.kind == .restoring { return }   // on its way out already
         guard model.layout.float(id)?.tuck != nil else { motion.dropEdge(id); return }
         let held = motion.edges[id].flatMap { $0.kind == .tucking ? nil : $0 }
@@ -900,6 +919,7 @@ struct WorkspaceFloatLayer: View {
             return
         }
         let back = shares(path.to)
+        let speed = velocity ?? (held == nil ? 0 : motion.edgeVelocity(id))
         Self.haptic(.drop)
         if reduceMotion {
             withAnimation(.easeOut(duration: 0.2)) {
@@ -913,22 +933,23 @@ struct WorkspaceFloatLayer: View {
         if model.canLiftFloats {
             // Shown again now, so its capture starts on the way, but left out by the Mac until it lands.
             model.beginRestoringFloat(id, frame: back)
-            motion.glideEdge(id, path: path, from: start, to: 1, velocity: velocity, kind: .restoring) { [model] in model.endFloatGesture(id) }
+            motion.glideEdge(id, path: path, from: start, to: 1, velocity: speed, kind: .restoring) { [model] in model.endFloatGesture(id) }
         } else {
             // A Mac without lift draws it as soon as it's shown: shown once it's out.
-            motion.glideEdge(id, path: path, from: start, to: 1, velocity: velocity, kind: .restoring) { [model] in model.untuckFloat(id, frame: back) }
+            motion.glideEdge(id, path: path, from: start, to: 1, velocity: speed, kind: .restoring) { [model] in model.untuckFloat(id, frame: back) }
         }
     }
 
-    /// A pull let go short of the restore point (or cancelled): the same picture slides back into
-    /// its edge, carrying the finger's speed (share of the way per second).
-    private func pullFellShort(_ id: String, velocity: Double = 0) {
+    /// A pull let go short of the restore point, a peek let go of without a tap (pushed back, or
+    /// cancelled): the same picture slides back into its edge from where it's drawn, carrying the
+    /// finger's speed (share of the way per second; nil: as fast as it's moving now).
+    private func pullFellShort(_ id: String, velocity: Double? = nil) {
         guard let s = motion.edges[id], s.kind == nil else { return }
         if reduceMotion {
             withAnimation(.easeOut(duration: 0.2)) { motion.dropEdge(id) }
             return
         }
-        motion.glideEdge(id, path: s.path, from: s.p, to: 0, velocity: velocity, kind: .returning)
+        motion.glideEdge(id, path: s.path, from: s.p, to: 0, velocity: velocity ?? motion.edgeVelocity(id), kind: .returning)
     }
 
     /// While a float is dragged more than halfway past an edge (letting go would tuck it there),
@@ -1197,10 +1218,14 @@ struct WorkspaceFloatLayer: View {
                 t.start = s.p
                 motion.holdEdge(id, path: s.path, p: s.p)
             } else if let path = pullPath(id) {
-                // Touched: it comes out a little more (a peek).
-                t.start = path.progress(inward: WorkspaceFloatGeometry.peekDepth - WorkspaceFloatGeometry.stripDepth)
-                withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.26, dampingFraction: 0.78)) {
-                    motion.holdEdge(id, path: path, p: t.start)
+                // Touched: it comes out a little more (a peek), driven like every other move of it,
+                // so a tap or a pull carries on from wherever the peek has got to.
+                let peek = path.progress(inward: WorkspaceFloatGeometry.peekDepth - WorkspaceFloatGeometry.stripDepth)
+                t.start = peek
+                if reduceMotion {
+                    withAnimation(.easeOut(duration: 0.15)) { motion.holdEdge(id, path: path, p: peek) }
+                } else {
+                    motion.peekEdge(id, path: path, to: peek)
                 }
             }
         }
@@ -1209,9 +1234,15 @@ struct WorkspaceFloatLayer: View {
             // A strip waiting on another edge than its own (its own is full of controls) isn't slid.
             let slides = model.layout.float(id)?.tuck?.edge == tab.edge
             t.mode = abs(along) > abs(inward) ? (slides ? .slide : .away) : (inward > 0 ? .pull : .away)
-            if t.mode != .pull {
-                // Slid along its edge or pushed back in: the peek goes back in.
+            switch t.mode {
+            case .pull:
+                // From where the peek is drawn now: the window never jumps to meet the finger.
+                if let s = motion.edges[id], s.kind == nil { t.start = s.p }
+            case .slide:
+                // Slid along its edge: the peek goes back in as the strip follows the finger.
                 withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.26, dampingFraction: 0.86)) { motion.dropEdge(id) }
+            case .away, .peek:
+                pullFellShort(id)   // pushed back in: the peek slides back
             }
         }
         handleTouches[id] = t
