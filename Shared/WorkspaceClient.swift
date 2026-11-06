@@ -1340,8 +1340,17 @@ final class WorkspaceModel: ObservableObject {
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
         // Never an empty pane: a window that leaves a pane closes it up and the rest grow.
-        let next = change(arranged).compacted()
-        guard next != arranged else { return }
+        let changed = change(arranged).compacted()
+        guard changed != arranged else { return }
+        // A float tucked here only because the Mac can't draw floats isn't saved tucked by an
+        // unrelated change: it shows again on a Mac that can.
+        var next = changed
+        for i in next.floats.indices {
+            let id = next.floats[i].tile
+            if saved.float(id).map({ $0.tuck == nil }) == true, let shown = arranged.float(id)?.tuck, next.floats[i].tuck == shown {
+                next.floats[i].tuck = nil
+            }
+        }
         history.record(saved)
         var updated = next
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
@@ -1984,8 +1993,12 @@ extension WorkspaceModel {
         return r.width > 0 && r.height > 0 ? r.width / r.height : nil
     }
 
+    /// Where a new float opens: where it was dropped, else the next place in the cascade that no
+    /// shown float sits on (a phone shows several, like an iPad).
     private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
-        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
+        if let center { return WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, center: center) }
+        let shown = space == nil ? layout.floats.filter { $0.tuck == nil }.map(\.frame) : []
+        return WorkspaceFloatGeometry.openingFrame(aspect: aspect, in: space ?? size, avoiding: shown)
     }
 
     /// A window can open floating from here: in Window view, or over the mirrored desktop (Window
@@ -2035,7 +2048,6 @@ extension WorkspaceModel {
         let id = "w\(nextTile)"; nextTile += 1
         let frame = newFloatFrame(aspect: aspect, at: center)
         edit { $0.addingFloat(WorkspaceTile(id: id, source: source), frame: frame) }
-        if compactSpace { tuckOthers(than: id) }
         focus(id, raise: false)
     }
 
@@ -2057,7 +2069,6 @@ extension WorkspaceModel {
             if localFullscreen == id { localFullscreen = nil }
             edit { $0.floatingPane(id, frame: frame) }
         }
-        if compactSpace { tuckOthers(than: floated) }
         focus(floated, raise: false)
     }
 
@@ -2228,12 +2239,10 @@ extension WorkspaceModel {
         sendNow()
     }
 
-    /// Back where it was, in front and focused. On a compact screen the float shown before
-    /// tucks in its place (one shows at a time there).
+    /// Back where it was, in front and focused. The other floats stay as they are, on a phone too.
     func untuckFloat(_ id: String) {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
         edit { $0.untuckingFloat(id) }
-        if compactSpace { tuckOthers(than: id) }
         focus(id, raise: false)
     }
 
@@ -2250,17 +2259,6 @@ extension WorkspaceModel {
         if localFullscreen == id { localFullscreen = nil }
         edit { $0.removing(id) }
         refocus(after: id)
-    }
-
-    private var compactSpace: Bool { WorkspaceFloatGeometry.visibleLimit(for: size) <= 1 }
-
-    private func tuckOthers(than id: String) {
-        let others = saved.visibleFloatIDs.filter { $0 != id }
-        guard !others.isEmpty else { return }
-        var next = saved
-        for (i, o) in others.enumerated() { next = next.tuckingFloat(o, edge: .right, offset: min(0.3 + Double(i) * 0.12, 0.85)) }
-        saved = next
-        persist(); publish(); scheduleSend()
     }
 
     /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,

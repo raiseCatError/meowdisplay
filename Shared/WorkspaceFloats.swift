@@ -270,12 +270,6 @@ enum WorkspaceFloatGeometry {
         return WorkspaceSize(width: min(w, size.width), height: min(h, max(size.height - barHeight, 1)))
     }
 
-    /// Visible floats at a time: one on a compact screen (a phone, or an iPad in a narrow
-    /// window), as many as the workspace holds otherwise. More are kept tucked, never closed.
-    static func visibleLimit(for size: WorkspaceSize) -> Int {
-        WorkspaceSizeClass.of(size) == .compact ? 1 : WorkspaceLayout.maximumTiles
-    }
-
     /// `rect` kept usable on this picture: at least the minimum size, at most the picture, the
     /// whole content and the title bar on screen.
     static func clamped(_ rect: WorkspaceRect, in size: WorkspaceSize) -> WorkspaceRect {
@@ -291,8 +285,10 @@ enum WorkspaceFloatGeometry {
         return WorkspaceRect(x: x, y: y, width: w, height: h)
     }
 
-    /// Where a new float opens. `aspect`: the window's width / height when known. `index`: how
-    /// many floats are already shown (each new one cascades). `center`: where it was dropped.
+    /// Where a new float opens. `aspect`: the window's width / height when known. `index`: its
+    /// place in the cascade: each one steps `cascade` points from the one before (up and across
+    /// from the bottom on a phone, down and across on a larger screen), starting over on an axis
+    /// before it would leave the picture. `center`: where it was dropped.
     static func defaultFrame(aspect: Double?, in size: WorkspaceSize, index: Int = 0, center: WorkspacePoint? = nil) -> WorkspaceRect {
         guard size.width > 0, size.height > 0 else { return WorkspaceRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4) }
         let a = (aspect ?? 1.5).isFinite && (aspect ?? 0) > 0 ? aspect! : 1.5
@@ -308,46 +304,60 @@ enum WorkspaceFloatGeometry {
             w = size.width * 0.42; h = min(w / a, size.height * 0.62)
         }
         if h < w / a { w = h * a }   // keep the window's shape when the height ran out
-        let step = Double(index) * cascade
         var x: Double, y: Double
         if let c = center {
             x = c.x * size.width - w / 2; y = c.y * size.height - h / 2
-        } else if compact && portrait {
-            x = (size.width - w) / 2; y = size.height - h - 24 - step
-        } else if compact {
-            x = size.width - w - 24 - step; y = size.height - h - 24 - step
         } else {
-            x = size.width * 0.5 - w / 2 + step; y = size.height * 0.18 + step
+            // Where the first one goes and which way the next ones step.
+            let x0: Double, y0: Double, sx: Double, sy: Double
+            if compact && portrait {
+                x0 = (size.width - w) / 2; y0 = size.height - h - 24; sx = 1; sy = -1
+            } else if compact {
+                x0 = size.width - w - 24; y0 = size.height - h - 24; sx = -1; sy = -1
+            } else {
+                x0 = size.width * 0.5 - w / 2; y0 = size.height * 0.18; sx = 1; sy = 1
+            }
+            let roomX = sx > 0 ? size.width - w - x0 : x0
+            let roomY = sy > 0 ? size.height - h - y0 : y0 - barHeight
+            func steps(_ room: Double) -> Int { max(Int((max(room, 0) / cascade).rounded(.down)) + 1, 1) }
+            let i = max(index, 0)
+            x = x0 + sx * Double(i % steps(roomX)) * cascade
+            y = y0 + sy * Double(i % steps(roomY)) * cascade
         }
         return clamped(WorkspaceRect(x: x / size.width, y: y / size.height, width: w / size.width, height: h / size.height), in: size)
     }
 
-    /// The floats as shown in this space: each kept usable (clamped), and on a compact screen
-    /// only one shown (the active one if it floats, else the frontmost): the rest wait tucked.
-    /// `shown` false (the Mac can't draw floats): all of them wait tucked.
-    static func fitted(_ floats: [WorkspaceFloat], in size: WorkspaceSize, active: String?, shown: Bool = true) -> [WorkspaceFloat] {
+    /// Where a new float opens among the floats shown now (`shown`, picture shares): the first
+    /// place in the cascade that isn't on top of one of them (within half a step of where one is),
+    /// so a new float never hides the one before it exactly.
+    static func openingFrame(aspect: Double?, in size: WorkspaceSize, avoiding shown: [WorkspaceRect]) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0 else { return defaultFrame(aspect: aspect, in: size) }
+        let near = cascade / 2
+        func taken(_ r: WorkspaceRect) -> Bool {
+            shown.contains { abs(($0.x - r.x) * size.width) < near && abs(($0.y - r.y) * size.height) < near }
+        }
+        for i in 0..<(WorkspaceLayout.maximumTiles * 2) {
+            let r = defaultFrame(aspect: aspect, in: size, index: i)
+            if !taken(r) { return r }
+        }
+        return defaultFrame(aspect: aspect, in: size, index: shown.count)
+    }
+
+    /// The floats as shown in this space: each kept usable (clamped). A phone shows as many as an
+    /// iPad (the tile budget, `WorkspaceLayout.maximumTiles`, is the only limit): a small screen
+    /// never tucks, resizes or removes one. `shown` false (the Mac can't draw floats): all of
+    /// them wait tucked, here only (`WorkspaceModel` doesn't save that).
+    static func fitted(_ floats: [WorkspaceFloat], in size: WorkspaceSize, shown: Bool = true) -> [WorkspaceFloat] {
         var out = floats.map { f -> WorkspaceFloat in
             var c = f
             c.frame = clamped(f.frame, in: size)
             return c
         }
-        func tuck(_ i: Int) {
-            guard out[i].tuck == nil else { return }
+        guard !shown else { return out }
+        for i in out.indices where out[i].tuck == nil {
             let count = out.filter { $0.tuck?.edge == .right }.count
             out[i].tuck = WorkspaceFloatTuck(edge: .right, offset: min(0.3 + Double(count) * 0.12, 0.85))
         }
-        guard shown else {
-            for i in out.indices { tuck(i) }
-            return out
-        }
-        let limit = visibleLimit(for: size)
-        let visible = out.indices.filter { out[$0].tuck == nil }
-        guard visible.count > limit else { return out }
-        var keep = Array(visible.suffix(limit))
-        if let active, let a = visible.first(where: { out[$0].tile == active }), !keep.contains(a) {
-            keep[keep.count - 1] = a
-        }
-        for i in visible where !keep.contains(i) { tuck(i) }
         return out
     }
 

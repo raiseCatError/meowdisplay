@@ -1527,7 +1527,7 @@ enum WorkspaceAdaptation {
         guard ordered.count > capacity else {
             guard !saved.floats.isEmpty else { return Result(visible: saved, stacked: []) }
             var visible = saved
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             return Result(visible: visible, stacked: [])
         }
         var shown = Array(ordered.prefix(capacity))
@@ -1542,7 +1542,7 @@ enum WorkspaceAdaptation {
         if !saved.floats.isEmpty {
             // Floats don't take the tree's room: they stay, fitted to this space.
             for f in saved.floats { visible.tiles[f.tile] = saved.tiles[f.tile] }
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             visible.normalize()
         }
         if let m = saved.maximized, shown.contains(m) || saved.isFloat(m) { visible.maximized = m }

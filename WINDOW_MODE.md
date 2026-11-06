@@ -51,8 +51,12 @@ moved, resized or brought forward.
 | Overlapping | A float's outline, title and handles are drawn by this device over the Mac's picture. Where a float is in front, what's behind it (a pane's outline, divider, title, a float's outline, title pill, grips or grabber) steps aside and takes no touches there, so nothing shows through the front float or catches its touches. The resize grips and the bottom grabber show only on the selected float, under the pointer, or while it moves or resizes |
 | VoiceOver | Each float is an element with actions: Bring to Front, Move Left/Right/Up/Down, Make Larger/Smaller, Tuck to Left/Right/Top/Bottom Edge, Add to Layout, Fullscreen on This Device, Remove from This Device; tucking says which edge it went to. Each sliver is a button named **Restore** and the window's name, says which edge it waits at, and has Restore and Remove from This Device actions; the slivers are read together, around the edges from the left (left, top, right, bottom). A shared handle is a button with a menu of its windows |
 
-On iPhone (and other compact screens) one float shows at a time; opening or
-restoring another tucks the one before. Floats stay where you left them
+An iPhone shows several floats at once, overlapping like on an iPad: as many as
+the workspace's nine windows allow (one pane and eight floats). Each new one opens
+a step up and across from the one before (the first at the bottom centre), never
+exactly on top of another. Bringing one to the front or back from its edge never
+tucks, resizes or removes the others, and a small screen never does either; the
+Mac's own capture limits still apply (a window over them says so). Floats stay where you left them
 through rotation, reconnects and saved layouts (a layout saved with floats
 opens on older versions of the app with the panes only). A Mac that doesn't
 offer floating windows (an older MeowDisplay) keeps them tucked until you
