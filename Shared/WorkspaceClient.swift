@@ -579,8 +579,9 @@ final class WorkspaceModel: ObservableObject {
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
     /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
-    /// Tucked floats' edge handles (global), for anything that wants to know where they are.
-    /// Stage Peek doesn't dodge them any more: they keep clear of it (`edgeReservationsGlobal`).
+    /// Where tucked floats' edge handles take touches (global): the dividers' holds above them
+    /// leave them free. Stage Peek doesn't dodge them any more: they keep clear of it
+    /// (`edgeReservationsGlobal`).
     @Published var floatHandlesGlobal: [CGRect] = []
     /// What tucked floats' edge handles keep clear of (global), set by the app next to where Stage
     /// Peek learns what to avoid: the screen (its top and bottom belong to the system's own edge

@@ -869,9 +869,10 @@ struct WorkspaceFloatLayer: View {
             .map { Handle(key: "\($0.edge.rawValue)-" + $0.ids.joined(separator: ","), tab: $0) }
     }
 
+    /// Where the strips take touches (global), for the chrome above them to leave free.
     private func publishHandles(_ handles: [Handle]) {
         let o = toGlobal
-        let rects = handles.map { CGRect(x: $0.tab.rect.x + o.x, y: $0.tab.rect.y + o.y, width: $0.tab.rect.width, height: $0.tab.rect.height) }
+        let rects = handles.map { WorkspaceFloatGeometry.touchArea($0.tab).cgRect.offsetBy(dx: o.x, dy: o.y) }
         if model.floatHandlesGlobal != rects { model.floatHandlesGlobal = rects }
     }
 

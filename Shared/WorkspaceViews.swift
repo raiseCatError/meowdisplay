@@ -899,8 +899,9 @@ struct WorkspaceChromeView: View {
     private func dividerHolds(_ frames: WorkspaceFrames) -> some View {
         // A divider takes touches only where no float covers it: a touch on a float drawn over a
         // divider goes to that float's window, never to the divider under it. One view per divider
-        // (its identity never changes while it's held), its touch shape cut around the floats.
-        let covers = floatOccluders(frames).map(WorkspaceRect.init)
+        // (its identity never changes while it's held), its touch shape cut around the floats, and
+        // around tucked floats' strips where it meets an edge (a tap on a strip brings its window back).
+        let covers = (floatOccluders(frames) + stripTouchAreas).map(WorkspaceRect.init)
         ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, divider in
             let r = divider.hitRect.onScreen(picture)
             let horizontal = divider.axis == .horizontal
@@ -941,6 +942,12 @@ struct WorkspaceChromeView: View {
                 })
             .accessibilityHidden(true)   // VoiceOver uses Arrange Panes
         }
+    }
+
+    /// Where tucked floats' strips take touches (this view's coordinates).
+    private var stripTouchAreas: [CGRect] {
+        let dx = picture.minX - model.pictureGlobal.minX, dy = picture.minY - model.pictureGlobal.minY
+        return model.floatHandlesGlobal.map { $0.offsetBy(dx: dx, dy: dy) }
     }
 }
 
