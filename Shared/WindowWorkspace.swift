@@ -1586,6 +1586,12 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
     }
 
+    /// The last step recorded `layout` and the change came to nothing (a float's move cancelled
+    /// back to where it was): no undo step for it.
+    mutating func forget(_ layout: WorkspaceLayout) {
+        if past.last == layout { past.removeLast() }
+    }
+
     /// The layout before the last change. With `current`, that change can be redone.
     mutating func undo(current: WorkspaceLayout? = nil) -> WorkspaceLayout? {
         guard let previous = past.popLast() else { return nil }

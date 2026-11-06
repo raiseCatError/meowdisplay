@@ -1321,7 +1321,8 @@ struct WorkspaceDropOverlay: View {
                 let target = model.dropTarget(forGlobal: d.location)
                 if let target { preview(target, item: d.item) }
                 if d.placement == .float, let f = model.floatDropPreview(forGlobal: d.location) { floatPreview(f) }
-                if model.canPlace(d.item, .float) || d.placement == .float { placementChip(d) }
+                // A float being docked shows it too: circling again turns it back into the float.
+                if model.canPlace(d.item, .float) || d.placement == .float || d.isFloat { placementChip(d) }
                 // Circling toward the other placement: a ring that fills just above the finger.
                 if model.placementSwitchProgress > 0, model.pictureGlobal.width > 0 {
                     WorkspacePlacementRing(progress: model.placementSwitchProgress, toFloating: d.placement == .pane)

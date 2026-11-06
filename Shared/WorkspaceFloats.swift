@@ -777,3 +777,50 @@ struct WorkspaceCircleGesture: Equatable, Sendable {
         return true
     }
 }
+
+// MARK: - Docking a float by circling while moving it
+
+/// A finger moving a float by its title or grabber. Circling (`WorkspaceCircleGesture`) switches
+/// it into docking the float into the panes (`.dock`: it folds into a card under the finger and
+/// the pane drop targets show) and back (`.float`: the card opens into the float under the
+/// finger). A shake, a zig-zag, a figure eight, a straight move or a pause never switches, and
+/// circling on after a switch never switches back until it has stopped. It keeps how the float
+/// was before the finger took it, so Cancel puts it back exactly (`restoring`). Pure.
+struct WorkspaceFloatMove: Equatable, Sendable {
+    enum Switch: Equatable, Sendable { case dock, float }
+
+    let id: String
+    /// The float's frame, and its place among the floats (back to front), before the finger took it.
+    let frame: WorkspaceRect
+    let index: Int
+    /// Folded into a card and being docked (else moving as a float).
+    private(set) var docking = false
+    private(set) var circling = WorkspaceCircleGesture()
+
+    /// Nil when `id` isn't a float of `layout`.
+    init?(_ id: String, in layout: WorkspaceLayout) {
+        guard let i = layout.floats.firstIndex(where: { $0.tile == id }) else { return nil }
+        self.id = id
+        frame = layout.floats[i].frame
+        index = i
+    }
+
+    /// One finger position (points) at `t` (seconds): the switch it makes, if any.
+    mutating func add(x: Double, y: Double, at t: Double) -> Switch? {
+        guard circling.add(x: x, y: y, at: t) else { return nil }
+        docking.toggle()
+        return docking ? .dock : .float
+    }
+
+    /// `layout` with the float back as the finger found it: its frame and its place among the
+    /// floats. Its view (Fit or Fill, zoom, rotation) never changes while it moves or docks.
+    func restoring(_ layout: WorkspaceLayout) -> WorkspaceLayout {
+        guard let i = layout.floats.firstIndex(where: { $0.tile == id }) else { return layout }
+        var copy = layout
+        var f = copy.floats.remove(at: i)
+        f.frame = frame
+        copy.floats.insert(f, at: min(index, copy.floats.count))
+        copy.normalize()
+        return copy
+    }
+}
