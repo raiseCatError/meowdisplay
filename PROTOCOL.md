@@ -2230,15 +2230,18 @@ currently never sends it (research: RESEARCH-2026-10-30-add-to-stage.md in the i
 
 While Mission Control is open on the Mac, macOS pauses every window capture. In Window mode the
 Mac then adds `"missionControl":"open"` to `workspaceState` and holds paused panes as `paused`
-without restarting them (no reconnect loop); without the field it is closed. Receivers show one
-banner at the top of Window view, above every pane and floating pane ("Mission Control is open
-on your Mac. Video is paused."), with one button: Exit Mission Control with control, Request
-Control without it (then Exit), Awaiting Approval while asked, or, when the Mac takes no control
-requests from this device, the text "Press Esc on the Mac to close it." Paused, waiting or
-retrying panes also say "Paused while Mission Control is open"; tapping that does what the
-banner offers. (Before 2026-11, one pane offered the button inline, and floats or a float over
-that pane's title could hide it.) When it closes, macOS resumes the captures; a pane still paused
-after the usual 2 s gets one fresh stream.
+without restarting them (no reconnect loop); without the field it is closed. Display sources
+(Full Desktop in a pane) keep streaming: the display shows Mission Control itself. Receivers say
+so only on the Window-view panes and floats it holds (a window source that is `paused`, `waiting`
+or `retrying` while the field is present; never a display): "Paused while Mission Control is open",
+with one button: Exit Mission Control with control, Request Control to Exit without it (then
+Exit), Awaiting Approval while asked, or, when the Mac takes no control requests from this device,
+the text "Press Esc on the Mac to close it." Its × folds it on that device to a small "Paused ·
+Mission Control" status that brings it back; nothing is sent. The pane's menu and its
+accessibility action offer the same way out. Folds are forgotten when Mission Control closes.
+(Before 2026-11: one banner over all of Window view, covering a Full Desktop pane that was fine,
+and before that one pane's inline button, which floats could hide.) When it closes, macOS resumes
+the captures; a pane still paused after the usual 2 s gets one fresh stream.
 
 `{"type":"windowAction","action":"missionControl","exit":true}` (needs control): the Mac checks
 that Mission Control is open right now and only then posts Escape; otherwise nothing is sent.
