@@ -669,8 +669,9 @@ final class WorkspaceModel: ObservableObject {
     var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
     /// Whether this device extends the Mac now (outside Window view), as the Mac confirmed.
     var extending: () -> Bool = { false }
-    /// Seconds, for waits measured here (tests step it).
-    var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Seconds, for waits measured here (tests step it). Not `systemUptime`: a required-reason API
+    /// the iOS privacy manifest doesn't declare (the other planners here use the same clock).
+    var clock: () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
 
     /// A step that would start Window view from Extend, waiting for the person to confirm it.
     struct LeaveExtendRequest: Identifiable {
