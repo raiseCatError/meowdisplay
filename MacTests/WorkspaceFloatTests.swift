@@ -186,7 +186,7 @@ final class WorkspaceFloatTests: XCTestCase {
     }
 
     /// Rotation, a compact screen and a Mac without floats: floats are kept usable or tucked,
-    /// never dropped; the saved arrangement is untouched.
+    /// never dropped; the saved arrangement is untouched. A phone shows every float, like an iPad.
     func testAdaptationKeepsEveryFloat() {
         let l = threePanes().floatingPane("b", frame: WorkspaceRect(x: 0.7, y: 0.6, width: 0.1, height: 0.1))
             .addingFloat(tile("f", 40), frame: box)
@@ -197,9 +197,11 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(wide.visible.visibleFloatIDs.count, 2)
 
         let small = WorkspaceAdaptation.adapt(l, to: phone, active: "b")
-        XCTAssertEqual(small.visible.visibleFloatIDs, ["b"], "one float shows on a phone: the active one")
-        XCTAssertNotNil(small.visible.float("f")?.tuck, "the other waits tucked")
+        XCTAssertEqual(small.visible.visibleFloatIDs, ["b", "f"], "both show on a phone, in their order")
+        XCTAssertNil(small.visible.float("f")?.tuck, "a small screen never tucks one")
         XCTAssertEqual(small.visible.floatIDs.count, 2)
+        let landscape = WorkspaceAdaptation.adapt(l, to: WorkspaceSize(width: phone.height, height: phone.width), active: nil)
+        XCTAssertEqual(landscape.visible.visibleFloatIDs, ["b", "f"])
 
         let old = WorkspaceAdaptation.adapt(l, to: ipad, active: nil, floatsShown: false)
         XCTAssertTrue(old.visible.visibleFloatIDs.isEmpty)
@@ -278,22 +280,24 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(edge.width * ipad.width / (edge.height * ipad.height), 3, accuracy: 0.01, "too big: shrunk, same shape")
     }
 
-    /// Several tucked floats on one edge: tabs that never overlap, kept out of the system's
+    /// Several tucked floats on one edge: strips that never overlap, kept out of the system's
     /// top and bottom bands; too many collapse into one stack.
     func testTuckedTabsStackWithoutOverlapping() {
         let area = WorkspaceRect(x: 0, y: 0, width: 1180, height: 820)
-        let three = WorkspaceFloatGeometry.tuckTabs([("a", 0.5), ("b", 0.5), ("c", 0.52)], edge: .right, area: area)
+        let card = WorkspaceSize(width: 240, height: 150)
+        let three = WorkspaceFloatGeometry.tuckTabs([("a", 0.5, card), ("b", 0.5, card), ("c", 0.52, card)], edge: .right, area: area)
         XCTAssertEqual(three.count, 3)
+        XCTAssertTrue(three.allSatisfy { $0.rect.height == 150 }, "each as long as its float")
         for (i, t) in three.enumerated() {
             XCTAssertEqual(t.rect.maxX, area.maxX, accuracy: 1e-9)
             XCTAssertGreaterThanOrEqual(t.rect.y, area.height * WorkspaceFloatGeometry.tabBand - 1e-9)
             XCTAssertLessThanOrEqual(t.rect.maxY, area.height * (1 - WorkspaceFloatGeometry.tabBand) + 1e-9)
             for other in three[(i + 1)...] { XCTAssertNil(t.rect.intersection(other.rect), "tabs never overlap") }
         }
-        let low = WorkspaceFloatGeometry.tuckTabs([("a", 0.99), ("b", 0.99)], edge: .left, area: area)
+        let low = WorkspaceFloatGeometry.tuckTabs([("a", 0.99, card), ("b", 0.99, card)], edge: .left, area: area)
         XCTAssertTrue(low.allSatisfy { $0.rect.maxY <= area.height * 0.88 + 1e-9 && $0.rect.x == 0 })
         let phoneEdge = WorkspaceRect(x: 0, y: 0, width: 844, height: 300)
-        let crowded = WorkspaceFloatGeometry.tuckTabs((0..<5).map { ("f\($0)", 0.5) }, edge: .right, area: phoneEdge)
+        let crowded = WorkspaceFloatGeometry.tuckTabs((0..<5).map { ("f\($0)", 0.5, card) }, edge: .right, area: phoneEdge)
         XCTAssertEqual(crowded.count, 1)
         XCTAssertEqual(crowded[0].ids.count, 5)
         XCTAssertTrue(crowded[0].isStack)
@@ -508,9 +512,10 @@ final class WorkspaceFloatTests: XCTestCase {
 
     @MainActor
     private func connectedModel(features: Set<String>, drawsFloats: Bool = true, window: Bool = true,
-                                displays: [[String: Any]] = [],
+                                displays: [[String: Any]] = [], windows: [Int] = [10, 11, 12],
+                                defaults suite: UserDefaults? = nil,
                                 sent: @escaping ([String: Any]) -> Void) -> WorkspaceModel {
-        let defaults = UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
+        let defaults = suite ?? UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
         let m = WorkspaceModel(defaults: defaults)
         m.floatsDrawnHere = drawsFloats   // the iPhone/iPad receiver (this test runs on the Mac)
         m.send = { sent($0); return true }
@@ -520,7 +525,7 @@ final class WorkspaceFloatTests: XCTestCase {
         m.apply(.mode(window: window))
         m.apply(WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
             "type": WireMessage.windowCatalog, "host": "mac-a",
-            "windows": [10, 11, 12].map { ["id": $0, "gen": 5, "bundle": "app.\($0)", "app": "App\($0)", "title": "t", "w": 1600, "h": 1000, "state": "visible"] },
+            "windows": windows.map { ["id": $0, "gen": 5, "bundle": "app.\($0)", "app": "App\($0)", "title": "t", "w": 1600, "h": 1000, "state": "visible"] },
             "apps": [], "displays": displays,
         ])!)
         m.updateSpace(ipad, hinge: nil)
@@ -567,7 +572,8 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(request.last?["layer"] as? String, "float")
         XCTAssertEqual(request.last?["z"] as? Int, 0)
         XCTAssertEqual(request.last?["window"] as? Int, 12)
-        XCTAssertEqual(request.last?["x"] as? Double ?? -1, 0.1, accuracy: 1e-9, "the frame the finger left")
+        XCTAssertEqual(request.last?["x"] as? Double ?? -1, 0.7, accuracy: 1e-9, "back from the right edge: flush with it, where it waited")
+        XCTAssertEqual(request.last?["w"] as? Double ?? -1, 0.3, accuracy: 1e-9, "at the size the finger left")
         let allowed: Set<String> = [WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.workspaceBackdropRequest,
                                     WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest]
         XCTAssertTrue(sent.allSatisfy { allowed.contains($0["type"] as? String ?? "") },
@@ -634,7 +640,7 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(m.layout.float(front)?.frame, before.float(front)?.frame)
     }
 
-    /// Dragging: Pane placement keeps the existing drops; about two seconds of circling (or the
+    /// Dragging: Pane placement keeps the existing drops; circling, a circle and a bit (or the
     /// control) switches to Floating, where a drop floats the window at the finger; Cancel
     /// changes nothing. The ring's progress shows only while it can switch.
     @MainActor
@@ -1183,5 +1189,143 @@ final class WorkspaceFloatTests: XCTestCase {
         let big = WorkspaceFloatGeometry.carried(WorkspaceRect(x: 0.05, y: 0.1, width: 0.9, height: 0.5), from: phone, to: landscape)
         XCTAssertEqual(big.width * landscape.width / (big.height * landscape.height), (0.9 * phone.width) / (0.5 * phone.height), accuracy: 0.01)
         XCTAssertLessThanOrEqual(big.maxY, 1 + 1e-9)
+    }
+
+    // MARK: Several floats on a phone
+
+    private let iphone = WorkspaceSize(width: 430, height: 932)
+
+    /// The cascade on a phone: each new float steps up and across from the bottom-centre one, never
+    /// on top of the one before, always inside the picture; a moved-away float frees its place.
+    func testNewFloatsOnAPhoneCascadeInsideThePicture() {
+        for size in [iphone, phone, WorkspaceSize(width: iphone.height, height: iphone.width), ipad] {
+            var shown: [WorkspaceRect] = []
+            for n in 0..<8 {
+                let f = WorkspaceFloatGeometry.openingFrame(aspect: 1.6, in: size, avoiding: shown)
+                XCTAssertGreaterThanOrEqual(f.x, -1e-9, "\(size) #\(n)")
+                XCTAssertLessThanOrEqual(f.maxX, 1 + 1e-9, "\(size) #\(n)")
+                XCTAssertGreaterThanOrEqual(f.y * size.height, WorkspaceFloatGeometry.barHeight - 1e-6, "\(size) #\(n)")
+                XCTAssertLessThanOrEqual(f.maxY, 1 + 1e-9, "\(size) #\(n)")
+                for g in shown {
+                    let apart = abs(f.x - g.x) * size.width >= WorkspaceFloatGeometry.cascade / 2
+                        || abs(f.y - g.y) * size.height >= WorkspaceFloatGeometry.cascade / 2
+                    XCTAssertTrue(apart, "\(size) #\(n) opens on top of \(g)")
+                }
+                if let last = shown.last {
+                    XCTAssertGreaterThanOrEqual(max(abs(f.x - last.x) * size.width, abs(f.y - last.y) * size.height),
+                                                WorkspaceFloatGeometry.cascade - 1e-6, "visibly offset from the one before")
+                }
+                shown.append(f)
+            }
+        }
+        // Portrait: the first sits bottom-centre, the next one up and to the right.
+        let first = WorkspaceFloatGeometry.openingFrame(aspect: 1.6, in: iphone, avoiding: [])
+        XCTAssertEqual(first.midX, 0.5, accuracy: 1e-6)
+        XCTAssertEqual((1 - first.maxY) * iphone.height, 24, accuracy: 1e-6)
+        let second = WorkspaceFloatGeometry.openingFrame(aspect: 1.6, in: iphone, avoiding: [first])
+        XCTAssertEqual((second.x - first.x) * iphone.width, WorkspaceFloatGeometry.cascade, accuracy: 1e-6)
+        XCTAssertEqual((first.y - second.y) * iphone.height, WorkspaceFloatGeometry.cascade, accuracy: 1e-6)
+        // The first one moved away: its place is free again.
+        let moved = WorkspaceRect(x: 0.05, y: 0.1, width: first.width, height: first.height)
+        XCTAssertEqual(WorkspaceFloatGeometry.openingFrame(aspect: 1.6, in: iphone, avoiding: [moved, second]), first)
+    }
+
+    /// A phone shows several floats at once, like an iPad: two, three, and as many as the tile
+    /// budget holds (one pane and eight floats), each sent to the Mac. Raising one or bringing one
+    /// back from an edge never tucks another; rotating and reconnecting keep which are shown and
+    /// which wait tucked.
+    @MainActor
+    func testAPhoneShowsSeveralFloatsAtOnce() throws {
+        let suite = UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
+        let windows = Array(10...19)
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]
+        var sent: [[String: Any]] = []
+        let m = connectedModel(features: features, windows: windows, defaults: suite) { sent.append($0) }
+        m.updateSpace(iphone, hinge: nil)
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        for (n, item) in w[1...8].enumerated() {
+            m.openFloating(item)
+            XCTAssertEqual(m.layout.visibleFloatIDs.count, n + 1, "\(n + 1) floats shown at once")
+            XCTAssertEqual(m.layout.visibleFloatIDs.last, m.layout.floatIDs.last, "the new one in front")
+        }
+        XCTAssertEqual(m.layout.tiles.count, WorkspaceLayout.maximumTiles)
+        m.openFloating(w[9])
+        XCTAssertEqual(m.layout.floatIDs.count, 8, "the tile budget is the only limit")
+        let floats = m.layout.floatIDs
+        let frames = m.layout.floats.map(\.frame)
+        for (i, f) in frames.enumerated() {
+            for g in frames[(i + 1)...] {
+                XCTAssertFalse(abs(f.x - g.x) * iphone.width < 12 && abs(f.y - g.y) * iphone.height < 12, "never exactly on top of another")
+            }
+        }
+        settle()
+        let request = sent.last { $0["type"] as? String == WireMessage.workspaceRequest }?["tiles"] as? [[String: Any]] ?? []
+        XCTAssertEqual(request.filter { $0["layer"] as? String == "float" }.count, 8, "every shown float is sent")
+
+        // Raising one (a touch, a move) never tucks another.
+        m.raiseFloat(floats[0])
+        m.beginFloatGesture(floats[2])
+        m.updateFloatFrame(floats[2], WorkspaceRect(x: 0.1, y: 0.3, width: frames[2].width, height: frames[2].height))
+        m.endFloatGesture(floats[2])
+        XCTAssertEqual(Set(m.layout.visibleFloatIDs), Set(floats))
+        XCTAssertEqual(m.layout.floatIDs.last, floats[2])
+
+        // Bringing one back from an edge never tucks another.
+        m.tuckFloat(floats[1], edge: .left, offset: 0.5)
+        m.tuckFloat(floats[4], edge: .right, offset: 0.5)
+        XCTAssertEqual(m.layout.visibleFloatIDs.count, 6)
+        m.untuckFloat(floats[1])
+        XCTAssertEqual(m.layout.visibleFloatIDs.count, 7)
+        XCTAssertNotNil(m.layout.float(floats[4])?.tuck, "the other tucked one stays tucked")
+        m.beginRestoringFloat(floats[4])
+        m.endFloatGesture(floats[4])
+        XCTAssertEqual(Set(m.layout.visibleFloatIDs), Set(floats))
+
+        // Rotating keeps the shown set and the tucked one.
+        m.tuckFloat(floats[3], edge: .bottom, offset: 0.4)
+        let shown = Set(m.layout.visibleFloatIDs)
+        XCTAssertEqual(shown.count, 7)
+        m.updateSpace(WorkspaceSize(width: iphone.height, height: iphone.width), hinge: nil)
+        XCTAssertEqual(Set(m.layout.visibleFloatIDs), shown)
+        XCTAssertEqual(m.layout.float(floats[3])?.tuck?.edge, .bottom)
+        m.updateSpace(iphone, hinge: nil)
+        XCTAssertEqual(Set(m.layout.visibleFloatIDs), shown)
+
+        // Reconnecting brings back the same arrangement.
+        let order = m.layout.floatIDs
+        m.apply(.disconnected)
+        let again = connectedModel(features: features, windows: windows, defaults: suite) { _ in }
+        again.updateSpace(iphone, hinge: nil)
+        XCTAssertEqual(Set(again.layout.visibleFloatIDs), shown)
+        XCTAssertEqual(again.layout.float(floats[3])?.tuck?.edge, .bottom)
+        XCTAssertEqual(again.layout.floatIDs, order, "the same order back to front")
+    }
+
+    /// A Mac that can't draw floats keeps all of them tucked here, on a phone as on an iPad, and an
+    /// unrelated change doesn't save them tucked: they all show again on a Mac that can.
+    @MainActor
+    func testAMacThatCantDrawFloatsKeepsThemTuckedWithoutSavingThat() throws {
+        let suite = UserDefaults(suiteName: "WorkspaceFloatTests-\(UUID().uuidString)")!
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature], defaults: suite) { _ in }
+        m.updateSpace(iphone, hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.openFloating(m.catalog!.windows[1])
+        m.openFloating(m.catalog!.windows[2])
+        let floats = m.layout.floatIDs
+        XCTAssertEqual(m.layout.visibleFloatIDs, floats)
+        m.apply(.disconnected)
+
+        let old = connectedModel(features: [WindowWorkspaceWire.welcomeFeature], defaults: suite) { _ in }
+        old.updateSpace(iphone, hinge: nil)
+        XCTAssertTrue(old.layout.visibleFloatIDs.isEmpty, "all of them wait tucked")
+        XCTAssertEqual(old.layout.floatIDs, floats, "none lost")
+        old.rotate(old.layout.orderedTileIDs[0])   // an unrelated change
+        XCTAssertTrue(old.layout.visibleFloatIDs.isEmpty)
+        old.apply(.disconnected)
+
+        let again = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature], defaults: suite) { _ in }
+        again.updateSpace(iphone, hinge: nil)
+        XCTAssertEqual(again.layout.visibleFloatIDs, floats, "shown again on a Mac that draws them")
     }
 }
