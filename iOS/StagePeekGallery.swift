@@ -55,22 +55,8 @@ struct MacAppIcon: View {
     var size: CGFloat = 44
 
     var body: some View {
-        Group {
-            if let cg = model.icons[bundleID] {
-                Image(decorative: cg, scale: 1).resizable().interpolation(.high)
-            } else if bundleID == MacAppItem.finderBundle {
-                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(red: 0.36, green: 0.72, blue: 1), Color(red: 0.13, green: 0.45, blue: 0.95)],
-                                         startPoint: .top, endPoint: .bottom))
-                    .overlay(Image(systemName: "face.smiling").font(.system(size: size * 0.55)).foregroundStyle(.white))
-            } else {
-                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                    .fill(Color.white.opacity(0.16))
-                    .overlay(Text(String(name.prefix(1))).font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(.white))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        // The one placeholder every app view uses until the Mac sends the icon (or has none).
+        WorkspaceAppIcon(icon: model.icons[bundleID], name: name, bundleID: bundleID, size: size)
     }
 }
 

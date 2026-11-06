@@ -398,7 +398,10 @@ struct WorkspaceFloatLayer: View {
         let maxWidth = max(min(rect.width - 28, 280), 90)
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
-                if let icon = icon(id) { Image(decorative: icon, scale: 1).resizable().frame(width: 14, height: 14) }
+                if let bundle = model.layout.tiles[id]?.source?.bundleID {
+                    // Its icon, or the same placeholder as everywhere until the Mac sends it.
+                    WorkspaceAppIcon(icon: model.icons[bundle], name: model.tileState(id)?.app ?? title(id), bundleID: bundle, size: 14)
+                }
                 Text(title(id)).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(Color.white.opacity(active ? 1 : 0.8))
                     .frame(maxWidth: max(maxWidth - 64, 40))
