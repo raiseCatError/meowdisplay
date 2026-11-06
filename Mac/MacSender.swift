@@ -5567,16 +5567,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                     #endif
                     inputInjector?.handleKeyboardPress(
-                        usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                        usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                        exactModifiers: ExactKeyModifiersWire.isExact(obj))
                 }
             case "down":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
                     inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
-                                                      isRepeat: obj["repeat"] as? Bool == true)
+                                                      isRepeat: obj["repeat"] as? Bool == true,
+                                                      exactModifiers: ExactKeyModifiersWire.isExact(obj))
                 }
             case "up":
                 if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
+                    inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                    exactModifiers: ExactKeyModifiersWire.isExact(obj))
                 }
             case "modifierDown", "modifierUp":
                 if let name = obj["modifier"] as? String {
@@ -6906,16 +6909,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
+        welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: WindowStreamingPolicy.isAllowed())
+        sendJSONObject(welcome)
+    }
+
+    /// `welcome.features`: what this Mac offers beyond its `pv`. A receiver
+    /// reads at most 16 entries, so keep the list short.
+    static func welcomeFeatures(windowStreamingAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
-        if WindowStreamingPolicy.isAllowed() {
+        if windowStreamingAllowed {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
             features.append(WindowWorkspaceWire.floatFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
-        welcome["features"] = features
-        sendJSONObject(welcome)
+        features.append(ExactKeyModifiersWire.welcomeFeature)
+        return features
     }
 
     private func sendStreamingProfileState() {

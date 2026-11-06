@@ -269,6 +269,33 @@ enum WindowCloseWire {
     static let welcomeFeature = "windowClose"
 }
 
+/// Exact key modifiers (PROTOCOL.md `keyboard`): a `press`, `down` or `up` marked
+/// `exactModifiers: true` posts with exactly its own `modifiers`, never adding the ones this
+/// device holds down with `modifierDown`. The arrow keypad's own ⇧ ⌥ ⌘ use it, so they never
+/// mix with the tray's. Sent only to a Mac that lists `welcomeFeature`; without the field (an
+/// older receiver, the Mac Receiver, Android) a key still carries every held modifier.
+enum ExactKeyModifiersWire {
+    static let welcomeFeature = "exactKeyModifiers"
+    /// The additive `keyboard` field.
+    static let field = "exactModifiers"
+
+    /// A `keyboard` `press`/`down`/`up` message. `exactModifiers` adds the field; callers pass
+    /// true only for a Mac that advertised `welcomeFeature`.
+    static func keyMessage(action: String, usage: Int, modifiers: [String], isRepeat: Bool = false,
+                           exactModifiers: Bool) -> [String: Any] {
+        var message: [String: Any] = ["type": "keyboard", "action": action, "usage": usage, "modifiers": modifiers]
+        if isRepeat { message["repeat"] = true }
+        if exactModifiers { message[field] = true }
+        return message
+    }
+
+    /// Whether a received `keyboard` message asks for exact modifiers. Anything but `true`
+    /// (absent, malformed) keeps the default: held modifiers are added.
+    static func isExact(_ message: [String: Any]) -> Bool {
+        message[field] as? Bool == true
+    }
+}
+
 /// What the Mac reports after `windowClose`.
 enum WindowCloseResult: String, Sendable, CaseIterable {
     /// The window is gone.
