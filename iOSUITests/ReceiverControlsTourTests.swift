@@ -168,6 +168,38 @@ final class ReceiverControlsTourTests: XCTestCase {
         }
     }
 
+    /// The keypad's own ⇧ ⌥ ⌘: a tap latches ⇧, the next arrow carries it,
+    /// the latch lasts while the keypad is open, and closing it clears it.
+    @MainActor
+    func testArrowKeypadModifiersLatchApplyAndClear() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let button = app.buttons["arrowKeysButton"].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 3), "no arrow button")
+        revealControls(button)
+        button.tap()
+        let shift = app.buttons["arrowKeypadModifier.shift"].firstMatch
+        XCTAssertTrue(shift.waitForExistence(timeout: 2), "the keypad has no Shift of its own")
+        for name in ["arrowKeypadModifier.option", "arrowKeypadModifier.command", "arrowKey.right"] {
+            XCTAssertTrue(app.buttons[name].firstMatch.isHittable, "\(name) is not reachable")
+        }
+        XCTAssertEqual(shift.value as? String, "Off")
+        shift.tap()
+        XCTAssertEqual(shift.value as? String, "On")
+        app.buttons["arrowKey.right"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '⇧→'")).firstMatch
+            .waitForExistence(timeout: 3), "⇧→ was not sent")
+        XCTAssertEqual(shift.value as? String, "On", "a latch lasts while the keypad is open")
+        snapshot("arrows-keypad-modifiers")
+
+        button.tap()
+        waitForAbsence(shift, "closing the keypad left its modifiers up")
+        button.tap()
+        XCTAssertTrue(shift.waitForExistence(timeout: 2))
+        XCTAssertEqual(shift.value as? String, "Off", "closing the keypad clears its modifiers")
+        app.buttons["Exit Demo"].tap()
+    }
+
     /// With the keyboard up, the companion bar's one Arrow Keys item opens
     /// the same keypad, and its keys send arrows.
     @MainActor
