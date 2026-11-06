@@ -1576,10 +1576,14 @@ Mac keeps drawing a moving float a moment behind the finger, as before.
 Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
 `schema` 3 and byte-identical while a layout has no floats. A layout with
 floats is `schema` 4 and adds `floats: [{tile, x, y, w, h, tuck?,
-offset?}]` (back to front; `tuck` is `left` or `right` with `offset` the
-handle's height 0–1). Its `tree` and `tiles` are as before, so a reader that
-ignores `floats` keeps the tiled arrangement and drops the floating tiles
-(nothing in its tree refers to them).
+offset?}]` (back to front; `tuck` is `left`, `right`, `top` or `bottom` with
+`offset` the handle's place along that edge, 0–1 from its top or left end).
+A reader that doesn't know a `tuck` value (builds from before `top` and
+`bottom`) shows that float untucked where it was; tucks are receiver-local
+and never reach the Mac (a tucked float is left out of the request). Its
+`tree` and `tiles` are as before, so a reader that ignores `floats` keeps the
+tiled arrangement and drops the floating tiles (nothing in its tree refers to
+them).
 
 ### 6.11 Text caret (`keyboardState` / `textCaret`)
 

@@ -1701,9 +1701,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var y: Double
         var w: Double
         var h: Double
-        /// "left" or "right" while tucked; absent while shown.
+        /// "left", "right", "top" or "bottom" while tucked; absent while shown. A reader that
+        /// knows fewer edges shows a float tucked to one it doesn't know where it was (untucked).
         var tuck: String?
-        /// The tucked tab's place along its edge (0 top, 1 bottom).
+        /// The tucked handle's place along its edge (0 top or left, 1 bottom or right).
         var offset: Double?
     }
 
@@ -1782,7 +1783,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         }
         let floating = (floats ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { f -> WorkspaceFloat? in
             guard [f.x, f.y, f.w, f.h].allSatisfy(\.isFinite), f.w > 0, f.h > 0 else { return nil }
-            let edge = f.tuck.flatMap(WorkspaceEdge.init(rawValue:)).flatMap { $0.axis == .horizontal ? $0 : nil }
+            // An edge this build doesn't know: shown where it was, untucked.
+            let edge = f.tuck.flatMap(WorkspaceEdge.init(rawValue:))
             return WorkspaceFloat(tile: f.tile, frame: WorkspaceRect(x: f.x, y: f.y, width: f.w, height: f.h),
                                   tuck: edge.map { WorkspaceFloatTuck(edge: $0, offset: f.offset ?? 0.5) })
         }

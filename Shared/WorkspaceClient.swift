@@ -458,6 +458,17 @@ enum WorkspacePlacement: String, CaseIterable, Sendable {
     case float
 }
 
+/// What tucked floats' edge handles give way to, in global (window) coordinates. Who wins,
+/// highest first: the system's edge bands (the top and bottom of `screen`), then `controls`,
+/// then the handles (`WorkspaceFloatGeometry.tuckHandles`).
+struct WorkspaceEdgeReservations: Equatable {
+    /// The screen the receiver fills; zero: unknown (only the safe area is kept clear).
+    var screen: CGRect = .zero
+    /// The fixed controls (the control tray, the function tray, the shortcut column and other
+    /// trays), folds, and Stage Peek's own edge handle.
+    var controls: [CGRect] = []
+}
+
 @MainActor
 final class WorkspaceModel: ObservableObject {
     @Published private(set) var available = false
@@ -565,8 +576,13 @@ final class WorkspaceModel: ObservableObject {
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
     /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
-    /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
+    /// Tucked floats' edge handles (global), for anything that wants to know where they are.
+    /// Stage Peek doesn't dodge them any more: they keep clear of it (`edgeReservationsGlobal`).
     @Published var floatHandlesGlobal: [CGRect] = []
+    /// What tucked floats' edge handles keep clear of (global), set by the app next to where Stage
+    /// Peek learns what to avoid: the screen (its top and bottom belong to the system's own edge
+    /// gestures), then the fixed controls and Stage Peek's handle. Handles give way to all of it.
+    @Published var edgeReservationsGlobal = WorkspaceEdgeReservations()
     /// The first-use tip about circling while dragging (shown once, ever, on this device).
     @Published private(set) var placementTipVisible = false
     /// How far circling while dragging has got toward switching Pane / Floating (0...1), for the
@@ -2191,8 +2207,25 @@ extension WorkspaceModel {
     /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched.
     func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double) {
         guard layout.isFloat(id) else { return }
+        // A fresh still for its sliver at the edge, asked for while it's still sent (the Mac
+        // answers from the capture that stops with the tuck).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        if age > 2 { requestBackdrop(id, refresh: true) }
         edit { $0.tuckingFloat(id, edge: edge, offset: offset) }
         refocus(after: id)
+    }
+
+    /// A tucked float comes back with a slide drawn on this device: it's shown again now (so its
+    /// capture starts during the slide) but lifted where the Mac can lift floats, so the Mac
+    /// leaves it out until it has landed (`endFloatGesture`) and it's never on screen twice.
+    /// Its still may be old: it's only drawn for the moment of the slide.
+    func beginRestoringFloat(_ id: String) {
+        guard layout.isFloat(id) || saved.isFloat(id) else { return }
+        untuckFloat(id)
+        guard canLiftFloats, saved.float(id)?.tuck == nil, !liftedFloats.contains(id) else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
     }
 
     /// Back where it was, in front and focused. On a compact screen the float shown before

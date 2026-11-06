@@ -1,7 +1,7 @@
 import Foundation
 
 // Floating panes: Window mode panes that float above the tiled panes (or above a Full Desktop
-// pane), may overlap, can be tucked to the left or right edge and turned back into panes.
+// pane), may overlap, can be tucked to any edge and turned back into panes.
 //
 // Everything here is receiver-local presentation. A float is an ordinary workspace tile with a
 // frame and a place in a back-to-front order: the Mac composites it into the same single
@@ -14,10 +14,13 @@ import Foundation
 
 // MARK: - Model
 
-/// Where a tucked float waits: on the left or right edge, its tab centred at `offset` (0 = top
-/// of the picture, 1 = bottom). Its frame is kept, so it comes back exactly where it was.
+/// Where a tucked float waits: on an edge of the picture, its handle centred at `offset` along
+/// that edge (0 = its top or left end, 1 = its bottom or right end). Its frame is kept, so it
+/// comes back exactly where it was.
 struct WorkspaceFloatTuck: Equatable, Sendable {
-    /// `.left` or `.right` only (the top and bottom edges belong to the system's own gestures).
+    /// Any edge. The handles themselves stay clear of the system's edge gestures (the status bar,
+    /// Notification Center and Dynamic Island band at the top, the Home indicator at the bottom):
+    /// see `WorkspaceFloatGeometry.handleArea`.
     var edge: WorkspaceEdge
     var offset: Double
 }
@@ -42,7 +45,6 @@ struct WorkspaceFloat: Equatable, Sendable {
         let y = min(max(finite(frame.y, 0), 0), 1 - h)
         copy.frame = WorkspaceRect(x: x, y: y, width: w, height: h)
         if var t = tuck {
-            if t.edge.axis != .horizontal { t.edge = .right }
             t.offset = min(max(finite(t.offset, 0.5), 0), 1)
             copy.tuck = t
         }
@@ -231,10 +233,10 @@ extension WorkspaceLayout {
         return copy
     }
 
-    /// Hidden to an edge: it keeps its frame and its place in the workspace; nothing happens to
-    /// the Mac window. Its capture stops while it isn't sent.
+    /// Hidden to an edge (any of the four): it keeps its frame and its place in the workspace;
+    /// nothing happens to the Mac window. Its capture stops while it isn't sent.
     func tuckingFloat(_ id: String, edge: WorkspaceEdge, offset: Double) -> WorkspaceLayout {
-        guard edge.axis == .horizontal, let i = floats.firstIndex(where: { $0.tile == id }) else { return self }
+        guard let i = floats.firstIndex(where: { $0.tile == id }) else { return self }
         var copy = self
         copy.floats[i].tuck = WorkspaceFloatTuck(edge: edge, offset: min(max(offset.isFinite ? offset : 0.5, 0), 1))
         if copy.maximized == id { copy.maximized = nil }
@@ -419,123 +421,312 @@ enum WorkspaceFloatGeometry {
         return clamped(WorkspaceRect(x: r.midX - w / 2, y: r.midY - h / 2, width: w, height: h), in: size)
     }
 
-    // MARK: Tucked tabs
+    // MARK: Tucked handles
 
-    /// One handle on an edge: a single tucked float, or several collapsed into a stack.
+    /// One handle on an edge: a single tucked float (drawn as a sliver of its window), or several
+    /// collapsed into a stack.
     struct TuckTab: Equatable, Sendable {
         /// Back to front as tucked; more than one = a stack (opens a list).
         var ids: [String]
-        /// In points, in the picture's coordinates.
+        /// The sliver as drawn, in points, in the picture's coordinates. Its touch area reaches
+        /// `touchDepth` in from the edge.
         var rect: WorkspaceRect
+        /// The edge it sits on.
+        var edge: WorkspaceEdge
         var isStack: Bool { ids.count > 1 }
     }
 
-    /// Tab size (points): narrow, tall enough for a thumb, 44 pt along the edge at least.
-    static let tabSize = WorkspaceSize(width: 30, height: 60)
+    /// The sliver (points): `width` deep from its edge, `height` long along it (rotated on the
+    /// top and bottom edges). Slim, but long enough to show a slice of the window and its icon.
+    static let tabSize = WorkspaceSize(width: 28, height: 68)
+    /// How far in from the edge a handle takes touches (points): a 44 pt target.
+    static let touchDepth = 44.0
     static let tabSpacing = 8.0
-    /// The top and bottom of an edge are left to the system (Control Center, the Home indicator,
-    /// notification and app switching gestures): tabs stay within the middle of it.
+    /// The ends of the left and right edges are left to the system (Control Center, the Home
+    /// indicator, notification and app switching gestures): handles stay within the middle.
     static let tabBand = 0.12
+    /// Kept clear of the screen's top and bottom (points), beyond the safe area: the system's own
+    /// edge swipes start there (Notification Center, Control Center, the Home indicator, the Dock).
+    static let systemEdgeClearance = 24.0
+    /// More tucked floats than this on one edge share one stack handle.
+    static let maximumTabsPerEdge = 4
 
-    /// The handles on one edge of `area` (points). `tucked`: (id, offset) in tuck order. One tab
-    /// each, near its offset without overlapping, while they fit; otherwise one stack.
-    static func tuckTabs(_ tucked: [(id: String, offset: Double)], edge: WorkspaceEdge, area: WorkspaceRect) -> [TuckTab] {
+    /// Where tuck handles may sit (points): the picture inside the safe area (clear of the notch,
+    /// the Dynamic Island, the status bar and the Home indicator) and at least
+    /// `systemEdgeClearance` from the screen's top and bottom, where the system's swipes start.
+    /// `screen` nil: the safe area alone. nil when nothing is left.
+    static func handleArea(picture: WorkspaceRect, safe: WorkspaceRect?, screen: WorkspaceRect?) -> WorkspaceRect? {
+        guard [picture.x, picture.y, picture.width, picture.height].allSatisfy(\.isFinite) else { return nil }
+        var area = picture
+        if let safe {
+            guard let a = area.intersection(safe) else { return nil }
+            area = a
+        }
+        if let s = screen, s.width > 0, s.height > 0, s.y.isFinite, s.height.isFinite {
+            let top = max(area.y, s.y + systemEdgeClearance), bottom = min(area.maxY, s.maxY - systemEdgeClearance)
+            guard bottom > top else { return nil }
+            area.y = top
+            area.height = bottom - top
+        }
+        return area.width > 0 && area.height > 0 ? area : nil
+    }
+
+    /// Handles go along y on the left and right edges, along x on the top and bottom.
+    private static func alongY(_ edge: WorkspaceEdge) -> Bool { edge.axis == .horizontal }
+
+    /// The stretch of `edge` handles may use (points along it): the left and right edges' middle
+    /// (`tabBand` kept at each end); the top and bottom edges clear of the corners, so they never
+    /// meet the side handles. At least one handle long while the area is.
+    static func run(_ edge: WorkspaceEdge, in area: WorkspaceRect) -> (lo: Double, hi: Double) {
+        let start = alongY(edge) ? area.y : area.x, extent = alongY(edge) ? area.height : area.width
+        let inset = alongY(edge) ? extent * tabBand : max(extent * tabBand, touchDepth + tabSpacing)
+        var lo = start + inset, hi = start + extent - inset
+        if hi - lo < tabSize.height {
+            let mid = start + extent / 2
+            lo = max(start, mid - tabSize.height / 2)
+            hi = min(start + extent, mid + tabSize.height / 2)
+        }
+        return (lo, hi)
+    }
+
+    /// The edges a float may be tucked into here: those with room for a handle.
+    static func tuckEdges(area: WorkspaceRect?) -> Set<WorkspaceEdge> {
+        guard let area, area.width > 0, area.height > 0 else { return [] }
+        return Set([WorkspaceEdge.left, .right, .top, .bottom].filter { e in
+            let r = run(e, in: area)
+            return r.hi - r.lo >= tabSize.height - 1e-9
+                && (alongY(e) ? area.width : area.height) >= touchDepth
+        })
+    }
+
+    /// The parts of `edge`'s run no reserved rect reaches (each at least one handle long). A rect
+    /// counts when it comes within the handles' touch depth of the edge; a spacing is kept to it.
+    static func freeRuns(_ edge: WorkspaceEdge, in area: WorkspaceRect, avoiding reserved: [WorkspaceRect]) -> [(lo: Double, hi: Double)] {
+        let along = alongY(edge)
+        let depth: (lo: Double, hi: Double) = {
+            switch edge {
+            case .left: return (area.x, area.x + touchDepth)
+            case .right: return (area.maxX - touchDepth, area.maxX)
+            case .top: return (area.y, area.y + touchDepth)
+            case .bottom: return (area.maxY - touchDepth, area.maxY)
+            }
+        }()
+        var free = [run(edge, in: area)]
+        for r in reserved where r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].allSatisfy(\.isFinite) {
+            let (p0, p1) = along ? (r.x, r.maxX) : (r.y, r.maxY)
+            guard p1 > depth.lo, p0 < depth.hi else { continue }
+            let (a0, a1) = along ? (r.y - tabSpacing, r.maxY + tabSpacing) : (r.x - tabSpacing, r.maxX + tabSpacing)
+            free = free.flatMap { seg -> [(lo: Double, hi: Double)] in
+                guard a1 > seg.lo, a0 < seg.hi else { return [seg] }
+                return [(seg.lo, min(a0, seg.hi)), (max(a1, seg.lo), seg.hi)].filter { $0.1 > $0.0 }
+            }
+        }
+        return free.filter { $0.hi - $0.lo >= tabSize.height - 1e-9 }
+    }
+
+    /// The handles on one edge of `area` (points). `tucked`: (id, offset) in tuck order. One
+    /// handle each, as near its offset as the free room allows (sliding along the edge past
+    /// whatever `reserved` holds, never overlapping); when the edge has no room for each, or more
+    /// than `maximumTabsPerEdge`, one stack where most of them want to be.
+    static func tuckTabs(_ tucked: [(id: String, offset: Double)], edge: WorkspaceEdge, area: WorkspaceRect,
+                         avoiding reserved: [WorkspaceRect] = []) -> [TuckTab] {
         guard !tucked.isEmpty, area.width > 0, area.height > 0 else { return [] }
-        let top = area.y + area.height * tabBand, bottom = area.maxY - area.height * tabBand
-        let band = max(bottom - top, tabSize.height)
-        let x = edge == .left ? area.x : area.maxX - tabSize.width
-        let h = tabSize.height, gap = tabSpacing
-        let needed = Double(tucked.count) * h + Double(tucked.count - 1) * gap
-        func rect(_ y: Double) -> WorkspaceRect { WorkspaceRect(x: x, y: y, width: tabSize.width, height: h) }
-        if needed > band || tucked.count > 4 {
-            let mid = tucked.map(\.offset).sorted()[tucked.count / 2]
-            let y = min(max(area.y + mid * area.height - h / 2, top), top + band - h)
-            return [TuckTab(ids: tucked.map(\.id), rect: rect(y))]
+        let length = tabSize.height, gap = tabSpacing
+        let along = alongY(edge)
+        let start = along ? area.y : area.x, extent = along ? area.height : area.width
+        func rect(_ a: Double) -> WorkspaceRect {
+            switch edge {
+            case .left: return WorkspaceRect(x: area.x, y: a, width: tabSize.width, height: length)
+            case .right: return WorkspaceRect(x: area.maxX - tabSize.width, y: a, width: tabSize.width, height: length)
+            case .top: return WorkspaceRect(x: a, y: area.y, width: length, height: tabSize.width)
+            case .bottom: return WorkspaceRect(x: a, y: area.maxY - tabSize.width, width: length, height: tabSize.width)
+            }
         }
-        // Wanted places, top to bottom; then pushed apart (down, then back up from the bottom).
-        let order = tucked.enumerated().sorted { ($0.element.offset, $0.offset) < ($1.element.offset, $1.offset) }
-        var ys = order.map { min(max(area.y + $0.element.offset * area.height - h / 2, top), top + band - h) }
-        for i in ys.indices.dropFirst() where ys[i] < ys[i - 1] + h + gap { ys[i] = ys[i - 1] + h + gap }
-        if let last = ys.last, last > top + band - h {
-            ys[ys.count - 1] = top + band - h
-            for i in ys.indices.dropLast().reversed() where ys[i] > ys[i + 1] - h - gap { ys[i] = ys[i + 1] - h - gap }
+        /// Where a handle centred at `centre` starts, inside `lo…hi`.
+        func place(_ centre: Double, _ lo: Double, _ hi: Double) -> Double { min(max(centre - length / 2, lo), max(hi - length, lo)) }
+        func distance(_ c: Double, _ seg: (lo: Double, hi: Double)) -> Double { c < seg.lo ? seg.lo - c : (c > seg.hi ? c - seg.hi : 0) }
+        let wanted = tucked.map { start + (($0.offset.isFinite ? min(max($0.offset, 0), 1) : 0.5) * extent) }
+        // Along the edge, in tuck order where they want the same place.
+        let order = tucked.indices.sorted { (wanted[$0], $0) < (wanted[$1], $1) }
+        let runs = freeRuns(edge, in: area, avoiding: reserved)
+        let capacity = runs.map { Int(((($0.hi - $0.lo) + gap) / (length + gap) + 1e-9).rounded(.down)) }
+
+        if tucked.count > maximumTabsPerEdge || capacity.reduce(0, +) < tucked.count {
+            let mid = wanted[order[order.count / 2]]
+            let a: Double
+            if let best = runs.min(by: { distance(mid, $0) < distance(mid, $1) }) {
+                a = place(mid, best.lo, best.hi)
+            } else {
+                // Nothing on this edge is free: the stack stays reachable over whatever is there
+                // (a window is never lost behind a control).
+                let r = run(edge, in: area)
+                a = place(mid, r.lo, r.hi)
+            }
+            return [TuckTab(ids: tucked.map(\.id), rect: rect(a), edge: edge)]
         }
-        return zip(order, ys).map { TuckTab(ids: [$0.element.id], rect: rect($1)) }
+
+        // Each handle (in order along the edge) to the free stretch nearest where it wants to be,
+        // keeping enough room after it for the rest.
+        var assigned = Array(repeating: [Int](), count: runs.count)
+        var current = 0
+        for (k, i) in order.enumerated() {
+            let rest = order.count - k - 1
+            var best: Int?
+            for j in current..<runs.count where assigned[j].count < capacity[j] {
+                let room = capacity[j] - assigned[j].count - 1 + capacity[(j + 1)...].reduce(0, +)
+                guard room >= rest else { continue }
+                if best.map({ distance(wanted[i], runs[j]) < distance(wanted[i], runs[$0]) }) ?? true { best = j }
+            }
+            let j = best ?? runs.count - 1
+            assigned[j].append(i)
+            current = j
+        }
+        // Inside each stretch: wanted places, pushed apart (forward, then back from its end).
+        var out: [TuckTab] = []
+        for (j, items) in assigned.enumerated() where !items.isEmpty {
+            let lo = runs[j].lo, hi = runs[j].hi
+            var starts = items.map { place(wanted[$0], lo, hi) }
+            for n in starts.indices.dropFirst() where starts[n] < starts[n - 1] + length + gap { starts[n] = starts[n - 1] + length + gap }
+            if let last = starts.last, last > hi - length {
+                starts[starts.count - 1] = hi - length
+                for n in starts.indices.dropLast().reversed() where starts[n] > starts[n + 1] - length - gap {
+                    starts[n] = starts[n + 1] - length - gap
+                }
+            }
+            for (i, a) in zip(items, starts) { out.append(TuckTab(ids: [tucked[i].id], rect: rect(a), edge: edge)) }
+        }
+        return out
+    }
+
+    /// Every tucked float's handle, on every edge (left, top, right, bottom; along each in order).
+    ///
+    /// Who gives way: the system's edge bands first (kept out of `area`: see `handleArea`), then
+    /// the fixed controls in `reserved` (the control tray, the function tray, the shortcut column,
+    /// Stage Peek's handle, folds), then the handles, which slide along their edge to the nearest
+    /// free room and share one stack when their edge has no room for each. Handles on different
+    /// edges never meet: the top and bottom ones stay clear of the corners.
+    static func tuckHandles(_ floats: [WorkspaceFloat], area: WorkspaceRect, reserved: [WorkspaceRect] = []) -> [TuckTab] {
+        [WorkspaceEdge.left, .top, .right, .bottom].flatMap { edge in
+            tuckTabs(floats.compactMap { f in f.tuck.flatMap { $0.edge == edge ? (f.tile, $0.offset) : nil } },
+                     edge: edge, area: area, avoiding: reserved)
+        }
     }
 }
 
 // MARK: - Drag, fling and tuck
 
 /// What happens when a float's title bar is let go: it stays, glides on with its momentum, or
-/// is carried into the edge it was flung at and tucked. Only the receiver's presentation moves:
-/// nothing here is ever sent to the Mac as input.
+/// is carried into the edge its throw reaches and tucked; and how a tucked float is pulled back
+/// out. Only the receiver's presentation moves: nothing here is ever sent to the Mac as input.
 enum WorkspaceFloatMotion {
     /// Deceleration per millisecond for a released float: between UIKit's `.fast` (0.99) and
     /// `.normal` (0.998), so a window carries on a little, like a thrown card, not a scroll view.
     static let decelerationRate = 0.995
+    /// The deceleration a throw is projected with to see which edge it reaches: UIKit's
+    /// `.normal`, what WWDC18's picture in picture uses to choose where a thrown window goes. A
+    /// throw that reaches an edge this way tucks; one that doesn't glides (with the shorter
+    /// carry above) and stays inside.
+    static let reachDecelerationRate = 0.998
     /// Below this release speed (points/s) a float stays where it was let go.
     static let glideSpeed = 220.0
-    /// A fling toward an edge needs at least this speed (points/s)…
+    /// A throw needs at least this release speed (points/s) to tuck: a slower move, across the
+    /// middle or not, never tucks (unless the float was pulled past an edge on purpose)…
     static let flingSpeed = 1100.0
-    /// …mostly sideways (the cosine of its angle to the edge's normal)…
-    static let flingCosine = 0.8
-    /// …must carry at least this share of the float past the edge…
+    /// …and its projected path must carry at least this share of the float past the edge (half:
+    /// its centre crosses it). The same share pulled past an edge and let go tucks too.
     static let pastEdge = 0.5
-    /// …and be let go on that edge's side of the picture (its centre past this share of the
-    /// width from the far side), so a fast move across the middle never hides a float.
-    static let releaseSide = 0.55
+    static let allEdges: Set<WorkspaceEdge> = [.left, .right, .top, .bottom]
 
     /// How far a release at `velocity` (points/s) carries before it stops (WWDC18, "Designing
     /// Fluid Interfaces": the projection of a decelerating throw).
-    static func projection(_ velocity: Double) -> Double {
-        guard velocity.isFinite else { return 0 }
-        return velocity / 1000 * decelerationRate / (1 - decelerationRate)
+    static func projection(_ velocity: Double, rate: Double = decelerationRate) -> Double {
+        guard velocity.isFinite, rate > 0, rate < 1 else { return 0 }
+        return velocity / 1000 * rate / (1 - rate)
     }
 
     enum Outcome: Equatable, Sendable {
         /// Ends at `frame` (normalized, inside the picture). `glide`: it travels there (with its
         /// momentum, or pulled back inside); otherwise it stays exactly where it was let go.
         case settle(frame: WorkspaceRect, glide: Bool)
-        /// Carried into `edge` and tucked; its tab waits at `offset`.
+        /// Carried into `edge` and tucked; its handle waits at `offset` along that edge.
         case tuck(edge: WorkspaceEdge, offset: Double)
+    }
+
+    /// The share of `r` past `edge` (0 while inside).
+    static func past(_ r: WorkspaceRect, _ edge: WorkspaceEdge) -> Double {
+        switch edge {
+        case .left: return max(0, -r.x) / max(r.width, 1e-9)
+        case .right: return max(0, r.maxX - 1) / max(r.width, 1e-9)
+        case .top: return max(0, -r.y) / max(r.height, 1e-9)
+        case .bottom: return max(0, r.maxY - 1) / max(r.height, 1e-9)
+        }
+    }
+
+    /// Where along `edge` a float at `r` is (its centre, a share of that edge).
+    static func along(_ r: WorkspaceRect, _ edge: WorkspaceEdge) -> Double {
+        min(max(edge.axis == .horizontal ? r.midY : r.midX, 0), 1)
+    }
+
+    /// The edge `r` hangs at least `pastEdge` past (an armed tuck: letting go slowly tucks it).
+    static func pulledEdge(_ r: WorkspaceRect, edges: Set<WorkspaceEdge> = allEdges) -> WorkspaceEdge? {
+        [WorkspaceEdge.left, .right, .top, .bottom].first { edges.contains($0) && past(r, $0) >= pastEdge }
+    }
+
+    /// The first edge a float at `r` moving by (`dx`, `dy`) (picture shares) is carried
+    /// `pastEdge` past, and where along that edge it crosses; nil when it reaches none.
+    static func firstEdge(_ r: WorkspaceRect, dx: Double, dy: Double, edges: Set<WorkspaceEdge>) -> (edge: WorkspaceEdge, offset: Double)? {
+        var best: (edge: WorkspaceEdge, t: Double)?
+        func consider(_ edge: WorkspaceEdge, _ t: Double) {
+            guard edges.contains(edge), t.isFinite, t >= 0, t <= 1, best.map({ t < $0.t }) ?? true else { return }
+            best = (edge, t)
+        }
+        let p = pastEdge
+        if dx < 0 { consider(.left, (-p * r.width - r.x) / dx) }
+        if dx > 0 { consider(.right, (1 - (1 - p) * r.width - r.x) / dx) }
+        if dy < 0 { consider(.top, (-p * r.height - r.y) / dy) }
+        if dy > 0 { consider(.bottom, (1 - (1 - p) * r.height - r.y) / dy) }
+        guard let best else { return nil }
+        var at = r
+        at.x += dx * best.t
+        at.y += dy * best.t
+        return (best.edge, along(at, best.edge))
     }
 
     /// `frame`: where the float is when let go (normalized; while dragging it may hang past an
     /// edge). `velocity`: its release velocity in points per second. `canTuck`: false while the
-    /// float can't be tucked (it isn't a float of a live workspace).
+    /// float can't be tucked (it isn't a float of a live workspace). `edges`: where it may tuck
+    /// (those with room for a handle, `WorkspaceFloatGeometry.tuckEdges`).
     static func decide(release frame: WorkspaceRect, velocity: (x: Double, y: Double), in size: WorkspaceSize,
-                       canTuck: Bool = true) -> Outcome {
+                       canTuck: Bool = true, edges: Set<WorkspaceEdge> = allEdges) -> Outcome {
         guard size.width > 0, size.height > 0, frame.width > 0, frame.height > 0,
               [frame.x, frame.y, frame.width, frame.height].allSatisfy(\.isFinite) else {
             return .settle(frame: WorkspaceFloatGeometry.clamped(frame, in: size), glide: false)
         }
         let vx = velocity.x.isFinite ? velocity.x : 0, vy = velocity.y.isFinite ? velocity.y : 0
-        let offset = min(max(frame.midY, 0), 1)
-        func past(_ r: WorkspaceRect, _ edge: WorkspaceEdge) -> Double {
-            (edge == .left ? max(0, -r.x) : max(0, r.maxX - 1)) / r.width
-        }
-        if canTuck {
+        let speed = (vx * vx + vy * vy).squareRoot()
+        if canTuck, !edges.isEmpty {
             // Pulled more than halfway past an edge on purpose and let go there (slowly or not,
             // as long as it isn't being thrown back in).
-            for edge in [WorkspaceEdge.left, .right] where past(frame, edge) >= pastEdge {
-                let inward = edge == .left ? vx : -vx
-                if inward < flingSpeed { return .tuck(edge: edge, offset: offset) }
-            }
-            // Flung at an edge: fast, mostly sideways, let go on that side, carried past it.
-            let speed = (vx * vx + vy * vy).squareRoot()
-            if speed >= flingSpeed, abs(vx) / speed >= flingCosine {
-                let edge: WorkspaceEdge = vx < 0 ? .left : .right
-                let onSide = edge == .left ? frame.midX <= 1 - releaseSide : frame.midX >= releaseSide
-                var projected = frame
-                projected.x += projection(vx) / size.width
-                projected.y += projection(vy) / size.height
-                if onSide, past(projected, edge) >= pastEdge {
-                    return .tuck(edge: edge, offset: min(max(projected.midY, 0), 1))
+            for edge in [WorkspaceEdge.left, .right, .top, .bottom] where edges.contains(edge) && past(frame, edge) >= pastEdge {
+                let inward: Double
+                switch edge {
+                case .left: inward = vx
+                case .right: inward = -vx
+                case .top: inward = vy
+                case .bottom: inward = -vy
                 }
+                if inward < flingSpeed { return .tuck(edge: edge, offset: along(frame, edge)) }
+            }
+            // Thrown: fast enough, and its projected path carries it past an edge (from the
+            // middle or from the far side alike): tucked into the first edge that path crosses,
+            // where it crosses it. A corner throw takes whichever edge it meets first.
+            if speed >= flingSpeed,
+               let hit = firstEdge(frame, dx: projection(vx, rate: reachDecelerationRate) / size.width,
+                                   dy: projection(vy, rate: reachDecelerationRate) / size.height, edges: edges) {
+                return .tuck(edge: hit.edge, offset: hit.offset)
             }
         }
         let held = WorkspaceFloatGeometry.clamped(frame, in: size)
-        let speed = (vx * vx + vy * vy).squareRoot()
         guard speed >= glideSpeed else { return .settle(frame: snapped(held, in: size), glide: snapped(held, in: size) != frame) }
         var target = frame
         target.x += projection(vx) / size.width
@@ -557,11 +748,72 @@ enum WorkspaceFloatMotion {
         return c
     }
 
-    /// Where a tucked float slides to while it hides: just past its edge, at its height.
-    static func hiddenFrame(_ frame: WorkspaceRect, edge: WorkspaceEdge) -> WorkspaceRect {
+    /// Just past `edge`, so none of it (nor its title pill) shows: where a tucked float slides to
+    /// while it hides and comes back from. `along`: centred there along the edge (a share of
+    /// it, where its handle is or where its throw crossed); nil: where it is.
+    static func hiddenFrame(_ frame: WorkspaceRect, edge: WorkspaceEdge, along: Double? = nil) -> WorkspaceRect {
         var r = frame
-        r.x = edge == .left ? -r.width - 0.02 : 1.02
+        switch edge {
+        case .left: r.x = -r.width - 0.02
+        case .right: r.x = 1.02
+        case .top: r.y = -r.height - 0.06
+        case .bottom: r.y = 1.04
+        }
+        if let a = along, a.isFinite {
+            if edge.axis == .horizontal { r.y = a - r.height / 2 } else { r.x = a - r.width / 2 }
+        }
         return r
+    }
+
+    // MARK: Pulling a tucked float back out
+
+    /// Share of the way out (from hidden to where it was) past which letting go of a pull brings
+    /// the float back; short of it, it slides back into its edge.
+    static let restoreProgress = 0.4
+
+    /// How far out a tucked float is (0 hidden … 1 back where it was) while a finger pulls it
+    /// from its handle, its inner edge under the finger: `finger` is the finger's place across
+    /// the edge (a share of the picture's width for the left and right edges, of its height for
+    /// the top and bottom). Not clamped above 1.
+    static func pullProgress(finger: Double, frame: WorkspaceRect, edge: WorkspaceEdge) -> Double {
+        guard finger.isFinite else { return 0 }
+        let hidden = hiddenFrame(frame, edge: edge)
+        let (inner0, inner1): (Double, Double)
+        switch edge {
+        case .left: (inner0, inner1) = (hidden.maxX, frame.maxX)
+        case .right: (inner0, inner1) = (hidden.x, frame.x)
+        case .top: (inner0, inner1) = (hidden.maxY, frame.maxY)
+        case .bottom: (inner0, inner1) = (hidden.y, frame.y)
+        }
+        let travel = inner1 - inner0
+        guard abs(travel) > 1e-9 else { return 1 }
+        return max(0, (finger - inner0) / travel)
+    }
+
+    /// Points a pulled float travels from hidden to where it was.
+    static func pullTravel(_ frame: WorkspaceRect, edge: WorkspaceEdge, in size: WorkspaceSize) -> Double {
+        let hidden = hiddenFrame(frame, edge: edge)
+        return edge.axis == .horizontal ? abs(frame.x - hidden.x) * size.width : abs(frame.y - hidden.y) * size.height
+    }
+
+    /// Where a tucked float is drawn `progress` of the way out of its edge: from hidden at its
+    /// handle (`handle`, a share along the edge) to its own frame, in a straight line.
+    static func pulledFrame(_ frame: WorkspaceRect, edge: WorkspaceEdge, handle: Double, progress: Double) -> WorkspaceRect {
+        let from = hiddenFrame(frame, edge: edge, along: handle)
+        let t = progress.isFinite ? min(max(progress, 0), 1) : 0
+        return WorkspaceRect(x: from.x * (1 - t) + frame.x * t, y: from.y * (1 - t) + frame.y * t,
+                             width: frame.width, height: frame.height)
+    }
+
+    /// A pull let go `progress` of the way out at `inwardVelocity` (points/s, positive away from
+    /// the edge), with `travel` points from hidden to its frame: true brings it back (projected
+    /// like a throw, so a flick outward restores it early); false slides it back in. Pushed back
+    /// toward the edge, it always goes back.
+    static func pullRestores(progress: Double, inwardVelocity: Double, travel: Double) -> Bool {
+        guard progress.isFinite, travel.isFinite, travel > 0 else { return false }
+        let v = inwardVelocity.isFinite ? inwardVelocity : 0
+        if v <= -glideSpeed { return false }
+        return progress + max(0, projection(v)) / travel >= restoreProgress
     }
 
     /// A critically damped spring from `from` toward `to`, starting at `velocity` (units/s):

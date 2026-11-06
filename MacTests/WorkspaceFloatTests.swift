@@ -95,7 +95,10 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertNil(tf.tiles["b"])
         XCTAssertEqual(tf.hitTest(WorkspacePoint(x: 0.5, y: 0.4)), "f")
         XCTAssertEqual(tucked.float("b")?.frame, box)
-        XCTAssertEqual(tucked.tuckingFloat("b", edge: .top, offset: 0.4), tucked, "only the left and right edges")
+        let top = tucked.tuckingFloat("b", edge: .top, offset: 0.4)
+        XCTAssertEqual(top.float("b")?.tuck, WorkspaceFloatTuck(edge: .top, offset: 0.4), "any edge: the top and bottom too")
+        XCTAssertEqual(top.float("b")?.frame, box, "its frame is kept")
+        XCTAssertEqual(tucked.tuckingFloat("b", edge: .bottom, offset: 7).float("b")?.tuck?.offset, 1, "kept on its edge")
         let back = tucked.raisingFloat("f").untuckingFloat("b")
         XCTAssertNil(back.float("b")?.tuck)
         XCTAssertEqual(back.floatIDs.last, "b")
@@ -163,14 +166,23 @@ final class WorkspaceFloatTests: XCTestCase {
 
         // Hostile values are kept on the canvas or dropped, never trusted.
         json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        json["floats"] = [["tile": "b", "x": -5.0, "y": 9.0, "w": 40.0, "h": 0.5, "tuck": "top"],
+        json["floats"] = [["tile": "b", "x": -5.0, "y": 9.0, "w": 40.0, "h": 0.5, "tuck": "sideways"],
                           ["tile": "nope", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2],
                           ["tile": "a", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2]]
         let hostile = try XCTUnwrap(WorkspaceLayoutRecord.decode(JSONSerialization.data(withJSONObject: json)))
         XCTAssertEqual(hostile.floatIDs, ["b"], "unknown tiles and tiles already in the tree are refused")
         let f = try XCTUnwrap(hostile.float("b"))
         XCTAssertTrue(f.frame.x >= 0 && f.frame.maxX <= 1 && f.frame.y >= 0 && f.frame.maxY <= 1)
-        XCTAssertNil(f.tuck, "only left and right tucks")
+        XCTAssertNil(f.tuck, "an edge it doesn't know: shown where it was, untucked (what a reader from before top and bottom tucks does with them)")
+
+        // Every edge round-trips, the schema stays 4.
+        for edge in [WorkspaceEdge.left, .right, .top, .bottom] {
+            let t = l.tuckingFloat("b", edge: edge, offset: 0.25)
+            let r = WorkspaceLayoutRecord(t)
+            XCTAssertEqual(r.schema, 4)
+            XCTAssertEqual(r.floats?.first { $0.tile == "b" }?.tuck, edge.rawValue)
+            XCTAssertEqual(try XCTUnwrap(WorkspaceLayoutRecord.decode(try XCTUnwrap(r.encoded()))), t, "\(edge)")
+        }
     }
 
     /// Rotation, a compact screen and a Mac without floats: floats are kept usable or tucked,
@@ -298,17 +310,23 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertGreaterThan(glided.x, mid.x)
         XCTAssertEqual(glided.y, mid.y)
         XCTAssertLessThanOrEqual(glided.maxX, 1 + 1e-9)
-        // A fast throw across the middle (let go on the far side) never hides the float.
+        // A move across the middle that isn't a throw never hides the float, however far it goes.
         let left = WorkspaceRect(x: 0.1, y: 0.3, width: 0.3, height: 0.3)
-        if case .tuck = WorkspaceFloatMotion.decide(release: left, velocity: (3500, 0), in: ipad) { XCTFail("crossing the middle must not tuck") }
+        if case .tuck = WorkspaceFloatMotion.decide(release: left, velocity: (1000, 0), in: ipad) { XCTFail("a move across the middle must not tuck") }
+        // A strong throw from the far side tucks at the edge it reaches (WorkspaceFloatTuckTests has the reach).
+        XCTAssertEqual(WorkspaceFloatMotion.decide(release: left, velocity: (3500, 0), in: ipad), .tuck(edge: .right, offset: left.midY))
         // An intentional fling at the near edge tucks it, at the height it was heading for.
         let right = WorkspaceRect(x: 0.6, y: 0.3, width: 0.3, height: 0.3)
         XCTAssertEqual(WorkspaceFloatMotion.decide(release: right, velocity: (2600, 0), in: ipad),
                        .tuck(edge: .right, offset: right.midY))
         let leftSide = WorkspaceRect(x: 0.05, y: 0.4, width: 0.3, height: 0.3)
         guard case .tuck(.left, _) = WorkspaceFloatMotion.decide(release: leftSide, velocity: (-2600, -300), in: ipad) else { return XCTFail() }
-        // Mostly downward: no tuck (the top and bottom are the system's).
-        if case .tuck = WorkspaceFloatMotion.decide(release: right, velocity: (1300, 2600), in: ipad) { XCTFail("a steep fling must not tuck") }
+        // Mostly downward: into the bottom edge, which its path crosses before the right one.
+        guard case .tuck(.bottom, let along) = WorkspaceFloatMotion.decide(release: right, velocity: (1300, 2600), in: ipad) else { return XCTFail() }
+        XCTAssertGreaterThan(along, right.midX, "where its path crosses the bottom")
+        // Unless the bottom edge has no room for a handle: then the right edge it reaches next.
+        guard case .tuck(.right, _) = WorkspaceFloatMotion.decide(release: right, velocity: (1300, 2600), in: ipad,
+                                                                  edges: [.left, .right, .top]) else { return XCTFail() }
         // Slow, but pulled more than halfway past the edge on purpose: tucks.
         let pulled = WorkspaceRect(x: 0.88, y: 0.3, width: 0.3, height: 0.3)
         XCTAssertEqual(WorkspaceFloatMotion.decide(release: pulled, velocity: (0, 0), in: ipad), .tuck(edge: .right, offset: pulled.midY))
