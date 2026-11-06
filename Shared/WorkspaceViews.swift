@@ -143,15 +143,15 @@ struct WorkspaceChromeView: View {
                 }
                 #endif
                 WorkspaceDropOverlay(model: model, picture: picture)
-                #if os(iOS)
-                // Mission Control: the notices of the floats it pauses, each on its own window.
-                if !model.arranging, model.drag == nil { floatMissionControlNotices(frames) }
-                #endif
                 if model.arranging {
                     arrangeControls(frames)
                 } else if model.localFullscreen == nil, !voiceOver {
                     dividerHolds(frames)
                 }
+                #if os(iOS)
+                // Mission Control: the notices of the floats it pauses, each on its own window.
+                if !model.arranging, model.drag == nil { floatMissionControlNotices(frames) }
+                #endif
                 if let m = menu, let tile = model.layout.tiles[m.tile], let rect = frames.tiles[m.tile]?.onScreen(picture) {
                     // Tap anywhere else to close; nothing reaches the Mac while the menu is open.
                     Color.black.opacity(0.001)
@@ -190,7 +190,24 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    // MARK: Mission Control (only on the windows it pauses)
+    /// What decides whose menus the bar shows: the focused pane, its app, and control.
+    private var menuKey: String {
+        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
+        // `available` too: after a reconnect the same pane and app need their menus asked for again.
+        return "\(model.active ?? "")|\(source?.isDisplay == false ? source?.bundleID ?? "" : "")|\(inputAllowed)|\(model.windowMode)|\(model.menus.available)"
+    }
+
+    private func syncMenus() {
+        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
+        let appName = source.flatMap { s in model.catalog?.windows.first { $0.id == s.windowID }?.app }
+        model.menus.sync(tile: model.active, bundle: source?.isDisplay == false ? source?.bundleID : nil,
+                         appName: appName, enabled: inputAllowed && model.windowMode)
+    }
+
+    private var closeTitle: String {
+        let name = confirmClose.flatMap { model.tileState($0)?.app }.flatMap { $0.isEmpty ? nil : $0 } ?? "this window"
+        return "Close \(name) on the Mac?"
+    }
 
     /// Mission Control holds this window's picture: what's happening and the one thing this device
     /// can do about it (that button is the only way out: never an Escape on its own). The × folds
@@ -307,25 +324,6 @@ struct WorkspaceChromeView: View {
                 content
             }
         }
-    }
-
-    /// What decides whose menus the bar shows: the focused pane, its app, and control.
-    private var menuKey: String {
-        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
-        // `available` too: after a reconnect the same pane and app need their menus asked for again.
-        return "\(model.active ?? "")|\(source?.isDisplay == false ? source?.bundleID ?? "" : "")|\(inputAllowed)|\(model.windowMode)|\(model.menus.available)"
-    }
-
-    private func syncMenus() {
-        let source = model.active.flatMap { model.layout.tiles[$0]?.source }
-        let appName = source.flatMap { s in model.catalog?.windows.first { $0.id == s.windowID }?.app }
-        model.menus.sync(tile: model.active, bundle: source?.isDisplay == false ? source?.bundleID : nil,
-                         appName: appName, enabled: inputAllowed && model.windowMode)
-    }
-
-    private var closeTitle: String {
-        let name = confirmClose.flatMap { model.tileState($0)?.app }.flatMap { $0.isEmpty ? nil : $0 } ?? "this window"
-        return "Close \(name) on the Mac?"
     }
 
     private func status(for id: String, tile: WorkspaceTile) -> String? {
