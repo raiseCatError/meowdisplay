@@ -1527,7 +1527,7 @@ enum WorkspaceAdaptation {
         guard ordered.count > capacity else {
             guard !saved.floats.isEmpty else { return Result(visible: saved, stacked: []) }
             var visible = saved
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             return Result(visible: visible, stacked: [])
         }
         var shown = Array(ordered.prefix(capacity))
@@ -1542,7 +1542,7 @@ enum WorkspaceAdaptation {
         if !saved.floats.isEmpty {
             // Floats don't take the tree's room: they stay, fitted to this space.
             for f in saved.floats { visible.tiles[f.tile] = saved.tiles[f.tile] }
-            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, active: active, shown: floatsShown)
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             visible.normalize()
         }
         if let m = saved.maximized, shown.contains(m) || saved.isFloat(m) { visible.maximized = m }
@@ -1584,6 +1584,12 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.last == layout { return }
         past.append(layout)
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
+    }
+
+    /// The last step recorded `layout` and the change came to nothing (a float's move cancelled
+    /// back to where it was): no undo step for it.
+    mutating func forget(_ layout: WorkspaceLayout) {
+        if past.last == layout { past.removeLast() }
     }
 
     /// The layout before the last change. With `current`, that change can be redone.
