@@ -572,10 +572,17 @@ struct ReceiverScreen: View {
                         .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
                     let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
                                                                      peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
+                    // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
+                    // too) and a docked keyboard (its visible rect is in the canvas's coordinates).
+                    let keyboardCover = keyboardVisibleRect.map { visible -> CGRect in
+                        let top = canvas.minY + visible.maxY
+                        return CGRect(x: canvas.minX, y: top, width: canvas.width, height: max(0, geo.size.height - top))
+                    }
                     WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
                                         layoutPicture: picture.layout, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                        controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
                                         onSettings: { showSettings = true },
                                         onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
                         .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
