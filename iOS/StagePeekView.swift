@@ -149,7 +149,9 @@ struct StagePeekOverlay: View {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
                 // (Window mode: the pane view draws them. Drawing them here too showed two
                 // "Drop Here to Cancel" zones, owner report 2026-10-31.)
-                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
+                // Its chip below the Dynamic Island, its bar above the Home indicator and the controls.
+                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size),
+                                     safeArea: safe, controls: avoiding).zIndex(55)
             }
             if let d = model.drag, case .window(let w) = d.item {
                 // The card under the finger while the peek steps aside to show the panes.
