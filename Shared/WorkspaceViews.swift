@@ -1334,7 +1334,7 @@ struct WorkspaceDropOverlay: View {
                 HStack(spacing: 12) {
                     cancelZone(over: model.overCancelZone(d.location), short: removable || floatable)
                     if floatable { floatZone(over: model.overFloatZone(d.location)) }
-                    if removable { removeZone(over: model.overRemoveZone(d.location)) }
+                    if removable { removeZone(over: model.overRemoveZone(d.location), float: d.isFloat) }
                 }
                 .padding(.horizontal, 12)
                 .frame(maxWidth: picture.width)
@@ -1444,9 +1444,11 @@ struct WorkspaceDropOverlay: View {
         }
     }
 
-    /// Takes the pane out of this device's layout. Never closes, minimizes or quits the Mac window.
-    private func removeZone(over: Bool) -> some View {
-        dropZone(over ? String(localized: "Release to Remove") : String(localized: "Remove from Layout"),
+    /// Takes the pane out of this device's layout, or a float being docked off this device (the
+    /// float menu's own Remove from This Device). Never closes, minimizes or quits the Mac window.
+    private func removeZone(over: Bool, float: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Remove")
+                      : (float ? String(localized: "Remove from This Device") : String(localized: "Remove from Layout")),
                  symbol: "rectangle.badge.minus", over: over,
                  fill: over ? Color.red.opacity(0.85) : Color(red: 0.35, green: 0.06, blue: 0.06, opacity: 0.72)) {
             model.removeZoneGlobal = $0

@@ -358,6 +358,65 @@ final class WorkspaceFloatDockingTests: XCTestCase {
         XCTAssertTrue(m.layout.isFloat(front))
     }
 
+    /// Remove from This Device for a float being docked: released on it the float is removed
+    /// here only (the Mac window stays open; nothing but the layout is sent; Undo brings it back);
+    /// Cancel changes nothing; where the two zones' margins meet, Cancel wins, so the highlight,
+    /// the haptic and the drop agree and nothing is removed by a near miss.
+    @MainActor
+    func testAFloatReleasedOnRemoveIsRemovedFromThisDeviceOnly() throws {
+        var sent: [[String: Any]] = []
+        let m = connectedModel { sent.append($0) }
+        let (_, back, front) = try arranged(m)
+        let before = m.layout
+
+        m.beginFloatGesture(front)
+        var (switched, t) = moveThenCircle(m, front, around: CGPoint(x: 700, y: 400))
+        XCTAssertEqual(switched, .dock)
+        XCTAssertTrue(m.canDropToRemove, "offered for a float being docked")
+        XCTAssertTrue(m.drag?.isFloat == true, "labelled Remove from This Device")
+        XCTAssertFalse(m.canDropToFloat, "no Float zone: circling back is the way")
+
+        // Between the zones (inside both 8 pt margins): Cancel.
+        let between = CGPoint(x: 526, y: 760)
+        m.moveFloatFinger(front, to: between, at: t + 0.3)
+        XCTAssertTrue(m.overCancelZone(between))
+        XCTAssertFalse(m.overRemoveZone(between), "only one zone lights at a time")
+        XCTAssertFalse(m.endDockingFloat(front))
+        XCTAssertEqual(m.layout, before, "a near miss removes nothing")
+
+        // On Remove: gone from this device only.
+        sent.removeAll()
+        m.beginFloatGesture(front)
+        (switched, t) = moveThenCircle(m, front, around: CGPoint(x: 700, y: 400), from: 100)
+        XCTAssertEqual(switched, .dock)
+        let onRemove = CGPoint(x: 650, y: 760)
+        m.moveFloatFinger(front, to: onRemove, at: t + 0.3)
+        XCTAssertTrue(m.overRemoveZone(onRemove))
+        XCTAssertNil(m.dropTarget(forGlobal: onRemove), "Remove is not also a pane drop")
+        XCTAssertTrue(m.endDockingFloat(front))
+        XCTAssertNil(m.layout.tiles[front])
+        XCTAssertEqual(m.layout.floatIDs, [back])
+        XCTAssertTrue(m.liftedFloats.isEmpty)
+        let types = sent.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains(WireMessage.windowClose), "never closes the Mac window")
+        XCTAssertFalse(types.contains(WireMessage.windowAction), "never minimizes or moves it")
+        XCTAssertTrue(sent.allSatisfy { allowed.contains($0["type"] as? String ?? "") }, "\(types)")
+        let request = sent.last { $0["type"] as? String == WireMessage.workspaceRequest }?["tiles"] as? [[String: Any]] ?? []
+        XCTAssertFalse(request.contains { $0["id"] as? String == front }, "no longer asked for")
+        m.undo()
+        XCTAssertEqual(m.layout, before, "Undo brings it back where it was")
+
+        // A pane's label still gets Remove from Layout; a tab or a Stage Peek window doesn't.
+        let pane = m.layout.orderedTileIDs[0]
+        m.beginDrag(.pane(pane, tab: nil), at: CGPoint(x: 200, y: 20))
+        XCTAssertTrue(m.canDropToRemove)
+        XCTAssertFalse(m.drag?.isFloat == true)
+        m.cancelDrag()
+        m.beginDrag(.window(m.catalog!.windows[0]), at: CGPoint(x: 200, y: 400))
+        XCTAssertFalse(m.canDropToRemove)
+        m.cancelDrag()
+    }
+
     /// A Mac without `floatLift` can't leave the float out: it keeps drawing it where the move
     /// began while the card is shown, and nothing is ever sent with `lift`.
     @MainActor

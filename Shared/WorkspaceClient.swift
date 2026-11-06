@@ -1663,10 +1663,14 @@ final class WorkspaceModel: ObservableObject {
 
     /// Remove from Layout is offered only while repositioning a whole pane that is already in the
     /// layout (its label, not one of its tabs), with another pane left: never for a window or app
-    /// from Stage Peek, a new pane or a tab. It removes the pane here only; the Mac window is untouched.
+    /// from Stage Peek, a new pane or a tab. A float being docked (circled into a card) is offered
+    /// Remove from This Device. Either removes it here only; the Mac window is untouched.
     var canDropToRemove: Bool {
-        guard windowMode, case .pane(let id, nil)? = drag?.item else { return false }
-        return canRemoveFromLayout(id)
+        guard windowMode else { return false }
+        switch drag?.item {
+        case .pane(let id, nil)?, .float(let id)?: return canRemoveFromLayout(id)
+        default: return false
+        }
     }
 
     /// Whether a pane may come off this device's layout (its menu and the drop
@@ -1703,6 +1707,10 @@ final class WorkspaceModel: ObservableObject {
         drag = nil
         if remove, case .pane(let id, nil) = d.item {
             removeTile(id)   // one undo step; never a request to close the window on the Mac
+            return true
+        }
+        if remove, case .float(let id) = d.item {
+            removeFloat(id)   // the float's own Remove from This Device: the Mac window stays open
             return true
         }
         guard let target else { return false }
