@@ -280,22 +280,24 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(edge.width * ipad.width / (edge.height * ipad.height), 3, accuracy: 0.01, "too big: shrunk, same shape")
     }
 
-    /// Several tucked floats on one edge: tabs that never overlap, kept out of the system's
+    /// Several tucked floats on one edge: strips that never overlap, kept out of the system's
     /// top and bottom bands; too many collapse into one stack.
     func testTuckedTabsStackWithoutOverlapping() {
         let area = WorkspaceRect(x: 0, y: 0, width: 1180, height: 820)
-        let three = WorkspaceFloatGeometry.tuckTabs([("a", 0.5), ("b", 0.5), ("c", 0.52)], edge: .right, area: area)
+        let card = WorkspaceSize(width: 240, height: 150)
+        let three = WorkspaceFloatGeometry.tuckTabs([("a", 0.5, card), ("b", 0.5, card), ("c", 0.52, card)], edge: .right, area: area)
         XCTAssertEqual(three.count, 3)
+        XCTAssertTrue(three.allSatisfy { $0.rect.height == 150 }, "each as long as its float")
         for (i, t) in three.enumerated() {
             XCTAssertEqual(t.rect.maxX, area.maxX, accuracy: 1e-9)
             XCTAssertGreaterThanOrEqual(t.rect.y, area.height * WorkspaceFloatGeometry.tabBand - 1e-9)
             XCTAssertLessThanOrEqual(t.rect.maxY, area.height * (1 - WorkspaceFloatGeometry.tabBand) + 1e-9)
             for other in three[(i + 1)...] { XCTAssertNil(t.rect.intersection(other.rect), "tabs never overlap") }
         }
-        let low = WorkspaceFloatGeometry.tuckTabs([("a", 0.99), ("b", 0.99)], edge: .left, area: area)
+        let low = WorkspaceFloatGeometry.tuckTabs([("a", 0.99, card), ("b", 0.99, card)], edge: .left, area: area)
         XCTAssertTrue(low.allSatisfy { $0.rect.maxY <= area.height * 0.88 + 1e-9 && $0.rect.x == 0 })
         let phoneEdge = WorkspaceRect(x: 0, y: 0, width: 844, height: 300)
-        let crowded = WorkspaceFloatGeometry.tuckTabs((0..<5).map { ("f\($0)", 0.5) }, edge: .right, area: phoneEdge)
+        let crowded = WorkspaceFloatGeometry.tuckTabs((0..<5).map { ("f\($0)", 0.5, card) }, edge: .right, area: phoneEdge)
         XCTAssertEqual(crowded.count, 1)
         XCTAssertEqual(crowded[0].ids.count, 5)
         XCTAssertTrue(crowded[0].isStack)
@@ -570,7 +572,8 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(request.last?["layer"] as? String, "float")
         XCTAssertEqual(request.last?["z"] as? Int, 0)
         XCTAssertEqual(request.last?["window"] as? Int, 12)
-        XCTAssertEqual(request.last?["x"] as? Double ?? -1, 0.1, accuracy: 1e-9, "the frame the finger left")
+        XCTAssertEqual(request.last?["x"] as? Double ?? -1, 0.7, accuracy: 1e-9, "back from the right edge: flush with it, where it waited")
+        XCTAssertEqual(request.last?["w"] as? Double ?? -1, 0.3, accuracy: 1e-9, "at the size the finger left")
         let allowed: Set<String> = [WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.workspaceBackdropRequest,
                                     WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest]
         XCTAssertTrue(sent.allSatisfy { allowed.contains($0["type"] as? String ?? "") },

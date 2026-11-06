@@ -881,7 +881,13 @@ final class WorkspaceModel: ObservableObject {
            !saved.floats.isEmpty, floatGesture == nil {
             var carried = saved
             for i in carried.floats.indices {
-                carried.floats[i].frame = WorkspaceFloatGeometry.carried(carried.floats[i].frame, from: size, to: newSize)
+                var f = WorkspaceFloatGeometry.carried(carried.floats[i].frame, from: size, to: newSize)
+                if let t = carried.floats[i].tuck {
+                    // A tucked float waits flush with its edge, where its strip is.
+                    f = WorkspaceFloatGeometry.tuckedFrame(f, edge: t.edge, along: t.offset, in: newSize)
+                    carried.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, t.edge)
+                }
+                carried.floats[i].frame = f
             }
             saved = carried
         }
@@ -2215,41 +2221,53 @@ extension WorkspaceModel {
 
     // MARK: Tucking
 
-    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched.
-    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double) {
-        guard layout.isFloat(id) else { return }
-        // A fresh still for its sliver at the edge, asked for while it's still sent (the Mac
+    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched. It waits
+    /// at its own size flush with that edge where its strip is (`frame`, the view's place for it;
+    /// nil: flush with the picture's edge at `offset`), so pulling it back out is a straight
+    /// slide back to that place.
+    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double, frame: WorkspaceRect? = nil) {
+        guard let f = layout.float(id) else { return }
+        // A fresh still for its strip at the edge, asked for while it's still sent (the Mac
         // answers from the capture that stops with the tuck).
         let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
         if age > 2 { requestBackdrop(id, refresh: true) }
-        edit { $0.tuckingFloat(id, edge: edge, offset: offset) }
+        let waiting = frame ?? WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: offset, in: size)
+        edit { $0.tuckingFloat(id, edge: edge, offset: WorkspaceFloatMotion.along(waiting, edge), frame: waiting) }
         refocus(after: id)
     }
 
     /// A tucked float comes back with a slide drawn on this device: it's shown again now (so its
     /// capture starts during the slide) but lifted where the Mac can lift floats, so the Mac
     /// leaves it out until it has landed (`endFloatGesture`) and it's never on screen twice.
-    /// Its still may be old: it's only drawn for the moment of the slide.
-    func beginRestoringFloat(_ id: String) {
+    /// `frame`: where it comes back to (nil: where it waited). Its still may be old: it's only
+    /// drawn for the moment of the slide.
+    func beginRestoringFloat(_ id: String, frame: WorkspaceRect? = nil) {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
-        untuckFloat(id)
+        untuckFloat(id, frame: frame)
         guard canLiftFloats, saved.float(id)?.tuck == nil, !liftedFloats.contains(id) else { return }
         liftedFloats.insert(id)
         landingFloats[id] = nil
         sendNow()
     }
 
-    /// Back where it was, in front and focused. The other floats stay as they are, on a phone too.
-    func untuckFloat(_ id: String) {
+    /// Back where it waited (or at `frame`), in front and focused. The other floats stay as they
+    /// are, on a phone too.
+    func untuckFloat(_ id: String, frame: WorkspaceRect? = nil) {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
-        edit { $0.untuckingFloat(id) }
+        edit { $0.untuckingFloat(id, frame: frame) }
         focus(id, raise: false)
     }
 
-    /// A tab dragged along its edge (no undo step; tucked floats aren't sent).
+    /// A strip slid along its edge (no undo step; tucked floats aren't sent): the float waits
+    /// there now, as far from the edge as before, and comes back out there.
     func moveTuckTab(_ id: String, offset: Double) {
-        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), saved.floats[i].tuck != nil else { return }
-        saved.floats[i].tuck?.offset = min(max(offset.isFinite ? offset : 0.5, 0), 1)
+        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), let tuck = saved.floats[i].tuck else { return }
+        var f = saved.floats[i].frame
+        let along = offset.isFinite ? min(max(offset, 0), 1) : 0.5
+        if tuck.edge.axis == .horizontal { f.y = along - f.height / 2 } else { f.x = along - f.width / 2 }
+        f = WorkspaceFloatGeometry.clamped(f, in: size)
+        saved.floats[i].frame = f
+        saved.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, tuck.edge)
         persist(); publish()
     }
 
