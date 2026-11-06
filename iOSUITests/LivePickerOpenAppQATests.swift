@@ -77,7 +77,7 @@ final class LivePickerOpenAppQATests: XCTestCase {
         XCTAssertTrue(waitUntil(5) { open.exists || requestControl.exists }, "opening is confirmed first")
         snapshot(app, "picker-04-confirm")
         if !open.exists {
-            app.buttons["Cancel"].firstMatch.tap()
+            dismissConfirm(app)
             closePicker(app)
             throw XCTSkip("this session has no control of the Mac (the confirm offers Request Control and Open); allow control first")
         }
@@ -145,6 +145,15 @@ final class LivePickerOpenAppQATests: XCTestCase {
     /// The same pane slot (a window changing in a pane doesn't move it).
     private static func samePlace(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.midX - b.midX) < 4 && abs(a.midY - b.midY) < 4
+    }
+
+    /// Leaves the confirm without opening anything: its Cancel where it has one (iPad, a sheet);
+    /// on iPhone it's a popover with no Cancel, so a tap on the empty foot of the picker.
+    @MainActor
+    private func dismissConfirm(_ app: XCUIApplication) {
+        let cancel = app.buttons["Cancel"].firstMatch
+        if cancel.exists { cancel.tap() } else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap() }
+        sleep(1)
     }
 
     @MainActor
