@@ -184,6 +184,12 @@ holding the old one is refused, never pointed at the new one.
   without moving the Mac pointer, so hover reaches the Mac only over the
   active tile.
 - **Zoom.** On iPhone and iPad, tile handles follow the unzoomed picture.
+- **Mission Control.** macOS pauses every window capture while it is open.
+  Each paused window pane and float says so, with **Exit Mission Control**
+  (with control; otherwise Request Control to Exit). Its × folds it to a
+  small status that brings it back; it never exits by itself, and the pane's
+  menu and VoiceOver action still offer Exit. Full Desktop keeps showing the
+  Mac's screen, Mission Control included, so it gets no notice.
 - **Stage Manager.** Windows on the current stage stream live. A window in
   the side strip doesn't: measured on macOS 27.0 (26A428) with a disposable
   window drawing a frame counter, ScreenCaptureKit's per-window stream
