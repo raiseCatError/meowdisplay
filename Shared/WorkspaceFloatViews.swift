@@ -274,6 +274,16 @@ struct WorkspaceFloatLayer: View {
                     floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
                 }
             }
+            // Tucked floats, each its own window at its own size just behind its edge.
+            ForEach(edgeItems(handles)) { edgeItem($0) }
+            armedEdges
+            // Where tucked floats' strips take touches, together for VoiceOver, in reading order
+            // around the edges.
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(handles.enumerated()), id: \.element.key) { i, h in
+                    handle(h.tab).accessibilitySortPriority(Double(handles.count - i))
+                }
+            }
             .accessibilityElement(children: .contain)
             if let c = card, model.dockingFloat == c.id { dockCard(c) }
             if let r = ring, r.progress > 0 {
