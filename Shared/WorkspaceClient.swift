@@ -819,7 +819,7 @@ final class WorkspaceModel: ObservableObject {
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
         savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
-        thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]; tuckedStillAskedAt = [:]
+        thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []
         generations = [:]
