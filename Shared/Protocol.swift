@@ -224,6 +224,10 @@ enum WindowWorkspaceWire {
     static let welcomeFeature = "window"
     /// The Mac draws floating panes (`layer: "float"` tiles that may overlap, ordered by `z`).
     static let floatFeature = "windowFloat"
+    /// The Mac leaves out a floating pane sent with `lift: true` (not drawn, not hit, its capture
+    /// kept running) while the receiver draws it under the finger during a move or resize, so
+    /// the float is never on screen twice. Without it the receiver never sends `lift`.
+    static let floatLiftFeature = "floatLift"
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }

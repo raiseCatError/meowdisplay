@@ -21,6 +21,45 @@ private extension WorkspaceRect {
     }
 }
 
+/// A native menu built when it opens and never rebuilt while it is open. A SwiftUI `Menu` in the
+/// workspace chrome is re-evaluated every time the workspace model publishes (many times a second
+/// while a stream runs); an open menu rebuilt mid-scroll jumps back to its top and cross-fades two
+/// copies of itself, so its lower items can't be reached. `symbol` nil: an invisible button laid
+/// over a SwiftUI face, which then is only the picture.
+struct WorkspaceStableMenuButton: UIViewRepresentable {
+    var symbol: String?
+    var accessibilityLabel: String
+    var accessibilityIdentifier: String
+    var items: @MainActor () -> [UIMenuElement]
+
+    @MainActor final class Coordinator {
+        var items: @MainActor () -> [UIMenuElement] = { [] }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        if let symbol {
+            button.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .bold)), for: .normal)
+            button.tintColor = .white
+        }
+        button.showsMenuAsPrimaryAction = true
+        button.preferredMenuElementOrder = .fixed
+        button.isPointerInteractionEnabled = true
+        let coordinator = context.coordinator
+        button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { completion in completion(coordinator.items()) }])
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        // Only what the next opening reads: the open menu itself is never touched.
+        context.coordinator.items = items
+        button.accessibilityLabel = accessibilityLabel
+        button.accessibilityIdentifier = accessibilityIdentifier
+    }
+}
+
 /// Glides a released float to where it settles (or off to the edge it was flung at) with a
 /// critically damped spring that starts at the finger's velocity. A new touch catches it.
 @MainActor
@@ -137,15 +176,17 @@ struct WorkspaceFloatLayer: View {
     var body: some View {
         let frames = model.frames
         let handles = model.localFullscreen == nil ? tuckTabs() : []
+        // Where each float is drawn now, and what the floats in front of it cover: its chrome
+        // steps aside there (the front float's window is in the video, under all the chrome).
+        let shown = frames.floats.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
+        let covers = WorkspaceFloatLayering.covers(backToFront: shown.map { WorkspaceRect($0.rect) })
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
             ForEach(Array(motion.leaving).sorted(), id: \.self) { id in
                 if let f = motion.frames[id] { leavingGhost(id, f.screen(in: picture)) }
             }
-            ForEach(frames.floats, id: \.self) { id in
-                if let f = motion.frames[id] ?? frames.tiles[id] {
-                    floatChrome(id, rect: f.screen(in: picture), front: frames.floats.last == id)
-                }
+            ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
+                floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: covers[i].map(\.cgRect))
             }
             ForEach(handles, id: \.key) { h in handle(h.tab, edge: h.edge) }
             if model.shakeTipVisible { shakeTip }
@@ -178,17 +219,26 @@ struct WorkspaceFloatLayer: View {
         model.layout.tiles[id]?.source?.bundleID.flatMap { model.icons[$0] }
     }
 
+    /// One float's chrome. `covers`: what the floats in front of it cover (picture points). Its
+    /// outline steps aside there, and its title pill, grips, grabber and notices aren't drawn (nor
+    /// touchable) where they'd sit over a float in front: they would show through that float and
+    /// take its touches.
     @ViewBuilder
-    private func floatChrome(_ id: String, rect: CGRect, front: Bool) -> some View {
+    private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect]) -> some View {
         let active = model.active == id
         let moved = motion.frames[id] != nil || resizeStart[id] != nil
-        let outline = active ? floatAccent : Color.white.opacity(highContrast ? 0.75 : 0.4)
+        let outline = active ? floatAccent : Color.white.opacity(highContrast ? 0.75 : 0.3)
+        let coverRects = covers.map(WorkspaceRect.init)
+        let covered: (CGRect) -> Bool = { WorkspaceFloatLayering.isCovered(WorkspaceRect($0), by: coverRects) }
+        let handles = WorkspaceFloatLayering.showsHandles(selected: active, hovered: model.hovered == id, manipulating: moved)
+        // While a finger moves or resizes it the Mac leaves it out (`floatLift`) and it's drawn
+        // here, from its last still, in its own view at this size. A Mac without lift keeps
+        // drawing it a moment behind, so the still goes with the finger as before.
+        let drawnHere = model.drawsFloatHere(id) || (moved && !model.canLiftFloats)
         ZStack {
-            // While it moves, the window's last picture goes with the finger (the Mac follows).
-            if moved, let image = model.backdrops[id]?.image {
-                Image(decorative: image, scale: 1).resizable().scaledToFill()
-                    .frame(width: rect.width, height: rect.height)
-                    .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+            if drawnHere, let image = model.backdrop(id)?.image,
+               let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
+                FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
             }
             RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
                 .strokeBorder(Color.black.opacity(highContrast ? 0.8 : 0.45), lineWidth: active ? 3.5 : 2.5)
@@ -196,6 +246,7 @@ struct WorkspaceFloatLayer: View {
                 .strokeBorder(outline, lineWidth: active ? 2 : 1)
         }
         .frame(width: rect.width, height: rect.height)
+        .mask(WorkspaceHoleMask(size: rect.size, holes: covers.map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
         .position(x: rect.midX, y: rect.midY)
         .allowsHitTesting(false)
         .accessibilityElement()
@@ -205,12 +256,18 @@ struct WorkspaceFloatLayer: View {
         .accessibilityAction { model.raiseFloat(id); model.focus(id, raise: false) }   // selects it here only
         .modifier(FloatAccessibilityActions(model: model, id: id, front: front))
 
-        titlePill(id, rect: rect, active: active, outline: outline)
-        grabber(id, rect: rect, active: active)
-        grip(id, rect: rect, corner: .bottomLeading, active: active)
-        grip(id, rect: rect, corner: .bottomTrailing, active: active)
-        if model.tileState(id)?.status == .offscreen, !moved { offscreenNotice(id, rect: rect) }
-        else if active, model.remote?.hostFocus.isMismatch == true, !moved { typingPaused(id, rect: rect) }
+        if !covered(WorkspaceFloatLayering.pillBounds(WorkspaceRect(rect)).cgRect) {
+            titlePill(id, rect: rect, active: active, outline: outline)
+        }
+        if handles {
+            if !covered(CGRect(x: rect.midX - 38, y: rect.maxY - 4, width: 76, height: 28)) { grabber(id, rect: rect, active: active) }
+            if !covered(CGRect(x: rect.minX - 28, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
+            if !covered(CGRect(x: rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
+        }
+        let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)
+        if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }
+        else if active, model.remote?.hostFocus.isMismatch == true, !moved,
+                !covered(CGRect(x: rect.midX - 60, y: rect.maxY - 54, width: 120, height: 40)) { typingPaused(id, rect: rect) }
     }
 
     /// Typing to this float paused: the Mac's focus moved to another app or window after its
@@ -278,12 +335,9 @@ struct WorkspaceFloatLayer: View {
             .accessibilityHint(Text("Drag to move. Fling toward the left or right edge to tuck it away."))
             .accessibilityAddTraits(.isButton)
             .hoverEffect(.highlight)
-            Menu { floatMenu(id) } label: {
-                Image(systemName: "ellipsis").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
-                    .frame(width: 30, height: 26).contentShape(Rectangle())
-            }
-            .accessibilityLabel(Text("Options for \(title(id))"))
-            .accessibilityIdentifier("floatOptions")
+            WorkspaceStableMenuButton(symbol: "ellipsis", accessibilityLabel: String(localized: "Options for \(title(id))"),
+                                      accessibilityIdentifier: "floatOptions") { floatMenu(id) }
+                .frame(width: 34, height: 28)
         }
         .fixedSize()
         .background(Capsule().fill(floatChip))
@@ -323,10 +377,9 @@ struct WorkspaceFloatLayer: View {
 
     private func leavingGhost(_ id: String, _ rect: CGRect) -> some View {
         ZStack {
-            if let image = model.backdrops[id]?.image {
-                Image(decorative: image, scale: 1).resizable().scaledToFill()
-                    .frame(width: rect.width, height: rect.height)
-                    .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+            if let image = model.backdrop(id)?.image,
+               let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
+                FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
             }
             RoundedRectangle(cornerRadius: floatCorner, style: .continuous).strokeBorder(Color.white.opacity(0.4), lineWidth: 1)
         }
@@ -353,17 +406,22 @@ struct WorkspaceFloatLayer: View {
                 list.append(Sample(point: v.location, time: v.time.timeIntervalSinceReferenceDate))
                 if list.count > 10 { list.removeFirst(list.count - 10) }
                 samples[id] = list
-                if !moving.contains(id), hypot(v.translation.width, v.translation.height) < 4 { return }
-                moving.insert(id)
+                if !moving.contains(id) {
+                    if hypot(v.translation.width, v.translation.height) < 4 { return }
+                    moving.insert(id)
+                    model.liftFloat(id)   // drawn here from now; a tap never lifts
+                }
                 let global = CGPoint(x: v.location.x + toGlobal.x, y: v.location.y + toGlobal.y)
                 // Shaken while held: switch between moving it and docking it into the layout.
                 if shake.add(x: v.location.x, y: v.location.y, at: v.time.timeIntervalSinceReferenceDate) {
                     if docking == id {
                         docking = nil
                         model.cancelDrag()
+                        model.liftFloat(id)
                     } else {
                         docking = id
                         motion.drop(id)
+                        model.landFloat(id)   // back where it was, drawn by the Mac
                         model.updateFloatFrame(id, s)
                         model.beginDrag(.float(id), at: global)
                     }
@@ -451,9 +509,11 @@ struct WorkspaceFloatLayer: View {
                     model.beginFloatGesture(id)
                 }
                 guard let s = resizeStart[id] else { return }
-                let aspect = model.windowAspect(id) ?? (s.width * picture.width) / max(s.height * picture.height, 1)
+                if hypot(v.translation.width, v.translation.height) > 2 { model.liftFloat(id) }
+                // Width and height follow the finger freely: the window keeps its view (Fit with
+                // bars, Fill, zoom) at the new size, never stretched.
                 let r = WorkspaceFloatGeometry.resized(s, corner: corner, translation: (v.translation.width, v.translation.height),
-                                                       aspect: aspect, in: pictureSize)
+                                                       aspect: nil, in: pictureSize)
                 model.updateFloatFrame(id, r)
             }
             .onEnded { _ in
@@ -464,46 +524,57 @@ struct WorkspaceFloatLayer: View {
 
     // MARK: Options
 
-    @ViewBuilder
-    private func floatMenu(_ id: String) -> some View {
+    /// The ⋯ menu, built each time it opens (`WorkspaceStableMenuButton`). Short enough for a phone
+    /// in portrait: the frequent local actions as two rows of three, then the rest of what happens
+    /// on this device, and everything that changes the real Mac window in its own "On Your Mac"
+    /// submenu, so the two are never mixed up.
+    private func floatMenu(_ id: String) -> [UIMenuElement] {
         let front = model.layout.visibleFloatIDs.last == id
-        Section {
-            if !front {
-                // On this device only: the Mac window stays where it is.
-                Button { model.raiseFloat(id); model.focus(id, raise: false) } label: { Label("Bring to Front", systemImage: "square.3.layers.3d.top.filled") }
-            }
-            Button { model.toggleLocalFullscreen(id) } label: {
-                Label("Fullscreen on This Device", systemImage: "arrow.up.left.and.arrow.down.right")
-            }
-            Button { model.addFloatToLayout(id) } label: { Label("Add to Layout", systemImage: "rectangle.split.2x1") }
-            Button { tuck(id, .left) } label: { Label("Tuck to Left Edge", systemImage: "sidebar.left") }
-            Button { tuck(id, .right) } label: { Label("Tuck to Right Edge", systemImage: "sidebar.right") }
-            Menu {
-                Button("Small") { model.sizeFloat(id, widthShare: picture.width < 600 ? 0.6 : 0.3) }
-                Button("Medium") { model.sizeFloat(id, widthShare: picture.width < 600 ? 0.8 : 0.45) }
-                Button("Large") { model.sizeFloat(id, widthShare: picture.width < 600 ? 0.95 : 0.65) }
-            } label: { Label("Size", systemImage: "arrow.up.left.and.down.right.magnifyingglass") }
+        let filled = model.effectiveFit(id) == .fill
+        let narrow = picture.width < 600
+        func act(_ title: String, _ symbol: String, _ attributes: UIMenuElement.Attributes = [],
+                 _ run: @escaping @MainActor () -> Void) -> UIAction {
+            UIAction(title: title, image: UIImage(systemName: symbol), attributes: attributes) { _ in run() }
         }
-        Section {
-            Button { model.toggleFit(id) } label: {
-                model.effectiveFit(id) == .fill ? Label("Show Whole Window", systemImage: "rectangle.arrowtriangle.2.inward")
-                    : Label("Fill Window", systemImage: "rectangle.arrowtriangle.2.outward")
-            }
-            Button { model.rotate(id) } label: { Label("Rotate", systemImage: "rotate.right") }
-            Button { model.resetView(id) } label: { Label("Reset View", systemImage: "arrow.counterclockwise") }
-            Button { model.openOverview(replacing: id) } label: { Label("Change Window…", systemImage: "macwindow.on.rectangle") }
-            Button { model.removeFloat(id) } label: { Label("Remove from This Device", systemImage: "rectangle.badge.minus") }
+        // On this device only. The first two rows are palettes (three items side by side).
+        let placement = UIMenu(title: String(localized: "On This Device"), options: .displayInline, preferredElementSize: .medium, children: [
+            act(String(localized: "Fullscreen"), "arrow.up.left.and.arrow.down.right") { model.toggleLocalFullscreen(id) },
+            act(String(localized: "Tuck Left"), "sidebar.left") { tuck(id, .left) },
+            act(String(localized: "Tuck Right"), "sidebar.right") { tuck(id, .right) },
+        ])
+        let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: [
+            filled ? act(String(localized: "Whole Window"), "rectangle.arrowtriangle.2.inward") { model.toggleFit(id) }
+                   : act(String(localized: "Fill Viewport"), "rectangle.arrowtriangle.2.outward") { model.toggleFit(id) },
+            act(String(localized: "Rotate"), "rotate.right") { model.rotate(id) },
+            act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) },
+        ])
+        var local: [UIMenuElement] = []
+        if !front {
+            local.append(act(String(localized: "Bring to Front"), "square.3.layers.3d.top.filled") { model.raiseFloat(id); model.focus(id, raise: false) })
         }
-        Section {
-            if model.tileState(id)?.status == .offscreen {
-                Button { model.showOnMac(id) } label: { Label("Show on Mac", systemImage: "macwindow") }
-                    .disabled(!inputAllowed)
-            }
-            Button { model.minimizeRemoteWindow(id) } label: { Label("Minimize on Mac", systemImage: "minus.rectangle") }
-                .disabled(!inputAllowed)
-            Button(role: .destructive) { onClose(id) } label: { Label("Close Window on Mac…", systemImage: "xmark.square") }
-                .disabled(!inputAllowed)
+        local.append(act(String(localized: "Add to Layout"), "rectangle.split.2x1") { model.addFloatToLayout(id) })
+        local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"), children: [
+            act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.45 : 0.3) },
+            act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.65 : 0.45) },
+            act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.9 : 0.65) },
+            act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) },
+        ]))
+        local.append(act(String(localized: "Change Window…"), "macwindow.on.rectangle") { model.openOverview(replacing: id) })
+        local.append(act(String(localized: "Remove from This Device"), "rectangle.badge.minus") { model.removeFloat(id) })
+
+        // The real window on the Mac: needs control, and says so.
+        let off: UIMenuElement.Attributes = inputAllowed ? [] : [.disabled]
+        var mac: [UIMenuElement] = []
+        if model.tileState(id)?.status == .offscreen {
+            mac.append(act(String(localized: "Show on Mac"), "macwindow", off) { model.showOnMac(id) })
         }
+        mac.append(act(String(localized: "Minimize on Mac"), "minus.rectangle", off) { model.minimizeRemoteWindow(id) })
+        mac.append(act(String(localized: "Close Window on Mac…"), "xmark.square", off.union(.destructive)) { onClose(id) })
+        let onMac = UIMenu(title: String(localized: "On Your Mac"), image: UIImage(systemName: "desktopcomputer"), children: mac)
+        onMac.subtitle = inputAllowed ? String(localized: "Changes the real window") : String(localized: "Needs control of the Mac")
+
+        return [placement, view, UIMenu(title: "", options: .displayInline, children: local),
+                UIMenu(title: "", options: .displayInline, children: [onMac])]
     }
 
     private func tuck(_ id: String, _ edge: WorkspaceEdge) {
@@ -567,10 +638,12 @@ struct WorkspaceFloatLayer: View {
 
         Group {
             if tab.isStack {
-                Menu {
-                    ForEach(tab.ids, id: \.self) { id in Button(title(id)) { untuck(id) } }
-                } label: { face }
-                .accessibilityLabel(Text("\(tab.ids.count) tucked floating windows"))
+                face
+                    .accessibilityHidden(true)
+                    .overlay(WorkspaceStableMenuButton(symbol: nil, accessibilityLabel: String(localized: "\(tab.ids.count) tucked floating windows"),
+                                                       accessibilityIdentifier: "floatTuckHandle") {
+                        tab.ids.map { id in UIAction(title: title(id)) { _ in untuck(id) } }
+                    })
             } else if let id = tab.ids.first {
                 face
                     .offset(x: left ? max(0, min(drag.width, 40)) : min(0, max(drag.width, -40)), y: drag.height)
@@ -717,3 +790,27 @@ private struct FloatResizePointer: ViewModifier {
     }
 }
 #endif
+
+/// A float drawn on this device from its whole-window still, in the float's own view (Fit with
+/// bars, Fill, zoom, any rotation) exactly as the Mac composes it at this size: while a finger
+/// moves or resizes it the Mac leaves it out (`floatLift`), so this is the only copy on screen.
+private struct FloatStill: View {
+    var image: CGImage
+    var view: TileContentTransform
+    var size: CGSize
+    var corner: CGFloat
+
+    var body: some View {
+        let box = view.contentRect, s = view.scale
+        ZStack(alignment: .topLeading) {
+            // The Mac's letterbox colour (WorkspaceCompositor).
+            Color(red: 0.07, green: 0.07, blue: 0.08)
+            Image(decorative: image, scale: 1).resizable().interpolation(.medium)
+                .frame(width: max(view.source.width * s, 1), height: max(view.source.height * s, 1))
+                .rotationEffect(.degrees(Double(view.rotation.rawValue)))
+                .position(x: box.midX, y: box.midY)
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+    }
+}

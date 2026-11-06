@@ -260,11 +260,11 @@ enum WorkspaceFloatGeometry {
     /// Margin kept from the picture's edges when gliding (points); closer than `snap` lands flush.
     static let snap = 14.0
 
-    /// Smallest float content in points: large enough to touch and read (HIG 44 pt targets),
-    /// never larger than the picture allows.
+    /// Smallest float content in points: still a readable glance at the window with room for a
+    /// 44 pt touch, never larger than the picture allows. (Its grips sit outside the content.)
     static func minimum(for size: WorkspaceSize) -> WorkspaceSize {
         let compact = WorkspaceSizeClass.of(size) == .compact
-        let w = compact ? 160.0 : 200.0, h = compact ? 120.0 : 150.0
+        let w = compact ? 120.0 : 160.0, h = compact ? 80.0 : 100.0
         return WorkspaceSize(width: min(w, size.width), height: min(h, max(size.height - barHeight, 1)))
     }
 
@@ -297,10 +297,11 @@ enum WorkspaceFloatGeometry {
         let compact = WorkspaceSizeClass.of(size) == .compact
         let portrait = size.height > size.width
         var w: Double, h: Double
+        // A phone opens a float as a picture-in-picture, not a second screen over the first.
         if compact && portrait {
-            w = size.width * 0.88; h = min(w / a, size.height * 0.45)
+            w = size.width * 0.62; h = min(w / a, size.height * 0.32)
         } else if compact {
-            w = size.width * 0.46; h = min(w / a, size.height * 0.72)
+            w = size.width * 0.38; h = min(w / a, size.height * 0.6)
         } else {
             w = size.width * 0.42; h = min(w / a, size.height * 0.62)
         }
@@ -352,9 +353,10 @@ enum WorkspaceFloatGeometry {
     enum Corner: Sendable { case bottomLeading, bottomTrailing }
 
     /// A float resized from a lower corner by `translation` (points) since the drag began at
-    /// `start`: the opposite top corner stays put. With `aspect` (the window's width / height as
-    /// drawn) the float keeps that shape, so the window fills it without bars or distortion;
-    /// the larger of the two finger movements decides. Kept between the minimum and the picture.
+    /// `start`: the opposite top corner stays put. Without `aspect` (what the grips do) width and
+    /// height follow the finger freely: the float is a viewport, and its view (Fit with bars,
+    /// Fill, zoom) scales with it, never stretched. With `aspect` the float keeps that shape; the
+    /// larger of the two finger movements decides. Kept between the minimum and the picture.
     static func resized(_ start: WorkspaceRect, corner: Corner, translation: (x: Double, y: Double), aspect: Double?,
                         in size: WorkspaceSize) -> WorkspaceRect {
         guard size.width > 0, size.height > 0, translation.x.isFinite, translation.y.isFinite else { return start }
@@ -378,6 +380,35 @@ enum WorkspaceFloatGeometry {
         }
         let x = corner == .bottomTrailing ? start.x : start.maxX - w / size.width
         return WorkspaceRect(x: x, y: start.y, width: w / size.width, height: h / size.height)
+    }
+
+    /// A float carried to a new picture size (the device rotated, or its window was resized):
+    /// same size in points and same centre (as a share of the picture), shrunk evenly only when
+    /// it no longer fits, so it never turns into a strip. Kept usable.
+    static func carried(_ r: WorkspaceRect, from old: WorkspaceSize, to new: WorkspaceSize) -> WorkspaceRect {
+        guard old.width > 0, old.height > 0, new.width > 0, new.height > 0 else { return r }
+        var w = r.width * old.width, h = r.height * old.height
+        let room = WorkspaceSize(width: new.width, height: max(new.height - barHeight, 1))
+        let shrink = min(1, room.width / max(w, 1), room.height / max(h, 1))
+        w *= shrink; h *= shrink
+        let cx = r.midX * new.width, cy = r.midY * new.height
+        return clamped(WorkspaceRect(x: (cx - w / 2) / new.width, y: (cy - h / 2) / new.height,
+                                     width: w / new.width, height: h / new.height), in: new)
+    }
+
+    /// The float reshaped to the window's own shape (`aspect`, width / height), keeping its area
+    /// and centre: Fit then shows the whole window with no bars. Kept usable.
+    static func matched(_ r: WorkspaceRect, aspect: Double, in size: WorkspaceSize) -> WorkspaceRect {
+        guard aspect.isFinite, aspect > 0, size.width > 0, size.height > 0 else { return r }
+        let area = r.width * size.width * r.height * size.height
+        var w = (area * aspect).squareRoot(), h = w / aspect
+        // Within the picture (below the title bar), still the window's shape.
+        let maxW = size.width, maxH = max(size.height - barHeight, 1)
+        if w > maxW { w = maxW; h = w / aspect }
+        if h > maxH { h = maxH; w = h * aspect }
+        let cx = r.midX * size.width, cy = r.midY * size.height
+        return clamped(WorkspaceRect(x: (cx - w / 2) / size.width, y: (cy - h / 2) / size.height,
+                                     width: w / size.width, height: h / size.height), in: size)
     }
 
     /// A float scaled about its centre (accessibility Make Larger / Smaller, size presets),
@@ -544,6 +575,70 @@ enum WorkspaceFloatMotion {
         let c = velocity + w * x0
         let e = exp(-w * t)
         return (to + (x0 + c * t) * e, (velocity - w * c * t) * e)
+    }
+}
+
+// MARK: - Chrome layering (receiver)
+
+/// The receiver draws every outline, title pill and handle in one layer above the video, while
+/// each float's window is pixels inside the video. So the chrome of anything behind a float must
+/// step aside where that float is, or it shows through it: a pane's outline through a float, a
+/// back float's grips and title over the front one. All rects here are picture points.
+enum WorkspaceFloatLayering {
+    /// The title pill straddles the float's top edge (half above it): what a float covers reaches
+    /// this far above its content, so the pill hides what's behind it too.
+    static let pillReach = 16.0
+    /// Height of the title pill's touch area.
+    static let pillHeight = 30.0
+
+    /// What a shown float hides behind it: its content and the band its title pill sits in.
+    static func occluder(_ content: WorkspaceRect) -> WorkspaceRect {
+        WorkspaceRect(x: content.x, y: content.y - pillReach, width: content.width, height: content.height + pillReach)
+    }
+
+    /// The title pill's largest extent for a float of `content` (it is never wider than this).
+    static func pillBounds(_ content: WorkspaceRect) -> WorkspaceRect {
+        let w = max(min(content.width - 28, 280), 90) + 34
+        return WorkspaceRect(x: content.midX - w / 2, y: content.y - pillHeight / 2, width: w, height: pillHeight)
+    }
+
+    /// For each float (back to front), what the floats in front of it cover.
+    static func covers(backToFront floats: [WorkspaceRect]) -> [[WorkspaceRect]] {
+        floats.indices.map { i in floats[(i + 1)...].map(occluder) }
+    }
+
+    /// Whether `r` meets any of `covers` by more than a sliver (`tolerance` points each way).
+    static func isCovered(_ r: WorkspaceRect, by covers: [WorkspaceRect], tolerance: Double = 0.5) -> Bool {
+        covers.contains { c in
+            guard let i = r.intersection(c) else { return false }
+            return i.width > tolerance && i.height > tolerance
+        }
+    }
+
+    /// The parts of a straight strip (a divider's touch area) that no float covers, each at least
+    /// `minLength` long: a divider stays draggable where it's visible and never takes a touch
+    /// meant for a float drawn over it.
+    static func uncovered(_ strip: WorkspaceRect, alongX: Bool, by covers: [WorkspaceRect], minLength: Double = 24) -> [WorkspaceRect] {
+        var free: [(Double, Double)] = [alongX ? (strip.x, strip.maxX) : (strip.y, strip.maxY)]
+        for c in covers {
+            guard strip.intersection(c) != nil else { continue }
+            let lo = alongX ? c.x : c.y, hi = alongX ? c.maxX : c.maxY
+            free = free.flatMap { seg -> [(Double, Double)] in
+                guard hi > seg.0, lo < seg.1 else { return [seg] }
+                return [(seg.0, min(lo, seg.1)), (max(hi, seg.0), seg.1)].filter { $0.1 > $0.0 }
+            }
+        }
+        return free.filter { $0.1 - $0.0 >= minLength }.map { seg in
+            alongX ? WorkspaceRect(x: seg.0, y: strip.y, width: seg.1 - seg.0, height: strip.height)
+                   : WorkspaceRect(x: strip.x, y: seg.0, width: strip.width, height: seg.1 - seg.0)
+        }
+    }
+
+    /// Resize grips and the bottom grabber show only while they're useful: on the selected float,
+    /// under the pointer, or while a finger moves or resizes it. Elsewhere they would clutter the
+    /// picture and take touches meant for the windows around them.
+    static func showsHandles(selected: Bool, hovered: Bool, manipulating: Bool) -> Bool {
+        selected || hovered || manipulating
     }
 }
 

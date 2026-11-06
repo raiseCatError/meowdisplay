@@ -1,4 +1,6 @@
 import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 
 /// Floating panes (Shared/WorkspaceFloats.swift, the Mac's validator and input targeting, and
@@ -178,7 +180,7 @@ final class WorkspaceFloatTests: XCTestCase {
             .addingFloat(tile("f", 40), frame: box)
         let wide = WorkspaceAdaptation.adapt(l, to: ipad, active: nil)
         let b = try! XCTUnwrap(wide.visible.float("b"))
-        XCTAssertGreaterThanOrEqual(b.frame.width * ipad.width, 200 - 1e-6, "grown to the touch minimum")
+        XCTAssertGreaterThanOrEqual(b.frame.width * ipad.width, WorkspaceFloatGeometry.minimum(for: ipad).width - 1e-6, "grown to the minimum")
         XCTAssertLessThanOrEqual(b.frame.maxX, 1 + 1e-9)
         XCTAssertEqual(wide.visible.visibleFloatIDs.count, 2)
 
@@ -202,9 +204,9 @@ final class WorkspaceFloatTests: XCTestCase {
 
     // MARK: Geometry
 
-    func testClampingDefaultsAndCornerResizeKeepTheWindowsShape() {
+    func testClampingDefaultsAndCornerResize() {
         let c = WorkspaceFloatGeometry.clamped(WorkspaceRect(x: 0.95, y: -0.2, width: 0.01, height: 2), in: ipad)
-        XCTAssertGreaterThanOrEqual(c.width * ipad.width, 200 - 1e-6)
+        XCTAssertGreaterThanOrEqual(c.width * ipad.width, 160 - 1e-6)
         XCTAssertLessThanOrEqual(c.maxX, 1 + 1e-9)
         XCTAssertGreaterThanOrEqual(c.y * ipad.height, WorkspaceFloatGeometry.barHeight - 1e-6, "the title bar stays on screen")
         XCTAssertLessThanOrEqual(c.maxY, 1 + 1e-9)
@@ -213,8 +215,17 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(d.width * ipad.width / (d.height * ipad.height), 1.6, accuracy: 0.01, "opens at the window's shape")
         let cascaded = WorkspaceFloatGeometry.defaultFrame(aspect: 1.6, in: ipad, index: 1)
         XCTAssertEqual((cascaded.x - d.x) * ipad.width, WorkspaceFloatGeometry.cascade, accuracy: 0.5)
+        // A phone opens a picture-in-picture, not a second screen (IMG_2266: nearly full width).
         let p = WorkspaceFloatGeometry.defaultFrame(aspect: 1.6, in: phone)
-        XCTAssertGreaterThan(p.width, 0.8, "a phone in portrait: nearly full width")
+        XCTAssertEqual(p.width, 0.62, accuracy: 0.01)
+        XCTAssertLessThanOrEqual(p.height * phone.height, phone.height * 0.32 + 1e-6)
+        XCTAssertEqual(p.midX, 0.5, accuracy: 0.01, "centred")
+        XCTAssertEqual(p.width * phone.width / (p.height * phone.height), 1.6, accuracy: 0.01, "at the window's shape")
+        let tall = WorkspaceFloatGeometry.defaultFrame(aspect: 0.5, in: phone)
+        XCTAssertLessThanOrEqual(tall.height * phone.height, phone.height * 0.32 + 1e-6, "a tall window opens no taller")
+        XCTAssertEqual(tall.width * phone.width / (tall.height * phone.height), 0.5, accuracy: 0.01)
+        let landscape = WorkspaceFloatGeometry.defaultFrame(aspect: 1.6, in: WorkspaceSize(width: 844, height: 390))
+        XCTAssertLessThanOrEqual(landscape.width, 0.38 + 1e-6)
 
         let start = WorkspaceRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4 * ipad.width / ipad.height / 1.6)
         let bigger = WorkspaceFloatGeometry.resized(start, corner: .bottomTrailing, translation: (100, 10), aspect: 1.6, in: ipad)
@@ -225,10 +236,34 @@ final class WorkspaceFloatTests: XCTestCase {
         let leading = WorkspaceFloatGeometry.resized(start, corner: .bottomLeading, translation: (-50, 0), aspect: 1.6, in: ipad)
         XCTAssertEqual(leading.maxX, start.maxX, accuracy: 1e-9, "the opposite corner stays put")
         let tiny = WorkspaceFloatGeometry.resized(start, corner: .bottomTrailing, translation: (-2000, -2000), aspect: 1.6, in: ipad)
-        XCTAssertGreaterThanOrEqual(tiny.width * ipad.width, 200 - 1e-6)
+        XCTAssertGreaterThanOrEqual(tiny.width * ipad.width, 160 - 1e-6)
         let huge = WorkspaceFloatGeometry.resized(start, corner: .bottomTrailing, translation: (5000, 5000), aspect: 1.6, in: ipad)
         XCTAssertLessThanOrEqual(huge.maxX, 1 + 1e-9)
         XCTAssertLessThanOrEqual(huge.maxY, 1 + 1e-9)
+
+        // The grips resize freely (no aspect): width and height follow the finger on their own.
+        let wide = WorkspaceFloatGeometry.resized(start, corner: .bottomTrailing, translation: (200, -40), aspect: nil, in: ipad)
+        XCTAssertEqual(wide.width * ipad.width, start.width * ipad.width + 200, accuracy: 1e-6)
+        XCTAssertEqual(wide.height * ipad.height, start.height * ipad.height - 40, accuracy: 1e-6)
+        XCTAssertEqual(wide.y, start.y)
+        let thin = WorkspaceFloatGeometry.resized(start, corner: .bottomLeading, translation: (300, 0), aspect: nil, in: ipad)
+        XCTAssertEqual(thin.maxX, start.maxX, accuracy: 1e-9, "the opposite corner stays put")
+        XCTAssertEqual(thin.height, start.height, accuracy: 1e-9, "only the width changed")
+        let small = WorkspaceFloatGeometry.resized(start, corner: .bottomTrailing, translation: (-5000, -5000), aspect: nil, in: phone)
+        XCTAssertEqual(small.width * phone.width, 120, accuracy: 1e-6, "down to the phone's minimum")
+        XCTAssertEqual(small.height * phone.height, 80, accuracy: 1e-6)
+
+        // Match Window: back to the window's shape, same area and centre, still on screen.
+        let free = WorkspaceRect(x: 0.2, y: 0.3, width: 0.5, height: 0.2)
+        let matched = WorkspaceFloatGeometry.matched(free, aspect: 1.0, in: ipad)
+        XCTAssertEqual(matched.width * ipad.width, matched.height * ipad.height, accuracy: 1e-6)
+        XCTAssertEqual(matched.width * ipad.width * matched.height * ipad.height,
+                       free.width * ipad.width * free.height * ipad.height, accuracy: 1)
+        XCTAssertEqual(matched.midX, free.midX, accuracy: 1e-9)
+        XCTAssertEqual(matched.midY, free.midY, accuracy: 1e-9)
+        let edge = WorkspaceFloatGeometry.matched(WorkspaceRect(x: 0, y: 0.04, width: 1, height: 0.9), aspect: 3, in: ipad)
+        XCTAssertLessThanOrEqual(edge.maxX, 1 + 1e-9)
+        XCTAssertEqual(edge.width * ipad.width / (edge.height * ipad.height), 3, accuracy: 0.01, "too big: shrunk, same shape")
     }
 
     /// Several tucked floats on one edge: tabs that never overlap, kept out of the system's
@@ -425,6 +460,55 @@ final class WorkspaceFloatTests: XCTestCase {
         let onFloat = CGPoint(x: 3400, y: 300)
         let c = try! XCTUnwrap(t.cursorPlacement(forGlobal: onFloat))
         XCTAssertEqual(t.tile(at: WorkspacePoint(x: c.x, y: c.y))?.tileID, "f2")
+    }
+
+    /// While the receiver moves or resizes a float it draws it itself (`lift`): the Mac leaves it
+    /// out of the picture and of input and lets the panes under it count as seen, but keeps its
+    /// capture running, so letting go needs no restart.
+    func testALiftedFloatIsLeftOutOfThePictureAndInputButKeepsItsCapture() {
+        let catalog = Dictionary(uniqueKeysWithValues: [UInt32(10), 11, 12, 13].map { ($0, entry($0, pid: Int32($0))) })
+        let canvas = CGSize(width: 2000, height: 1400)
+        var next: UInt64 = 1
+        let ok = WorkspaceRequestValidator.validate(tiles: floatRequest, catalog: catalog, hostID: "mac", canvasPixels: canvas,
+                                                    previous: [:], nextGeneration: &next, allowFloats: true)
+        XCTAssertFalse(ok.assignments.contains(where: \.isLifted))
+        let previous = Dictionary(uniqueKeysWithValues: ok.assignments.map { ($0.tileID, $0) })
+        var lifted = floatRequest
+        lifted[2]["lift"] = true   // f2, the front float
+        lifted[0]["lift"] = true   // a tiled pane: means nothing
+        next = 100
+        let r = WorkspaceRequestValidator.validate(tiles: lifted, catalog: catalog, hostID: "mac", canvasPixels: canvas,
+                                                   previous: previous, nextGeneration: &next, allowFloats: true)
+        XCTAssertTrue(r.rejected.isEmpty, "\(r.rejected)")
+        let byID = Dictionary(uniqueKeysWithValues: r.assignments.map { ($0.tileID, $0) })
+        XCTAssertEqual(byID["f2"]?.isLifted, true)
+        XCTAssertEqual(byID["f2"]?.isOnCanvas, false, "not drawn")
+        XCTAssertEqual(byID["f1"]?.isOnCanvas, true)
+        XCTAssertEqual(byID["a"]?.isLifted, false, "only a float can be lifted")
+        XCTAssertEqual(byID["f2"]?.assignmentGeneration, previous["f2"]?.assignmentGeneration, "its capture keeps running")
+        XCTAssertEqual(next, 100, "nothing new was started")
+
+        // A receiver that can't send floats can't lift anything either.
+        next = 1
+        let old = WorkspaceRequestValidator.validate(tiles: lifted, catalog: catalog, hostID: "mac", canvasPixels: canvas,
+                                                     previous: [:], nextGeneration: &next)
+        XCTAssertFalse(old.assignments.contains(where: \.isLifted))
+
+        // Input: where the lifted float was, the float behind it (or the pane) takes the touch.
+        var t = WorkspaceInputTargeting()
+        t.canvas = canvas
+        t.windowFrames = [10: CGRect(x: 0, y: 0, width: 800, height: 600), 11: CGRect(x: 1000, y: 0, width: 800, height: 600),
+                          12: CGRect(x: 2000, y: 0, width: 800, height: 600), 13: CGRect(x: 3000, y: 0, width: 800, height: 600)]
+        _ = t.update(assignments: r.assignments)
+        XCTAssertEqual(t.tile(at: WorkspacePoint(x: 0.5, y: 0.4))?.tileID, "f1")
+        XCTAssertEqual(t.tile(at: WorkspacePoint(x: 0.65, y: 0.5))?.tileID, "b")
+        XCTAssertNotEqual(t.resolve(.down, at: WorkspacePoint(x: 0.65, y: 0.5))?.windowID, 13, "never the lifted float's window")
+
+        // Capture budget: only the floats drawn hide pane b.
+        let all = WorkspaceCaptureBudget.coverage(ok.assignments)["b"] ?? 0
+        let some = WorkspaceCaptureBudget.coverage(r.assignments)["b"] ?? 0
+        XCTAssertEqual(some, 0.08, accuracy: 0.01, "f1 alone: 0.1 x 0.4 of the 0.5 x 1 pane")
+        XCTAssertLessThan(some, all)
     }
 
     // MARK: Receiver wire and safety
@@ -926,5 +1010,170 @@ final class WorkspaceFloatTests: XCTestCase {
         window.switchTo(window.catalog!.windows[0])
         XCTAssertNil(window.leaveExtendRequest)
         XCTAssertFalse(window.layout.orderedTileIDs.isEmpty)
+    }
+
+    // MARK: Lift (moving or resizing a float draws it here, once)
+
+    private func png(width: Int = 160, height: Int = 100) -> Data {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: 0, green: 0.5, blue: 1, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let data = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+        CGImageDestinationFinalize(dest)
+        return data as Data
+    }
+
+    private func lastTile(_ sent: [[String: Any]], _ id: String) -> [String: Any]? {
+        let tiles = sent.last { $0["type"] as? String == WireMessage.workspaceRequest }?["tiles"] as? [[String: Any]] ?? []
+        return tiles.first { $0["id"] as? String == id }
+    }
+
+    @MainActor
+    private func wait(_ seconds: TimeInterval) {
+        let exp = expectation(description: "wait")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exp.fulfill() }
+        wait(for: [exp], timeout: seconds + 2)
+    }
+
+    /// Moving or resizing a float lifts it: sent with `lift` (only to a Mac with `floatLift`, only
+    /// with a still to draw it from), drawn here in its own view, and still drawn here after it's
+    /// let go until the Mac says its frame with the float where it landed is out.
+    @MainActor
+    func testAMovedFloatIsDrawnHereOnceUntilTheMacShowsItWhereItLanded() throws {
+        var sent: [[String: Any]] = []
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature,
+                                          WindowWorkspaceWire.floatLiftFeature]) { sent.append($0) }
+        XCTAssertTrue(m.canLiftFloats)
+        let w = m.catalog!.windows
+        m.choose(w[0], asNewTile: false)
+        let pane = m.layout.orderedTileIDs[0]
+        m.openFloating(w[1])
+        let fid = try XCTUnwrap(m.layout.floatIDs.first)
+        settle()
+
+        // Picked up before its still arrived: the Mac keeps drawing it; lifted once the still is in.
+        m.beginFloatGesture(fid)
+        m.liftFloat(fid)
+        XCTAssertFalse(m.drawsFloatHere(fid))
+        XCTAssertNil(lastTile(sent, fid)?["lift"])
+        m.apply(.backdrop(tile: fid, windowID: 11, data: png(), stale: false))
+        XCTAssertTrue(m.liftedFloats.contains(fid))
+        XCTAssertTrue(m.drawsFloatHere(fid))
+        XCTAssertEqual(lastTile(sent, fid)?["lift"] as? Bool, true, "sent at once")
+        XCTAssertNil(lastTile(sent, pane)?["lift"], "a pane is never lifted")
+
+        // Drawn here in its own view: the window's 1600x1000 at Fit in a 400x400 float, centred with bars.
+        let view = try XCTUnwrap(m.floatContentTransform(fid, width: 400, height: 400))
+        XCTAssertEqual(view.contentRect.width, 400, accuracy: 1e-6)
+        XCTAssertEqual(view.contentRect.height, 250, accuracy: 1e-6)
+        XCTAssertEqual(view.contentRect.y, 75, accuracy: 1e-6)
+
+        for i in 1...5 { m.updateFloatFrame(fid, WorkspaceRect(x: 0.05 * Double(i), y: 0.2, width: 0.3, height: 0.3)) }
+        XCTAssertTrue(m.liftedFloats.contains(fid), "lifted for the whole move")
+        m.endFloatGesture(fid)
+        XCTAssertFalse(m.liftedFloats.contains(fid))
+        XCTAssertTrue(m.drawsFloatHere(fid), "let go: still drawn here until the Mac shows it")
+        let landed = try XCTUnwrap(lastTile(sent, fid))
+        XCTAssertNil(landed["lift"], "the Mac draws it again")
+        XCTAssertEqual(landed["x"] as? Double ?? -1, 0.25, accuracy: 1e-9)
+        let epoch = try XCTUnwrap(landed["view"] as? Int)
+
+        // An older frame isn't enough; the frame with this view is (after a moment to arrive).
+        m.apply(.view([fid: epoch - 1]))
+        wait(0.25)
+        XCTAssertTrue(m.drawsFloatHere(fid))
+        m.apply(.view([fid: epoch]))
+        XCTAssertTrue(m.drawsFloatHere(fid), "not the same instant: the frame is still on its way")
+        wait(0.25)
+        XCTAssertFalse(m.drawsFloatHere(fid))
+
+        // Never composed (a frame lost): it's handed back to the Mac after `landingHold` anyway.
+        m.beginFloatGesture(fid)
+        m.liftFloat(fid)
+        XCTAssertTrue(m.drawsFloatHere(fid))
+        m.endFloatGesture(fid)
+        wait(WorkspaceModel.landingHold + 0.2)
+        XCTAssertFalse(m.drawsFloatHere(fid))
+
+        // A tap (no movement) never lifts: the view only lifts what a finger moves.
+        sent.removeAll()
+        m.beginFloatGesture(fid)
+        m.endFloatGesture(fid)
+        XCTAssertFalse(sent.contains { ($0["tiles"] as? [[String: Any]])?.contains { $0["lift"] != nil } == true })
+
+        // Disconnecting forgets it all.
+        m.beginFloatGesture(fid)
+        m.liftFloat(fid)
+        m.apply(.disconnected)
+        XCTAssertTrue(m.liftedFloats.isEmpty)
+        XCTAssertFalse(m.canLiftFloats)
+    }
+
+    /// A Mac without `floatLift` keeps drawing the float: `lift` is never sent.
+    @MainActor
+    func testAMacWithoutLiftNeverGetsIt() throws {
+        var sent: [[String: Any]] = []
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { sent.append($0) }
+        XCTAssertTrue(m.canFloat)
+        XCTAssertFalse(m.canLiftFloats)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.openFloating(m.catalog!.windows[1])
+        let fid = try XCTUnwrap(m.layout.floatIDs.first)
+        m.beginFloatGesture(fid)
+        m.apply(.backdrop(tile: fid, windowID: 11, data: png(), stale: false))
+        m.liftFloat(fid)
+        m.updateFloatFrame(fid, WorkspaceRect(x: 0.1, y: 0.2, width: 0.3, height: 0.3))
+        m.endFloatGesture(fid)
+        settle()
+        XCTAssertTrue(m.liftedFloats.isEmpty)
+        XCTAssertFalse(m.drawsFloatHere(fid))
+        XCTAssertFalse(sent.contains { ($0["tiles"] as? [[String: Any]])?.contains { $0["lift"] != nil } == true })
+    }
+
+    /// Size > Match Window gives a freely resized float the window's shape back (Fit: no bars).
+    @MainActor
+    func testMatchWindowGivesTheFloatTheWindowsShape() throws {
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.openFloating(m.catalog!.windows[1])
+        let fid = try XCTUnwrap(m.layout.floatIDs.first)
+        m.beginFloatGesture(fid)
+        m.updateFloatFrame(fid, WorkspaceRect(x: 0.2, y: 0.2, width: 0.5, height: 0.2))
+        m.endFloatGesture(fid)
+        XCTAssertEqual(try XCTUnwrap(m.windowAspect(fid)), 1.6, accuracy: 1e-9)
+        m.matchWindowShape(fid)
+        let f = try XCTUnwrap(m.layout.float(fid)?.frame)
+        XCTAssertEqual(f.width * ipad.width / (f.height * ipad.height), 1.6, accuracy: 0.01)
+        m.rotate(fid)
+        XCTAssertEqual(try XCTUnwrap(m.windowAspect(fid)), 1 / 1.6, accuracy: 1e-9, "turned a quarter: the shape as drawn")
+    }
+
+    /// Rotating the phone keeps a float's size in points and its place (a share of the screen):
+    /// its frame is a share of the picture, which alone would stretch it into a strip.
+    @MainActor
+    func testAFloatKeepsItsSizeInPointsWhenThePhoneRotates() throws {
+        let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature]) { _ in }
+        m.updateSpace(phone, hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.openFloating(m.catalog!.windows[1])
+        let fid = try XCTUnwrap(m.layout.floatIDs.first)
+        let p = try XCTUnwrap(m.layout.float(fid)?.frame)
+        let landscape = WorkspaceSize(width: phone.height, height: phone.width)
+        m.updateSpace(landscape, hinge: nil)
+        let l = try XCTUnwrap(m.layout.float(fid)?.frame)
+        XCTAssertEqual(l.width * landscape.width, p.width * phone.width, accuracy: 1)
+        XCTAssertEqual(l.height * landscape.height, p.height * phone.height, accuracy: 1)
+        XCTAssertEqual(l.midX, p.midX, accuracy: 0.02, "same place across")
+        m.updateSpace(phone, hinge: nil)
+        let back = try XCTUnwrap(m.layout.float(fid)?.frame)
+        XCTAssertEqual(back.width, p.width, accuracy: 0.005, "rotating back gives the same float")
+        XCTAssertEqual(back.height, p.height, accuracy: 0.005)
+
+        // Too big for the new screen: shrunk evenly (same shape), never squashed.
+        let big = WorkspaceFloatGeometry.carried(WorkspaceRect(x: 0.05, y: 0.1, width: 0.9, height: 0.5), from: phone, to: landscape)
+        XCTAssertEqual(big.width * landscape.width / (big.height * landscape.height), (0.9 * phone.width) / (0.5 * phone.height), accuracy: 0.01)
+        XCTAssertLessThanOrEqual(big.maxY, 1 + 1e-9)
     }
 }

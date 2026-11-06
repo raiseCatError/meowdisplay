@@ -330,7 +330,7 @@ enum WorkspaceRequests {
                           generation: (WorkspaceSource) -> UInt64?,
                           displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
                           viewEpoch: (String) -> Int? = { _ in nil },
-                          floats: Bool = false) -> [String: Any] {
+                          floats: Bool = false, lifted: Set<String> = []) -> [String: Any] {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
@@ -349,7 +349,11 @@ enum WorkspaceRequests {
             }
             if let z = tile.zoom { t["zoom"] = z.wire }
             if let e = viewEpoch(id) { t["view"] = e }
-            if let z = floating.firstIndex(of: id) { t["layer"] = "float"; t["z"] = z }
+            if let z = floating.firstIndex(of: id) {
+                t["layer"] = "float"; t["z"] = z
+                // Drawn here under the finger for now: the Mac leaves it out (`floatLift`).
+                if lifted.contains(id) { t["lift"] = true }
+            }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
@@ -493,6 +497,20 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var canCloseWindows = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
+    /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
+    /// the finger while it moves or resizes and it's never on screen twice.
+    @Published private(set) var canLiftFloats = false
+    /// Floats this device draws itself right now (a finger moves or resizes them): sent with `lift`.
+    @Published private(set) var liftedFloats: Set<String> = []
+    /// Floats just let go of: still drawn here until the Mac's picture shows them where they
+    /// landed (its view echo, plus a moment for that frame to reach the screen), at most
+    /// `landingHold` seconds.
+    @Published private(set) var landingFloats: [String: Date] = [:]
+    static let landingHold: TimeInterval = 1.0
+    /// After the Mac says it composed the landed float: about the time its frame takes to arrive.
+    static let landingSettle: TimeInterval = 0.1
+    /// Floats a finger has started to move or resize, waiting for a still to be lifted with.
+    private var liftWanted: Set<String> = []
     /// This receiver has floating-pane chrome (iPhone and iPad). The Mac Receiver doesn't yet:
     /// it says `ws` 1 and never floats a pane.
     nonisolated static let floatsDrawnHere: Bool = {
@@ -664,6 +682,7 @@ final class WorkspaceModel: ObservableObject {
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
+            canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
@@ -677,6 +696,13 @@ final class WorkspaceModel: ObservableObject {
             menus.applyResult(ok: ok, error: error)
         case .view(let tiles):
             composedViewEpochs.merge(tiles) { old, new in max(old, new) }
+            // A float let go of is drawn here until the Mac shows it where it landed.
+            for id in landingFloats.keys where tiles[id] != nil && viewComposed(id) {
+                let at = landingFloats[id]
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingSettle) { [weak self] in
+                    if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+                }
+            }
         case .backdrop(let tile, let window, let data, let stale):
             guard layout.tiles[tile]?.source?.windowID == window || window == 0,
                   let image = WorkspaceImageDecoder.image(data, maxSide: 1600) else { return }
@@ -684,6 +710,8 @@ final class WorkspaceModel: ObservableObject {
                 Log.info("workspace: backdrop \(tile) \(image.width)x\(image.height) after \(Int(Date().timeIntervalSince(asked) * 1000)) ms\(zoomGesture?.tile == tile ? " (mid-gesture)" : "")")
             }
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
+            // A float picked up before its still arrived is lifted now.
+            if floatGesture == tile, liftWanted.contains(tile) { liftFloat(tile) }
         case .mode(let window):
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
@@ -746,6 +774,7 @@ final class WorkspaceModel: ObservableObject {
             launchpadOpen = false; launching = []; planner.reset()
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
+            canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canLockMac = false; lockMacStatus = nil
             files.setAvailable(false)
             menus.setAvailable(false)
@@ -826,6 +855,17 @@ final class WorkspaceModel: ObservableObject {
 
     func updateSpace(_ newSize: WorkspaceSize, hinge newHinge: WorkspaceHinge?) {
         guard newSize != size || newHinge != hinge else { return }
+        // Floats keep their size in points across a rotation or a window resize (their frames are
+        // shares of the picture, which would stretch a phone's float into a strip). Not an edit:
+        // no undo step. Not while a finger holds one.
+        if newSize != size, size.width > 0, size.height > 0, newSize.width > 0, newSize.height > 0,
+           !saved.floats.isEmpty, floatGesture == nil {
+            var carried = saved
+            for i in carried.floats.indices {
+                carried.floats[i].frame = WorkspaceFloatGeometry.carried(carried.floats[i].frame, from: size, to: newSize)
+            }
+            saved = carried
+        }
         size = newSize; hinge = newHinge
         publish(); scheduleSend()
     }
@@ -981,7 +1021,8 @@ final class WorkspaceModel: ObservableObject {
         for (id, tile) in layout.tiles {
             let r = frames.tiles[id]
             let z = tile.zoom ?? .identity
-            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)"
+            // Lifted or not is part of the view: a float let go of waits for the frame that draws it again.
+            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(id))"
             if viewSignatures[id] != sig {
                 viewSignatures[id] = sig
                 viewEpochs[id] = nextViewEpoch
@@ -1858,7 +1899,7 @@ final class WorkspaceModel: ObservableObject {
                                              host: host, focus: focusNow, generation: generation,
                                              displayID: { [weak self] in self?.display(for: $0)?.id },
                                              viewEpoch: { [weak self] in self?.viewEpochs[$0] },
-                                             floats: canFloat))
+                                             floats: canFloat, lifted: canLiftFloats ? liftedFloats.filter { sendable.isFloat($0) } : []))
     }
 
     private func persist() {
@@ -1896,9 +1937,11 @@ extension WorkspaceModel {
 
     /// The window's width / height as the pane draws it (turned a quarter: swapped).
     func windowAspect(_ id: String) -> Double? {
-        guard let tile = layout.tiles[id], let s = tile.source, let w = windowItem(s), w.width > 0, w.height > 0 else { return nil }
-        let a = Double(w.width) / Double(w.height)
-        return tile.rotation.isQuarterTurn ? 1 / a : a
+        guard let tile = layout.tiles[id], let source = windowSize(tile) else { return nil }
+        // As drawn: a turned window's box (any angle).
+        let r = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), source: source,
+                                     rotation: tile.rotation, fit: .fit).rotatedSourceSize
+        return r.width > 0 && r.height > 0 ? r.width / r.height : nil
     }
 
     private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
@@ -2014,7 +2057,51 @@ extension WorkspaceModel {
         floatGestureStart = saved
         raiseFloat(id)
         if active != id { focus(id, raise: false) }   // arranging only: the Mac window stays put
-        requestBackdrop(id)
+        // A fresh still to draw under the finger (the one kept may be a while old).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        requestBackdrop(id, refresh: age > 1)
+    }
+
+    /// The finger started moving or resizing float `id`: from now this device draws it (its last
+    /// still, in its own view) and the Mac leaves it out, so it's never drawn twice: once under
+    /// the finger and once, a moment behind, by the Mac. Needs `floatLift` and a recent still;
+    /// without them the Mac keeps drawing it, as before.
+    func liftFloat(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        liftWanted.insert(id)
+        guard canLiftFloats, !liftedFloats.contains(id),
+              let b = backdrop(id), Date().timeIntervalSince(b.receivedAt) < Self.liftStillMaxAge else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
+    }
+    /// A still older than this isn't drawn in place of the live window.
+    static let liftStillMaxAge: TimeInterval = 6
+
+    /// Let go (or the gesture ended, or it's being docked): the Mac draws it again where it is;
+    /// this device keeps drawing it until the Mac's frame with it is out (or `landingHold` passes).
+    /// The caller sends the layout (the lift's end changes the float's view epoch).
+    func landFloat(_ id: String) {
+        liftWanted.remove(id)
+        guard liftedFloats.remove(id) != nil else { return }
+        let at = Date()
+        landingFloats[id] = at
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingHold) { [weak self] in
+            if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+        }
+    }
+
+    /// Whether this device draws float `id` itself now (lifted, or landing).
+    func drawsFloatHere(_ id: String) -> Bool {
+        liftedFloats.contains(id) || landingFloats[id] != nil
+    }
+
+    /// Float `id`'s view (Fit or Fill, zoom, rotation) at `width` x `height` points, placed as the
+    /// Mac composes it: what this device draws while it holds the float.
+    func floatContentTransform(_ id: String, width: Double, height: Double) -> TileContentTransform? {
+        guard let tile = layout.tiles[id], let source = windowSize(tile), width > 0, height > 0 else { return nil }
+        return TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: width, height: height), source: source,
+                                    rotation: tile.rotation, fit: effectiveFit(id), zoom: tile.zoom ?? .identity)
     }
 
     /// The float's frame while the finger moves (kept usable; the Mac follows at most ~30 times a second).
@@ -2031,6 +2118,7 @@ extension WorkspaceModel {
         if let frame { updateFloatFrame(id, frame) }
         floatGesture = nil
         floatGestureStart = nil
+        landFloat(id)
         persist(); publish(); sendNow()
     }
 
@@ -2057,6 +2145,13 @@ extension WorkspaceModel {
         let r = WorkspaceRect(x: f.frame.midX - w / size.width / 2, y: f.frame.midY - h / size.height / 2,
                               width: w / size.width, height: h / size.height)
         edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
+    }
+
+    /// Size > Match Window: the float takes the window's shape as drawn (same area and centre),
+    /// so Fit shows the whole window with no bars. The view (zoom, rotation) is kept.
+    func matchWindowShape(_ id: String) {
+        guard let f = layout.float(id), let a = windowAspect(id), size.width > 0 else { return }
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.matched(f.frame, aspect: a, in: size)) }
     }
 
     /// Accessibility Move Left / Right / Up / Down: a tenth of the picture per step.

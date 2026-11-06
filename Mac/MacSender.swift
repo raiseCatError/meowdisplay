@@ -6912,6 +6912,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
             features.append(WindowWorkspaceWire.floatFeature)
+            features.append(WindowWorkspaceWire.floatLiftFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         welcome["features"] = features
