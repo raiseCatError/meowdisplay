@@ -82,6 +82,19 @@ struct AppIconSendLedger: Equatable {
     mutating func reset() { self = AppIconSendLedger() }
 }
 
+/// Whether to open an app a receiver asked for (`appLaunch`, tested): a bundle id, and the
+/// session's control when the message arrived. Control is asked again right before the app opens
+/// (`AppCatalog.launch`), and only an app the Mac lists or runs is ever opened.
+enum AppLaunchGate {
+    enum Decision: Equatable { case launch(String), refuse(String) }
+
+    static func decide(_ obj: [String: Any], inputGranted: Bool) -> Decision {
+        guard let bundle = obj["bundle"] as? String, !bundle.isEmpty, bundle.count <= 255 else { return .refuse("bundle") }
+        guard inputGranted else { return .refuse("control") }
+        return .launch(bundle)
+    }
+}
+
 /// One Mac display a tile (or Stage Peek's Displays row) can show.
 struct DisplayCatalogEntry: Equatable, Sendable {
     var displayID: UInt32
@@ -129,6 +142,14 @@ final class WindowBrowserService: @unchecked Sendable {
     var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
     /// Integration tests only.
     var includeOwnProcessForTesting = false
+    /// Opens an app without activating it, asking `stillAllowed` right before. Unit tests replace
+    /// it, so they never open a real app.
+    var launchApp: (_ bundle: String, _ stillAllowed: @escaping @Sendable () -> Bool,
+                    _ done: @escaping @Sendable (Bool) -> Void) -> Void = { bundle, stillAllowed, done in
+        AppCatalog.shared.launch(bundle, stillAllowed: stillAllowed, completion: done)
+    }
+    /// A new listing shortly after a launch, so the app's window reaches the receiver (tests turn it off).
+    var refreshesAfterLaunch = true
 
     init(hostID: String) { self.hostID = hostID }
 
@@ -164,7 +185,10 @@ final class WindowBrowserService: @unchecked Sendable {
 
     // MARK: Messages (admitted session only; MacSender gates)
 
-    func handle(type: String, message obj: [String: Any], inputGranted: Bool) {
+    /// `controlStillAllowed`: the session's control asked again (side-effect free) right before an
+    /// app opens.
+    func handle(type: String, message obj: [String: Any], inputGranted: Bool,
+                controlStillAllowed: @escaping @Sendable () -> Bool = { false }) {
         queue.async { [self] in
             guard active, !stopped else { return }
             switch type {
@@ -188,12 +212,22 @@ final class WindowBrowserService: @unchecked Sendable {
                     self?.queue.async { self?.sendAppCatalog(apps, revision: revision, receiverHas: rev) }
                 }
             case WireMessage.appLaunch:
-                // Changing the Mac needs control. Opens without activating: no focus steal.
-                guard inputGranted, let bundle = obj["bundle"] as? String else { return }
-                AppCatalog.shared.launch(bundle) { [weak self] ok in
-                    self?.queue.async {
-                        self?.sendMessage?(["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok])
-                        self?.queue.asyncAfter(deadline: .now() + 0.8) { self?.refresh(sendCatalog: true) }
+                // Changing the Mac needs control (asked again right before opening). Exactly the
+                // app asked for, opened without activating: no focus steal, no window moved.
+                switch AppLaunchGate.decide(obj, inputGranted: inputGranted) {
+                case .refuse(let why):
+                    Log.info("workspace: appLaunch refused (\(why))")
+                case .launch(let bundle):
+                    Log.info("workspace: appLaunch \(bundle) opening")
+                    launchApp(bundle, controlStillAllowed) { [weak self] ok in
+                        self?.queue.async {
+                            guard let self, !self.stopped else { return }
+                            Log.info("workspace: appLaunch \(bundle) ok=\(ok)")
+                            self.sendMessage?(["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok])
+                            if self.refreshesAfterLaunch {
+                                self.queue.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refresh(sendCatalog: true) }
+                            }
+                        }
                     }
                 }
             case WireMessage.windowClose:
@@ -610,10 +644,16 @@ final class AppCatalog: @unchecked Sendable {
     }
 
     /// Opens an app the Mac listed, WITHOUT activating it (no focus steal). Already
-    /// running: a reopen, which makes most apps show a window.
-    func launch(_ bundle: String, completion: @escaping @Sendable (Bool) -> Void) {
+    /// running: a reopen, which makes most apps show a window. `stillAllowed` (the session's
+    /// control) is asked right before opening; false: nothing opens.
+    func launch(_ bundle: String, stillAllowed: @escaping @Sendable () -> Bool = { true },
+                completion: @escaping @Sendable (Bool) -> Void) {
         let path: String? = lock.withLock { entries[bundle]?.path }
         DispatchQueue.main.async {
+            guard stillAllowed() else {
+                Log.info("workspace: launch \(bundle) not opened: control ended")
+                completion(false); return
+            }
             let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first
             guard let url = path.map(URL.init(fileURLWithPath:)) ?? (runningApp != nil ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) : nil) else {
                 completion(false); return
