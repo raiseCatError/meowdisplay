@@ -711,7 +711,7 @@ struct WorkspaceFloatLayer: View {
     private var placementTip: some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.clockwise.circle").foregroundStyle(floatAccent).accessibilityHidden(true)
-            Text("Tip: while you drag a window, draw circles for about two seconds to switch between a pane and a floating window. A ring shows how close it is.")
+            Text("Tip: while you drag a window, draw a circle with it (about a second) to switch between a pane and a floating window. A ring shows how close it is.")
                 .font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
             Button { model.dismissPlacementTip() } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.85))

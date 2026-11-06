@@ -664,9 +664,9 @@ enum WorkspaceOcclusion {
 
 // MARK: - Circling while holding (switch a drag between Pane and Floating)
 
-/// Switches a drag between Pane and Floating placement: about two seconds of drawing circles
-/// while holding (like winding a dial), so it never happens by accident. Replaces the shake,
-/// which fired on any quick back-and-forth.
+/// Switches a drag between Pane and Floating placement: drawing a circle and a bit while holding
+/// (like winding a dial), about a second at an easy pace, so it never happens by accident.
+/// Replaces the shake, which fired on any quick back-and-forth.
 ///
 /// It follows the direction the finger (or pointer) travels: a loop turns that direction by a
 /// full turn, always the same way round. It counts only steps that curve, all one way, around
@@ -674,16 +674,23 @@ enum WorkspaceOcclusion {
 /// straight move or a pause starts over. After it fires it stays quiet until the circling stops
 /// (a pause, or a straight move), so circling on never switches back and forth. `progress`
 /// (0...1) is for the ring drawn at the finger. Pure: the same samples always decide the same.
+///
+/// Fires when all of these hold for one run of steps: net turning of `requiredTurn` (1.25 loops)
+/// one way round, at least `minimumDuration` (1 s) since the run's first curving step, at least
+/// `consistency` (80 %) of all its turning the same way, loop radius (path length / net turning)
+/// 12-240 pt, no step turning more than about 100°, never `quiet` (0.4 s) without a curving step,
+/// and armed (it hasn't fired since the circling last stopped). Steps are 8 pt chords of the path.
 struct WorkspaceCircleGesture: Equatable, Sendable {
-    /// Net turning that makes the gesture: one and three-quarter loops.
-    var requiredTurn = 1.75 * 2 * Double.pi
-    /// And at least this long circling (seconds): about two seconds in all at an easy pace.
-    var minimumDuration = 1.5
+    /// Net turning that makes the gesture: one and a quarter loops.
+    var requiredTurn = 1.25 * 2 * Double.pi
+    /// And at least this long circling (seconds): about a second at an easy pace.
+    var minimumDuration = 1.0
     /// Loop radius (points) that counts: smaller is a wobble, larger is a long curve.
     var minRadius = 12.0
     var maxRadius = 240.0
-    /// Samples closer than this to the last one count together (touch jitter).
-    var minStep = 3.0
+    /// Samples closer than this to the last one count together: the path is measured in chords
+    /// this long, so a fraction of a point of touch jitter can't turn a circle into a zig-zag.
+    var minStep = 8.0
     /// One step turning more than this (about 100°) is a reversal: starts over.
     var maxStepTurn = 1.75
     /// This long without a curving step (a pause or a straight move) starts over and, after a

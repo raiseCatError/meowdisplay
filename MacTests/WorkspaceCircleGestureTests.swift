@@ -16,30 +16,83 @@ final class WorkspaceCircleGestureTests: XCTestCase {
         return fired
     }
 
-    /// A circle of `radius` at `loopsPerSecond`, clockwise unless `ccw`.
-    private func circle(radius: Double, loopsPerSecond: Double, ccw: Bool = false) -> (Double) -> (x: Double, y: Double) {
-        { t in
+    /// A circle of `radius` at `loopsPerSecond`, clockwise unless `ccw`. `jitter`: each sample
+    /// off by up to that many points either way (seeded, so repeatable), like a real finger.
+    private func circle(radius: Double, loopsPerSecond: Double, ccw: Bool = false,
+                        jitter: Double = 0, seed: UInt64 = 1) -> (Double) -> (x: Double, y: Double) {
+        var noise = Noise(seed)
+        return { t in
             let a = 2 * .pi * loopsPerSecond * t * (ccw ? -1 : 1)
-            return (300 + radius * cos(a), 400 + radius * sin(a))
+            return (300 + radius * cos(a) + noise.next(jitter), 400 + radius * sin(a) + noise.next(jitter))
         }
     }
 
-    func testAboutTwoSecondsOfCirclingSwitchesOnce() {
+    /// A small seeded generator (an LCG), so the noisy paths are the same on every run.
+    private struct Noise {
+        var state: UInt64
+        init(_ seed: UInt64) { state = seed }
+        mutating func unit() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Double(state >> 11) / Double(1 << 53)
+        }
+        mutating func next(_ amount: Double) -> Double { amount == 0 ? 0 : (unit() * 2 - 1) * amount }
+    }
+
+    func testACircleAndABitSwitchesOnce() {
         var g = WorkspaceCircleGesture()
         let fired = run(&g, seconds: 2.5, circle(radius: 50, loopsPerSecond: 1))
         XCTAssertEqual(fired.count, 1, "\(fired)")
-        XCTAssertEqual(fired.first ?? 0, 1.75, accuracy: 0.15, "one and three-quarter loops at one a second")
+        XCTAssertEqual(fired.first ?? 0, 1.3, accuracy: 0.08, "one and a quarter loops at one a second")
         // Fast circling still needs its time; either way round, at 120 Hz too.
         var fast = WorkspaceCircleGesture()
         let quick = run(&fast, seconds: 2.5, hz: 120, circle(radius: 40, loopsPerSecond: 2.5, ccw: true))
         XCTAssertEqual(quick.count, 1)
-        XCTAssertEqual(quick.first ?? 0, 1.5, accuracy: 0.1, "never before the minimum time")
+        XCTAssertEqual(quick.first ?? 0, 1.0, accuracy: 0.08, "never before the minimum time")
+    }
+
+    /// The tuning (1.25 loops, at least 1 s, 8 pt steps): a deliberate circle (40-60 pt radius,
+    /// one loop a second or a little faster) switches in 1.0-1.3 s at 60 and 120 Hz, either way
+    /// round. The old tuning (1.75 loops, 1.5 s) took 1.52-1.78 s for the same circles.
+    func testATypicalDeliberateCircleSwitchesInAboutASecond() {
+        for hz in [60.0, 120.0] {
+            for radius in [40.0, 50.0, 60.0] {
+                for speed in [1.0, 1.1, 1.25] {
+                    for ccw in [false, true] {
+                        var g = WorkspaceCircleGesture()
+                        let fired = run(&g, seconds: 3, hz: hz, circle(radius: radius, loopsPerSecond: speed, ccw: ccw))
+                        let label = "\(Int(hz)) Hz, radius \(radius), \(speed) loops/s\(ccw ? ", ccw" : "")"
+                        XCTAssertEqual(fired.count, 1, label)
+                        XCTAssertGreaterThanOrEqual(fired.first ?? 0, 1.0, label)
+                        XCTAssertLessThanOrEqual(fired.first ?? 9, 1.32, label)   // 1.3 s and a sample
+                    }
+                }
+            }
+        }
+    }
+
+    /// A real finger's samples wobble a little. Measured in 8 pt steps the circle still counts; in
+    /// the old 3 pt steps a point of jitter made every one of these circles start over and over.
+    func testTouchJitterDoesntStopACircle() {
+        var oldSteps = 0
+        for hz in [60.0, 120.0] {
+            for seed in UInt64(1)...12 {
+                var g = WorkspaceCircleGesture()
+                let fired = run(&g, seconds: 3, hz: hz, circle(radius: 50, loopsPerSecond: 1, jitter: 1, seed: seed))
+                XCTAssertEqual(fired.count, 1, "\(Int(hz)) Hz, seed \(seed)")
+                XCTAssertLessThanOrEqual(fired.first ?? 9, 1.8, "\(Int(hz)) Hz, seed \(seed)")
+                var old = WorkspaceCircleGesture()
+                old.minStep = 3
+                old.reset()
+                if !run(&old, seconds: 3, hz: hz, circle(radius: 50, loopsPerSecond: 1, jitter: 1, seed: seed)).isEmpty { oldSteps += 1 }
+            }
+        }
+        XCTAssertLessThanOrEqual(oldSteps, 4, "why the steps are 8 pt: in 3 pt steps jitter breaks the circle")
     }
 
     func testProgressGrowsWhileCirclingForTheRing() {
         var g = WorkspaceCircleGesture()
-        _ = run(&g, seconds: 0.9, circle(radius: 60, loopsPerSecond: 1))
-        XCTAssertGreaterThan(g.progress, 0.4)
+        _ = run(&g, seconds: 0.6, circle(radius: 60, loopsPerSecond: 1))
+        XCTAssertGreaterThan(g.progress, 0.35)
         XCTAssertLessThan(g.progress, 0.6)
         XCTAssertTrue(g.armed)
     }
@@ -59,16 +112,41 @@ final class WorkspaceCircleGestureTests: XCTestCase {
     func testAShakeAZigZagOrAFigureEightNeverSwitches() {
         var shake = WorkspaceCircleGesture()
         XCTAssertTrue(run(&shake, seconds: 4) { t in (300 + 40 * sin(2 * .pi * 4 * t), 400) }.isEmpty, "side to side")
+        // Shakes of any size, speed and slant, at 60 and 120 Hz.
+        for amplitude in [10.0, 20, 40, 80] {
+            for hz in [3.0, 5, 7] {
+                for slant in [0.0, 0.5, 1.2] {
+                    for rate in [60.0, 120.0] {
+                        var g = WorkspaceCircleGesture()
+                        XCTAssertTrue(run(&g, seconds: 3, hz: rate) { t in
+                            (300 + amplitude * cos(slant) * sin(2 * .pi * hz * t), 400 + amplitude * sin(slant) * sin(2 * .pi * hz * t))
+                        }.isEmpty, "shake \(amplitude) pt at \(hz) Hz, slant \(slant), \(rate) Hz samples")
+                    }
+                }
+            }
+        }
+        // A sloppy shake (a little up and down as it goes side to side), and a rounded zig-zag.
+        var sloppy = WorkspaceCircleGesture()
+        XCTAssertTrue(run(&sloppy, seconds: 4) { t in (300 + 50 * sin(2 * .pi * 3 * t), 400 + 8 * sin(2 * .pi * 6 * t)) }.isEmpty)
+        var wave = WorkspaceCircleGesture()
+        XCTAssertTrue(run(&wave, seconds: 4) { t in (100 + 120 * t, 400 + 60 * sin(2 * .pi * 1.5 * t)) }.isEmpty)
         var zigzag = WorkspaceCircleGesture()
         XCTAssertTrue(run(&zigzag, seconds: 4) { t in
             let phase = (t * 3).truncatingRemainder(dividingBy: 1)
             return (300 + 200 * t, 400 + (phase < 0.5 ? phase : 1 - phase) * 120)
         }.isEmpty)
-        var eight = WorkspaceCircleGesture()
-        XCTAssertTrue(run(&eight, seconds: 5) { t in
-            let a = 2 * .pi * 0.8 * t
-            return (300 + 80 * sin(a), 400 + 50 * sin(2 * a))
-        }.isEmpty, "turns as much one way as the other")
+        // Figure eights turn as much one way as the other: any size and pace.
+        for (w, h) in [(30.0, 20.0), (80, 50), (140, 70)] {
+            for pace in [0.4, 0.8, 1.5] {
+                for rate in [60.0, 120.0] {
+                    var eight = WorkspaceCircleGesture()
+                    XCTAssertTrue(run(&eight, seconds: 5, hz: rate) { t in
+                        let a = 2 * .pi * pace * t
+                        return (300 + w * sin(a), 400 + h * sin(2 * a))
+                    }.isEmpty, "figure eight \(w) x \(h) at \(pace)/s, \(rate) Hz")
+                }
+            }
+        }
         // A restless scribble: each step turns a random amount either way (seeded, so repeatable).
         var shaky = WorkspaceCircleGesture()
         var seed: UInt64 = 0x5EED
@@ -81,6 +159,19 @@ final class WorkspaceCircleGestureTests: XCTestCase {
             if shaky.add(x: x, y: y, at: Double(i) / 60) { scribbled += 1 }
         }
         XCTAssertEqual(scribbled, 0, "ten seconds of scribbling")
+        // Many more scribbles, wild and gentle, each ten seconds.
+        for seed in UInt64(1)...150 {
+            for (spread, step) in [(1.2, 8.0), (0.6, 8.0), (0.35, 6.0)] {
+                var g = WorkspaceCircleGesture()
+                var noise = Noise(seed &* 7919)
+                var x = 300.0, y = 400.0, heading = 0.0
+                for i in 0..<600 {
+                    heading += noise.next(spread)
+                    x += step * cos(heading); y += step * sin(heading)
+                    XCTAssertFalse(g.add(x: x, y: y, at: Double(i) / 60), "scribble \(seed), spread \(spread)")
+                }
+            }
+        }
     }
 
     func testStraightMovesLongCurvesAndTinyWobblesDontCount() {
@@ -95,12 +186,12 @@ final class WorkspaceCircleGestureTests: XCTestCase {
     /// Changing direction mid-way, or stopping, starts over.
     func testReversingOrPausingStartsOver() {
         var g = WorkspaceCircleGesture()
-        XCTAssertTrue(run(&g, seconds: 1.2, circle(radius: 50, loopsPerSecond: 1)).isEmpty)
-        XCTAssertTrue(run(&g, from: 1.2, seconds: 1.2, circle(radius: 50, loopsPerSecond: 1, ccw: true)).isEmpty,
+        XCTAssertTrue(run(&g, seconds: 1.0, circle(radius: 50, loopsPerSecond: 1)).isEmpty)
+        XCTAssertTrue(run(&g, from: 1.0, seconds: 1.0, circle(radius: 50, loopsPerSecond: 1, ccw: true)).isEmpty,
                       "the other way round: not enough on its own yet")
         var paused = WorkspaceCircleGesture()
-        XCTAssertTrue(run(&paused, seconds: 1.2, circle(radius: 50, loopsPerSecond: 1)).isEmpty)
-        let after = run(&paused, from: 2.0, seconds: 1.0, circle(radius: 50, loopsPerSecond: 1))
+        XCTAssertTrue(run(&paused, seconds: 1.0, circle(radius: 50, loopsPerSecond: 1)).isEmpty)
+        let after = run(&paused, from: 1.8, seconds: 0.9, circle(radius: 50, loopsPerSecond: 1))
         XCTAssertTrue(after.isEmpty, "the pause threw away the first second")
         XCTAssertTrue(paused.isQuiet(at: 3.6))
     }

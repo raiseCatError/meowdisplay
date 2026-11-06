@@ -1601,8 +1601,8 @@ final class WorkspaceModel: ObservableObject {
         canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
     }
 
-    /// Moves the drag; about two seconds of circling while holding switches its placement (true
-    /// when it switched). Progress shows as a ring at the finger, only when it can switch.
+    /// Moves the drag; circling while holding (a circle and a bit, about a second) switches its
+    /// placement (true when it switched). Progress shows as a ring at the finger, only when it can switch.
     @discardableResult
     func moveDrag(to global: CGPoint, at time: TimeInterval = CACurrentMediaTime()) -> Bool {
         guard let d = drag else { return false }
