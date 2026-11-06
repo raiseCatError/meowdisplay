@@ -3319,6 +3319,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    /// Side-effect free and safe on any thread (every part is lock-protected or a defaults read):
+    /// whether the receiver on connection `generation` may still change this Mac right now. The
+    /// conditions of `receiverInputIsAllowed()` (Allow Input on, that same connection admitted and
+    /// granted, capture state allows input) without cancelling anything, plus this login session on
+    /// the console and no Privacy Shield unlock in progress. Fill/Restore on Mac asks it right before
+    /// its first Accessibility write, after the message itself passed `receiverInputIsAllowed()`.
+    func controlStillAllowed(generation: UInt64) -> Bool {
+        sessionAuthorization.isAdmitted(generation: generation)
+            && sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
+            && captureStateSnapshot().allowsInput
+            && LoginSessionConsole.shared.isOnConsole
+            && !PrivacyShieldWindows.isUnlocking
+    }
+
+    /// Answers a `windowFrame` the Mac won't act on (`queue` only).
+    private func replyWindowFrame(_ obj: [String: Any], _ result: WindowFrameResult) {
+        guard let r = WindowFrameRequest.parse(obj) else { return }
+        sendJSONObject(WindowFrameWire.resultMessage(r.op, window: r.windowID, req: r.req, result: result, restorable: false))
+    }
+
     /// M4: the keyboard's own, stricter input gate. Touch/Pencil/scroll keep
     /// using `receiverInputIsAllowed()` (tolerates `.recovering`) — this
     /// exists only so keyboard input additionally requires the capture
@@ -5231,6 +5251,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // this Mac (PrivacyShieldPolicy.messagesAllowedWhileUnlocking).
         if PrivacyShieldWindows.isUnlocking, !PrivacyShieldPolicy.handlesWhileUnlocking(type) {
             Log.info("privacy shield: \(type) from a device dropped while the Mac asks for its password")
+            // Fill/Restore on Mac is answered (nothing is done), so the device can say why.
+            if type == WindowFrameWire.request { replyWindowFrame(obj, .privacyShield) }
             return
         }
         switch type {
@@ -5632,6 +5654,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let generation = activeConnectionGeneration
             let selfBox = self.selfBox
             Task { @MainActor in selfBox.resolve()?.onClipboardMessage?(generation, box.value) }
+        case WindowFrameWire.request:
+            // Fill Window on Mac / Restore Previous Size on Mac (admitted sessions only, gate above): the
+            // only change to a real Mac window's size, from a pane's explicit menu item. Needs control
+            // (asked again, side-effect free, right before the Mac acts) and a Window-mode pane showing
+            // that window. Always answered, so the device never guesses.
+            guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            guard receiverInputIsAllowed() else { replyWindowFrame(obj, .control); return }
+            guard mode == .window, let engine = workspaceEngine else { replyWindowFrame(obj, .stale); return }
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            engine.handleWindowFrame(obj, inputGranted: true) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
              WireMessage.menuRequest, WireMessage.menuPress, WireMessage.workspaceRetry, WireMessage.workspaceBackdropRequest:
             // Admitted sessions only (gate above). Window metadata exists only
@@ -6906,17 +6941,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
+        welcome["features"] = Self.welcomeFeatures(windowModeAllowed: WindowStreamingPolicy.isAllowed())
+        sendJSONObject(welcome)
+    }
+
+    /// What this Mac offers (`welcome.features`). Window-mode features, Fill/Restore on Mac
+    /// (`windowFrame`) among them, only while Window mode is allowed.
+    static func welcomeFeatures(windowModeAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
-        if WindowStreamingPolicy.isAllowed() {
+        if windowModeAllowed {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
             features.append(WindowWorkspaceWire.floatFeature)
             features.append(WindowWorkspaceWire.floatLiftFeature)
+            features.append(WindowFrameWire.welcomeFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
-        welcome["features"] = features
-        sendJSONObject(welcome)
+        return features
     }
 
     private func sendStreamingProfileState() {

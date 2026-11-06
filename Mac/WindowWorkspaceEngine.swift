@@ -683,6 +683,54 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
     }
 
+    // MARK: Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10)
+
+    /// Resizes the real Mac window shown in one of this receiver's panes, on that pane's explicit
+    /// menu item only. `inputGranted`: MacSender's gate when the message arrived. `stillAllowed`
+    /// (side-effect free) is asked again right before the first Accessibility write. Always answered.
+    func handleWindowFrame(_ obj: [String: Any], inputGranted: Bool, stillAllowed: @escaping @Sendable () -> Bool) {
+        queue.async { [self] in
+            guard !stopped, let r = WindowFrameRequest.parse(obj) else { return }
+            guard inputGranted else { return replyWindowFrame(r, pid: nil, .control) }
+            guard running else { return replyWindowFrame(r, pid: nil, .failed) }   // paused or Video Off
+            if missionControlOpen || MissionControlMonitor.shared.isOpen { return replyWindowFrame(r, pid: nil, .missionControl) }
+            // Exactly the window listed to this session (id + gen + owner), shown in one of this receiver's panes.
+            guard let entry = catalog[r.windowID], entry.generation == r.generation,
+                  browser.knows(windowID: r.windowID, generation: r.generation),
+                  assignments.contains(where: { $0.displayID == nil && $0.windowID == r.windowID && $0.windowGeneration == r.generation })
+            else { return replyWindowFrame(r, pid: nil, .stale) }
+            if entry.inStageStrip { return replyWindowFrame(r, pid: entry.pid, .stageStrip) }
+            if entry.availability == .offscreen { return replyWindowFrame(r, pid: entry.pid, .offscreen) }
+            let key = WindowFrameMemoryKey(windowID: r.windowID, pid: entry.pid)
+            if r.op == .restore, WindowFrameMemory.shared.entry(key) == nil { return replyWindowFrame(r, pid: entry.pid, .nothingToRestore) }
+            Log.info("workspace: \(r.op.rawValue) window \(r.windowID) on Mac requested by the device")
+            let job = WindowFrameSetter.Job(op: r.op, windowID: r.windowID, pid: entry.pid, title: entry.title, stillAllowed: stillAllowed)
+            WindowFrameSetter.perform(job) { [weak self] result in
+                self?.queue.async {
+                    guard let self, !self.stopped else { return }
+                    self.replyWindowFrame(r, pid: entry.pid, result)
+                    self.refreshSoon()
+                    self.sendState(force: true)   // the pane's `restore` flag
+                }
+            }
+        }
+    }
+
+    private func replyWindowFrame(_ r: WindowFrameRequest, pid: Int32?, _ result: WindowFrameResult) {
+        let restorable = pid.map { WindowFrameMemory.shared.entry(WindowFrameMemoryKey(windowID: r.windowID, pid: $0)) != nil } ?? false
+        sendMessage?(WindowFrameWire.resultMessage(r.op, window: r.windowID, req: r.req, result: result, restorable: restorable))
+    }
+
+    /// Forgets Fill's earlier frames for windows that closed (or whose id another app now has) and
+    /// for windows moved or resized on the Mac since: Restore never applies a stale size.
+    private func reconcileFrameMemory(_ snap: WindowCatalogSnapshot) {
+        let memory = WindowFrameMemory.shared
+        guard !memory.isEmpty else { return }
+        let listed = Dictionary(snap.windows.filter { $0.availability == .visible && !$0.inStageStrip }
+            .map { (WindowFrameMemoryKey(windowID: $0.windowID, pid: $0.pid), $0.frame) }, uniquingKeysWith: { a, _ in a })
+        memory.reconcile(existing: WindowFrameMemory.existingWindows(), listed: listed, listedAt: snap.takenAt)
+    }
+
     // MARK: Catalog
 
     /// When the Mac may bring back a tile's minimized or hidden window (see the ledger).
@@ -697,6 +745,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func apply(_ snap: WindowCatalogSnapshot) {
         snapshot = snap
         catalog = Dictionary(snap.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+        reconcileFrameMemory(snap)
         followApps(snap)
         var frames: [UInt32: CGRect] = [:]
         let previousFrames = inputLock.withLock { targeting.windowFrames }
@@ -1184,6 +1233,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             ]
             if let r = recovery[a.tileID], r.attempts > 0 { tile["attempt"] = r.attempts }
             if entry?.inStageStrip == true { tile["strip"] = true }
+            // Restore Previous Size on Mac is possible (Fill changed it from here and it hasn't moved since).
+            if let entry, a.displayID == nil, entry.generation == a.windowGeneration,
+               WindowFrameMemory.shared.entry(WindowFrameMemoryKey(windowID: a.windowID, pid: entry.pid)) != nil {
+                tile[WindowFrameWire.tileRestorable] = true
+            }
             // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
             if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
             if a.isLifted { tile["lift"] = true }
