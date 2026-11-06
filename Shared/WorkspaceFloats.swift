@@ -1128,9 +1128,9 @@ enum WorkspaceOcclusion {
 
 // MARK: - Circling while holding (switch a drag between Pane and Floating)
 
-/// Switches a drag between Pane and Floating placement: about two seconds of drawing circles
-/// while holding (like winding a dial), so it never happens by accident. Replaces the shake,
-/// which fired on any quick back-and-forth.
+/// Switches a drag between Pane and Floating placement: drawing a circle and a bit while holding
+/// (like winding a dial), about a second at an easy pace, so it never happens by accident.
+/// Replaces the shake, which fired on any quick back-and-forth.
 ///
 /// It follows the direction the finger (or pointer) travels: a loop turns that direction by a
 /// full turn, always the same way round. It counts only steps that curve, all one way, around
@@ -1138,16 +1138,23 @@ enum WorkspaceOcclusion {
 /// straight move or a pause starts over. After it fires it stays quiet until the circling stops
 /// (a pause, or a straight move), so circling on never switches back and forth. `progress`
 /// (0...1) is for the ring drawn at the finger. Pure: the same samples always decide the same.
+///
+/// Fires when all of these hold for one run of steps: net turning of `requiredTurn` (1.25 loops)
+/// one way round, at least `minimumDuration` (1 s) since the run's first curving step, at least
+/// `consistency` (80 %) of all its turning the same way, loop radius (path length / net turning)
+/// 12-240 pt, no step turning more than about 100°, never `quiet` (0.4 s) without a curving step,
+/// and armed (it hasn't fired since the circling last stopped). Steps are 8 pt chords of the path.
 struct WorkspaceCircleGesture: Equatable, Sendable {
-    /// Net turning that makes the gesture: one and three-quarter loops.
-    var requiredTurn = 1.75 * 2 * Double.pi
-    /// And at least this long circling (seconds): about two seconds in all at an easy pace.
-    var minimumDuration = 1.5
+    /// Net turning that makes the gesture: one and a quarter loops.
+    var requiredTurn = 1.25 * 2 * Double.pi
+    /// And at least this long circling (seconds): about a second at an easy pace.
+    var minimumDuration = 1.0
     /// Loop radius (points) that counts: smaller is a wobble, larger is a long curve.
     var minRadius = 12.0
     var maxRadius = 240.0
-    /// Samples closer than this to the last one count together (touch jitter).
-    var minStep = 3.0
+    /// Samples closer than this to the last one count together: the path is measured in chords
+    /// this long, so a fraction of a point of touch jitter can't turn a circle into a zig-zag.
+    var minStep = 8.0
     /// One step turning more than this (about 100°) is a reversal: starts over.
     var maxStepTurn = 1.75
     /// This long without a curving step (a pause or a straight move) starts over and, after a
@@ -1232,5 +1239,52 @@ struct WorkspaceCircleGesture: Equatable, Sendable {
         armed = false
         endRun()
         return true
+    }
+}
+
+// MARK: - Docking a float by circling while moving it
+
+/// A finger moving a float by its title or grabber. Circling (`WorkspaceCircleGesture`) switches
+/// it into docking the float into the panes (`.dock`: it folds into a card under the finger and
+/// the pane drop targets show) and back (`.float`: the card opens into the float under the
+/// finger). A shake, a zig-zag, a figure eight, a straight move or a pause never switches, and
+/// circling on after a switch never switches back until it has stopped. It keeps how the float
+/// was before the finger took it, so Cancel puts it back exactly (`restoring`). Pure.
+struct WorkspaceFloatMove: Equatable, Sendable {
+    enum Switch: Equatable, Sendable { case dock, float }
+
+    let id: String
+    /// The float's frame, and its place among the floats (back to front), before the finger took it.
+    let frame: WorkspaceRect
+    let index: Int
+    /// Folded into a card and being docked (else moving as a float).
+    private(set) var docking = false
+    private(set) var circling = WorkspaceCircleGesture()
+
+    /// Nil when `id` isn't a float of `layout`.
+    init?(_ id: String, in layout: WorkspaceLayout) {
+        guard let i = layout.floats.firstIndex(where: { $0.tile == id }) else { return nil }
+        self.id = id
+        frame = layout.floats[i].frame
+        index = i
+    }
+
+    /// One finger position (points) at `t` (seconds): the switch it makes, if any.
+    mutating func add(x: Double, y: Double, at t: Double) -> Switch? {
+        guard circling.add(x: x, y: y, at: t) else { return nil }
+        docking.toggle()
+        return docking ? .dock : .float
+    }
+
+    /// `layout` with the float back as the finger found it: its frame and its place among the
+    /// floats. Its view (Fit or Fill, zoom, rotation) never changes while it moves or docks.
+    func restoring(_ layout: WorkspaceLayout) -> WorkspaceLayout {
+        guard let i = layout.floats.firstIndex(where: { $0.tile == id }) else { return layout }
+        var copy = layout
+        var f = copy.floats.remove(at: i)
+        f.frame = frame
+        copy.floats.insert(f, at: min(index, copy.floats.count))
+        copy.normalize()
+        return copy
     }
 }

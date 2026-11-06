@@ -640,7 +640,7 @@ final class WorkspaceFloatTests: XCTestCase {
         XCTAssertEqual(m.layout.float(front)?.frame, before.float(front)?.frame)
     }
 
-    /// Dragging: Pane placement keeps the existing drops; about two seconds of circling (or the
+    /// Dragging: Pane placement keeps the existing drops; circling, a circle and a bit (or the
     /// control) switches to Floating, where a drop floats the window at the finger; Cancel
     /// changes nothing. The ring's progress shows only while it can switch.
     @MainActor

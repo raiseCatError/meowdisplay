@@ -218,13 +218,10 @@ struct WorkspaceFloatLayer: View {
     @State private var moving: Set<String> = []
     @State private var samples: [String: [Sample]] = [:]
     @State private var lastTap: (id: String, at: Date)?
-    /// A float's title circled during a move: now docking it (the pane drop targets show, and the
-    /// float is drawn as a card under the finger).
-    @State private var docking: String?
-    @State private var circling = WorkspaceCircleGesture()
     /// Circling toward the other placement: where the finger is and how far along.
     @State private var ring: Ring?
-    /// The float folded into a card while it's being docked.
+    /// The float folded into a card while it's being docked (`model.dockingFloat`, circled while
+    /// moving it: the pane drop targets show).
     @State private var card: DockCard?
     @State private var finger: CGPoint = .zero
     @State private var ringFade: Task<Void, Never>?
@@ -264,9 +261,11 @@ struct WorkspaceFloatLayer: View {
         let handles = model.localFullscreen == nil ? tuckHandles() : []
         // Where each float is drawn now, and what the floats in front of it cover: its chrome
         // steps aside there (the front float's window is in the video, under all the chrome).
-        // A float being docked is drawn only as its card under the finger.
-        let shown = frames.floats.filter { $0 != docking }.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
-        let covers = WorkspaceFloatLayering.covers(backToFront: shown.map { WorkspaceRect($0.rect) })
+        // A float being docked is drawn only as its card under the finger. Its chrome stays,
+        // drawing nothing (its move lives on its title or grabber), so it covers nothing.
+        let docking = model.dockingFloat
+        let shown = frames.floats.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
+        let covers = WorkspaceFloatLayering.covers(backToFront: shown.map { WorkspaceRect($0.id == docking ? .zero : $0.rect) })
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
@@ -275,18 +274,8 @@ struct WorkspaceFloatLayer: View {
                     floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
                 }
             }
-            // Tucked floats, each its own window at its own size just behind its edge.
-            ForEach(edgeItems(handles)) { edgeItem($0) }
-            armedEdges
-            // Where tucked floats' strips take touches, together for VoiceOver, in reading order
-            // around the edges.
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(handles.enumerated()), id: \.element.key) { i, h in
-                    handle(h.tab).accessibilitySortPriority(Double(handles.count - i))
-                }
-            }
             .accessibilityElement(children: .contain)
-            if let c = card, docking == c.id { dockCard(c) }
+            if let c = card, model.dockingFloat == c.id { dockCard(c) }
             if let r = ring, r.progress > 0 {
                 WorkspacePlacementRing(progress: r.progress, toFloating: r.toFloating)
                     .position(x: r.at.x, y: r.at.y - WorkspacePlacementRing.lift)
@@ -314,8 +303,9 @@ struct WorkspaceFloatLayer: View {
             for id in start.keys where !held.contains(id) {
                 let f = motion.frames[id]
                 start[id] = nil; moving.remove(id); samples[id] = nil
-                if docking == id { docking = nil; card = nil; model.cancelDrag() }
                 ring = nil
+                // Docking: put back as it was (frame, view, place among the floats), drawn by the Mac.
+                if model.dockingFloat == id { card = nil; motion.drop(id); model.cancelDockingFloat(id); continue }
                 if !motion.isGliding(id) { motion.drop(id); model.endFloatGesture(id, frame: f) }
             }
         }
@@ -348,7 +338,11 @@ struct WorkspaceFloatLayer: View {
     @ViewBuilder
     private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect]) -> some View {
         let active = model.active == id
-        let moved = motion.frames[id] != nil || resizeStart[id] != nil
+        // Being docked: only its card is drawn. Its title pill and grabber stay, empty and taking
+        // no new touch: the move that docks it lives on one of them, and SwiftUI cancels a
+        // gesture whose view goes away (the card and the drop targets would vanish with it).
+        let docked = model.dockingFloat == id
+        let moved = docked || motion.frames[id] != nil || resizeStart[id] != nil
         let outline = active ? floatAccent : Color.white.opacity(highContrast ? 0.75 : 0.3)
         let coverRects = covers.map(WorkspaceRect.init)
         let covered: (CGRect) -> Bool = { WorkspaceFloatLayering.isCovered(WorkspaceRect($0), by: coverRects) }
@@ -358,19 +352,27 @@ struct WorkspaceFloatLayer: View {
         // drawing it (inside the picture): only its picture shows then, never a second copy.
         let drawnHere = model.drawsFloatHere(id)
         ZStack {
-            if drawnHere, let image = model.backdrop(id)?.image,
-               let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
-                FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
-            } else if model.drawsFloatHere(id) {
-                // Coming back out of its edge without a still of its own (the Mac leaves it out
-                // meanwhile): Stage Peek's still of the window, else its icon.
-                floatPicture(id, size: rect.size, corner: floatCorner)
+            if !docked {
+                Group {
+                    if drawnHere, let image = model.backdrop(id)?.image,
+                       let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
+                        FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
+                    } else if drawnHere {
+                        // Coming back out of its edge without a still of its own (the Mac leaves it out
+                        // meanwhile): Stage Peek's still of the window, else its icon.
+                        floatPicture(id, size: rect.size, corner: floatCorner)
+                    }
+                    RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
+                        .strokeBorder(Color.black.opacity(highContrast ? 0.8 : 0.45), lineWidth: active ? 3.5 : 2.5)
+                    RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
+                        .strokeBorder(outline, lineWidth: active ? 2 : 1)
+                }
+                // Circled back: the card opens into the float under the finger (the title).
+                .transition(.scale(scale: 0.3, anchor: .top).combined(with: .opacity))
             }
-            RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
-                .strokeBorder(Color.black.opacity(highContrast ? 0.8 : 0.45), lineWidth: active ? 3.5 : 2.5)
-            RoundedRectangle(cornerRadius: floatCorner, style: .continuous)
-                .strokeBorder(outline, lineWidth: active ? 2 : 1)
         }
+        // Only opening animates: folding, the float goes at once and the card takes its place.
+        .animation(docked || reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86), value: docked)
         .frame(width: rect.width, height: rect.height)
         .mask(WorkspaceHoleMask(size: rect.size, holes: covers.map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
         .position(x: rect.midX, y: rect.midY)
@@ -381,14 +383,15 @@ struct WorkspaceFloatLayer: View {
         .accessibilityAddTraits(active ? .isSelected : [])
         .accessibilityAction { model.raiseFloat(id); model.focus(id, raise: false) }   // selects it here only
         .modifier(FloatAccessibilityActions(model: model, id: id, front: front, tuck: { tuck(id, $0) }))
+        .accessibilityHidden(docked)
 
-        if !covered(WorkspaceFloatLayering.pillBounds(WorkspaceRect(rect)).cgRect) {
-            titlePill(id, rect: rect, active: active, outline: outline)
+        if docked || !covered(WorkspaceFloatLayering.pillBounds(WorkspaceRect(rect)).cgRect) {
+            titlePill(id, rect: rect, active: active, outline: outline, docked: docked)
         }
         if handles {
-            if !covered(CGRect(x: rect.midX - 38, y: rect.maxY - 4, width: 76, height: 28)) { grabber(id, rect: rect, active: active) }
-            if !covered(CGRect(x: rect.minX - 28, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
-            if !covered(CGRect(x: rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
+            if docked || !covered(CGRect(x: rect.midX - 38, y: rect.maxY - 4, width: 76, height: 28)) { grabber(id, rect: rect, active: active, docked: docked) }
+            if !docked, !covered(CGRect(x: rect.minX - 28, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
+            if !docked, !covered(CGRect(x: rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
         }
         let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)
         if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }
@@ -440,7 +443,9 @@ struct WorkspaceFloatLayer: View {
 
     /// The title in a pill on the top edge, part of the outline. Drag it to move (fling to glide,
     /// at an edge to tuck); tap to select, double-tap for Fullscreen on This Device; ⋯ for options.
-    private func titlePill(_ id: String, rect: CGRect, active: Bool, outline: Color) -> some View {
+    /// `docked`: the float is being docked (only its card shows): the pill draws nothing and takes
+    /// no new touch, but stays, because the move that docks it lives here.
+    private func titlePill(_ id: String, rect: CGRect, active: Bool, outline: Color, docked: Bool) -> some View {
         let maxWidth = max(min(rect.width - 28, 280), 90)
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
@@ -449,9 +454,10 @@ struct WorkspaceFloatLayer: View {
                     .foregroundStyle(Color.white.opacity(active ? 1 : 0.8))
                     .frame(maxWidth: max(maxWidth - 64, 40))
             }
+            .opacity(docked ? 0 : 1)
             .padding(.leading, 10)
             .frame(minHeight: 26)
-            .contentShape(Rectangle())
+            .contentShape(FloatTouchArea(on: !docked))
             .gesture(moveGesture(id))
             // Taps counted like a pane title's (a double tap: Fullscreen on This Device). A tap
             // recognizer, so a system double-tap recognizer that cancels the drag can't swallow it.
@@ -464,22 +470,27 @@ struct WorkspaceFloatLayer: View {
             WorkspaceStableMenuButton(symbol: "ellipsis", accessibilityLabel: String(localized: "Options for \(title(id))"),
                                       accessibilityIdentifier: "floatOptions") { floatMenu(id) }
                 .frame(width: 34, height: 28)
+                .opacity(docked ? 0 : 1)
+                .allowsHitTesting(!docked)
         }
         .fixedSize()
-        .background(Capsule().fill(floatChip))
-        .overlay(Capsule().strokeBorder(outline, lineWidth: active ? 2 : 1).allowsHitTesting(false))
+        .background(Capsule().fill(floatChip).opacity(docked ? 0 : 1).allowsHitTesting(!docked))
+        .overlay(Capsule().strokeBorder(outline, lineWidth: active ? 2 : 1).opacity(docked ? 0 : 1).allowsHitTesting(false))
         .environment(\.colorScheme, .dark)
+        .accessibilityHidden(docked)
         .position(x: rect.midX, y: rect.minY)
     }
 
-    /// A short bar under the window: the same move as the title.
-    private func grabber(_ id: String, rect: CGRect, active: Bool) -> some View {
+    /// A short bar under the window: the same move as the title (and, like it, empty but kept
+    /// while the float is being docked).
+    private func grabber(_ id: String, rect: CGRect, active: Bool, docked: Bool) -> some View {
         let below = rect.maxY + 12 <= picture.maxY - 4
         return Capsule().fill(Color.white.opacity(active ? 0.9 : 0.55))
             .overlay(Capsule().stroke(Color.black.opacity(0.45), lineWidth: 0.5))
             .frame(width: 40, height: 5)
+            .opacity(docked ? 0 : 1)
             .frame(width: 76, height: 28)
-            .contentShape(Rectangle())
+            .contentShape(FloatTouchArea(on: !docked))
             .position(x: rect.midX, y: below ? rect.maxY + 10 : rect.maxY - 10)
             .gesture(moveGesture(id))
             .hoverEffect(.highlight)
@@ -533,9 +544,8 @@ struct WorkspaceFloatLayer: View {
             .onChanged { v in
                 if start[id] == nil {
                     start[id] = motion.catchFloat(id) ?? model.layout.float(id)?.frame
-                    model.beginFloatGesture(id)
+                    model.beginFloatGesture(id)   // and a new `model.floatMove` (circling from scratch)
                     samples[id] = []
-                    circling.reset()
                     ring = nil
                 }
                 guard let s = start[id] else { return }
@@ -550,35 +560,34 @@ struct WorkspaceFloatLayer: View {
                 }
                 let global = CGPoint(x: v.location.x + toGlobal.x, y: v.location.y + toGlobal.y)
                 finger = v.location
-                // About two seconds of circling while held: switch between moving it and docking
-                // it into the layout. A ring above the finger fills as it goes.
-                let switched = circling.add(x: v.location.x, y: v.location.y, at: v.time.timeIntervalSinceReferenceDate)
-                ring = circling.progress > 0 ? Ring(at: v.location, progress: circling.progress, toFloating: docking == id) : nil
+                // Circling while held (a circle and a bit, about a second): switch between moving it
+                // and docking it into the layout (`WorkspaceFloatMove`; while docking this moves the
+                // drag). A ring above the finger fills as it goes.
+                let here = (motion.frames[id] ?? model.layout.float(id)?.frame)?.screen(in: picture)
+                let switched = model.moveFloatFinger(id, to: global, at: v.time.timeIntervalSinceReferenceDate)
+                let progress = model.floatMove?.circling.progress ?? 0
+                ring = progress > 0 ? Ring(at: v.location, progress: progress, toFloating: model.dockingFloat == id) : nil
                 if ring != nil { fadeRingWhenQuiet() }
-                if switched {
-                    if docking == id {
-                        // Back to moving it: the card opens into the float under the finger.
-                        docking = nil
-                        card = nil
-                        model.cancelDrag()
-                        model.liftFloat(id)
-                    } else {
-                        // Docking: the float folds into a card under the finger. It stays lifted (the
-                        // Mac doesn't draw it), so it's on screen once, as the card; a cancelled drop
-                        // puts it back where the move began.
-                        let from = (motion.frames[id] ?? model.layout.float(id)?.frame)?.screen(in: picture)
-                        docking = id
-                        motion.drop(id)
-                        model.updateFloatFrame(id, s)
-                        model.liftFloat(id)
-                        model.beginDrag(.float(id), at: global)
-                        card = DockCard(id: id, from: from ?? CGRect(x: v.location.x - 80, y: v.location.y - 50, width: 160, height: 100), collapsed: false)
-                        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { card?.collapsed = true }
+                switch switched {
+                case .dock?:
+                    // The float folds into a card under the finger: it's drawn nowhere else, here or
+                    // on the Mac, until it's dropped (Cancel puts it back as it was) or circled back.
+                    motion.drop(id)
+                    card = DockCard(id: id, from: here ?? CGRect(x: v.location.x - 80, y: v.location.y - 50, width: 160, height: 100), collapsed: false)
+                    // Drawn once where the float was, then folded (the next update, so it animates).
+                    Task { @MainActor in
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) {
+                            if card?.id == id { card?.collapsed = true }
+                        }
                     }
-                    ring = nil
-                    Self.haptic(.toggle)
+                case .float?:
+                    // Back to moving it: the card opens into the float under the finger (below).
+                    card = nil
+                case nil:
+                    break
                 }
-                if docking == id { model.moveDrag(to: global); return }
+                if switched != nil { ring = nil; Self.haptic(.toggle) }
+                if model.dockingFloat == id { return }
                 var f = s
                 f.x += v.translation.width / max(picture.width, 1)
                 f.y += v.translation.height / max(picture.height, 1)
@@ -596,12 +605,11 @@ struct WorkspaceFloatLayer: View {
                 let list = samples[id] ?? []
                 start[id] = nil; moving.remove(id); samples[id] = nil
                 ring = nil
-                if docking == id {
-                    docking = nil
+                if model.dockingFloat == id {
+                    // On a pane target: docked there. On Remove: removed here only. Else put back.
                     card = nil
                     motion.drop(id)
-                    model.endFloatGesture(id)
-                    if model.endDrag() { Self.haptic(.drop) }
+                    if model.endDockingFloat(id) { Self.haptic(.drop) }
                     return
                 }
                 guard s != nil else { return }
@@ -888,7 +896,7 @@ struct WorkspaceFloatLayer: View {
     private var armedEdges: some View {
         let edges = tuckEdges
         ForEach(Array(moving).sorted(), id: \.self) { id in
-            if docking != id, let f = held[id] ?? motion.frames[id], let edge = WorkspaceFloatMotion.pulledEdge(f, edges: edges),
+            if model.dockingFloat != id, let f = held[id] ?? motion.frames[id], let edge = WorkspaceFloatMotion.pulledEdge(f, edges: edges),
                let area = handleArea {
                 let mark = armedMark(f, edge: edge, area: area)
                 Capsule()
@@ -1219,7 +1227,7 @@ struct WorkspaceFloatLayer: View {
     private var placementTip: some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.clockwise.circle").foregroundStyle(floatAccent).accessibilityHidden(true)
-            Text("Tip: while you drag a window, draw circles for about two seconds to switch between a pane and a floating window. A ring shows how close it is.")
+            Text("Tip: while you drag a window, draw a circle with it (about a second) to switch between a pane and a floating window. A ring shows how close it is.")
                 .font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
             Button { model.dismissPlacementTip() } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.85))
@@ -1247,10 +1255,10 @@ struct WorkspaceFloatLayer: View {
     /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
     private func fadeRingWhenQuiet() {
         ringFade?.cancel()
-        let wait = circling.quiet + 0.05
+        let wait = (model.floatMove?.circling.quiet ?? 0) + 0.05
         ringFade = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-            guard !Task.isCancelled, circling.isQuiet(at: Date().timeIntervalSinceReferenceDate) else { return }
+            guard !Task.isCancelled, model.floatMove?.circling.isQuiet(at: Date().timeIntervalSinceReferenceDate) ?? true else { return }
             ring = nil
         }
     }
@@ -1326,6 +1334,13 @@ private struct FloatAccessibilityActions: ViewModifier {
             .accessibilityAction(named: Text("Fullscreen on This Device")) { model.toggleLocalFullscreen(id) }
             .accessibilityAction(named: Text("Remove from This Device")) { model.removeFloat(id) }
     }
+}
+
+/// A float handle's touch area, or none (`on` false) while the float is being docked: the handle
+/// stays so the move on it goes on, but a new touch there reaches what's under it.
+private struct FloatTouchArea: Shape {
+    var on: Bool
+    func path(in rect: CGRect) -> Path { on ? Path(rect) : Path() }
 }
 
 /// A quarter arc just outside a lower corner of the float.
