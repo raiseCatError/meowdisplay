@@ -2312,6 +2312,29 @@ Tailscale without anyone typing an address.
 * **Trust.** An address is only a routing hint. Every connection to it is the usual pinned mutual
   TLS; a report never creates, changes or approves a pairing.
 
+#### 6.10 addendum: Windows closed on the Mac (`workspaceRequest` `watch`, `workspaceState` `gone`)
+
+Additive: a Mac that doesn't know `watch` ignores it and never sends `gone`; a receiver that
+doesn't know `gone` ignores it.
+
+- Receiver → Mac, in `workspaceRequest`: `"watch":[{"window":N,"gen":G},…]`, every window the
+  receiver holds on this Mac (shown panes, other tabs, floating panes, tucked or not) that it saw
+  listed on this connection, at most 128. Whole displays and panes that follow an app aren't
+  sent.
+- Mac → receiver, in `workspaceState`: `"gone":[{"window":N,"gen":G},…]`, the watched (or shown)
+  windows proved closed. Proof comes from the window server's list of every window (any Space,
+  minimized, hidden, any layer): the id missing from two reads at least 1 s apart, or the id now
+  owned by another process than the one it was listed under. Not being in `windowCatalog`
+  (minimized untitled windows, Stage Manager's strip, Mission Control, other Spaces, a skipped
+  listing, capture loss) is never proof, and a read that returns no windows concludes nothing.
+  A proved window stays in `gone` while it is watched.
+- The receiver acts only on a `gone` entry whose `gen` is the one it holds for that window: a
+  floating pane holding it is removed (tucked too), a tab is removed and its pane shows the next
+  tab, and a pane whose last window closed stays in place, empty, with Choose Window and Remove
+  Pane (saved as `emptied` in the layout record until the person fills or removes it). This isn't
+  an undoable edit, and undo never brings a closed window back. A window that closed while
+  disconnected isn't removed (it shows as unavailable, as before).
+
 #### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
 
 `{"type":"windowAction","action":"addToStage","window":ID,"gen":G}` (needs control, Window mode):
