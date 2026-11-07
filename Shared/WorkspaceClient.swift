@@ -166,6 +166,14 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var stageAddAvailable = false
     /// Mission Control is open on the Mac: macOS pauses window pictures until it closes.
     var missionControlOpen = false
+    /// Windows this receiver holds (`watch`) that closed on the Mac (PROTOCOL.md 6.10 `gone`).
+    var gone: [WorkspaceHeldWindow] = []
+}
+
+/// A Mac window as this receiver holds it: its id and the generation it was listed under.
+struct WorkspaceHeldWindow: Hashable, Sendable {
+    var window: UInt32
+    var generation: UInt64
 }
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
@@ -260,7 +268,10 @@ enum WorkspaceEvent: Sendable {
                                                     u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
                                                 },
                                                 stageAddAvailable: obj["stageAddAvailable"] as? Bool ?? false,
-                                                missionControlOpen: obj["missionControl"] as? String == "open"))
+                                                missionControlOpen: obj["missionControl"] as? String == "open",
+                                                gone: (obj["gone"] as? [[String: Any]] ?? []).prefix(128).compactMap { g in
+                                                    u32(g, "window").flatMap { w in u64(g, "gen").map { WorkspaceHeldWindow(window: w, generation: $0) } }
+                                                }))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
@@ -376,7 +387,8 @@ enum WorkspaceRequests {
                           generation: (WorkspaceSource) -> UInt64?,
                           displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
                           viewEpoch: (String) -> Int? = { _ in nil },
-                          floats: Bool = false, lifted: Set<String> = []) -> [String: Any] {
+                          floats: Bool = false, lifted: Set<String> = [],
+                          watch: [WorkspaceHeldWindow] = []) -> [String: Any] {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
@@ -404,6 +416,8 @@ enum WorkspaceRequests {
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
         if let focus { m["focus"] = focus }
+        // Every window held here, shown or not (other tabs, tucked floats): the Mac says which closed.
+        if !watch.isEmpty { m["watch"] = watch.prefix(128).map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         return m
     }
 
@@ -722,6 +736,13 @@ final class WorkspaceModel: ObservableObject {
     private var generations: [String: UInt64] = [:]
     private func generation(_ s: WorkspaceSource) -> UInt64? { generations["\(s.host)#\(s.windowID)"] }
     private func setGeneration(_ s: WorkspaceSource, _ g: UInt64) { generations["\(s.host)#\(s.windowID)"] = g }
+
+    /// Windows the Mac proved closed on this connection (`gone`), by `tabKey`: the generation that
+    /// closed. A window held under another generation (its id reused) is never touched.
+    private var closedOnMac: [String: UInt64] = [:]
+    /// Windows listed on this connection (`tabKey`): only those are watched for closing, so a
+    /// reconnect never acts on what an earlier connection knew.
+    private var listedThisConnection: Set<String> = []
     private static let railKey = "workspace.railEdge"
 
     init(defaults: UserDefaults = .standard) {
@@ -832,6 +853,7 @@ final class WorkspaceModel: ObservableObject {
             if !duplicates.isEmpty {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
             }
+            if !s.gone.isEmpty { windowsClosedOnMac(s.gone) }
         case .thumbnail(let id, _, let data, let stale):
             let now = Date().timeIntervalSinceReferenceDate
             guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 560) else {
@@ -912,6 +934,7 @@ final class WorkspaceModel: ObservableObject {
             zoomGesture = nil; zoomPreview = nil
             requestedFocus = nil; floatGestureStart = nil; drag = nil
             floatMove = nil; dockingFloat = nil
+            closedOnMac = [:]; listedThisConnection = []   // a new connection proves closings again
         }
     }
 
@@ -925,7 +948,7 @@ final class WorkspaceModel: ObservableObject {
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []; inventory.reset()
         dismissAppOpening()
-        generations = [:]
+        generations = [:]; closedOnMac = [:]; listedThisConnection = []
         publish()
     }
 
@@ -935,6 +958,7 @@ final class WorkspaceModel: ObservableObject {
         catalog = c
         if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        if let host { listedThisConnection.formUnion(c.windows.map { WorkspaceSource(host: host, windowID: $0.id).tabKey }) }
         var missing = Set<String>()
         var rebased = saved
         for (id, tile) in saved.tiles {
@@ -947,6 +971,12 @@ final class WorkspaceModel: ObservableObject {
             guard let w = byID[source.windowID], source.bundleID == nil || source.bundleID == w.bundleID else { missing.insert(id); continue }
             setGeneration(source, w.generation)
             if source.bundleID == nil { rebased = rebased.replacingSource(of: id, with: WorkspaceSource(host: source.host, windowID: source.windowID, bundleID: w.bundleID, follow: source.follow)) }
+        }
+        // The other tabs too: every window held here can be watched for closing.
+        for tile in saved.tiles.values {
+            for s in tile.windows where s != tile.source && !s.isDisplay {
+                if let w = byID[s.windowID], s.bundleID == nil || s.bundleID == w.bundleID { setGeneration(s, w.generation) }
+            }
         }
         if rebased != saved { saved = rebased; persist() }
         self.missing = missing
@@ -1524,6 +1554,8 @@ final class WorkspaceModel: ObservableObject {
     func undo() {
         guard let previous = history.undo(current: saved) else { return }
         saved = previous
+        // A window that closed on the Mac doesn't come back with an older layout.
+        saved = removingClosed(from: saved)
         refreshMissing()
         persist(); publish(); scheduleSend()
     }
@@ -1531,6 +1563,7 @@ final class WorkspaceModel: ObservableObject {
     func redo() {
         guard let next = history.redo(current: saved) else { return }
         saved = next
+        saved = removingClosed(from: saved)
         refreshMissing()
         persist(); publish(); scheduleSend()
     }
@@ -2380,7 +2413,67 @@ final class WorkspaceModel: ObservableObject {
                                              host: host, focus: focusNow, generation: generation,
                                              displayID: { [weak self] in self?.display(for: $0)?.id },
                                              viewEpoch: { [weak self] in self?.viewEpochs[$0] },
-                                             floats: canFloat, lifted: canLiftFloats ? liftedFloats.filter { sendable.isFloat($0) } : []))
+                                             floats: canFloat, lifted: canLiftFloats ? liftedFloats.filter { sendable.isFloat($0) } : [],
+                                             watch: heldWindows(host: host)))
+    }
+
+    /// Every Mac window held here (shown, another tab, a float tucked or hidden) under the generation
+    /// it was listed with. Windows not yet listed on this connection, whole displays and panes that
+    /// follow an app aren't watched: nothing is taken out without the Mac's proof.
+    private func heldWindows(host: String) -> [WorkspaceHeldWindow] {
+        var seen = Set<String>()
+        return saved.allTileIDs.flatMap { saved.tiles[$0]?.windows ?? [] }.compactMap { s in
+            guard s.host == host, !s.isDisplay, s.follow == .window, listedThisConnection.contains(s.tabKey),
+                  let g = generation(s), seen.insert(s.tabKey).inserted else { return nil }
+            return WorkspaceHeldWindow(window: s.windowID, generation: g)
+        }
+    }
+
+    /// The Mac proved these windows closed (`gone`): a floating pane holding one goes (tucked too),
+    /// a tab goes and its pane shows the next, and a pane whose last window closed stays empty with
+    /// Choose Window and Remove Pane. Only windows held under exactly that generation; anything
+    /// in progress on a pane that goes or empties stops (a drag, a dock, a pinch). Not an edit the
+    /// person made, so not undoable (the window is gone).
+    private func windowsClosedOnMac(_ gone: [WorkspaceHeldWindow]) {
+        guard let host else { return }
+        var added = false
+        for g in gone {
+            let s = WorkspaceSource(host: host, windowID: g.window)
+            guard listedThisConnection.contains(s.tabKey), generation(s) == g.generation,
+                  closedOnMac[s.tabKey] != g.generation else { continue }
+            closedOnMac[s.tabKey] = g.generation
+            added = true
+        }
+        guard added else { return }
+        let result = saved.removingClosedWindows(isClosedOnMac)
+        guard result.layout != saved else { return }
+        let touched = result.removed.union(result.emptied)
+        Log.info("workspace: windows closed on the Mac: floats removed=\(result.removed.sorted()) panes emptied=\(result.emptied.sorted())")
+        if touched.contains(where: { floatGesture == $0 || dockingFloat == $0 }) { abandonDrag(reason: "window closed on the Mac") }
+        if let item = drag?.item {
+            switch item {
+            case .pane(let id, _) where touched.contains(id) || result.layout.tiles[id]?.windows != saved.tiles[id]?.windows:
+                abandonDrag(reason: "window closed on the Mac")
+            case .float(let id) where touched.contains(id):
+                abandonDrag(reason: "window closed on the Mac")
+            default: break
+            }
+        }
+        if let z = zoomGesture, touched.contains(z.tile) { zoomGesture = nil; zoomPreview = nil }
+        for id in result.removed { backdrops[id] = nil; liftedFloats.remove(id); liftWanted.remove(id) }
+        saved = result.layout
+        refreshMissing()
+        persist(); publish(); scheduleSend(immediately: true)
+        advanceAppOpening()
+    }
+
+    private func isClosedOnMac(_ s: WorkspaceSource) -> Bool {
+        guard let g = closedOnMac[s.tabKey] else { return false }
+        return generation(s) == g
+    }
+
+    private func removingClosed(from layout: WorkspaceLayout) -> WorkspaceLayout {
+        closedOnMac.isEmpty ? layout : layout.removingClosedWindows(isClosedOnMac).layout
     }
 
     private func persist() {

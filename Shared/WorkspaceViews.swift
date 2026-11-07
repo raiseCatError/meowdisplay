@@ -263,6 +263,7 @@ struct WorkspaceChromeView: View {
         // (the window list can lag behind a window that just appeared).
         if let remote = model.tileState(id), remote.status == .live, let source = tile.source, remote.windowID == source.windowID { return nil }
         if tile.source?.isDisplay == true, model.missing.contains(id) { return "This display isn't connected to the Mac now" }
+        if tile.source == nil, tile.emptied { return String(localized: "This pane’s window was closed on the Mac.") }
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
         // Refused by the Mac (e.g. that window already shows in another tile).
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
@@ -284,6 +285,49 @@ struct WorkspaceChromeView: View {
                 : "macOS paused \(app)'s picture. It comes back when the window is shown on the Mac."
         case .retrying: return "Reconnecting to \(remote.app.isEmpty ? "the window" : remote.app)… (try \(remote.attempt))"
         }
+    }
+
+    /// A pane whose last window closed on the Mac: it stays where it was until the person chooses
+    /// a window for it or removes it. Two plain buttons, readable and reachable in a small pane
+    /// (they stack when there's no room side by side).
+    private func emptiedPane(id: String, text: String) -> some View {
+        VStack(spacing: 10) {
+            Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if #available(macOS 13.0, iOS 16.0, *) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                    VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                }
+            } else {
+                VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 12))
+        .padding(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("emptiedPane")
+    }
+
+    @ViewBuilder
+    private func emptiedPaneButtons(id: String) -> some View {
+        Button { model.openOverview(replacing: id) } label: {
+            Label("Choose Window", systemImage: "macwindow").font(.callout.weight(.semibold))
+                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(.white, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneChooseWindow")
+        Button { model.removeTile(id) } label: {
+            Label("Remove Pane", systemImage: "rectangle.badge.minus").font(.callout.weight(.semibold))
+                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(workspaceChip, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneRemove")
     }
 
     /// How far each edge of [rect] reaches outside the safe area.
@@ -357,7 +401,10 @@ struct WorkspaceChromeView: View {
     private func tileLabels(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, multi: Bool) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
-            if let text = status(for: id, tile: tile) {
+            if tile.source == nil, tile.emptied, let text = status(for: id, tile: tile) {
+                emptiedPane(id: id, text: text)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
                     Button { model.openOverview(replacing: id) } label: {
                         HStack(spacing: 8) {
@@ -1681,6 +1728,8 @@ struct WorkspaceDropOverlay: View {
         let r = target.preview.onScreen(picture)
         let text: String = {
             switch target {
+            case .replace(let tile, _) where model.layout.tiles[tile]?.emptied == true && model.layout.tiles[tile]?.source == nil:
+                return String(localized: "Show Here")
             case .replace:
                 if case .pane = item { return String(localized: "Swap") }
                 if model.windowMode { return String(localized: "Replace") }

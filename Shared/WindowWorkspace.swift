@@ -372,6 +372,10 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     /// each tab keeps its own while another is shown. Absent = the default view.
     var tabViews: [String: WorkspaceTabView] = [:]
 
+    /// Its last window closed on the Mac: the pane stays, empty, until the person chooses a
+    /// window for it or removes it (`compacted()` keeps it; `removingClosedWindows`).
+    var emptied = false
+
     /// The pane's windows in label order (one, or its tabs).
     var windows: [WorkspaceSource] { tabs.isEmpty ? (source.map { [$0] } ?? []) : tabs }
 
@@ -825,6 +829,7 @@ struct WorkspaceLayout: Equatable, Sendable {
             if tile.tabs.count <= 1 { tile.tabs = [] }
         }
         tile.source = source
+        if source != nil { tile.emptied = false }
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -884,6 +889,41 @@ struct WorkspaceLayout: Equatable, Sendable {
         if t.tabs.count <= 1 { t.tabs = []; t.tabViews = [:] }
         copy.tiles[id] = t
         return copy
+    }
+
+    /// The Mac closed these windows (`isClosed`; PROTOCOL.md 6.10 `gone`). A floating pane whose
+    /// windows all closed goes, tucked or not; a closed tab goes and its pane shows the next; a pane
+    /// whose last window closed stays, empty (`emptied`), for the person to fill or remove.
+    /// Returns the floating panes removed and the panes emptied.
+    func removingClosedWindows(_ isClosed: (WorkspaceSource) -> Bool) -> (layout: WorkspaceLayout, removed: Set<String>, emptied: Set<String>) {
+        var l = self
+        var removed = Set<String>(), emptied = Set<String>()
+        for id in allTileIDs {
+            guard let tile = l.tiles[id] else { continue }
+            let closed = tile.windows.filter { !$0.isDisplay && isClosed($0) }
+            guard !closed.isEmpty else { continue }
+            if l.isFloat(id), closed.count == tile.windows.count {
+                l = l.removing(id)
+                removed.insert(id)
+                continue
+            }
+            for s in closed {
+                guard var t = l.tiles[id] else { break }
+                if let i = t.tabs.firstIndex(of: s) {
+                    l = l.removingTab(of: id, at: i)
+                } else if t.source == s {
+                    t.source = nil
+                    l.tiles[id] = t
+                }
+            }
+            if var t = l.tiles[id], t.source == nil {
+                // Its view belonged to the window that closed.
+                t.emptied = true; t.zoom = nil; t.rotation = .none; t.fit = .fit; t.tabs = []; t.tabViews = [:]
+                l.tiles[id] = t
+                emptied.insert(id)
+            }
+        }
+        return (l, removed, emptied)
     }
 
     /// The pane (or floating pane) showing, or holding as a tab, this window, if any.
@@ -977,10 +1017,11 @@ struct WorkspaceLayout: Equatable, Sendable {
 
     /// No empty panes: tiles without a window are dropped, empty slots close up and their
     /// neighbours take the space (ratios kept in proportion); one window fills the picture.
-    /// Only a layout with no windows at all keeps its single empty slot.
+    /// Only a layout with no windows at all keeps its single empty slot. A pane emptied because
+    /// its window closed on the Mac (`emptied`) stays until the person fills or removes it.
     func compacted() -> WorkspaceLayout {
         var copy = self
-        for (id, tile) in tiles where tile.source == nil { copy.tiles[id] = nil }
+        for (id, tile) in tiles where tile.source == nil && !tile.emptied { copy.tiles[id] = nil }
         copy.normalize()
         func prune(_ n: WorkspaceNode) -> WorkspaceNode? {
             switch n {
@@ -1448,6 +1489,10 @@ enum WorkspaceGeometry {
         guard let index = frames.slots.firstIndex(where: { $0.contains(point) }) else { return nil }
         let slot = frames.slots[index]
         guard let occupant = WorkspaceLayout.slotID(layout.root, at: index) else { return nil }
+        // A pane left empty after its window closed on the Mac: the window shows in it.
+        if let tile = occupant, layout.tiles[tile]?.source == nil, layout.tiles[tile]?.emptied == true {
+            return .replace(tile: tile, preview: slot)
+        }
         guard let tile = occupant, layout.tiles[tile]?.source != nil else { return .emptySlot(index: index, preview: slot) }
         let strip = min(labelHeight * 1.6, slot.height * 0.25)
         if point.y - slot.y <= strip {
@@ -1686,6 +1731,9 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var tabs: [TabRecord]?
         /// The pane's zoom `[scale, centerX, centerY]` (schema 3).
         var zoom: [Double]?
+        /// Its window closed on the Mac and it was kept empty (absent otherwise; older readers
+        /// drop the empty pane, as they always have).
+        var emptied: Bool?
     }
 
     struct TabRecord: Codable, Equatable, Sendable {
@@ -1739,7 +1787,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                      return TabRecord(host: s.host, window: s.windowID, bundle: s.bundleID, follow: s.follow.rawValue,
                                       rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue }, zoom: v?.zoom?.wire)
                  },
-                 zoom: $0.zoom?.wire)
+                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil)
         }
         maximized = layout.maximized
         floats = layout.floats.isEmpty ? nil : layout.floats.map {
@@ -1771,6 +1819,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             let fit: WorkspaceFit = t.fit == WorkspaceFit.fill.rawValue ? .fill : .fit
             var tile = WorkspaceTile(id: t.id, source: source, rotation: WorkspaceRotation(degrees: t.rotation ?? 0), fit: fit)
             if source != nil, let z = WorkspacePaneZoom(wire: t.zoom), !z.isIdentity { tile.zoom = z }
+            if source == nil, t.emptied == true { tile.emptied = true }
             let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
                                 follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
