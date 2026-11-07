@@ -180,6 +180,8 @@ struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: Stri
 
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
+    /// The Mac locked or unlocked its screen (`macLockState`).
+    case macLock(MacLockNotice)
     /// The Mac's Privacy Shield covers its own screens while this device is connected (welcome).
     case privacyShield(Bool)
     case mode(window: Bool)
@@ -220,6 +222,8 @@ enum WorkspaceEvent: Sendable {
         func u32(_ o: [String: Any], _ k: String) -> UInt32? { (o[k] as? Int).flatMap { UInt32(exactly: $0) } }
         func u64(_ o: [String: Any], _ k: String) -> UInt64? { (o[k] as? Int).flatMap { UInt64(exactly: $0) } }
         switch type {
+        case MacLockWire.type:
+            return MacLockNotice(message: obj).map { .macLock($0) }
         case WireMessage.windowCatalog:
             let windows = (obj["windows"] as? [[String: Any]] ?? []).prefix(120).compactMap { w -> CatalogWindowItem? in
                 guard let id = u32(w, "id"), let bundle = str(w, "bundle") else { return nil }
@@ -547,6 +551,9 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var privacyShieldNotice: Bool?
     private var privacyNoticeClear: DispatchWorkItem?
     @Published private(set) var catalog: WorkspaceCatalogMessage?
+    /// The Mac's screen is locked (or switched to another user): nothing of it is kept or shown
+    /// here until it unlocks (`macLockState`). The layout itself is kept.
+    @Published private(set) var macLocked = false
     @Published private(set) var missing: Set<String> = []
     @Published var overviewOpen = false
     @Published private(set) var replacingTile: String?
@@ -791,6 +798,8 @@ final class WorkspaceModel: ObservableObject {
             iconsConnected = true
             iconPlanner.reset()
             requestShownIcons()
+        case .macLock(let notice):
+            macLockChanged(locked: notice.isLocked)
         case .privacyShield(let on):
             privacyShieldNotice = on
             privacyNoticeClear?.cancel()
@@ -938,7 +947,32 @@ final class WorkspaceModel: ObservableObject {
             requestedFocus = nil; floatGestureStart = nil; drag = nil
             floatMove = nil; dockingFloat = nil
             closedOnMac = [:]; listedThisConnection = []   // a new connection proves closings again
+            macLocked = false
         }
+    }
+
+    /// Locked: every picture and name of the Mac's windows this device holds goes (stills, the
+    /// window list with its titles, backdrops), and anything in progress stops (a drag, Stage
+    /// Peek, the picker, an app drop's question): it can't carry on into, or show behind, the
+    /// locked screen. The layout is kept. Unlocked: the window list is asked for again, and
+    /// stills come back as they're asked for.
+    private func macLockChanged(locked: Bool) {
+        guard locked != macLocked else { return }
+        macLocked = locked
+        guard locked else {
+            if windowMode { requestCatalog() }
+            return
+        }
+        cancelDrag()
+        appDrop = nil
+        stagePeekOpen = false; launchpadOpen = false
+        if overviewOpen { closeOverview() }
+        catalog = nil
+        thumbnails = [:]; thumbAge = [:]; displayThumbnails = [:]
+        staleThumbnails = []; unavailableThumbnails = []; planner.reset()
+        backdrops = [:]; backdropAskedAt = [:]
+        zoomGesture = nil; zoomPreview = nil
+        publish()
     }
 
     private func load(for peer: String) {

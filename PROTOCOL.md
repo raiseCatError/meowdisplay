@@ -2313,6 +2313,34 @@ Tailscale without anyone typing an address.
 * **Trust.** An address is only a routing hint. Every connection to it is the usual pinned mutual
   TLS; a report never creates, changes or approves a pairing.
 
+### 6.18 Mac lock state (`macLockState`)
+
+Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.features`.
+
+- Mac → receiver: `{"type":"macLockState","state":S,"remoteUnlock":false}` with S one of
+  `unlocked`, `locked` (macOS shows its lock screen), `switchedOut` (Fast User Switching: another
+  login session is on the console) or `unknown` (the session couldn't be read). Every value other
+  than `unlocked`, including one a receiver doesn't recognise, means locked.
+- Sent on every change, and right after `welcome` when a receiver connects while the Mac is
+  already locked. On a change to a locked state it is followed by `inputReset` and
+  `videoState` with `enabled:false`, so a receiver that doesn't know `macLockState` still drops
+  its last picture.
+- While locked the Mac sends no media (video, audio, window frames), no cursor or cursor image and
+  none of `windowCatalog`, `windowThumbnail`, `appIcon`, `workspaceState`, `workspaceView`,
+  `workspaceBackdrop`, `appCatalog`, `displayThumbnail`, `files`, `menu`, `menuResult`,
+  `appLaunchResult`, `windowCloseResult`, `clip` or `textCaret`. Session messages (`welcome`,
+  pings, `videoState`, `allowInputState`, `inputReset`, `lockMacResult`, mode and profile states)
+  still go, so nothing reconnects. Window captures and listings stop and restart on unlock; the
+  first frame after it is a keyframe.
+- Input received while locked is dropped, whatever the grant. `allowInputRequest` while locked: a
+  device set to Ask is refused (`notAllowed`) without a prompt, Never Allow is refused as before,
+  Always Allow is granted but input still waits for the unlock. `lockMac` while locked answers
+  `locked`.
+- `remoteUnlock` is always `false`: no receiver can unlock the Mac, and no message carries a
+  password. Receivers show an opaque locked screen, forget stills, window names and anything in
+  progress (drags, Stage Peek, pickers), keep the layout, and ask for the window list again after
+  the unlock.
+
 #### 6.10 addendum: Windows closed on the Mac (`workspaceRequest` `watch`, `workspaceState` `gone`)
 
 Additive: a Mac that doesn't know `watch` ignores it and never sends `gone`; a receiver that

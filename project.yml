@@ -302,6 +302,8 @@ targets:
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
+      - Mac/MacLockPrivacy.swift
+      - Shared/MacLockWire.swift
       - Mac/DisplayCaptureSettings.swift
       - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift

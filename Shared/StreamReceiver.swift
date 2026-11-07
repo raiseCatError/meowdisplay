@@ -808,6 +808,9 @@ final class StreamReceiver: ObservableObject {
     /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
     /// the user acts on it.
     @MainActor @Published private(set) var mirrorUnavailable = false
+    /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
+    /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
+    @MainActor @Published private(set) var macLock: MacLockNotice?
     /// Set when the Mac authoritatively rejects a Mirror request made
     /// WHILE already confirmed extending (see `SenderController.requestMode`)
     /// — a simple informational state, never the "Use Extend?" offer, since
@@ -2960,6 +2963,12 @@ final class StreamReceiver: ObservableObject {
                 target = nil
             }
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
+        case MacLockWire.type:
+            guard let notice = MacLockNotice(message: obj) else { return }
+            // The last picture goes now, not when video-off follows.
+            if notice.isLocked { resetDecoderForVideoStateChange() }
+            DispatchQueue.main.async { uiSink.publishMacLock(notice) }
+            workspaceEvents.emit(.macLock(notice))
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -6029,6 +6038,7 @@ final class StreamReceiver: ObservableObject {
             // a fresh one arrives on the Mac's own next attempt, if any.
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
+            self.macLock = nil
         }
     }
 
@@ -6143,6 +6153,10 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyActiveStreamCodecUpdate(_ codec: StreamCodec) {
         activeStreamCodec = codec
+    }
+
+    @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
+        macLock = notice.isLocked ? notice : nil
     }
 
     @MainActor func applyMirrorUnavailableClear() {
