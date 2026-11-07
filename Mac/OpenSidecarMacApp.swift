@@ -590,6 +590,7 @@ final class SenderController: ObservableObject {
     @Published var sessions: [DeviceSession] = [] {
         // Clipboard grants and transfers end with their session.
         didSet {
+            macLockMonitor?.setPolling(!sessions.isEmpty)
             ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.releaseRemoteInput = { [weak self] in
@@ -1116,6 +1117,7 @@ final class SenderController: ObservableObject {
         if keepMacAvailableRequested { keepMacAvailableActive = keepAssertionEnable() }
         startObservingPhysicalDisplayAvailability()
         observeLoginSessionSwitching()
+        observeMacLock()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1274,6 +1276,29 @@ final class SenderController: ObservableObject {
                                  (NSWorkspace.sessionDidResignActiveNotification, false)].map { name, onConsole in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.loginSessionConsoleChanged(onConsole: onConsole) }
+            }
+        }
+    }
+
+    /// Lock screen privacy (`MacLockMonitor`): every session hears each change at once.
+    private var macLockMonitor: MacLockMonitor?
+
+    private func observeMacLock() {
+        let monitor = MacLockMonitor { [weak self] state in self?.macLockChanged(state) }
+        monitor.start()
+        monitor.setPolling(!sessions.isEmpty)
+        macLockMonitor = monitor
+    }
+
+    private func macLockChanged(_ state: MacScreenPrivacy) {
+        for session in sessions {
+            session.sender.macPrivacyChanged(state)
+            // A Request Control prompt nobody can answer behind the lock screen is retired (no
+            // Not Now cooldown), and its receiver hears no at once; it can ask after the unlock.
+            if !state.allowsContent, session.inputControlRequest.isPending {
+                session.inputControlRequest.invalidatePending()
+                inputControlPrompt.cancelForEndedSession(id: session.id)
+                session.sender.denySessionInput(state: .notAllowed)
             }
         }
     }
@@ -3869,6 +3894,7 @@ final class SenderController: ObservableObject {
         // that can't succeed (`InputControlRequestRoute`).
         switch InputControlRequestRoute.route(masterEnabled: allowInput,
                                               onConsole: LoginSessionConsole.shared.isOnConsole,
+                                              screenLocked: !MacPrivacyGate.shared.allowsInput,
                                               policy: ReceiverInputAuthorizationStore.policy(peerID: peerID)) {
         case .deny(let state):
             session.sender.denySessionInput(state: state)
