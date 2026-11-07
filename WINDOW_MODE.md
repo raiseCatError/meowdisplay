@@ -315,6 +315,13 @@ holding the old one is refused, never pointed at the new one.
     owed and when it runs, and any pause.
   - The owner's own Shortcuts automations that run when Stage Manager turns
     on or off run each time MeowDisplay switches it.
+- **Dialogs.** An untitled sheet (an alert, "Save changes?") is drawn over its
+  window in the pane and works there. Open and Save panels are titled and
+  partly drawn by a separate macOS process, so they aren't drawn in the pane,
+  and neither is an app-modal alert that isn't over its window: open Stage
+  Peek, where each is listed as a window of the same app ("Open", "Save" or
+  untitled), and show or float it to answer it. Only the front-most of nested
+  sheets is drawn. See RESEARCH_TEMPORARY_DIALOGS.md.
 
 ## Turning it off
 
