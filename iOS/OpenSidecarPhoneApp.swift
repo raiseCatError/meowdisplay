@@ -803,6 +803,7 @@ struct ReceiverScreen: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .modifier(WorkspaceDragGuard(model: model.workspace))
         .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {

@@ -392,6 +392,7 @@ struct WorkspaceChromeView: View {
         // (the window list can lag behind a window that just appeared).
         if let remote = model.tileState(id), remote.status == .live, let source = tile.source, remote.windowID == source.windowID { return nil }
         if tile.source?.isDisplay == true, model.missing.contains(id) { return "This display isn't connected to the Mac now" }
+        if tile.source == nil, tile.emptied { return String(localized: "This pane’s window was closed on the Mac.") }
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
         // Refused by the Mac (e.g. that window already shows in another tile).
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
@@ -410,6 +411,49 @@ struct WorkspaceChromeView: View {
                 : "macOS paused \(app)'s picture. It comes back when the window is shown on the Mac."
         case .retrying: return "Reconnecting to \(remote.app.isEmpty ? "the window" : remote.app)… (try \(remote.attempt))"
         }
+    }
+
+    /// A pane whose last window closed on the Mac: it stays where it was until the person chooses
+    /// a window for it or removes it. Two plain buttons, readable and reachable in a small pane
+    /// (they stack when there's no room side by side).
+    private func emptiedPane(id: String, text: String) -> some View {
+        VStack(spacing: 10) {
+            Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if #available(macOS 13.0, iOS 16.0, *) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                    VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                }
+            } else {
+                VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 12))
+        .padding(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("emptiedPane")
+    }
+
+    @ViewBuilder
+    private func emptiedPaneButtons(id: String) -> some View {
+        Button { model.openOverview(replacing: id) } label: {
+            Label("Choose Window", systemImage: "macwindow").font(.callout.weight(.semibold))
+                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(.white, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneChooseWindow")
+        Button { model.removeTile(id) } label: {
+            Label("Remove Pane", systemImage: "rectangle.badge.minus").font(.callout.weight(.semibold))
+                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(workspaceChip, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneRemove")
     }
 
     /// How far each edge of [rect] reaches outside the safe area.
@@ -515,6 +559,9 @@ struct WorkspaceChromeView: View {
             if model.missionControlNotice(id) != nil {
                 // Mission Control holds this window's picture: its notice (folded: a small status).
                 missionControlNotice(id, compact: rect.width < 320, width: rect.width)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if tile.source == nil, tile.emptied, let text = status(for: id, tile: tile) {
+                emptiedPane(id: id, text: text)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
@@ -1344,7 +1391,7 @@ struct WindowOverviewView: View {
                     Spacer()
                     Button("Done") { model.closeOverview() }.keyboardShortcut(.cancelAction)
                 }
-                .modifier(OpenedWindowChoice(model: model))
+                .modifier(OpenedWindowChoice(model: model, forDrop: false))
                 TextField("Search windows and apps", text: $query).textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("windowPickerSearch")
                 HStack(spacing: 8) {
@@ -1389,11 +1436,13 @@ struct WindowOverviewView: View {
                 .confirmationDialog(confirmApp.map(openTitle) ?? "", isPresented: Binding(get: { confirmApp != nil }, set: { if !$0 { confirmApp = nil } }),
                                     titleVisibility: .visible, presenting: confirmApp) { app in
                     if canOpenApps {
-                        Button(String(localized: "Open \(app.name)")) { model.openAppFromPicker(app) }
+                        Button("Open on Mac") { model.openAppFromPicker(app) }
                             .accessibilityIdentifier("pickerOpenAppConfirm")
-                    } else if model.controlState() != .requestsDisabled {
-                        Button("Request Control and Open") { model.openAppFromPicker(app, requestingControl: true) }
+                            .accessibilityLabel(String(localized: "Open \(app.name) on Mac"))
+                    } else if inputAllowed, model.controlState() != .requestsDisabled {
+                        Button("Request Control & Open") { model.openAppFromPicker(app, requestingControl: true) }
                             .accessibilityIdentifier("pickerOpenAppRequestControl")
+                            .accessibilityLabel(String(localized: "Request control and open \(app.name)"))
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: { app in
@@ -1404,7 +1453,7 @@ struct WindowOverviewView: View {
             .padding(safeInsets)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(white: 0.06, opacity: 0.97).ignoresSafeArea())
-            .modifier(AppOpeningFailureAlert(model: model, macName: macName) { name in query = name })
+            .modifier(AppOpeningFailureAlert(model: model, macName: macName, forDrop: false) { name in query = name })
             .onAppear { model.requestIcons(iconBundles) }
             .onChange(of: iconBundles) { model.requestIcons($0) }
         }
@@ -1465,7 +1514,7 @@ struct WindowOverviewView: View {
     private func openMessage(_ app: WorkspacePickerSearch.AppToOpen) -> String {
         if !canOpenApps {
             if model.controlState() == .requestsDisabled {
-                return String(localized: "\(macName) doesn’t accept control requests from this device, so apps can’t be opened from here.")
+                return WorkspaceAppDropDialogs.refusedMessage(macName)
             }
             return model.replacingTile != nil
                 ? String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(app.name) opens and its window goes in this tile.")
@@ -1506,13 +1555,16 @@ struct WindowOverviewView: View {
     }
 }
 
-/// Several new windows after opening an app from the picker: which one goes in the tile. Never
-/// chosen for the person; Cancel leaves the tile as it was.
-private struct OpenedWindowChoice: ViewModifier {
+/// Several new windows after opening an app from the picker (or a drop): which one goes in the
+/// tile. Never chosen for the person; Cancel leaves the tile as it was. `forDrop`: this copy
+/// answers openings from a drop (shown over the layout), the picker's copy those from the picker.
+struct OpenedWindowChoice: ViewModifier {
     @ObservedObject var model: WorkspaceModel
+    let forDrop: Bool
 
     func body(content: Content) -> some View {
-        let windows: [CatalogWindowItem]? = { if case .choosing(let ws) = model.appOpening?.phase { return ws }; return nil }()
+        let mine = (model.appOpening?.drop != nil) == forDrop
+        let windows: [CatalogWindowItem]? = { if mine, case .choosing(let ws) = model.appOpening?.phase { return ws }; return nil }()
         let round = model.appOpeningRound
         content.confirmationDialog(model.appOpening.map { String(localized: "Which \($0.name) window?") } ?? "",
                                    isPresented: Binding(get: { windows != nil },
@@ -1532,14 +1584,16 @@ private struct OpenedWindowChoice: ViewModifier {
 
 /// An app opening from the picker that didn't end with its window in the tile: what happened,
 /// Try Again (or Request Control), Choose a Window (searches for the app), or Cancel.
-private struct AppOpeningFailureAlert: ViewModifier {
+struct AppOpeningFailureAlert: ViewModifier {
     @ObservedObject var model: WorkspaceModel
     let macName: String
+    let forDrop: Bool
     let onChooseWindow: (String) -> Void
 
     func body(content: Content) -> some View {
         let opening = model.appOpening
-        let failure: WorkspaceAppOpening.Failure? = { if case .failed(let f) = opening?.phase { return f }; return nil }()
+        let mine = (opening?.drop != nil) == forDrop
+        let failure: WorkspaceAppOpening.Failure? = { if mine, case .failed(let f) = opening?.phase { return f }; return nil }()
         let round = model.appOpeningRound
         let name = opening?.name ?? ""
         content.alert(failure.map { title($0, name) } ?? "",
@@ -1585,7 +1639,9 @@ private struct AppOpeningFailureAlert: ViewModifier {
         case .controlEnded:
             return String(localized: "Control of \(macName) ended before \(name) opened, so it may not have opened.")
         case .tileChanged:
-            return String(localized: "That tile changed or was removed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
+            return forDrop
+                ? String(localized: "The panes changed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
+                : String(localized: "That tile changed or was removed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
         case .disconnected:
             return String(localized: "The connection to \(macName) ended while \(name) was opening.")
         }
@@ -1673,10 +1729,14 @@ struct WorkspacePresetsView: View {
 }
 
 /// After an app is dropped on a pane: which of its windows (several), or open it on the Mac
-/// (none; needs control). Nothing opens or moves until the person picks.
+/// (none). Opening asks first, with one action that says what happens: Open on Mac with control,
+/// Request Control & Open without, or why it can't from this device. It then runs like the
+/// picker's (`WorkspaceAppOpening`): progress over the layout, a choice of several windows, and
+/// what went wrong. Nothing opens or moves until the person picks.
 struct WorkspaceAppDropDialogs: ViewModifier {
     @ObservedObject var model: WorkspaceModel
     var onRequestControl: () -> Void
+    var macName: String = String(localized: "your Mac")
 
     func body(content: Content) -> some View {
         let d = model.appDrop
@@ -1686,17 +1746,37 @@ struct WorkspaceAppDropDialogs: ViewModifier {
                 ForEach(d.windows) { w in
                     Button(w.title.isEmpty ? String(localized: "Untitled Window") : w.title) { model.completeAppDrop(d, with: w) }
                 }
-            } else if model.inputAllowed() {
-                Button("Open on Mac") { model.launchForAppDrop(d) }
-            } else {
-                Button("Request Control") { model.cancelAppDrop(); onRequestControl() }
+            } else if model.canControlMac {
+                Button("Open on Mac") { model.openAppForDrop(d) }
+                    .accessibilityIdentifier("appDropOpenOnMac")
+                    .accessibilityLabel(String(localized: "Open \(d.app.name) on Mac"))
+            } else if model.inputAllowed(), model.controlState() != .requestsDisabled {
+                Button("Request Control & Open") { model.openAppForDrop(d, requestingControl: true) }
+                    .accessibilityIdentifier("appDropRequestControlAndOpen")
+                    .accessibilityLabel(String(localized: "Request control and open \(d.app.name)"))
             }
             Button("Cancel", role: .cancel) { model.cancelAppDrop() }
         } message: { d in
-            if d.windows.isEmpty {
-                Text(model.inputAllowed() ? "Its first new window goes where you dropped it." : "Opening apps needs control of the Mac.")
-            }
+            if d.windows.isEmpty { Text(message(d)) }
         }
+        .overlay(alignment: .bottom) {
+            if let o = model.appOpening, o.drop != nil, o.isWaiting { openingStatus(o) }
+        }
+        .modifier(OpenedWindowChoice(model: model, forDrop: true))
+        .modifier(AppOpeningFailureAlert(model: model, macName: macName, forDrop: true) { _ in
+            model.openOverview(replacing: nil)
+        })
+    }
+
+    static func refusedMessage(_ macName: String) -> String {
+        String(localized: "\(macName) doesn’t accept control requests from this device, so apps can’t be opened from here. To allow it, change this device’s input setting in MeowDisplay on \(macName).")
+    }
+
+    private func message(_ d: WorkspaceModel.AppDrop) -> String {
+        if model.canControlMac { return String(localized: "Its window goes where you dropped it; nothing else in your layout changes. It opens without coming to the front on the Mac.") }
+        if !model.inputAllowed() { return String(localized: "Opening apps needs a live connection with control of the Mac.") }
+        if model.controlState() == .requestsDisabled { return Self.refusedMessage(macName) }
+        return String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(d.app.name) opens and its window goes where you dropped it.")
     }
 
     private func title(_ d: WorkspaceModel.AppDrop?) -> String {
@@ -1704,6 +1784,33 @@ struct WorkspaceAppDropDialogs: ViewModifier {
         if !d.windows.isEmpty { return String(localized: "Which \(d.app.name) window?") }
         return d.app.running ? String(localized: "\(d.app.name) has no windows you can show. Open a new one on the Mac?")
                              : String(localized: "Open \(d.app.name) on the Mac?")
+    }
+
+    /// The dropped app opening: what it waits for, and Cancel. Small, at the bottom, over the layout.
+    private func openingStatus(_ o: WorkspaceAppOpening) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text(statusText(o)).font(.footnote.weight(.semibold)).lineLimit(2)
+            Button("Cancel") { model.dismissAppOpening() }
+                .font(.footnote.weight(.semibold))
+                .accessibilityLabel(String(localized: "Stop opening \(o.name)"))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.bottom, 96)
+        .padding(.horizontal, 16)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("appDropOpening")
+    }
+
+    private func statusText(_ o: WorkspaceAppOpening) -> String {
+        if o.phase == .awaitingControl {
+            return model.controlState() == .requesting
+                ? String(localized: "Waiting for \(macName) to allow control. \(o.name) opens then.")
+                : String(localized: "Requesting control to open \(o.name)…")
+        }
+        return model.appOpeningSlow ? String(localized: "\(o.name) is taking a while to open…")
+                                    : String(localized: "Opening \(o.name) on \(macName)…")
     }
 }
 
@@ -1810,6 +1917,8 @@ struct WorkspaceDropOverlay: View {
         let r = target.preview.onScreen(picture)
         let text: String = {
             switch target {
+            case .replace(let tile, _) where model.layout.tiles[tile]?.emptied == true && model.layout.tiles[tile]?.source == nil:
+                return String(localized: "Show Here")
             case .replace:
                 if case .pane = item { return String(localized: "Swap") }
                 if model.windowMode { return String(localized: "Replace") }

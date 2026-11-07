@@ -183,11 +183,23 @@ struct WorkspaceAppOpening: Equatable, Sendable {
     /// From here the picker says it's taking a while.
     static let slowAfter: TimeInterval = 5
 
+    /// Where an app dragged from Stage Peek (or Launchpad) was dropped: its window goes there,
+    /// exactly as a dropped window would. `panes`: the layout's panes when it was dropped, since a
+    /// split or an empty slot names a position that only means the same while they're unchanged.
+    struct Drop: Equatable, Sendable {
+        var target: WorkspaceWindowDrop
+        /// Dropped in Floating placement: it floats here (picture-normalized).
+        var floatAt: WorkspacePoint?
+        var panes: [String]
+    }
+
     let bundleID: String
     let name: String
     /// The tile the picker was opened for (nil: the whole overview, where a window goes as a
-    /// picked window would).
+    /// picked window would), or the pane a dropped app landed on.
     let tile: String?
+    /// Set when the app was dropped rather than picked: where its window goes.
+    var drop: Drop? = nil
     /// What that tile showed when the person asked.
     let tileSource: WorkspaceSource?
     private(set) var phase: Phase
@@ -201,9 +213,9 @@ struct WorkspaceAppOpening: Equatable, Sendable {
     private(set) var pickWasStale = false
 
     /// The person confirmed opening `bundleID`. With control: launch now; otherwise wait for it.
-    static func start(bundleID: String, name: String, tile: String?, tileSource: WorkspaceSource?,
+    static func start(bundleID: String, name: String, tile: String?, tileSource: WorkspaceSource?, drop: Drop? = nil,
                       control: Control, windows: [CatalogWindowItem], now: TimeInterval) -> (WorkspaceAppOpening, Step) {
-        var o = WorkspaceAppOpening(bundleID: bundleID, name: name, tile: tile, tileSource: tileSource,
+        var o = WorkspaceAppOpening(bundleID: bundleID, name: name, tile: tile, drop: drop, tileSource: tileSource,
                                     phase: .awaitingControl, startedAt: now, phaseSince: now)
         if control == .refused { o.phase = .failed(.controlDenied); return (o, .fail(.controlDenied)) }
         if control == .requesting { o.sawRequesting = true }
@@ -358,5 +370,36 @@ extension WorkspaceAppOpening.Control {
         case .requestsDisabled: self = .refused
         case .off: self = .off
         }
+    }
+}
+
+extension WorkspaceWindowDrop {
+    /// The pane a drop lands on (replace or add a tab); nil for a new pane (split, empty slot).
+    var tile: String? {
+        switch self {
+        case .replace(let t, _), .tab(let t, _): return t
+        case .split, .emptySlot: return nil
+        }
+    }
+}
+
+extension WorkspaceSearch {
+    /// The Mac's app list with each app's running state and window count taken from the latest
+    /// window listing, which is fresher: the list is asked for once when a browser opens, so an
+    /// app opened since still said "Not running" next to its own window (owner, 2026-11-07,
+    /// IMG_2319). Order is kept so nothing jumps while someone browses. Nil: nothing changed.
+    static func reconciled(_ apps: [MacAppItem], windows: [CatalogWindowItem], running: [CatalogAppItem]) -> [MacAppItem]? {
+        let live = Set(running.map(\.bundleID))
+        var counts: [String: Int] = [:]
+        for w in windows where !WorkspaceSource.isDisplayKey(w.id) { counts[w.bundleID, default: 0] += 1 }
+        var changed = false
+        let out = apps.map { a -> MacAppItem in
+            let n = counts[a.bundleID] ?? 0
+            let isRunning = live.contains(a.bundleID) || n > 0
+            guard a.running != isRunning || a.windowCount != n else { return a }
+            changed = true
+            return MacAppItem(bundleID: a.bundleID, name: a.name, running: isRunning, windowCount: n, lastUsed: a.lastUsed)
+        }
+        return changed ? out : nil
     }
 }

@@ -181,6 +181,60 @@ struct WindowCatalogSnapshot: @unchecked Sendable {
     var takenAt: TimeInterval
     /// Sheets open on listed windows, by the window they belong to (front-most first).
     var sheets: [UInt32: [AttachedSheet]] = [:]
+    /// Every window the window server has, listed or not (any Space, minimized, hidden, any
+    /// layer), by id: its owning process. Nil when that read gave nothing (never "all closed").
+    var existing: [UInt32: Int32]? = nil
+}
+
+/// Which windows a receiver holds (in a pane, a tab or a floating pane, shown or not) are
+/// provably closed on the Mac, so it can take them out of its layout (PROTOCOL.md 6.10 `watch` /
+/// `gone`). Proof is the window server's own list of every window: the id missing from two reads
+/// at least `confirmAfter` apart, or the id now owned by another process. Being left out of the
+/// window list (minimized untitled windows, Stage Manager, Mission Control, other Spaces, hidden
+/// apps, a skipped listing) is never proof, and a failed read concludes nothing. Once proved,
+/// a window stays gone while it is watched.
+struct WindowGoneTracker: Sendable {
+    struct Watch: Hashable, Sendable, Comparable {
+        var window: UInt32
+        var generation: UInt64
+        static func < (a: Watch, b: Watch) -> Bool { (a.window, a.generation) < (b.window, b.generation) }
+    }
+
+    static let confirmAfter: TimeInterval = 1
+    /// The process each watched window was listed under (with the watched generation).
+    private var owners: [UInt32: Int32] = [:]
+    private var absentSince: [UInt32: TimeInterval] = [:]
+    private(set) var gone: Set<Watch> = []
+
+    /// One read. `listed`: this listing's windows (id -> owner and generation); `existing`: the
+    /// window server's every window (id -> owner), nil when the read failed. Returns whether `gone`
+    /// changed.
+    @discardableResult
+    mutating func observe(watched: Set<Watch>, listed: [UInt32: (pid: Int32, generation: UInt64)],
+                          existing: [UInt32: Int32]?, now: TimeInterval) -> Bool {
+        let before = gone
+        let ids = Set(watched.map(\.window))
+        gone = gone.intersection(watched)
+        owners = owners.filter { ids.contains($0.key) }
+        absentSince = absentSince.filter { ids.contains($0.key) }
+        let server = (existing?.isEmpty ?? true) ? nil : existing
+        for w in watched where !gone.contains(w) {
+            if let l = listed[w.window], l.generation == w.generation { owners[w.window] = l.pid }
+            guard let server else { continue }
+            if let pid = server[w.window] {
+                absentSince[w.window] = nil
+                // Same id, another process: the window the receiver holds is gone.
+                if let owner = owners[w.window], owner != pid { gone.insert(w) }
+                continue
+            }
+            if let since = absentSince[w.window] {
+                if now - since >= Self.confirmAfter { gone.insert(w) }
+            } else {
+                absentSince[w.window] = now
+            }
+        }
+        return gone != before
+    }
 }
 
 /// Which on-screen windows are sheets of which window. A sheet is an untitled normal-layer
@@ -296,8 +350,13 @@ enum WindowCatalogBuilder {
                                    hasWindows: windowPIDs.contains(app.processID))
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        var existing: [UInt32: Int32] = [:]
+        for info in cgList {
+            if let n = info[kCGWindowNumber as String] as? UInt32, let pid = info[kCGWindowOwnerPID as String] as? Int32 { existing[n] = pid }
+        }
         return (WindowCatalogSnapshot(windows: entries, apps: apps, scWindows: scByID,
-                                      takenAt: ProcessInfo.processInfo.systemUptime, sheets: sheetMap), ledger)
+                                      takenAt: ProcessInfo.processInfo.systemUptime, sheets: sheetMap,
+                                      existing: existing.isEmpty ? nil : existing), ledger)
     }
 
     private static func sheetsOfListedWindows(content: SCShareableContent, cgList: [[String: Any]],

@@ -331,16 +331,22 @@ final class WorkspaceClientTests: XCTestCase {
         guard let none = m.appDrop else { return XCTFail("expected the open offer") }
         XCTAssertTrue(none.windows.isEmpty)
         XCTAssertEqual(launches(), [])
-        // Without control, opening sends nothing.
+        // Without control nothing launches: control is asked for first (Request Control & Open).
+        var now: TimeInterval = 100
+        m.clock = { now }
         control = false
-        m.launchForAppDrop(none)
+        m.openAppForDrop(none, requestingControl: true)
         XCTAssertEqual(launches(), [])
+        XCTAssertEqual(m.appOpening?.phase, .awaitingControl)
         control = true
-        m.appDrop = none
-        m.launchForAppDrop(none)
-        XCTAssertEqual(launches(), ["com.apple.TextEdit"])
+        m.advanceAppOpening()
+        XCTAssertEqual(launches(), ["com.apple.TextEdit"], "it opens once the Mac allows control")
         m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 5, "com.apple.Safari"), (12, 5, "com.apple.Safari"), (20, 1, "com.apple.TextEdit")]))
-        XCTAssertTrue(shown().contains(20), "its first new window goes where it was dropped")
+        XCTAssertFalse(shown().contains(20), "a moment for other windows opening with it")
+        now += WorkspaceAppOpening.settle
+        m.advanceAppOpening()
+        XCTAssertTrue(shown().contains(20), "its new window goes where it was dropped")
+        XCTAssertNil(m.appOpening)
 
         // One window: straight in, no question.
         let before = m.layout.tiles.count

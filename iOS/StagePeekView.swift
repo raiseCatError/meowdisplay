@@ -126,7 +126,9 @@ struct StagePeekOverlay: View {
                 }
                 if machine.expansion > 0.001 {
                     gallery
-                        .opacity(model.drag != nil ? 0 : machine.expansion)
+                        // A card dragged from here (search results too) carries the finger's
+                        // gesture: barely there, never 0 or removed, so the drag keeps its view.
+                        .opacity(model.drag != nil ? 0.001 : machine.expansion)
                         .allowsHitTesting(machine.expanded)
                 }
                 toolbar(cards: cards)
@@ -136,7 +138,7 @@ struct StagePeekOverlay: View {
                     closeToast(notice)
                 }
                 topControls
-                    .opacity(model.drag != nil ? 0 : 1)
+                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
                     .transition(.opacity)
             }
             if launchpad {
@@ -186,6 +188,12 @@ struct StagePeekOverlay: View {
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.
         .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
+        // An app dropped from here is opening: its progress, then its window, show in the layout.
+        .onChange(of: model.stagePeekCloseRequest) { _ in
+            searchFocused = false
+            launchpad = false
+            if machine.isVisible { animate { cancelAll() } }
+        }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
         .onChange(of: model.currentWindowID) { _ in syncItems() }

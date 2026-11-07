@@ -745,6 +745,31 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// When the Mac may bring back a tile's minimized or hidden window (see the ledger).
     private var restoreLedger = WorkspaceRestoreLedger()
 
+    /// Windows the receiver holds but isn't showing now (other tabs, tucked or hidden floats), from
+    /// its last `workspaceRequest` (`watch`); with the shown ones, checked for closing on the Mac.
+    private var watchedByReceiver: Set<WindowGoneTracker.Watch> = []
+    private var goneTracker = WindowGoneTracker()
+
+    /// Every window the receiver holds, by the generation it holds it under (whole displays and
+    /// panes that follow an app aren't windows that close).
+    private var watchedWindows: Set<WindowGoneTracker.Watch> {
+        watchedByReceiver.union(assignments.compactMap { a in
+            a.displayID == nil && a.follow == .window ? WindowGoneTracker.Watch(window: a.windowID, generation: a.windowGeneration) : nil
+        })
+    }
+
+    /// Bounds what one request may ask to watch (8 tabs in each of the most panes, and floats).
+    static let maximumWatched = 128
+
+    static func parseWatch(_ raw: Any?) -> Set<WindowGoneTracker.Watch> {
+        let list = (raw as? [[String: Any]] ?? []).prefix(maximumWatched)
+        return Set(list.compactMap { w in
+            guard let id = (w["window"] as? Int).flatMap({ UInt32(exactly: $0) }), id != 0, !WorkspaceSource.isDisplayKey(id),
+                  let gen = (w["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) else { return nil }
+            return WindowGoneTracker.Watch(window: id, generation: gen)
+        })
+    }
+
     /// Listings come from the shared browser (one identity ledger for every mode).
     private func refresh(sendCatalog: Bool) {
         guard running || sendCatalog else { return }
@@ -802,6 +827,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
         }
         restoreLedger.prune { catalog[$0.window]?.generation == $0.generation }
+        // Windows of this receiver's layout that closed on the Mac (reported with the state below).
+        let listed = Dictionary(snap.windows.map { ($0.windowID, (pid: $0.pid, generation: $0.generation)) }, uniquingKeysWith: { a, _ in a })
+        if goneTracker.observe(watched: watchedWindows, listed: listed, existing: snap.existing, now: snap.takenAt) {
+            Log.info("workspace: closed on Mac: \(goneTracker.gone.sorted().map { "\($0.window)/\($0.generation)" })")
+        }
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
@@ -845,6 +875,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                                                         allowFloats: allowFloats)
         assignments = result.assignments
         rejected = result.rejected
+        watchedByReceiver = Self.parseWatch(obj["watch"])
         let sources = WindowAudioSources.of(assignments)
         if sources != lastAudioSources { lastAudioSources = sources; onAudioSources?(sources) }
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
@@ -1278,6 +1309,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         if let active = t.keyboardTarget?.tileID { msg["active"] = active }
         if !rejected.isEmpty { msg["rejected"] = rejected }
+        // Held windows that closed on the Mac: the receiver takes them out of its layout.
+        let gone = goneTracker.gone.intersection(watchedWindows).sorted()
+        if !gone.isEmpty { msg["gone"] = gone.map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         let key = (try? JSONSerialization.data(withJSONObject: msg, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
         guard force || key != lastStateSent else { return }
         lastStateSent = key

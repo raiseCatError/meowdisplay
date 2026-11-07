@@ -72,14 +72,14 @@ final class LivePickerOpenAppQATests: XCTestCase {
 
         // 3. Tap it, then confirm. Control must already be allowed.
         row.tap()
-        let open = app.buttons["Open \(Self.appName)"]
-        let requestControl = app.buttons["Request Control and Open"]
+        let open = app.buttons["pickerOpenAppConfirm"]
+        let requestControl = app.buttons["pickerOpenAppRequestControl"]
         XCTAssertTrue(waitUntil(5) { open.exists || requestControl.exists }, "opening is confirmed first")
         snapshot(app, "picker-04-confirm")
         if !open.exists {
             dismissConfirm(app)
             closePicker(app)
-            throw XCTSkip("this session has no control of the Mac (the confirm offers Request Control and Open); allow control first")
+            throw XCTSkip("this session has no control of the Mac (the confirm offers Request Control & Open); allow control first")
         }
         open.tap()
         snapshot(app, "picker-05-opening")
