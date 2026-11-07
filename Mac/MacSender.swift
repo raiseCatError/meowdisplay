@@ -5629,7 +5629,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
             let phase = captureStateSnapshot().phase
             guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
-            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+            // An app opens only if control still holds right before (asked again, side-effect free).
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed()) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case LockMacWire.request:
             // Admitted sessions only (gate above), every mode; needs control.
             let req = obj["req"] as? Int

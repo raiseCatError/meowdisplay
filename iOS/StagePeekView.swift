@@ -184,6 +184,12 @@ struct StagePeekOverlay: View {
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.
         .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
+        // An app dropped from here is opening: its progress, then its window, show in the layout.
+        .onChange(of: model.stagePeekCloseRequest) { _ in
+            searchFocused = false
+            launchpad = false
+            if machine.isVisible { animate { cancelAll() } }
+        }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
         .onChange(of: model.currentWindowID) { _ in syncItems() }
