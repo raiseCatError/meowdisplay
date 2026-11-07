@@ -301,7 +301,7 @@ final class WorkspaceFloatDockingTests: XCTestCase {
         m.rotate(back)   // a view of its own, kept
         let before = m.layout
 
-        for end in ["cancel", "outside", "system"] {
+        for end in ["cancel", "outside", "system", "abandoned"] {
             sent.removeAll()
             m.beginFloatGesture(back)
             m.apply(.backdrop(tile: back, windowID: 12, data: png(), stale: false))
@@ -319,6 +319,8 @@ final class WorkspaceFloatDockingTests: XCTestCase {
             case "outside":
                 m.moveFloatFinger(back, to: CGPoint(x: 1300, y: 400), at: t + 0.3)
                 XCTAssertFalse(m.endDockingFloat(back), end)
+            case "abandoned":
+                m.abandonDrag(reason: "no finger down")   // the gesture's end never came (WorkspaceDragGuard)
             default:
                 m.cancelDockingFloat(back)   // the touch went to a call or Control Center
             }
