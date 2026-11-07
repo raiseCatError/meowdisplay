@@ -1552,6 +1552,39 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Which lock state this sender reads (tests set their own; the app keeps `.shared` current).
+    var privacyGate: MacPrivacyGate = .shared { didSet { inputInjector?.privacyGate = privacyGate } }
+
+    /// Every injector waits on this sender's lock state (desktop, extend and window mode alike).
+    private func makeInputInjector(displayID: CGDirectDisplayID) -> InputInjector {
+        let injector = InputInjector(displayID: displayID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+        injector.privacyGate = privacyGate
+        return injector
+    }
+
+    /// The Mac locked, unlocked, switched users or can't say (`MacLockMonitor`, main actor). Not
+    /// unlocked: held keys and buttons are released, window captures and listings stop, and the
+    /// receiver is told (the lock state, then video off, so it drops its last picture) before
+    /// anything else could go. Unlocked again: the next frame is a keyframe and all of it resumes.
+    /// The receiver's control grant (if any) stays with this connection; input waits for the unlock.
+    func macPrivacyChanged(_ state: MacScreenPrivacy) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            if state.allowsContent {
+                self.needsKeyframe = true
+            } else {
+                self.inputInjector?.cancelActiveInput()
+                self.nativeAppGestureState.cancelAll()
+            }
+            self.syncWorkspaceSuspension()
+            guard self.sessionAuthorization.isAdmitted, self.lastHello != nil else { return }
+            self.sendJSONObject(MacLockWire.message(state))
+            if !state.allowsContent { self.sendJSONObject(["type": WireMessage.inputReset]) }
+            self.sendVideoState()
+        }
+    }
+
     /// A request was denied (Not Now / timeout / Never-Allow policy / Mac
     /// master off) or this session's own grant was released/revoked. Always
     /// safe to call even if the grant was already off — narrowing input is
@@ -1584,8 +1617,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
               info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
         // Video channel: over QUIC this keeps the state ordered with the
         // frames it describes; over TCP it is the same byte stream as ever.
+        // While the Mac is locked every receiver is told video is off: it drops its last picture
+        // (an older one too, which doesn't know `macLockState`).
         sendJSONObject(["type": WireMessage.videoState,
-                        "enabled": videoEnabled,
+                        "enabled": videoEnabled && privacyGate.allowsContent,
                         "width": capturePixelsWide,
                         "height": capturePixelsHigh], channel: .video)
     }
@@ -2380,7 +2415,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vdID) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+            inputInjector = makeInputInjector(displayID: targetID)
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
@@ -2553,7 +2588,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
             if let targetID = InputTargetResolver.displayID(
                 mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+                inputInjector = makeInputInjector(displayID: targetID)
             }
             if UserDefaults.standard.bool(forKey: "testPattern") {
                 let id = vd.displayID
@@ -3312,7 +3347,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// is fully on.
     private func receiverInputIsAllowed() -> Bool {
         guard sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
-              captureStateSnapshot().allowsInput else {
+              captureStateSnapshot().allowsInput,
+              privacyGate.allowsInput else {   // never into the lock screen or a window behind it
             inputInjector?.cancelActiveInput()
             return false
         }
@@ -3971,7 +4007,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             mirrorDisplayID: display.displayID,
             virtualDisplayID: nil
         ) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+            inputInjector = makeInputInjector(displayID: targetID)
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
@@ -5036,6 +5072,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCursorPane: (kx: Double, rotation: Int)?
 
     private func sendCursor(_ fields: String) {
+        guard privacyGate.allowsContent else { return }
         cursorSeq &+= 1
         sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
     }
@@ -5120,7 +5157,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
         let selfBox = self.selfBox
-        queue.async { selfBox.currentOnQueue()?.sendJSONFrame(msg) }
+        queue.async {
+            guard let sender = selfBox.currentOnQueue(), sender.privacyGate.allowsContent else { return }
+            sender.sendJSONFrame(msg)
+        }
         #if DEBUG
         logCursorTraceIfDue(reason: "cursorImg sent: \(png.count) bytes size=\(size) hot=\(hot)")
         #endif
@@ -5603,7 +5643,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
             // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
             let phase = captureStateSnapshot().phase
-            guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            guard videoEnabled, sessionAuthorization.isAdmitted, privacyGate.allowsContent,
+                  phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
         case LockMacWire.request:
             // Admitted sessions only (gate above), every mode; needs control.
@@ -5617,6 +5658,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             guard sessionAuthorization.isAdmitted else { return }
+            if !privacyGate.allowsContent { reply(.locked); return }   // already locked: nothing to do
             guard receiverInputIsAllowed() else { reply(.control); return }
             Log.info("lock mac: requested by the device")
             DispatchQueue.main.async { MacScreenLock.lock(done: reply) }
@@ -5624,10 +5666,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
             let phase = captureStateSnapshot().phase
-            guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            guard sessionAuthorization.isAdmitted, privacyGate.allowsContent,
+                  phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
         case ClipboardWire.type:
             // Admitted sessions only (gate above); every mode. The hub on the main actor decides.
+            // Nothing goes to or comes from the Mac's clipboard while it's locked.
+            guard privacyGate.allowsContent else { return }
             let box = WorkspaceMessageBox(value: obj)
             let generation = activeConnectionGeneration
             let selfBox = self.selfBox
@@ -6914,8 +6959,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(WindowWorkspaceWire.floatFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
+        features.append(MacLockWire.welcomeFeature)
         welcome["features"] = features
         sendJSONObject(welcome)
+        // Connected while locked (Wake & Connect, a reconnect): said at once, before anything else.
+        let privacy = privacyGate.state
+        if !privacy.allowsContent { sendJSONObject(MacLockWire.message(privacy)) }
     }
 
     private func sendStreamingProfileState() {
@@ -7035,6 +7084,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendJSONObject(_ object: [String: Any], channel: TransportChannel = .control) {
+        // Locked: window lists, titles, stills, icons, Files, Clipboard and menus stay on the Mac.
+        guard LockedContentPolicy.allows(type: object["type"] as? String, privacy: privacyGate.state) else { return }
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         guard data.count >= ControlChunkWire.threshold else {
             guard let json = String(data: data, encoding: .utf8) else { return }
@@ -7094,6 +7145,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // live admitted connection receives any.
         guard transportController.currentConnection != nil, transportController.isReady,
               sessionAuthorization.isAdmitted else { return }
+        // Locked: no picture or sound leaves, including a frame captured or queued just before.
+        guard privacyGate.allowsContent else { return }
         // Media rides its own channel: over QUIC, Video and Audio are
         // independent streams, and the in-flight accounting is per channel
         // (video backpressure never gates audio) and per transport epoch (a
@@ -7480,7 +7533,7 @@ extension MacSender {
         workspaceEngine = engine
         // Input is mapped per tile to the window under it; the display id is
         // only the fallback for releases.
-        inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+        inputInjector = makeInputInjector(displayID: CGMainDisplayID())
         inputInjector?.setTargetMapper(engine)
         engine.start()
     }
@@ -7537,8 +7590,10 @@ extension MacSender {
     func syncWorkspaceSuspension() {
         let phase = captureStateSnapshot().phase
         let paused = phase == .pausing || phase == .paused || phase == .stopped
-        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
-        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
+        // Locked: every window capture and listing stops (and is started again on unlock).
+        let hidden = !privacyGate.allowsContent
+        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted || hidden)
+        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted && !hidden)
         // Without Screen Recording there is nothing to keep the display awake for.
         streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted
                                   && CGPreflightScreenCaptureAccess())
@@ -7632,9 +7687,7 @@ extension MacSender {
             }
             _ = sender.updateCaptureState { $0.captureStarted() }
             if sender.inputInjector == nil {
-                sender.inputInjector = InputInjector(displayID: CGMainDisplayID(),
-                                                     sessionInputGrant: sender.sessionInputGrant,
-                                                     eventSink: eventSink)
+                sender.inputInjector = sender.makeInputInjector(displayID: CGMainDisplayID())
             }
             return generation
         }

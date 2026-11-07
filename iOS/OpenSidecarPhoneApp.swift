@@ -771,6 +771,14 @@ struct ReceiverScreen: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
+        .overlay {
+            if let lock = model.receiver.macLock {
+                MacLockedCover(notice: lock, macName: model.workspace.hostName, onDisconnect: { model.receiver.disconnect() })
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
         .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {

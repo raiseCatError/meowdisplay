@@ -40,6 +40,8 @@ struct HIDEventTapSink: SyntheticEventSink {
 /// move = drag, finger up = button up — i.e. the phone acts as a touchscreen.
 final class InputInjector {
 
+    /// The lock state input waits on (tests set their own; the app keeps `.shared` current).
+    var privacyGate: MacPrivacyGate = .shared
     private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
     // This session's ephemeral input grant (per-device-session milestone) —
@@ -551,7 +553,10 @@ final class InputInjector {
     private func inputIsAllowed() -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
                                                    sessionGranted: sessionInputGrant.get()),
-              LoginSessionConsole.shared.isOnConsole else {
+              LoginSessionConsole.shared.isOnConsole,
+              // Locked (or can't tell): nothing reaches the lock screen or a window behind it,
+              // whatever the grant (`MacPrivacyGate`).
+              privacyGate.allowsInput else {
             cancelActiveInputLocked()
             return false
         }

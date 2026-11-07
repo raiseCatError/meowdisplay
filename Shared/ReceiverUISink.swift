@@ -219,6 +219,10 @@ final class ReceiverUISink: Sendable {
         target?.applyInputResetBump()
     }
 
+    func publishMacLock(_ notice: MacLockNotice) {
+        target?.applyMacLockUpdate(notice)
+    }
+
     func publishAllowInputStateChange(_ state: SessionInputWireState) {
         target?.applyAllowInputStateChangeUpdate(state)
     }

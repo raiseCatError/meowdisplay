@@ -31,6 +31,60 @@ final class MacSenderInputRevocationTests: XCTestCase {
         // Never dialed: the endpoint only satisfies the initializer.
         sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
                            name: "Revocation Test Phone", mode: .mirror)
+        // Its own lock state: these tests never depend on whether this Mac's screen is locked.
+        sender?.privacyGate = privacyGate
+    }
+
+    private let privacyGate = MacPrivacyGate(.unlocked)
+
+    // MARK: - Lock screen (SECURITY.md "When the Mac is locked")
+
+    /// Locking while a granted receiver holds a key, a modifier and a drag: everything is released
+    /// at once, nothing it sends reaches the Mac (the lock screen or a window behind it) while
+    /// locked, the receiver is told (lock state, input reset, video off). The grant stays with the
+    /// connection; input works again only after the unlock.
+    func testLockReleasesHeldInputAndBlocksEveryInputUntilUnlock() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await admitAndGrant(sender)
+        try await holdKeyModifierAndDrag(sender)
+
+        privacyGate.set(.locked)
+        sender.macPrivacyChanged(.locked)
+        try await sender.settleForTesting()
+
+        assertReleasedKeyModifierAndDrag(events.take())
+        XCTAssertTrue(sent.contains(type: MacLockWire.type))
+        XCTAssertTrue(sent.contains(type: WireMessage.inputReset))
+        try await sendEveryInputKind(sender)
+        XCTAssertEqual(events.take(), [], "nothing may reach the Mac while it's locked")
+        XCTAssertTrue(sender.hasInputGrantForTesting, "the grant stays with this connection; only input waits")
+
+        for state in [MacScreenPrivacy.unknown, .switchedOut] {
+            privacyGate.set(state)
+            sender.macPrivacyChanged(state)
+            try await sender.settleForTesting()
+            try await sendEveryInputKind(sender)
+            XCTAssertEqual(events.take(), [], "\(state): counted as locked")
+        }
+
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyC.rawValue])
+        XCTAssertFalse(events.take().isEmpty, "input works again after the unlock")
+    }
+
+    /// Lock This Mac while already locked answers "locked" and posts nothing.
+    func testLockMacWhileLockedAnswersLocked() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await admitAndGrant(sender)
+        privacyGate.set(.locked)
+        sender.macPrivacyChanged(.locked)
+        try await sender.settleForTesting()
+        _ = events.take()
+        try await receive(sender, ["type": LockMacWire.request, "req": 7])
+        try await sender.settleForTesting()
+        XCTAssertEqual(events.take(), [])
     }
 
     override func tearDown() {

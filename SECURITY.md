@@ -266,6 +266,36 @@ Settings ▸ System. Each connected device is told whether it's on.
   covered in that case is a prototype under assessment, not shipped. The
   Privacy Shield is a viewing shield for people near the Mac, not a lock.
 
+## When the Mac is locked
+
+While macOS shows its lock screen, while another user is switched in, or whenever MeowDisplay
+can't read the login session, no device gets anything of the Mac and nothing a device sends
+reaches it. Unknown counts as locked, never as unlocked.
+
+- **One gate.** The Mac reads its lock state from macOS's lock and unlock notifications, login
+  session switches, display sleep and wake, and the window server's session dictionary (twice a
+  second while a device is connected). A lock notice locks at once; unlocking needs a session read
+  that says so (`Mac/MacLockPrivacy.swift`). Every media frame, content message, window capture
+  and injected event checks the same gate.
+- **Nothing leaves.** No picture, sound, window frames, cursor, window list or titles, stills,
+  app icons, app list, Stage Peek or picker content, Remote Finder listings, pane menus, text
+  caret or clipboard. Frames captured or queued just before the lock are dropped too. Devices are
+  told the Mac is locked and that video is off, so even an older receiver drops its last
+  picture. The receiver covers everything with an opaque "locked" screen and forgets the stills
+  and window names it held; the layout is kept and restored after the unlock.
+- **Nothing gets in.** Keys, buttons, touches and drags the device was holding are released at
+  the lock; everything sent afterwards is dropped until the Mac unlocks, so nothing reaches the
+  lock screen or a window behind it. A device set to Ask is refused without a prompt (nobody
+  could answer one behind the lock screen); Never Allow stays refused; Always Allow keeps or gets
+  its grant, but input still waits for the unlock.
+- **No remote unlock.** MeowDisplay never asks for, shows a field for, stores or forwards the
+  Mac's login password, and doesn't imitate the macOS login screen. Unlock at the Mac (Touch ID,
+  the password, or an Apple Watch where macOS allows it). A future "control while locked" option
+  would need its own opt-in at the Mac, approval each time, and its own review; it isn't built.
+- **Limits.** The state comes from public macOS signals and the session dictionary. If macOS
+  reports the session unlocked while showing something else, MeowDisplay follows macOS. The
+  Privacy Shield above is a separate viewing shield for people near the Mac.
+
 ## What this doesn't claim
 
 This document describes what's implemented, not a completed third-party
