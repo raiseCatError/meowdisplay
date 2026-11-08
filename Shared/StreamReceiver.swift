@@ -3453,6 +3453,13 @@ final class StreamReceiver: ObservableObject {
         sendUIControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
     }
 
+    /// Asks the Mac to show (or hide) its own lock screen on this device (PROTOCOL.md 6.19). The
+    /// Mac decides and answers with `macLockState`; nothing here reads or carries a password.
+    @MainActor func requestLockScreen(show: Bool) {
+        guard connected else { return }
+        sendUIControl(LockScreenWire.request(show: show))
+    }
+
     @MainActor func requestVideoEnabled(_ enabled: Bool) {
         guard connected, macSupportsVideoControl else { return }
         sendUIControl(["type": WireMessage.videoRequest, "enabled": enabled])

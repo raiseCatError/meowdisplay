@@ -157,9 +157,12 @@ struct ReceiverScreen: View {
 
     /// A connected session on screen: the Settings control's hold opens Session Actions.
     private var sessionActionsAvailable: Bool {
-        ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
-                                               sessionOnScreen: route == .receiver)
+        !lockScreenShowing && ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
+                                                                    sessionOnScreen: route == .receiver)
     }
+
+    /// The Mac's own lock screen is up on this device: only the picture and a small banner show.
+    private var lockScreenShowing: Bool { model.receiver.macLock?.showsMacLockScreen ?? false }
 
     private var sessionActionsAnimation: Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .easeOut(duration: 0.22)
@@ -541,6 +544,7 @@ struct ReceiverScreen: View {
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    if !lockScreenShowing {
                     // Window mode: tile chrome and the window rail over the picture,
                     // under the MeowDisplay controls (which stay on top).
                     let picture = workspacePicture(canvas: canvas)
@@ -643,6 +647,7 @@ struct ReceiverScreen: View {
                                        onMirror: { model.receiver.requestDisplayMode(.mirror) },
                                        onExtend: { model.receiver.requestDisplayMode(.extend) },
                                        safeInsets: effectiveSafeInsets.edgeInsets)
+                    }
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
                                        keyboardActive: $keyboardActive,
@@ -773,9 +778,22 @@ struct ReceiverScreen: View {
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
         // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
         .overlay {
-            if let lock = model.receiver.macLock {
-                MacLockedCover(notice: lock, macName: model.workspace.hostName, onDisconnect: { model.receiver.disconnect() })
+            if let lock = model.receiver.macLock, !lock.showsMacLockScreen {
+                MacLockedCover(notice: lock, macName: model.workspace.hostName,
+                               lockFlow: model.lockScreenFlow,
+                               onShowLockScreen: { model.showLockScreen() },
+                               onDisconnect: { model.receiver.disconnect() })
                     .transition(.opacity)
+            }
+        }
+        // The Mac said its own lock screen is up here: the picture shows (fresh frames), plus this.
+        .overlay(alignment: .top) {
+            if lockScreenShowing {
+                LockScreenBanner(keyboardAvailable: keyboardAvailable && inputReachesMac,
+                                 onKeyboard: { if keyboardAvailable, inputReachesMac { keyboardActive.toggle() } },
+                                 onHide: { keyboardActive = false; model.hideLockScreen() })
+                    .padding(.top, 8)
+                    .transition(slideTransition(from: .top))
             }
         }
         .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
@@ -791,6 +809,12 @@ struct ReceiverScreen: View {
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
+        }
+        .onAppear { model.lastDesktopMode = lastDesktopMode }
+        .onChange(of: lastDesktopMode) { model.lastDesktopMode = $0 }
+        // The lock screen going away (Hide, or the Mac unlocking) closes the keyboard it opened.
+        .onChange(of: lockScreenShowing) { showing in
+            if !showing { keyboardActive = false }
         }
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
@@ -2305,6 +2329,36 @@ final class ReceiverModel: ObservableObject {
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
+    // MARK: Show Lock Screen (PROTOCOL.md 6.19)
+    // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
+    // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
+    @Published private(set) var lockScreenFlow = LockScreenFlow()
+    /// Mirror or Extend, whichever showed last (set by the screen): where the flow switches to.
+    var lastDesktopMode: ReceiverDisplayMode = .mirror
+
+    func showLockScreen() {
+        perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
+    }
+
+    func hideLockScreen() {
+        perform(lockScreenFlow.hide(now: Date()))
+    }
+
+    private func lockScreenInputsChanged() {
+        perform(lockScreenFlow.update(notice: receiver.macLock, connected: receiver.connected, now: Date()))
+    }
+
+    private func perform(_ action: LockScreenAction) {
+        switch action {
+        case .none: break
+        case .requestControl: receiver.requestAllowInput(true)
+        case .switchToFullDesktop:
+            if !receiver.requestDisplayMode(lastDesktopMode) { lockScreenFlow.couldNotPerform() }
+        case .show(let show): receiver.requestLockScreen(show: show)
+        case .returnToWindowView: _ = receiver.requestWindowMode()
+        }
+    }
+
     init() {
         // maximumFramesPerSecond reports this specific screen's real
         // hardware ceiling (60 on a standard panel, up to 120 on ProMotion)
@@ -2351,6 +2405,22 @@ final class ReceiverModel: ObservableObject {
             guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
             return state.displays.first { $0.uuid == chosen }
         }
+        receiver.$macLock
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+            .sink { [weak self] now in
+                guard let self, self.lockScreenFlow.isWaiting else { return }
+                _ = self.lockScreenFlow.tick(now: now)
+            }
+            .store(in: &cancellables)
         receiver.$connected
             .removeDuplicates()
             .filter { !$0 }
