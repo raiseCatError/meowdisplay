@@ -2958,8 +2958,9 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
         case MacLockWire.type:
             guard let notice = MacLockNotice(message: obj) else { return }
-            // The last picture goes now, not when video-off follows.
-            if notice.isLocked { resetDecoderForVideoStateChange() }
+            // The last picture goes now, not when video-off follows. While this device shows the
+            // Mac's lock screen (6.19) its fresh frames keep decoding.
+            if notice.isLocked, notice.lockScreen != .active { resetDecoderForVideoStateChange() }
             DispatchQueue.main.async { uiSink.publishMacLock(notice) }
             workspaceEvents.emit(.macLock(notice))
         case WireMessage.allowInputState:

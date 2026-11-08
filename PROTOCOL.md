@@ -2236,10 +2236,42 @@ Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.
   device set to Ask is refused (`notAllowed`) without a prompt, Never Allow is refused as before,
   Always Allow is granted but input still waits for the unlock. `lockMac` while locked answers
   `locked`.
-- `remoteUnlock` is always `false`: no receiver can unlock the Mac, and no message carries a
+- `remoteUnlock` is `true` only when this device may show the Mac's own lock screen (6.19), now
+  or after the step `lockScreen` names; older Macs always send `false`. No message carries a
   password. Receivers show an opaque locked screen, forget stills, window names and anything in
   progress (drags, Stage Peek, pickers), keep the layout, and ask for the window list again after
   the unlock.
+
+### 6.19 Lock screen control (`lockScreenRequest`, `macLockState.lockScreen`)
+
+Optional and additive: no `pv` bump. The Mac lists `"lockScreenControl"` in `welcome.features`.
+Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
+
+- While not `unlocked`, `macLockState` also carries `"lockScreen":L`:
+  - `available`: the device may ask to show the lock screen now.
+  - `active`: it is shown on this device.
+  - `needsControl`: ask for control first (`allowInputRequest`); the Mac grants it without a
+    prompt (Always Allow), then answers `available`.
+  - `needsFullDesktop`: switch to Full Desktop first (Window view can't show it); control is
+    asked for again on the new connection.
+  - any other word: not offered; the word is the Mac's reason (`controlBeforeLock`, `turnedOff`,
+    `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView`, `unavailable`). Unknown
+    words mean not offered.
+  `remoteUnlock` is `true` for the first four. A receiver treats `remoteUnlock:false` as not
+  offered whatever `lockScreen` says.
+- Receiver → Mac: `{"type":"lockScreenRequest","show":true|false}`. The Mac answers with
+  `macLockState`. `show:true` when allowed: `lockScreen:"active"`, then `videoState` with
+  `enabled:true` and fresh frames of the lock screen (a keyframe first; nothing from before the
+  request). `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
+- While `active`, the Mac accepts only `touch`, pointer `move`/`moveRelative`, `down`/`up` with the
+  left button, and `keyboard` `press`/`down`/`up` of character keys, Return, Tab, Delete, Forward
+  Delete, Escape, Space and the arrows with only `shift`, `option` or `capsLock` in `modifiers`,
+  `modifierDown`/`modifierUp` of Shift or Option, and `text` of up to 128 printable characters.
+  Everything else is dropped. Releases always go through.
+- The Mac ends the view (`lockScreen` no longer `active`, `inputReset`, `videoState
+  enabled:false`) when it is no longer allowed, after 120 s without input, or on unlock. On
+  unlock `macLockState` says `unlocked` and the session continues as before; a receiver that
+  switched modes to show the lock screen switches back.
 
 #### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
 

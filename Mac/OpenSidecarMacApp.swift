@@ -2997,6 +2997,7 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            self.pushLockScreenPermit(to: session)
             // The MEOW application handshake just completed on this live
             // connection — this, not Bonjour or a merely-open socket, is
             // what makes the device an Active Display.
@@ -3723,7 +3724,35 @@ final class SenderController: ObservableObject {
         let applied = ReceiverInputAuthorizationStore.setPolicy(
             policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
         objectWillChange.send()
+        if applied { pushLockScreenPermit(peerID: peerID) }
         return applied
+    }
+
+    /// Allow Lock Screen Control for one device (SECURITY.md "Lock screen control"). Turning it on
+    /// is refused while any session has effective input, like widening to Always Allow; turning it
+    /// off is always applied and ends that device's lock screen view at once.
+    @discardableResult
+    func setLockScreenControlAllowed(_ allowed: Bool, peerID: String) -> Bool {
+        let applied = ReceiverInputAuthorizationStore.setLockScreenControlAllowed(
+            allowed, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
+        objectWillChange.send()
+        if applied { pushLockScreenPermit(peerID: peerID) }
+        return applied
+    }
+
+    func lockScreenControlAllowed(peerID: String) -> Bool {
+        ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID)
+    }
+
+    /// Each live session of this device learns its input policy and Allow Lock Screen Control.
+    private func pushLockScreenPermit(peerID: String) {
+        for session in sessions where session.deviceID == peerID { pushLockScreenPermit(to: session) }
+    }
+
+    private func pushLockScreenPermit(to session: DeviceSession) {
+        guard let peerID = session.deviceID else { return }
+        session.sender.setLockScreenPermit(policy: ReceiverInputAuthorizationStore.policy(peerID: peerID),
+                                           allowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID))
     }
 
     /// Mac owner manually revokes an active session's control grant from

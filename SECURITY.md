@@ -287,14 +287,52 @@ reaches it. Unknown counts as locked, never as unlocked.
   the lock; everything sent afterwards is dropped until the Mac unlocks, so nothing reaches the
   lock screen or a window behind it. A device set to Ask is refused without a prompt (nobody
   could answer one behind the lock screen); Never Allow stays refused; Always Allow keeps or gets
-  its grant, but input still waits for the unlock.
-- **No remote unlock.** MeowDisplay never asks for, shows a field for, stores or forwards the
-  Mac's login password, and doesn't imitate the macOS login screen. Unlock at the Mac (Touch ID,
-  the password, or an Apple Watch where macOS allows it). A future "control while locked" option
-  would need its own opt-in at the Mac, approval each time, and its own review; it isn't built.
+  its grant, but input still waits for the unlock. The one exception is below.
+- **No password of MeowDisplay's own.** MeowDisplay never asks for, shows a field for, checks,
+  stores or logs the Mac's login password, and doesn't imitate the macOS login screen. A trusted
+  device can operate macOS's own lock screen (below); macOS does the authenticating.
 - **Limits.** The state comes from public macOS signals and the session dictionary. If macOS
   reports the session unlocked while showing something else, MeowDisplay follows macOS. The
   Privacy Shield above is a separate viewing shield for people near the Mac.
+
+## Lock screen control
+
+A device this Mac already trusts with input can show macOS's own lock screen while the Mac is
+locked and type the login password there, so the owner can unlock from the iPad. MeowDisplay
+relays the picture and the keys; macOS's login window checks the password. Code:
+`Mac/LockScreenControl.swift`, enforced in `MacSender` and again in `InputInjector`.
+
+- **Who.** All of these, checked on the Mac at every step, not by the receiver: the session is
+  admitted (paired, pinned key, current connection); Allow Input is on; this login session is on
+  the console and macOS says it is locked (not another user switched in, not unknown); the
+  device's input policy isn't Never Allow; its **Allow Lock Screen Control** switch is on; and
+  this connection has control, either because the device is set to Always Allow Requests (its
+  request is granted without a prompt, as in the section above) or because the owner granted
+  control on this connection before the Mac locked. A device set to Ask without that grant is
+  view-only and stays so: nothing is asked or granted behind the lock screen.
+- **The switch.** Device settings ▸ Input Authorization ▸ Allow Lock Screen Control, per device,
+  stored next to the input policy it narrows (no second trust list), cleared by Forget. On by
+  default, so it only matters for devices that could control the Mac anyway. Turning it off ends a
+  view at once; turning it on is refused while any device controls the Mac, like Always Allow.
+- **Only on request, only fresh.** Nothing is shown until the device asks (`lockScreenRequest`).
+  Then the Mac drops any frame it held, wakes the display, and sends only frames encoded after
+  the request, starting with a keyframe, so no picture from before the lock can go out. Sound,
+  windows, listings, Files, Clipboard, menus and the text caret stay off. Window view can't show
+  it (Full Desktop only); an Always Allow device is told to switch, an Ask device isn't offered it.
+- **Only the login window's input.** Pointer moves, left clicks and touches; character keys with
+  Shift or Option (Caps Lock rides along); Return, Tab, Delete, Forward Delete, Escape, Space and
+  the arrows; printable text up to 128 characters. Never Command or Control, function, media,
+  navigation or input-source keys, right-click, scrolling, Pencil, gestures, shortcuts, menus,
+  macros or window actions. Releases always go through so nothing stays held.
+- **Ends by itself.** On unlock (normal input and content resume for that session), on another
+  user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow
+  Input off, a disconnect, or two minutes without input. Held keys and buttons are released.
+- **Nothing kept.** Typed characters are passed to macOS and not logged, stored or inspected
+  beyond the key filter above; debug logging of keys is off while locked.
+- **Limits.** The Mac can't tell what macOS draws on its lock screen; it relies on macOS's own
+  lock state and the login window. Anyone holding a trusted device that has control can try
+  passwords on the lock screen, under macOS's own rate limits, as they could at the Mac's
+  keyboard. Turn the switch off for devices that shouldn't.
 
 ## What this doesn't claim
 

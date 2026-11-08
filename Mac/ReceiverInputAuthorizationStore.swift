@@ -70,11 +70,39 @@ enum ReceiverInputAuthorizationStore {
     }
 
     /// Always permitted regardless of any session's effective input — see
-    /// the type's security invariant above.
+    /// the type's security invariant above. Also clears the device's Allow
+    /// Lock Screen Control, so Forget leaves nothing behind.
     static func removePolicy(peerID: String, defaults: UserDefaults = .standard) {
         var policies = load(defaults: defaults)
         policies.removeValue(forKey: peerID)
         save(policies, defaults: defaults)
+        var lockScreen = defaults.dictionary(forKey: lockScreenKey) as? [String: Bool] ?? [:]
+        if lockScreen.removeValue(forKey: peerID) != nil { defaults.set(lockScreen, forKey: lockScreenKey) }
+    }
+
+    // MARK: Allow Lock Screen Control (SECURITY.md "Lock screen control")
+
+    /// Only ever narrows what the input policy above allows: a device may operate the Mac's lock
+    /// screen only when its input policy and grant would let it control the Mac anyway
+    /// (`LockScreenEligibility`). On by default for such devices (Always Allow, or Ask with
+    /// control granted before the lock); the owner can turn it off per device. Stored here, with
+    /// the input policy it qualifies, keyed by the same peer id, removed by Forget.
+    private static let lockScreenKey = "receiverLockScreenControl.v1"
+
+    static func lockScreenControlAllowed(peerID: String, defaults: UserDefaults = .standard) -> Bool {
+        (defaults.dictionary(forKey: lockScreenKey) as? [String: Bool])?[peerID] ?? true
+    }
+
+    /// Turning it on widens what a device may do, so it's refused while any session has effective
+    /// input (the same invariant as `.alwaysAllow`). Turning it off is always permitted.
+    @discardableResult
+    static func setLockScreenControlAllowed(_ allowed: Bool, peerID: String, anySessionHasEffectiveInput: Bool,
+                                            defaults: UserDefaults = .standard) -> Bool {
+        guard !allowed || !anySessionHasEffectiveInput else { return false }
+        var values = defaults.dictionary(forKey: lockScreenKey) as? [String: Bool] ?? [:]
+        if allowed { values.removeValue(forKey: peerID) } else { values[peerID] = false }
+        defaults.set(values, forKey: lockScreenKey)
+        return true
     }
 
     static func allPolicies(defaults: UserDefaults = .standard) -> [String: PeerInputRequestPolicy] {

@@ -42,6 +42,9 @@ final class InputInjector {
 
     /// The lock state input waits on (tests set their own; the app keeps `.shared` current).
     var privacyGate: MacPrivacyGate = .shared
+    /// On while this connection's receiver shows the Mac's lock screen (`MacSender`): then, while
+    /// locked, only what the login window needs gets in (`LockScreenInputFilter`).
+    var lockScreenGate: LockScreenInputGate?
     private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
     // This session's ephemeral input grant (per-device-session milestone) —
@@ -212,7 +215,7 @@ final class InputInjector {
     func handleTouch(phase: String, x: Double, y: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.touch) else { return }
         let point: CGPoint
         if let mapper = targetMapper {
             let mapPhase: InputMapPhase = phase == "began" ? .down : (phase == "moved" ? (isDown ? .drag : .hover) : .up)
@@ -310,7 +313,7 @@ final class InputInjector {
     func handlePointerMove(x: Double, y: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerMove) else { return }
         if let mapper = targetMapper {
             guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: x, y: y, dx: 0, dy: 0) else { return }
             postPointerMotion(to: point)
@@ -327,7 +330,7 @@ final class InputInjector {
     func handlePointerMoveRelative(dx: Double, dy: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerMove) else { return }
         if let mapper = targetMapper {
             // The workspace pointer moves freely across tiles; the Mac pointer
             // follows only where that is safe (see WorkspaceInputTargeting).
@@ -368,7 +371,7 @@ final class InputInjector {
     func handlePointerDown(button: PointerButton, clickCount: Int) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerButton(button)) else { return }
         guard pointerHeldButton == nil else { return }
         let cgButton: CGMouseButton = button == .left ? .left : .right
         let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
@@ -439,7 +442,7 @@ final class InputInjector {
     func handleKeyboardText(_ text: String) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
+        guard inputIsAllowed(.text(text)), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
         postUnicodeText(units)
     }
 
@@ -448,16 +451,16 @@ final class InputInjector {
     func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady() else { return }
+        guard inputIsAllowed(.key(usage, modifiers: modifiers)), keyboardTargetReady() else { return }
         let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
         #if DEBUG
-        if usage == .deleteOrBackspace {
+        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
             Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) down")
         }
         #endif
         postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
         #if DEBUG
-        if usage == .deleteOrBackspace {
+        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
             Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) up")
         }
         #endif
@@ -467,7 +470,7 @@ final class InputInjector {
     func handleModifier(name: String, down: Bool) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), let modifier = ControlModifier(rawValue: name) else { return }
+        guard inputIsAllowed(down ? .modifier(name) : .release), let modifier = ControlModifier(rawValue: name) else { return }
         if down {
             guard keyboardTargetReady(), heldModifiers.down(modifier) else { return }
             postKeyEvent(keyCode: modifier.keyCode, keyDown: true, flags: heldModifiers.flags)
@@ -484,7 +487,7 @@ final class InputInjector {
     func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady() else { return }
+        guard inputIsAllowed(.key(usage, modifiers: modifiers)), keyboardTargetReady() else { return }
         let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
         if isRepeat {
             guard heldKeys.allowsRepeat(usage) else { return }
@@ -550,17 +553,23 @@ final class InputInjector {
     /// OFF transition cannot race an event that already passed its outer gate.
     /// A login session that is switched out (Fast User Switching) never
     /// injects: someone else is using the Mac (`LoginSessionConsole`).
-    private func inputIsAllowed() -> Bool {
+    /// `event`: what this is, for the lock screen view's filter (anything not named is `.other`).
+    private func inputIsAllowed(_ event: LockScreenInputEvent = .other) -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
                                                    sessionGranted: sessionInputGrant.get()),
-              LoginSessionConsole.shared.isOnConsole,
-              // Locked (or can't tell): nothing reaches the lock screen or a window behind it,
-              // whatever the grant (`MacPrivacyGate`).
-              privacyGate.allowsInput else {
+              LoginSessionConsole.shared.isOnConsole else {
             cancelActiveInputLocked()
             return false
         }
-        return true
+        if privacyGate.allowsInput { return true }
+        // Locked (or can't tell): nothing reaches the lock screen or a window behind it, whatever
+        // the grant (`MacPrivacyGate`), except, while this receiver shows the lock screen and the
+        // Mac says it's locked, what the login window needs.
+        guard lockScreenGate?.isActive == true, privacyGate.state == .locked else {
+            cancelActiveInputLocked()
+            return false
+        }
+        return LockScreenInputFilter.allows(event)
     }
 
     func handlePencil(phase: String, x: Double, y: Double,
