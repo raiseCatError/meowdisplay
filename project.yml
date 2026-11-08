@@ -320,6 +320,7 @@ targets:
       - Shared/ReceiverPictureInPicture.swift
       - Shared/ReceiverSessionPresentation.swift
       - Shared/ReceiverSessionActions.swift
+      - Shared/LockMacFlow.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift
