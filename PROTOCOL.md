@@ -2217,7 +2217,7 @@ Tailscale without anyone typing an address.
 
 Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.features`.
 
-- Mac → receiver: `{"type":"macLockState","state":S,"remoteUnlock":false}` with S one of
+- Mac → receiver: `{"type":"macLockState","state":S,"remoteUnlock":B}` (plus `lockScreen`, 6.19) with S one of
   `unlocked`, `locked` (macOS shows its lock screen), `switchedOut` (Fast User Switching: another
   login session is on the console) or `unknown` (the session couldn't be read). Every value other
   than `unlocked`, including one a receiver doesn't recognise, means locked.
