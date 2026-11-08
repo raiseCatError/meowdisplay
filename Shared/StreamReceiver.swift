@@ -2965,8 +2965,9 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
         case MacLockWire.type:
             guard let notice = MacLockNotice(message: obj) else { return }
-            // The last picture goes now, not when video-off follows.
-            if notice.isLocked { resetDecoderForVideoStateChange() }
+            // The last picture goes now, not when video-off follows. While this device shows the
+            // Mac's lock screen (6.19) its fresh frames keep decoding.
+            if notice.isLocked, notice.lockScreen != .active { resetDecoderForVideoStateChange() }
             DispatchQueue.main.async { uiSink.publishMacLock(notice) }
             workspaceEvents.emit(.macLock(notice))
         case WireMessage.allowInputState:
@@ -3467,6 +3468,13 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestAllowInput(_ allowed: Bool) {
         guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
         sendUIControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
+    }
+
+    /// Asks the Mac to show (or hide) its own lock screen on this device (PROTOCOL.md 6.19). The
+    /// Mac decides and answers with `macLockState`; nothing here reads or carries a password.
+    @MainActor func requestLockScreen(show: Bool) {
+        guard connected else { return }
+        sendUIControl(LockScreenWire.request(show: show))
     }
 
     @MainActor func requestVideoEnabled(_ enabled: Bool) {

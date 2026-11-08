@@ -304,6 +304,8 @@ targets:
       - Mac/MacSender.swift
       - Mac/MacLockPrivacy.swift
       - Shared/MacLockWire.swift
+      - Shared/LockScreenFlow.swift
+      - Mac/LockScreenControl.swift
       - Mac/DisplayCaptureSettings.swift
       - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift

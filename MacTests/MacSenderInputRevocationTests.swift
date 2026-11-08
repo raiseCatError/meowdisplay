@@ -28,11 +28,23 @@ final class MacSenderInputRevocationTests: XCTestCase {
         let identity = try keychain.makeIdentity()
         let tls = TLSSessionConfig(identity: SendableSecIdentity(value: identity.identity),
                                    pinnedPeerSPKI: identity.spki, peerID: Self.peerID)
+        self.tls = tls
+        setUpSender()
+    }
+
+    private var tls: TLSSessionConfig?
+
+    /// A fresh sender (and lock state); the previous one, if any, is dropped.
+    private func setUpSender() {
+        guard let tls else { return }
+        privacyGate.set(.unlocked)
         // Never dialed: the endpoint only satisfies the initializer.
         sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
                            name: "Revocation Test Phone", mode: .mirror)
         // Its own lock state: these tests never depend on whether this Mac's screen is locked.
         sender?.privacyGate = privacyGate
+        sent.clear()
+        _ = events.take()
     }
 
     private let privacyGate = MacPrivacyGate(.unlocked)
@@ -85,6 +97,141 @@ final class MacSenderInputRevocationTests: XCTestCase {
         try await receive(sender, ["type": LockMacWire.request, "req": 7])
         try await sender.settleForTesting()
         XCTAssertEqual(events.take(), [])
+    }
+
+    // MARK: - Lock screen control (SECURITY.md "Lock screen control")
+
+    /// Locks the Mac for a granted receiver whose device policy and switch the app has pushed.
+    @discardableResult
+    private func lockWithPermit(_ sender: MacSender, policy: PeerInputRequestPolicy = .alwaysAllow,
+                                allowed: Bool = true, grant: Bool = true) async throws -> UInt64 {
+        let generation = grant ? try await admitAndGrant(sender) : try await admit(sender)
+        sender.setLockScreenPermit(policy: policy, allowed: allowed)
+        privacyGate.set(.locked)
+        sender.macPrivacyChanged(.locked)
+        try await sender.settleForTesting()
+        _ = events.take()
+        return generation
+    }
+
+    private func showLockScreen(_ sender: MacSender, _ show: Bool = true) async throws {
+        try await receive(sender, LockScreenWire.request(show: show))
+        try await sender.settleForTesting()
+    }
+
+    /// Shown: only what the login window needs reaches the Mac: clicks, character keys with
+    /// Shift, Return, Delete. Command and Control, right-click, scroll, Pencil and the rest don't.
+    func testTheLockScreenTakesOnlyWhatTheLoginWindowNeeds() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        XCTAssertEqual(sent.lastLockScreen, "available")
+        try await sendEveryInputKind(sender)
+        XCTAssertEqual(events.take(), [], "nothing before the receiver shows the lock screen")
+
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        XCTAssertEqual(sent.last(type: WireMessage.videoState)?["enabled"] as? Bool, true, "the lock screen picture is on")
+        try await receive(sender, ["type": "pointer", "action": "move", "x": 0.5, "y": 0.5])
+        try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "pointer", "action": "up", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyP.rawValue, "modifiers": ["shift"]])
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.deleteOrBackspace.rawValue])
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
+        let allowed = events.take()
+        XCTAssertTrue(allowed.contains { $0.type == .leftMouseDown } && allowed.contains { $0.type == .leftMouseUp }, "\(allowed)")
+        for usage in [HIDKeyUsage.keyP, .deleteOrBackspace, .returnOrEnter] {
+            XCTAssertTrue(allowed.contains { $0.type == .keyDown && $0.keyCode == Int64(usage.keyCode) }, "\(usage)")
+        }
+
+        let refused: [[String: Any]] = [
+            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyQ.rawValue, "modifiers": ["command"]],
+            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue, "modifiers": ["control"]],
+            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.f1.rawValue],
+            ["type": "keyboard", "action": "modifierDown", "modifier": ControlModifier.command.rawValue],
+            ["type": "pointer", "action": "down", "button": "right", "clickCount": 1],
+            ["type": "scroll", "dx": 0.0, "dy": 120.0],
+            ["type": "pencil", "phase": "began", "x": 0.3, "y": 0.3, "pressure": 0.5],
+            ["type": "keyboard", "action": "text", "text": "a\nb"],
+        ]
+        for message in refused { try await receive(sender, message) }
+        let leaked = events.take().filter { [.keyDown, .rightMouseDown, .scrollWheel, .flagsChanged].contains($0.type) }
+        XCTAssertEqual(leaked, [], "only the login window's input")
+
+        // Hidden by the receiver: nothing reaches the Mac again, the picture stops.
+        try await showLockScreen(sender, false)
+        XCTAssertEqual(sent.lastLockScreen, "available")
+        XCTAssertEqual(sent.last(type: WireMessage.videoState)?["enabled"] as? Bool, false)
+        try await sendEveryInputKind(sender)
+        XCTAssertEqual(events.take().filter { $0.type != .leftMouseUp && $0.type != .keyUp }, [])
+    }
+
+    /// A view-only Ask device (no control granted before the lock), a device set to Never Allow,
+    /// one with the switch off, and one the app hasn't vouched for yet are never shown it.
+    func testOnlyAPreAuthorizedDeviceIsShownTheLockScreen() async throws {
+        let cases: [(PeerInputRequestPolicy?, Bool, Bool, String)] = [
+            (.ask, true, false, "controlBeforeLock"),
+            (.neverAllow, true, true, "neverAllow"),
+            (.alwaysAllow, false, true, "turnedOff"),
+            (nil, true, true, "unavailable"),
+        ]
+        for (policy, allowed, grant, reason) in cases {
+            setUpSender()
+            let sender = try XCTUnwrap(sender)
+            if let policy {
+                try await lockWithPermit(sender, policy: policy, allowed: allowed, grant: grant)
+            } else {
+                if grant { try await admitAndGrant(sender) } else { try await admit(sender) }
+                privacyGate.set(.locked)
+                sender.macPrivacyChanged(.locked)
+                try await sender.settleForTesting()
+                _ = events.take()
+            }
+            XCTAssertEqual(sent.lastLockScreen, reason, "\(reason): offer")
+            XCTAssertEqual(sent.last(type: MacLockWire.type)?["remoteUnlock"] as? Bool, false, reason)
+            try await showLockScreen(sender)
+            XCTAssertNotEqual(sent.lastLockScreen, "active", reason)
+            try await sendEveryInputKind(sender)
+            XCTAssertEqual(events.take(), [], "\(reason): nothing reaches the lock screen")
+        }
+    }
+
+    /// Turning the switch off, revoking control and unlocking each end the view at once; held
+    /// input is released, and after a real unlock normal input works.
+    func testTheViewEndsWhenItsReasonEnds() async throws {
+        let sender = try XCTUnwrap(sender)
+        let generation = try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
+        _ = events.take()
+        sender.setLockScreenPermit(policy: .alwaysAllow, allowed: false)
+        try await sender.settleForTesting()
+        XCTAssertTrue(events.take().contains { $0.type == .leftMouseUp }, "the held click was released")
+        XCTAssertEqual(sent.lastLockScreen, "turnedOff")
+        try await sendEveryInputKind(sender)
+        XCTAssertEqual(events.take().filter { $0.type != .leftMouseUp && $0.type != .keyUp }, [])
+
+        sender.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        sender.revokeSessionInput()
+        try await sender.settleForTesting()
+        XCTAssertNotEqual(sent.lastLockScreen, "active", "revoked: the view ends")
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
+        XCTAssertEqual(events.take().filter { $0.type == .keyDown }, [])
+
+        // Granted again (Always Allow while locked), shown, then a real unlock: the view ends and
+        // the session goes on as before.
+        sender.grantSessionInput(generation: generation)
+        try await sender.settleForTesting()
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+        XCTAssertNil(sent.last(type: MacLockWire.type)?["lockScreen"], "unlocked: nothing to offer")
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyC.rawValue, "modifiers": ["command"]])
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyC.keyCode) },
+                      "unlocked: normal input, shortcuts included")
     }
 
     override func tearDown() {
@@ -380,6 +527,15 @@ private final class SentMessages: @unchecked Sendable {
     func contains(type: String) -> Bool {
         lock.withLock { messages.contains { $0["type"] as? String == type } }
     }
+
+    func last(type: String) -> [String: Any]? {
+        lock.withLock { messages.last { $0["type"] as? String == type } }
+    }
+
+    /// The lock screen offer in the latest `macLockState`.
+    var lastLockScreen: String? { last(type: MacLockWire.type)?["lockScreen"] as? String }
+
+    func clear() { lock.withLock { messages.removeAll() } }
 
     var lastAllowInputState: (allowed: Bool?, state: String?)? {
         lock.withLock {
