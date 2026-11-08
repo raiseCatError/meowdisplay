@@ -211,12 +211,17 @@ struct WorkspaceAppOpening: Equatable, Sendable {
     private(set) var sawRequesting = false
     /// The last pick named a window that's gone: the choice was refreshed.
     private(set) var pickWasStale = false
+    /// Show a Window on Mac: the launch asks the Mac to bring the app forward, which makes an app
+    /// that's running without a window open one (a background open doesn't, e.g. Ghostty).
+    private(set) var reveal = false
 
     /// The person confirmed opening `bundleID`. With control: launch now; otherwise wait for it.
     static func start(bundleID: String, name: String, tile: String?, tileSource: WorkspaceSource?, drop: Drop? = nil,
-                      control: Control, windows: [CatalogWindowItem], now: TimeInterval) -> (WorkspaceAppOpening, Step) {
+                      reveal: Bool = false, control: Control, windows: [CatalogWindowItem],
+                      now: TimeInterval) -> (WorkspaceAppOpening, Step) {
         var o = WorkspaceAppOpening(bundleID: bundleID, name: name, tile: tile, drop: drop, tileSource: tileSource,
                                     phase: .awaitingControl, startedAt: now, phaseSince: now)
+        o.reveal = reveal
         if control == .refused { o.phase = .failed(.controlDenied); return (o, .fail(.controlDenied)) }
         if control == .requesting { o.sawRequesting = true }
         guard control == .allowed else { return (o, .none) }
@@ -255,10 +260,14 @@ struct WorkspaceAppOpening: Equatable, Sendable {
         windows.filter { $0.bundleID == bundleID && !known.contains($0.id) && !WorkspaceSource.isDisplayKey($0.id) }
     }
 
-    /// The Mac's `appLaunchResult` for this app.
-    mutating func launchAnswered(ok: Bool, now: TimeInterval) -> Step {
+    /// The Mac's `appLaunchResult` for this app. `window` false: the app was already running
+    /// without a window and a background open didn't give it one, so none is coming (no point
+    /// waiting `windowTimeout`); Show a Window on Mac is what can. Nil (older Macs, a new launch,
+    /// a reveal): wait for the window as before.
+    mutating func launchAnswered(ok: Bool, window: Bool? = nil, now: TimeInterval) -> Step {
         guard phase == .launching else { return .none }
         guard ok else { return fail(.launchFailed) }
+        if window == false, !reveal { return fail(.noWindow) }
         phase = .waitingForWindow
         phaseSince = now
         return .none

@@ -1462,9 +1462,14 @@ launchable app the Mac finds (Spotlight's index of the app folders, a folder
 scan when Spotlight is off), one per bundle id, Finder first, at most 900:
 `{bundle, name, running?, windows?, used?}` (`used`: last-used time, seconds
 since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
-`appLaunch {bundle}` needs the input grant, opens only an app the Mac listed,
-never activates it (no focus change on the Mac), and is answered with
-`appLaunchResult {bundle, ok}`. Without the grant when it arrives it is
+`appLaunch {bundle, reveal?}` needs the input grant, opens only an app the Mac
+listed, never activates it (no focus change on the Mac) unless `reveal: true`
+(the person's Show a Window on Mac: brought forward, so macOS sends an app
+that's running without a window its reopen and it opens one), and is answered
+with `appLaunchResult {bundle, ok, window?}`. `window: false`: the app was
+already running with no on-screen window and still has none 1.5 s after a
+background open (receivers stop waiting and offer Show a Window on Mac);
+absent when unknown. Without the grant when it arrives it is
 ignored (not answered); the grant is checked again right before the app
 opens, and if it ended nothing opens and `ok` is false. Receivers ask for
 `appCatalog` when a browser opens (the window picker, Stage Peek,

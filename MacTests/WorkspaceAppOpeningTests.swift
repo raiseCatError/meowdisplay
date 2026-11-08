@@ -196,6 +196,26 @@ final class WorkspaceAppOpeningTests: XCTestCase {
         XCTAssertEqual(unsent.launchNotSent(), .fail(.noAnswer))
     }
 
+    /// The Mac says no window came (an app running without one, opened in the background): it
+    /// stops at once instead of waiting `windowTimeout`. Show a Window on Mac (`reveal`) waits for
+    /// the window as usual, whatever the answer says.
+    func testNoWindowFromTheMacStopsAtOnceAndARevealWaits() {
+        var o = start().0
+        XCTAssertFalse(o.reveal)
+        XCTAssertEqual(o.launchAnswered(ok: true, window: false, now: 1), .fail(.noWindow))
+        var unknown = start().0
+        XCTAssertEqual(unknown.launchAnswered(ok: true, window: nil, now: 1), .none)
+        XCTAssertEqual(unknown.phase, .waitingForWindow)
+        var shown = start().0
+        XCTAssertEqual(shown.launchAnswered(ok: true, window: true, now: 1), .none)
+
+        var revealed = WorkspaceAppOpening.start(bundleID: "com.apple.iCal", name: "Calendar", tile: "w2", tileSource: tileSource,
+                                                 reveal: true, control: .allowed, windows: [], now: 0).0
+        XCTAssertTrue(revealed.reveal)
+        XCTAssertEqual(revealed.launchAnswered(ok: true, window: false, now: 1), .none)
+        XCTAssertEqual(revealed.phase, .waitingForWindow)
+    }
+
     /// Control ending before the Mac opened the app stops it (the Mac opens nothing without
     /// control); once opened, showing its window needs no control.
     func testControlEndingBeforeTheAppOpenedStopsIt() {

@@ -1433,21 +1433,6 @@ struct WindowOverviewView: View {
                     }
                     appSection(results, searching: searching)
                 }
-                .confirmationDialog(confirmApp.map(openTitle) ?? "", isPresented: Binding(get: { confirmApp != nil }, set: { if !$0 { confirmApp = nil } }),
-                                    titleVisibility: .visible, presenting: confirmApp) { app in
-                    if canOpenApps {
-                        Button("Open on Mac") { model.openAppFromPicker(app) }
-                            .accessibilityIdentifier("pickerOpenAppConfirm")
-                            .accessibilityLabel(String(localized: "Open \(app.name) on Mac"))
-                    } else if inputAllowed, model.controlState() != .requestsDisabled {
-                        Button("Request Control & Open") { model.openAppFromPicker(app, requestingControl: true) }
-                            .accessibilityIdentifier("pickerOpenAppRequestControl")
-                            .accessibilityLabel(String(localized: "Request control and open \(app.name)"))
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: { app in
-                    Text(openMessage(app))
-                }
             }
             .padding(16)
             .padding(safeInsets)
@@ -1504,6 +1489,25 @@ struct WindowOverviewView: View {
         .accessibilityLabel(app.running ? String(localized: "\(app.name), open with no window to show") : app.name)
         .accessibilityHint("Asks before opening it on the Mac")
         .accessibilityInputLabels(["Open \(app.name)", app.name])
+        // On the row itself, so on iPad its popover points at this app (QA 9000025: attached to the
+        // scroll view, it showed far from the row). A row that goes away (the search changed) takes
+        // its question with it.
+        .confirmationDialog(openTitle(app), isPresented: Binding(get: { confirmApp?.bundleID == app.bundleID },
+                                                                 set: { if !$0, confirmApp?.bundleID == app.bundleID { confirmApp = nil } }),
+                            titleVisibility: .visible) {
+            if canOpenApps {
+                Button("Open on Mac") { model.openAppFromPicker(app) }
+                    .accessibilityIdentifier("pickerOpenAppConfirm")
+                    .accessibilityLabel(String(localized: "Open \(app.name) on Mac"))
+            } else if inputAllowed, model.controlState() != .requestsDisabled {
+                Button("Request Control & Open") { model.openAppFromPicker(app, requestingControl: true) }
+                    .accessibilityIdentifier("pickerOpenAppRequestControl")
+                    .accessibilityLabel(String(localized: "Request control and open \(app.name)"))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(openMessage(app))
+        }
     }
 
     private func openTitle(_ app: WorkspacePickerSearch.AppToOpen) -> String {
@@ -1600,7 +1604,11 @@ struct AppOpeningFailureAlert: ViewModifier {
                       isPresented: Binding(get: { failure != nil },
                                            set: { if !$0 { DispatchQueue.main.async { model.dismissAppOpening(round: round) } } }),
                       presenting: failure) { f in
-            if f.retryable, model.controlState() != .requestsDisabled {
+            if f == .noWindow, model.controlState() != .requestsDisabled {
+                // A background open again wouldn't make a window: this one brings the app forward on the Mac.
+                Button(String(localized: "Show a Window on Mac")) { model.retryAppOpening(reveal: true) }
+                    .accessibilityIdentifier("appOpeningShowWindowOnMac")
+            } else if f.retryable, model.controlState() != .requestsDisabled {
                 Button([.controlDenied, .controlEnded].contains(f) ? String(localized: "Request Control Again") : String(localized: "Try Again")) {
                     model.retryAppOpening()
                 }
@@ -1631,7 +1639,7 @@ struct AppOpeningFailureAlert: ViewModifier {
         case .noAnswer:
             return String(localized: "\(macName) didn’t answer. Check that this device still has control, then try again.")
         case .noWindow:
-            return String(localized: "\(name) is open on \(macName), but no window you can show here appeared. Try again to ask it for a window, or choose a window instead.")
+            return String(localized: "\(name) is open on \(macName), but has no window to show here. Show a Window on Mac brings \(name) to the front there so it opens one. Or choose a window instead.")
         case .controlDenied:
             return model.controlState() == .requestsDisabled
                 ? String(localized: "\(macName) doesn’t accept control requests from this device, so \(name) wasn’t opened.")
