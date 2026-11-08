@@ -6,7 +6,8 @@ enum LockScreenAction: Equatable, Sendable {
     case none
     /// Ask for control of this session (granted without a prompt when the Mac offered this).
     case requestControl
-    /// Switch to Full Desktop; the Mac's lock screen can't be shown from Window view.
+    /// Switch to Full Desktop Mirror (the main display, where macOS shows its login window); the
+    /// Mac's lock screen can't be shown from Window view.
     case switchToFullDesktop
     /// Ask the Mac to show (`true`) or hide (`false`) its lock screen on this device.
     case show(Bool)
@@ -125,6 +126,10 @@ struct LockScreenFlow: Equatable, Sendable {
             case .active:
                 phase = .showing
                 waitingSince = nil
+                return .none
+            case .unavailable(nil) where phase == .waitingForFullDesktop:
+                // The new Full Desktop connection says it's locked before the Mac has matched it
+                // to this device: no decision yet, keep waiting (the timeout still applies).
                 return .none
             case .unavailable(let why):
                 fail(why)

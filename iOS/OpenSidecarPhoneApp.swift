@@ -810,8 +810,6 @@ struct ReceiverScreen: View {
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
         }
-        .onAppear { model.lastDesktopMode = lastDesktopMode }
-        .onChange(of: lastDesktopMode) { model.lastDesktopMode = $0 }
         // The lock screen going away (Hide, or the Mac unlocking) closes the keyboard it opened.
         .onChange(of: lockScreenShowing) { showing in
             if !showing { keyboardActive = false }
@@ -2333,8 +2331,6 @@ final class ReceiverModel: ObservableObject {
     // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
     // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
     @Published private(set) var lockScreenFlow = LockScreenFlow()
-    /// Mirror or Extend, whichever showed last (set by the screen): where the flow switches to.
-    var lastDesktopMode: ReceiverDisplayMode = .mirror
 
     func showLockScreen() {
         perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
@@ -2353,7 +2349,9 @@ final class ReceiverModel: ObservableObject {
         case .none: break
         case .requestControl: receiver.requestAllowInput(true)
         case .switchToFullDesktop:
-            if !receiver.requestDisplayMode(lastDesktopMode) { lockScreenFlow.couldNotPerform() }
+            // Mirror: the main display, where macOS shows its login window (Extend's display
+            // would show only its wallpaper).
+            if !receiver.requestDisplayMode(.mirror) { lockScreenFlow.couldNotPerform() }
         case .show(let show): receiver.requestLockScreen(show: show)
         case .returnToWindowView: _ = receiver.requestWindowMode()
         }
@@ -2416,9 +2414,10 @@ final class ReceiverModel: ObservableObject {
             .sink { [weak self] _ in self?.lockScreenInputsChanged() }
             .store(in: &cancellables)
         Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-            .sink { [weak self] now in
-                guard let self, self.lockScreenFlow.isWaiting else { return }
-                _ = self.lockScreenFlow.tick(now: now)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Waiting: time out. Failed while switching: an unlock still takes it back.
+                if self.lockScreenFlow.isWaiting || self.lockScreenFlow.returnToWindowView { self.lockScreenInputsChanged() }
             }
             .store(in: &cancellables)
         receiver.$connected

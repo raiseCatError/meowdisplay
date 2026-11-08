@@ -50,7 +50,7 @@ struct MacLockedCover: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("macLockedLockScreenStatus")
-            } else {
+            } else if offersLockScreen {
                 Button(action: onShowLockScreen) {
                     Label("Show Lock Screen", systemImage: "lock.open.fill")
                         .frame(minWidth: 200)
@@ -58,9 +58,11 @@ struct MacLockedCover: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .accessibilityIdentifier("macLockedShowLockScreen")
-                Text("Type your Mac password on its own lock screen. MeowDisplay doesn’t see or keep it.")
+                Text("Type your Mac password on its own lock screen. MeowDisplay passes the keys to macOS and doesn’t check, log or keep them.")
                     .font(.footnote).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if !lockFlow.isWaiting {
                 if case .failed(let message) = lockFlow.phase {
                     Text(message).font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -69,6 +71,11 @@ struct MacLockedCover: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private var lockFlowFailed: Bool {
+        if case .failed = lockFlow.phase { return true }
+        return false
     }
 
     private var waitingText: String {
@@ -92,7 +99,7 @@ struct MacLockedCover: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Your layout comes back when it’s unlocked.")
                     .font(.footnote).foregroundStyle(.white.opacity(0.55)).multilineTextAlignment(.center)
-                if offersLockScreen { lockScreenControls }
+                if offersLockScreen || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
                 Button("Disconnect", role: .destructive, action: onDisconnect)
                     .buttonStyle(.bordered)
                     .padding(.top, 6)

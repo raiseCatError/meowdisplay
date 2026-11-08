@@ -65,6 +65,34 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0.addingTimeInterval(7)), .none)
     }
 
+    /// Right after the switch the new connection says "locked" before the Mac knows which device
+    /// it is (no reason given): that's not a refusal, the flow keeps waiting.
+    func testTheNewConnectionsFirstUndecidedNoticeKeepsTheFlowWaiting() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = flow.update(notice: nil, connected: false, now: t0)
+        XCTAssertEqual(flow.update(notice: locked(.unavailable(nil), remoteUnlock: false), connected: true, now: t0), .none)
+        XCTAssertEqual(flow.phase, .waitingForFullDesktop)
+        XCTAssertEqual(flow.update(notice: locked(.needsControl), connected: true, now: t0), .requestControl)
+        // A reason is a decision, even right after the switch.
+        var refused = LockScreenFlow()
+        _ = refused.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = refused.update(notice: locked(.unavailable("turnedOff"), remoteUnlock: false), connected: true, now: t0)
+        XCTAssertEqual(refused.phase, .failed("Lock Screen Control is off for this device on the Mac."))
+    }
+
+    /// Timed out while switching, then the Mac turns out unlocked: still back to Window view.
+    func testATimeoutThenAnUnlockStillReturnsToWindowView() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        let undecided = locked(.unavailable(nil), remoteUnlock: false)
+        XCTAssertEqual(flow.update(notice: undecided, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 1)), .none)
+        XCTAssertEqual(flow.phase, .failed("The Mac didn't respond."))
+        XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 2)),
+                       .returnToWindowView)
+        XCTAssertEqual(flow.phase, .idle)
+    }
+
     func testAfterTheSwitchAvailableShowsDirectly() {
         var flow = LockScreenFlow()
         _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)

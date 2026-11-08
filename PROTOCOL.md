@@ -2252,11 +2252,14 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
   - `active`: it is shown on this device.
   - `needsControl`: ask for control first (`allowInputRequest`); the Mac grants it without a
     prompt (Always Allow), then answers `available`.
-  - `needsFullDesktop`: switch to Full Desktop first (Window view can't show it); control is
-    asked for again on the new connection.
+  - `needsFullDesktop`: switch to Full Desktop first (Window view can't show it); receivers pick
+    Mirror, the main display, where macOS shows its login window. Control is asked for again on
+    the new connection.
   - any other word: not offered; the word is the Mac's reason (`controlBeforeLock`, `turnedOff`,
     `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView`, `unavailable`). Unknown
-    words mean not offered.
+    words mean not offered. `unavailable` right after connecting can mean the Mac hasn't matched
+    the connection to its device settings yet; a receiver that just switched modes for this waits
+    for the next `macLockState` (or its own timeout).
   `remoteUnlock` is `true` for the first four. A receiver treats `remoteUnlock:false` as not
   offered whatever `lockScreen` says.
 - Receiver → Mac: `{"type":"lockScreenRequest","show":true|false}`. The Mac answers with
