@@ -1748,41 +1748,32 @@ extension StageManagerSection {
 }
 
 /// Lock This Mac: macOS's own lock screen on the Mac, so its login password is needed to go on.
-/// Needs control; shows what the Mac reports, never assumes it worked.
+/// Needs control: without it, the confirmation offers Request Control & Lock Mac, which locks
+/// only after the Mac allows control (`LockMacFlow`). Shows what the Mac reports, never assumes it worked.
 private struct LockMacSection: View {
     @ObservedObject var workspace: WorkspaceModel
-    @State private var confirming = false
 
     var body: some View {
         if workspace.canLockMac {
             Section {
                 Button(workspace.lockMacStatus == .locking ? String(localized: "Locking…") : String(localized: "Lock Mac")) {
-                    workspace.clearLockMacStatus()
-                    confirming = true
+                    workspace.beginLockMac()
                 }
-                .disabled(workspace.lockMacStatus == .locking)
+                .disabled(workspace.lockMacBusy)
                 .accessibilityIdentifier("lockMac")
-                if case .done(let result)? = workspace.lockMacStatus {
-                    Text(Self.text(result)).font(.footnote).foregroundStyle(result == .locked ? .primary : .secondary)
+                if workspace.lockFlow.isAwaiting {
+                    Button("Stop Waiting") { workspace.cancelLockMac() }
+                        .accessibilityHint("Stops waiting for the Mac. Nothing is locked.")
+                }
+                if let line = workspace.lockMacStatusLine {
+                    Text(line).font(.footnote)
+                        .foregroundStyle(workspace.lockMacStatus == .done(.locked) ? .primary : .secondary)
+                        .accessibilityIdentifier("lockMacStatus")
                 }
             } footer: {
-                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Needs control of the Mac.")
+                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Without control of the Mac, you're offered Request Control first.")
             }
-            .confirmationDialog("Lock the Mac?", isPresented: $confirming, titleVisibility: .visible) {
-                Button("Lock Mac") { workspace.lockMac() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Anyone at the Mac will need its login password.")
-            }
-        }
-    }
-
-    static func text(_ result: LockMacResult) -> String {
-        switch result {
-        case .locked: String(localized: "The Mac is locked.")
-        case .control: String(localized: "Locking needs control of the Mac. Request Control first.")
-        case .accessibility: String(localized: "The Mac can't lock: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac.")
-        case .failed: String(localized: "The Mac didn't lock. Its Lock Screen shortcut (Control-Command-Q) may be changed or off.")
+            .lockMacConfirmation(workspace)
         }
     }
 }

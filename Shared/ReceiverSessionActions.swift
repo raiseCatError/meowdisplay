@@ -1,14 +1,17 @@
 import Foundation
 
 // Session Actions (iPhone/iPad): touch and hold the session's Settings control
-// to open a modal overlay with Back to Home — Keep Connected and Disconnect
-// from Mac. Pure values only, so every decision is unit-tested on macOS
+// to open a modal overlay with Back to Home — Keep Connected, Lock Mac (when
+// the Mac supports it) and Disconnect from Mac. Pure values only, so every decision is unit-tested on macOS
 // (ReceiverSessionActionsTests); ReceiverScreen and ReceiverControlOverlay act
 // on what they return. Nothing here reaches the wire.
 
 enum ReceiverSessionAction: Hashable, Sendable {
     /// `ReceiverModel.showHomeKeepingSession()` (#121).
     case backToHome
+    /// Lock This Mac (LockMacFlow): its own confirmation, shown from the overlay, which
+    /// stays up; Request Control comes first when this device doesn't have control.
+    case lockMac
     /// The same call as Settings → Connections → Disconnect: a deliberate
     /// goodbye, so neither side reconnects by itself (#162).
     case disconnect
@@ -30,11 +33,14 @@ enum ReceiverSessionActionsPolicy {
     }
 
     /// What the overlay offers, top to bottom. Back to Home needs a surface to
-    /// come back to; Disconnect is always there while the overlay is.
+    /// come back to; Lock Mac needs a Mac that supports it; Disconnect is always
+    /// there while the overlay is.
     static func actions(surfaceRetained: Bool,
-                        presentation: ReceiverSessionPresentation) -> [ReceiverSessionAction] {
+                        presentation: ReceiverSessionPresentation,
+                        canLockMac: Bool = false) -> [ReceiverSessionAction] {
         var actions: [ReceiverSessionAction] = []
         if surfaceRetained, presentation == .session { actions.append(.backToHome) }
+        if canLockMac { actions.append(.lockMac) }
         actions.append(.disconnect)
         return actions
     }
@@ -51,6 +57,8 @@ struct ReceiverSessionActionsState: Equatable, Sendable {
     enum Outcome: Equatable, Sendable {
         /// Resume from Home reopens the keyboard if it was open here.
         case backToHome(reopenKeyboardOnResume: Bool)
+        /// The overlay stays up; the flow's confirmation opens over it.
+        case lockMac
         case disconnect
     }
 
@@ -72,10 +80,12 @@ struct ReceiverSessionActionsState: Equatable, Sendable {
 
     mutating func choose(_ action: ReceiverSessionAction) -> Outcome? {
         guard isPresented else { return nil }
+        if action == .lockMac { return .lockMac }
         let keyboard = keyboardWasActive
         self = ReceiverSessionActionsState()
         switch action {
         case .backToHome: return .backToHome(reopenKeyboardOnResume: keyboard)
+        case .lockMac: return .lockMac
         case .disconnect: return .disconnect
         }
     }

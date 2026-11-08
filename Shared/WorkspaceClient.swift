@@ -747,6 +747,7 @@ final class WorkspaceModel: ObservableObject {
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
             canLockMac = false; lockMacStatus = nil
+            lockFlowInputsChanged()
             files.setAvailable(false)
             menus.setAvailable(false)
             clipboard.setAvailable(false)
@@ -1476,6 +1477,8 @@ final class WorkspaceModel: ObservableObject {
     /// Lock This Mac: the Mac shows macOS's lock screen (needs control; the Mac says what happened).
     func lockMac() {
         guard canLockMac, lockMacStatus != .locking else { return }
+        // Never asks the Mac to lock before control is confirmed granted.
+        guard canControlMac else { lockMacStatus = .done(.control); return }
         lockRequest += 1
         let req = lockRequest
         guard send(["type": LockMacWire.request, "req": req]) else { lockMacStatus = .done(.failed); return }
@@ -1487,6 +1490,59 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func clearLockMacStatus() { if lockMacStatus != .locking { lockMacStatus = nil } }
+
+    // MARK: Lock Mac flow (Request Control first when needed; see LockMacFlow)
+
+    @Published private(set) var lockFlow = LockMacFlow()
+    private var lockFlowTimeout: Task<Void, Never>?
+
+    private var lockFlowInputs: LockMacFlow.Inputs {
+        LockMacFlow.Inputs(canLock: canLockMac, connected: inputAllowed(),
+                           controlGranted: canControlMac, inputState: controlState())
+    }
+
+    /// Lock Mac was tapped: shows the confirmation (or why it can't). Sends nothing.
+    func beginLockMac() {
+        clearLockMacStatus()
+        lockFlow.begin(lockFlowInputs)
+        syncLockFlowTimeout()
+    }
+
+    func confirmLockMac() { applyLockEffects(lockFlow.confirm(lockFlowInputs)) }
+
+    /// Cancel, dismiss, or stop waiting: nothing is sent.
+    func cancelLockMac() {
+        lockFlow.cancel()
+        syncLockFlowTimeout()
+    }
+
+    /// Control state or the session changed (called by the host on either).
+    func lockFlowInputsChanged() { applyLockEffects(lockFlow.inputsChanged(lockFlowInputs)) }
+
+    private func applyLockEffects(_ effects: [LockMacFlow.Effect]) {
+        syncLockFlowTimeout()
+        for effect in effects {
+            switch effect {
+            case .requestControl: requestControl()
+            case .lock: lockMac()
+            }
+        }
+    }
+
+    private func syncLockFlowTimeout() {
+        if lockFlow.isAwaiting {
+            guard lockFlowTimeout == nil else { return }
+            lockFlowTimeout = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(LockMacFlow.timeout * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.lockFlowTimeout = nil
+                self.lockFlow.timedOut()
+            }
+        } else {
+            lockFlowTimeout?.cancel()
+            lockFlowTimeout = nil
+        }
+    }
 
     private func finishClose(_ id: UInt32, result: WindowCloseResult) {
         closingWindows.remove(id)

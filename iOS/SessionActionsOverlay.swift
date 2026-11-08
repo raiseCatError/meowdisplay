@@ -3,12 +3,14 @@ import SwiftUI
 /// Session Actions: opened by touching and holding the session's Settings
 /// control. A modal over the live session (blurred and dimmed, framed by a
 /// thin red outline that follows the screen's corners) with Back to Home —
-/// Keep Connected, Disconnect from Mac and Cancel. Which actions appear and
+/// Keep Connected, Lock Mac (when the Mac supports it), Disconnect from Mac and Cancel. Which actions appear and
 /// what dismissing restores are decided in `ReceiverSessionActionsState` /
 /// `ReceiverSessionActionsPolicy`; ReceiverScreen keeps every input from the
 /// Mac while this is up.
 struct SessionActionsOverlay: View {
     let macName: String
+    /// Lock Mac's flow, status and confirmation (decided in `LockMacFlow`).
+    @ObservedObject var workspace: WorkspaceModel
     let actions: [ReceiverSessionAction]
     let onAction: (ReceiverSessionAction) -> Void
     let onCancel: () -> Void
@@ -142,6 +144,8 @@ struct SessionActionsOverlay: View {
             .controlSize(.large)
             .accessibilityHint(Text("Shows Home. The Mac keeps this display until you resume or disconnect."))
             .accessibilityIdentifier("sessionActionsHome")
+        case .lockMac:
+            lockMacRow
         case .disconnect:
             Button(role: .destructive) { onAction(.disconnect) } label: {
                 label("Disconnect from Mac")
@@ -151,6 +155,36 @@ struct SessionActionsOverlay: View {
             .controlSize(.large)
             .accessibilityHint(Text("Ends the session. It doesn't reconnect by itself."))
             .accessibilityIdentifier("sessionActionsDisconnect")
+        }
+    }
+
+    /// Lock Mac, with the flow's status under it. The confirmation presents from this row, so it
+    /// shows over the overlay itself (a dialog under a sheet wouldn't).
+    private var lockMacRow: some View {
+        VStack(spacing: 6) {
+            Button { onAction(.lockMac) } label: {
+                label(workspace.lockMacBusy ? (workspace.lockFlow.isAwaiting ? "Waiting for the Mac…" : "Locking…") : "Lock Mac")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(workspace.lockMacBusy)
+            .accessibilityHint(Text("Asks you to confirm. If this device doesn't have control, it asks the Mac to allow control first."))
+            .accessibilityIdentifier("sessionActionsLockMac")
+            .lockMacConfirmation(workspace)
+            if workspace.lockFlow.isAwaiting {
+                Button("Stop Waiting") { workspace.cancelLockMac() }
+                    .buttonStyle(.borderless)
+                    .accessibilityHint(Text("Nothing is locked."))
+                    .accessibilityIdentifier("sessionActionsLockMacStop")
+            }
+            if let line = workspace.lockMacStatusLine {
+                Text(line)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("lockMacStatus")
+            }
         }
     }
 

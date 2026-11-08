@@ -185,6 +185,11 @@ struct ReceiverScreen: View {
         UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
 
+    private func endLockMacFlow() {
+        model.workspace.cancelLockMac()
+        model.workspace.clearLockMacStatus()
+    }
+
     private func chooseSessionAction(_ action: ReceiverSessionAction) {
         var next = sessionActions
         guard let outcome = next.choose(action) else { return }
@@ -198,6 +203,8 @@ struct ReceiverScreen: View {
             } else if reopenKeyboard, keyboardAvailable, inputReachesMac {
                 keyboardActive = true
             }
+        case .lockMac:
+            model.workspace.beginLockMac()
         case .disconnect:
             // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
             model.receiver.disconnect()
@@ -685,8 +692,10 @@ struct ReceiverScreen: View {
                 let host = model.workspace.hostName
                 SessionActionsOverlay(
                     macName: host.isEmpty ? String(localized: "your Mac") : host,
+                    workspace: model.workspace,
                     actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
-                                                                  presentation: model.presentation),
+                                                                  presentation: model.presentation,
+                                                                  canLockMac: model.workspace.canLockMac),
                     onAction: { chooseSessionAction($0) },
                     onCancel: { dismissSessionActions() })
                 .transition(.opacity)
@@ -703,6 +712,12 @@ struct ReceiverScreen: View {
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
         .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }
+        // Lock Mac: closing or opening the overlay, or leaving Settings, ends any wait and clears an old result.
+        .onChange(of: sessionActions.isPresented) { _ in endLockMacFlow() }
+        .onChange(of: showSettings) { shown in if !shown { endLockMacFlow() } }
+        // The Mac's answer to Request Control, or the session going away, moves the Lock Mac flow on.
+        .onChange(of: controlStore.sessionInputState) { _ in model.workspace.lockFlowInputsChanged() }
+        .onChange(of: model.receiver.session.allowsLiveInput) { _ in model.workspace.lockFlowInputsChanged() }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()

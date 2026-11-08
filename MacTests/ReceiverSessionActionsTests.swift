@@ -32,6 +32,25 @@ final class ReceiverSessionActionsTests: XCTestCase {
                        [.disconnect], "already on Home")
     }
 
+    func testLockMacSitsBeforeDisconnectOnlyWhenTheMacCanLock() {
+        XCTAssertEqual(ReceiverSessionActionsPolicy.actions(surfaceRetained: true, presentation: .session, canLockMac: true),
+                       [.backToHome, .lockMac, .disconnect])
+        XCTAssertEqual(ReceiverSessionActionsPolicy.actions(surfaceRetained: false, presentation: .session, canLockMac: true),
+                       [.lockMac, .disconnect])
+        XCTAssertEqual(ReceiverSessionActionsPolicy.actions(surfaceRetained: true, presentation: .session, canLockMac: false),
+                       [.backToHome, .disconnect])
+    }
+
+    func testChoosingLockMacKeepsTheOverlayUp() {
+        var state = ReceiverSessionActionsState()
+        XCTAssertNil(state.choose(.lockMac), "nothing to choose while closed")
+        _ = state.open(keyboardActive: true)
+        XCTAssertEqual(state.choose(.lockMac), .lockMac)
+        XCTAssertTrue(state.isPresented, "its confirmation opens over the overlay")
+        XCTAssertFalse(state.surfaceInteractive(.session), "still no input to the Mac")
+        XCTAssertTrue(state.dismiss(), "Cancel still restores the keyboard that was open")
+    }
+
     // MARK: Input gating
 
     func testNoInputReachesTheMacWhileTheOverlayIsUp() {

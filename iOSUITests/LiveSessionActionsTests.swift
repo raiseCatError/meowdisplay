@@ -60,6 +60,44 @@ final class LiveSessionActionsTests: XCTestCase {
         snapshot(app, "actions-04-disconnected")
     }
 
+    /// Lock Mac in Session Actions: opens its confirmation and cancels. Never confirms, so the
+    /// Mac is never locked and no control request is sent. Skips when the Mac can't lock.
+    @MainActor
+    func testLockMacRowOpensConfirmationAndCancelsWithoutLocking() throws {
+        guard env["MEOW_LIVE_SESSION_TESTS"] == "1" else {
+            throw XCTSkip("live session test: set MEOW_LIVE_SESSION_TESTS=1 with a paired Mac nearby")
+        }
+        let app = XCUIApplication()
+        app.launch()
+        let surface = app.descendants(matching: .any)["Mac screen"].firstMatch
+        try connect(app, surface: surface)
+        let overlay = app.descendants(matching: .any)["sessionActionsOverlay"].firstMatch
+        try openSessionActions(app, overlay: overlay)
+        let lock = app.buttons["sessionActionsLockMac"]
+        guard lock.waitForExistence(timeout: 3) else {
+            app.buttons["sessionActionsCancel"].tap()
+            throw XCTSkip("this Mac doesn't offer Lock This Mac")
+        }
+        XCTAssertTrue(app.buttons["sessionActionsDisconnect"].exists, "Disconnect stays")
+        XCTAssertTrue(app.buttons["sessionActionsCancel"].exists, "Cancel stays")
+
+        lock.tap()
+        let confirm = app.buttons["lockMacConfirm"]
+        let requestAndLock = app.buttons["lockMacRequestControlAndLock"]
+        XCTAssertTrue(waitUntil(5) { confirm.exists || requestAndLock.exists },
+                      "the confirmation shows over the overlay")
+        snapshot(app, "actions-lock-confirmation")
+        app.buttons["lockMacCancel"].tap()
+
+        XCTAssertTrue(waitUntil(3) { !confirm.exists && !requestAndLock.exists }, "Cancel closes the confirmation")
+        XCTAssertTrue(overlay.exists, "the overlay stays up")
+        XCTAssertTrue(lock.isEnabled, "nothing is pending")
+        XCTAssertFalse(app.staticTexts["lockMacStatus"].exists, "nothing was sent, so nothing to report")
+        app.buttons["sessionActionsCancel"].tap()
+        XCTAssertTrue(waitUntil(3) { !overlay.exists })
+        XCTAssertTrue(surface.exists, "still in the session")
+    }
+
     @MainActor
     private func openSessionActions(_ app: XCUIApplication, overlay: XCUIElement) throws {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
