@@ -1,4 +1,5 @@
 import CoreGraphics
+import Security
 import XCTest
 
 /// Window mode on the sender: when input at a point may go to a tiled window. Geometry from the
@@ -236,4 +237,138 @@ final class WorkspaceInputCoverTests: XCTestCase {
     }
 
     private final class Box: @unchecked Sendable { var value: Int? }
+
+    // MARK: The system Open/Save panel (QA 9000025: Chrome's upload chooser showed, took no presses)
+
+    private let servicePID: Int32 = 9001
+    private let sheet: UInt32 = 9318
+    /// An untitled panel sheet of the target's app, as Chrome's upload chooser is, centred under its title bar.
+    private let sheetFrame = CGRect(x: 476, y: 218, width: 547, height: 380)
+    private let inSheet = CGPoint(x: 700, y: 400)
+
+    private func service(_ id: UInt32, _ frame: CGRect, pid: Int32? = nil, layer: Int = 0, alpha: Double = 1) -> W {
+        W(id: id, owner: "com.apple.appkit.xpc.openAndSavePanelService (Google Chrome)", layer: layer,
+          bounds: frame, alpha: alpha, pid: pid ?? servicePID)
+    }
+
+    private func chromeSheet() -> W { W(id: sheet, owner: "Google Chrome", layer: 0, bounds: sheetFrame, alpha: 1, pid: 400) }
+
+    /// The verdict with a panel-service check that knows only `servicePID`, and how often it was asked.
+    private func panelVerdict(above: [W], sheets: Set<UInt32> = [], at point: CGPoint? = nil,
+                              hit: UInt32? = nil) -> (WorkspaceInputCover.Verdict, Int) {
+        var asked = 0
+        let v = WorkspaceInputCover.verdict(
+            target: target, targetFrame: targetFrame, at: point ?? inside, above: above, ownSheets: sheets,
+            displays: [display], isFilePanelService: { asked += 1; return $0 == self.servicePID }, hitTest: { hit })
+        return (v, asked)
+    }
+
+    func testThePanelServiceWindowOverAPanelShownInItsOwnPaneIsPartOfIt() {
+        // The app's "Open" window is the target; the service's window sits directly on it.
+        let (v, asked) = panelVerdict(above: [service(70, targetFrame)])
+        XCTAssertEqual(v, .clear)
+        XCTAssertEqual(asked, 1)
+    }
+
+    func testThePanelServiceWindowOverTheTargetsOwnSheetIsPartOfIt() {
+        // Chrome: the browser window is the target, its untitled sheet is drawn in the pane, and
+        // the service's window sits directly on the sheet.
+        let (v, _) = panelVerdict(above: [service(70, sheetFrame), chromeSheet()], sheets: [sheet], at: inSheet)
+        XCTAssertEqual(v, .clear)
+    }
+
+    func testWithoutThePanelServiceCheckTheSheetPressIsRefused() {
+        // The QA 9000025 failure: the service window counted as a cover (the default check says never).
+        let v = WorkspaceInputCover.verdict(target: target, targetFrame: targetFrame, at: inSheet,
+                                            above: [service(70, sheetFrame), chromeSheet()],
+                                            ownSheets: [sheet], displays: [display], hitTest: { nil })
+        XCTAssertEqual(v, .covered(by: 70, cache: sheetFrame))
+    }
+
+    func testAPanelServiceWindowWithAnythingInBetweenStillCovers() {
+        let between = W(id: 55, owner: "Notes", layer: 0, bounds: CGRect(x: 0, y: 0, width: 10, height: 10), alpha: 1)
+        XCTAssertEqual(panelVerdict(above: [service(70, targetFrame), between]).0, .covered(by: 70, cache: targetFrame))
+        XCTAssertEqual(panelVerdict(above: [service(70, sheetFrame), between, chromeSheet()], sheets: [sheet], at: inSheet).0,
+                       .covered(by: 70, cache: sheetFrame))
+    }
+
+    func testAPanelServiceWindowOverAWindowThatIsntTheTargetsSheetStillCovers() {
+        // Another app's panel over another app's window overlapping the target, or over a window
+        // of the same frame as a sheet that isn't one of the target's sheets.
+        let other = CGRect(x: 600, y: 300, width: 500, height: 400)
+        let (v, asked) = panelVerdict(above: [service(70, other), W(id: 81, owner: "TextEdit", layer: 0, bounds: other, alpha: 1)])
+        XCTAssertEqual(v, .covered(by: 70, cache: other))
+        XCTAssertEqual(asked, 0, "the process isn't even looked up")
+        XCTAssertEqual(panelVerdict(above: [service(70, sheetFrame), chromeSheet()], sheets: [], at: inSheet).0,
+                       .covered(by: 70, cache: sheetFrame))
+    }
+
+    func testAPanelServiceWindowOfAnotherFrameStillCovers() {
+        let off = targetFrame.offsetBy(dx: 2, dy: 0)
+        let (v, asked) = panelVerdict(above: [service(70, off)])
+        XCTAssertEqual(v, .covered(by: 70, cache: off))
+        XCTAssertEqual(asked, 0)
+        // Within a point is the same frame (the window server rounds).
+        XCTAssertEqual(panelVerdict(above: [service(70, targetFrame.insetBy(dx: 0.5, dy: 0.5))]).0, .clear)
+    }
+
+    func testAWindowOfTheRightShapeFromAnotherProcessStillCovers() {
+        // Same place, same layer, directly on the target: not the verified service, so a cover.
+        let (v, asked) = panelVerdict(above: [service(70, targetFrame, pid: 666)])
+        XCTAssertEqual(v, .covered(by: 70, cache: targetFrame))
+        XCTAssertEqual(asked, 1)
+    }
+
+    func testThePanelServicesMenusAndHiddenOrUnnumberedWindowsStillCover() {
+        // Its pop-up menus are above the normal layer; a hidden, unnumbered or ownerless window is never part of it.
+        let menu = CGRect(x: 600, y: 300, width: 200, height: 300)
+        XCTAssertEqual(panelVerdict(above: [service(71, menu, layer: 101), service(70, targetFrame)], at: CGPoint(x: 650, y: 350)).0,
+                       .covered(by: 71, cache: menu))
+        XCTAssertEqual(panelVerdict(above: [service(0, targetFrame)]).0, .covered(by: 0, cache: targetFrame))
+        XCTAssertEqual(panelVerdict(above: [service(70, targetFrame, pid: -1)]).0, .covered(by: 70, cache: targetFrame))
+        // Transparent: not a cover, and not part of the target either (the press goes by the rest).
+        XCTAssertEqual(panelVerdict(above: [service(70, targetFrame, alpha: 0)]).1, 0)
+    }
+
+    func testAWindowOverThePanelStillCovers() {
+        // A notification banner over the panel: the panel is part of the target, the banner isn't.
+        let banner = W(id: 90, owner: "NotificationCenter", layer: 0, bounds: CGRect(x: 650, y: 350, width: 300, height: 80), alpha: 1)
+        let (v, _) = panelVerdict(above: [banner, service(70, targetFrame)], at: CGPoint(x: 700, y: 380))
+        XCTAssertEqual(v, .covered(by: 90, cache: banner.bounds))
+    }
+
+    func testUnderTheDockTheWindowServerMayHitThePanelServiceWindow() {
+        XCTAssertEqual(panelVerdict(above: [dock, service(70, targetFrame)], hit: 70).0, .clear)
+        XCTAssertEqual(panelVerdict(above: [dock, service(70, targetFrame)], hit: 27).0,
+                       .covered(by: 27, cache: CGRect(x: 660, y: 360, width: 80, height: 80)))
+    }
+
+    func testOnlyAppKitsSealedPanelServiceExecutablePasses() {
+        let suffix = "/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelService"
+        let real = "/System/Library/Frameworks/AppKit.framework/Versions/C" + suffix
+        XCTAssertTrue(WorkspaceInputCover.isFilePanelServicePath(real))
+        XCTAssertTrue(WorkspaceInputCover.isFilePanelServicePath("/System/Library/Frameworks/AppKit.framework/Versions/A" + suffix))
+        for path in [
+            "", "/Applications/Fake.app/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelService",
+            "/System/Volumes/Data/Users/x/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelService",
+            "/System/Volumes/Data/System/Library/Frameworks/AppKit.framework/Versions/C" + suffix,
+            "/System/Library/Frameworks/AppKit.framework/Versions/" + suffix,
+            "/System/Library/Frameworks/AppKit.framework/Versions/.." + suffix,
+            "/System/Library/Frameworks/AppKit.framework/Versions/C/../../../../Users/x" + suffix,
+            real + "-copy", real.uppercased(),
+        ] {
+            XCTAssertFalse(WorkspaceInputCover.isFilePanelServicePath(path), path)
+        }
+    }
+
+    func testTheSignatureRequirementParsesAndOtherProcessesFailIt() {
+        var requirement: SecRequirement?
+        XCTAssertEqual(SecRequirementCreateWithString(WorkspaceInputCover.filePanelServiceRequirement as CFString, [], &requirement),
+                       errSecSuccess)
+        // This test process isn't the panel service; nor are pids that name no process.
+        XCTAssertFalse(WindowWorkspaceEngine.isFilePanelService(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertFalse(WindowWorkspaceEngine.isFilePanelService(0))
+        XCTAssertFalse(WindowWorkspaceEngine.isFilePanelService(-1))
+        XCTAssertFalse(WindowWorkspaceEngine.isFilePanelService(1), "launchd is Apple's, but not the panel service")
+    }
 }

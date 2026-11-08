@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Security
 import CoreImage
 import CoreMedia
 import Metal
@@ -448,6 +449,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var topmostCache: [UInt32: (at: TimeInterval, rect: CGRect, ok: Bool)] = [:]
     /// Display-wide surfaces already logged (`noteDisplayWideSurface`), under `inputLock`.
     private var loggedSurfaces: Set<String> = []
+    /// Input checks already logged (`noteCover`), by target and verdict.
+    private var loggedCovers: Set<String> = []
 
     /// A composited frame (engine queue). The sender hops to its own queue.
     var deliverFrame: ((CVPixelBuffer) -> Void)?
@@ -1634,13 +1637,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let above = info.compactMap(WorkspaceInputCover.window(from:))
         let displays = Self.activeDisplayBounds()
         var asked: UInt32??
+        let targetFrame = Self.currentFrame(windowID)
+        let ownSheets = sheetCovers[windowID] ?? []
+        var panelServiceAsked = false
         let verdict = WorkspaceInputCover.verdict(
-            target: windowID, targetFrame: Self.currentFrame(windowID), at: point, above: above,
-            ownSheets: sheetCovers[windowID] ?? [], displays: displays,
+            target: windowID, targetFrame: targetFrame, at: point, above: above,
+            ownSheets: ownSheets, displays: displays,
+            isFilePanelService: { panelServiceAsked = true; return Self.isFilePanelService($0) },
             hitTest: { let hit = Self.windowServerHit(at: point); asked = .some(hit); return hit })
         if asked != nil, let surface = above.first(where: { $0.bounds.contains(point)
                                                             && WorkspaceInputCover.isDisplayWideSurface($0, at: point, displays: displays) }) {
             noteDisplayWideSurface(surface)
+        }
+        if panelServiceAsked || ({ if case .covered = verdict { return true }; return false })() {
+            noteCover(target: windowID, targetFrame: targetFrame, ownSheets: ownSheets, above: above, at: point, verdict: verdict)
         }
         // Cached only as "covered here" or "fine near here"; outside the target (or off
         // screen) is never cached, so it is re-checked every time.
@@ -1653,6 +1663,63 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             topmostCache[windowID] = nil
         }
         return verdict == .clear
+    }
+
+    /// A process instance: its pid and start time, so a reused pid is a different instance.
+    private struct ProcessInstance: Hashable { var pid: Int32; var sec: UInt64; var usec: UInt64 }
+    private static let panelServiceLock = NSLock()
+    nonisolated(unsafe) private static var panelServiceVerdicts: [ProcessInstance: Bool] = [:]
+
+    /// Whether `pid` is the system Open/Save panel service: its executable is AppKit's copy on the
+    /// sealed system volume and its signature meets Apple's requirement for that identifier.
+    /// Remembered per process instance (pid and start time), and only when the instance is
+    /// unchanged after the check, so a pid reused meanwhile is never trusted.
+    static func isFilePanelService(_ pid: Int32) -> Bool {
+        guard pid > 0, let instance = processInstance(pid) else { return false }
+        if let known = panelServiceLock.withLock({ panelServiceVerdicts[instance] }) { return known }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        let path = length > 0 ? String(cString: buffer) : ""
+        let yes = WorkspaceInputCover.isFilePanelServicePath(path) && hasFilePanelServiceSignature(pid)
+        guard processInstance(pid) == instance else { return false }
+        panelServiceLock.withLock {
+            if panelServiceVerdicts.count > 64 { panelServiceVerdicts.removeAll() }
+            panelServiceVerdicts[instance] = yes
+        }
+        if yes { Log.info("workspace: pid \(pid) verified as the system Open/Save panel service") }
+        return yes
+    }
+
+    private static func processInstance(_ pid: Int32) -> ProcessInstance? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_pid == UInt32(pid) else { return nil }
+        return ProcessInstance(pid: pid, sec: info.pbi_start_tvsec, usec: info.pbi_start_tvusec)
+    }
+
+    private static func hasFilePanelServiceSignature(_ pid: Int32) -> Bool {
+        var code: SecCode?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid: pid] as CFDictionary, [], &code) == errSecSuccess,
+              let code else { return false }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(WorkspaceInputCover.filePanelServiceRequirement as CFString, [], &requirement)
+                == errSecSuccess, let requirement else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    /// Why a press was refused over a tiled window, or let into a panel-service window: logged
+    /// once per target and verdict, with window numbers, owners, layers and frames only (no titles
+    /// or contents), so a QA log shows the real window structure. Bounded.
+    private func noteCover(target: UInt32, targetFrame: CGRect?, ownSheets: Set<UInt32>,
+                           above: [WorkspaceInputCover.Window], at point: CGPoint, verdict: WorkspaceInputCover.Verdict) {
+        let key = "\(target)#\(verdict)"
+        guard !loggedCovers.contains(key) else { return }
+        if loggedCovers.count > 64 { loggedCovers.removeAll() }
+        loggedCovers.insert(key)
+        func r(_ f: CGRect?) -> String { f.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil" }
+        let near = above.suffix(6).map { "\($0.id)/\($0.owner)/pid\($0.pid)/L\($0.layer)/\(r($0.bounds))" }
+        Log.info("workspace: input check target=\(target) frame=\(r(targetFrame)) sheets=\(ownSheets.sorted()) "
+                 + "point=\(Int(point.x)),\(Int(point.y)) verdict=\(verdict) nearest-above(back last)=\(near)")
     }
 
     /// Each display-wide surface the window server decided for, logged once per owner and layer

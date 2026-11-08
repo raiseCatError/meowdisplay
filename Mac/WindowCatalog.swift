@@ -237,10 +237,14 @@ struct WindowGoneTracker: Sendable {
     }
 }
 
-/// Which on-screen windows are sheets of which window. A sheet is an untitled normal-layer
-/// window of the same app, ordered directly above its window and horizontally centred on it,
-/// starting inside it (attached under the title bar, or centred as on macOS 26 and later).
-/// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510).
+/// Which on-screen windows are sheets of which window. A sheet is a normal-layer window of the
+/// same app, ordered above its window and horizontally centred on it, starting inside it
+/// (attached under the title bar, or centred as on macOS 26 and later). Untitled, that shape is
+/// enough. Titled (an Open or Save panel shown as a sheet: "Open", "Save"), the app itself must
+/// confirm it through Accessibility (`confirmsTitled`); otherwise it is an ordinary window.
+/// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510), and a
+/// single-window capture of its window includes it (child windows), so a titled Open sheet
+/// showed in its window's pane while presses on it were refused as covered (QA 9000025).
 enum WindowSheetMatcher {
     struct Window: Equatable, Sendable {
         var id: UInt32
@@ -252,12 +256,14 @@ enum WindowSheetMatcher {
 
     /// `frontToBack`: on-screen windows in window-server order (CGWindowList order).
     /// Returns sheet ids by the id of the window they belong to.
-    static func sheets(frontToBack: [Window]) -> [UInt32: [UInt32]] {
+    /// `confirmsTitled(sheet, window)` is asked only for a titled window of sheet shape that sits on
+    /// the next window of its app below it; never for untitled ones.
+    static func sheets(frontToBack: [Window], confirmsTitled: (Window, Window) -> Bool = { _, _ in false }) -> [UInt32: [UInt32]] {
         var parentOf: [UInt32: UInt32] = [:]
-        for (i, w) in frontToBack.enumerated() where isSheetShaped(w) {
+        for (i, w) in frontToBack.enumerated() where isSheetSized(w) {
             // Its window: the next window of the same app below it that it sits on.
             guard let parent = frontToBack[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.id != w.id }),
-                  sits(w.frame, on: parent.frame) else { continue }
+                  sits(w.frame, on: parent.frame), isUntitled(w) || confirmsTitled(w, parent) else { continue }
             parentOf[w.id] = parent.id
         }
         // A sheet on a sheet (an alert over a Save panel) belongs to the same window. Front-most first.
@@ -271,13 +277,73 @@ enum WindowSheetMatcher {
         return result
     }
 
-    static func isSheetShaped(_ w: Window) -> Bool {
-        w.layer == 0 && (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty && w.frame.width >= 40 && w.frame.height >= 30
-    }
+    static func isSheetShaped(_ w: Window) -> Bool { isSheetSized(w) && isUntitled(w) }
+
+    static func isSheetSized(_ w: Window) -> Bool { w.layer == 0 && w.frame.width >= 40 && w.frame.height >= 30 }
+
+    static func isUntitled(_ w: Window) -> Bool { (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
 
     static func sits(_ sheet: CGRect, on window: CGRect) -> Bool {
         abs(sheet.midX - window.midX) <= 3 && sheet.width < window.width + 1
             && sheet.minY > window.minY && sheet.minY < window.maxY - 20
+    }
+}
+
+/// Whether the app confirms a titled window as a sheet of its window, through Accessibility: of
+/// its Accessibility windows exactly one has the window's frame, and that one has exactly one
+/// child of role `AXSheet` at the titled window's frame. Without Accessibility trust, on a timeout
+/// or any ambiguity, no. Confirmations are remembered per window pair (window numbers aren't
+/// reused while listed); refusals for 2 s, as a new sheet can appear before its element does.
+enum SheetConfirmation {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var known: [String: (at: TimeInterval, yes: Bool)] = [:]
+
+    static func confirms(pid: Int32, sheet: UInt32, sheetFrame: CGRect, window: UInt32, windowFrame: CGRect) -> Bool {
+        let key = "\(pid)|\(sheet)|\(window)"
+        let now = ProcessInfo.processInfo.systemUptime
+        if let k = lock.withLock({ known[key] }), k.yes || now - k.at < 2 { return k.yes }
+        let (yes, why) = ask(pid: pid, sheetFrame: sheetFrame, windowFrame: windowFrame)
+        let first = lock.withLock { () -> Bool in
+            let first = known[key] == nil
+            if known.count > 128 { known = known.filter { $0.value.yes || now - $0.value.at < 2 } }
+            known[key] = (now, yes)
+            return first
+        }
+        if first { Log.info("workspace: titled window \(sheet) over \(window) \(yes ? "confirmed as its sheet" : "not a sheet (\(why))") by Accessibility") }
+        return yes
+    }
+
+    private static func ask(pid: Int32, sheetFrame: CGRect, windowFrame: CGRect) -> (Bool, String) {
+        guard AXIsProcessTrusted() else { return (false, "no Accessibility trust") }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        guard let windows = elements(app, kAXWindowsAttribute) else { return (false, "no windows") }
+        let parents = windows.prefix(64).filter { frame($0).map { WindowCloser.framesMatch($0, windowFrame) } ?? false }
+        guard parents.count == 1, let parent = parents.first else { return (false, "\(parents.count) windows at its frame") }
+        let sheets = (elements(parent, kAXChildrenAttribute) ?? []).prefix(256).filter { child in
+            var role: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role) == .success,
+                  role as? String == kAXSheetRole else { return false }
+            return frame(child).map { WindowCloser.framesMatch($0, sheetFrame) } ?? false
+        }
+        return sheets.count == 1 ? (true, "") : (false, "\(sheets.count) sheets at its frame")
+    }
+
+    private static func elements(_ e: AXUIElement, _ attribute: String) -> [AXUIElement]? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, attribute as CFString, &value) == .success else { return nil }
+        return value as? [AXUIElement]
+    }
+
+    private static func frame(_ e: AXUIElement) -> CGRect? {
+        var p: CFTypeRef?, s: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXPositionAttribute as CFString, &p) == .success,
+              AXUIElementCopyAttributeValue(e, kAXSizeAttribute as CFString, &s) == .success,
+              let p, let s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero, size = CGSize.zero
+        AXValueGetValue(p as! AXValue, .cgPoint, &origin)   // swiftlint:disable:this force_cast
+        AXValueGetValue(s as! AXValue, .cgSize, &size)      // swiftlint:disable:this force_cast
+        return size.width > 0 && size.height > 0 ? CGRect(origin: origin, size: size) : nil
     }
 }
 
@@ -375,7 +441,11 @@ enum WindowCatalogBuilder {
                                              layer: (info[kCGWindowLayer as String] as? Int) ?? 0)
         }
         var result: [UInt32: [AttachedSheet]] = [:]
-        for (parent, ids) in WindowSheetMatcher.sheets(frontToBack: order) where listed.contains(parent) {
+        let sheets = WindowSheetMatcher.sheets(frontToBack: order) { sheet, window in
+            listed.contains(window.id) && SheetConfirmation.confirms(pid: sheet.pid, sheet: sheet.id, sheetFrame: sheet.frame,
+                                                                     window: window.id, windowFrame: window.frame)
+        }
+        for (parent, ids) in sheets where listed.contains(parent) {
             result[parent] = ids.compactMap { id in
                 guard let sc = scByID[id] else { return nil }
                 return AttachedSheet(windowID: id, frame: sc.frame, scWindow: sc)

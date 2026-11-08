@@ -39,6 +39,46 @@ final class WindowSheetTests: XCTestCase {
         XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, sheet, front, back]), [2: [4, 3]], "front-most first")
     }
 
+    // MARK: Titled sheets (an Open or Save panel shown as a sheet), QA 9000025
+
+    /// Measured on macOS 27 (probe, 2026-11-09): a 900x632 window at (300,248) and its Open sheet
+    /// 880x448 at (310,340), titled "Open" even when the panel's title is set empty.
+    private let window = WindowSheetMatcherWindow.make(18024, CGRect(x: 300, y: 248, width: 900, height: 632), "Upload probe")
+    private let openSheet = WindowSheetMatcherWindow.make(18026, CGRect(x: 310, y: 340, width: 880, height: 448), "Open")
+
+    func testATitledSheetIsASheetOnlyWhenTheAppConfirmsIt() {
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]), [:], "unconfirmed: an ordinary window")
+        var asked: [(UInt32, UInt32)] = []
+        let confirmed = WindowSheetMatcher.sheets(frontToBack: [openSheet, window]) { s, p in asked.append((s.id, p.id)); return true }
+        XCTAssertEqual(confirmed, [18024: [18026]])
+        XCTAssertEqual(asked.map(\.0), [18026])
+        XCTAssertEqual(asked.map(\.1), [18024], "asked about the window it sits on")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]) { _, _ in false }, [:])
+    }
+
+    func testOnlyTitledWindowsOfSheetShapeOnTheirWindowAreEverAskedAbout() {
+        var asked = 0
+        let confirm: (WindowSheetMatcher.Window, WindowSheetMatcher.Window) -> Bool = { _, _ in asked += 1; return true }
+        let untitled = WindowSheetMatcherWindow.make(5, CGRect(x: 310, y: 340, width: 880, height: 448), "")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitled, window], confirmsTitled: confirm), [18024: [5]])
+        let offCentre = WindowSheetMatcherWindow.make(6, CGRect(x: 320, y: 340, width: 600, height: 300), "Open")
+        let otherApp = WindowSheetMatcher.Window(id: 7, pid: 99, frame: openSheet.frame, title: "Open", layer: 0)
+        let floating = WindowSheetMatcher.Window(id: 8, pid: 10, frame: openSheet.frame, title: "Open", layer: 3)
+        let tiny = WindowSheetMatcherWindow.make(9, CGRect(x: 740, y: 340, width: 20, height: 20), "Open")
+        for c in [offCentre, otherApp, floating, tiny] {
+            XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [c, window], confirmsTitled: confirm), [:], "window \(c.id)")
+        }
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testAnAlertOnAConfirmedSaveSheetBelongsToTheSameWindow() {
+        let save = WindowSheetMatcherWindow.make(11, CGRect(x: 565, y: 473, width: 370, height: 182), "Save")
+        let alert = WindowSheetMatcherWindow.make(12, CGRect(x: 600, y: 500, width: 300, height: 120), "")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, save, window]) { _, _ in true }, [18024: [12, 11]])
+        // Unconfirmed Save sheet: the alert is its sheet, but neither belongs to the window.
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, save, window]), [11: [12]])
+    }
+
     func testTheCompositorDrawsTheSheetWhereItSitsOnTheWindow() throws {
         let compositor = try XCTUnwrap(WorkspaceCompositor())
         compositor.resize(to: CGSize(width: 800, height: 600))
@@ -77,5 +117,11 @@ final class WindowSheetTests: XCTestCase {
         let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
         let p = base + y * CVPixelBufferGetBytesPerRow(buffer) + x * 4
         return (Double(p[0]), Double(p[1]), Double(p[2]))
+    }
+}
+
+private enum WindowSheetMatcherWindow {
+    static func make(_ id: UInt32, _ frame: CGRect, _ title: String) -> WindowSheetMatcher.Window {
+        WindowSheetMatcher.Window(id: id, pid: 10, frame: frame, title: title, layer: 0)
     }
 }
