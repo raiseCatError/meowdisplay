@@ -1537,6 +1537,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let verdict = WorkspaceInputCover.verdict(
             target: windowID, targetFrame: Self.currentFrame(windowID), at: point, above: above,
             ownSheets: sheetCovers[windowID] ?? [], displays: displays,
+            isFilePanelService: Self.isFilePanelService,
             hitTest: { let hit = Self.windowServerHit(at: point); asked = .some(hit); return hit })
         if asked != nil, let surface = above.first(where: { $0.bounds.contains(point)
                                                             && WorkspaceInputCover.isDisplayWideSurface($0, at: point, displays: displays) }) {
@@ -1553,6 +1554,25 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             topmostCache[windowID] = nil
         }
         return verdict == .clear
+    }
+
+    /// Whether `pid` runs the system Open/Save panel service (by its executable under /System).
+    /// Remembered per pid: a pid isn't reused while its window is listed.
+    private static let panelServiceLock = NSLock()
+    nonisolated(unsafe) private static var panelServicePIDs: [Int32: Bool] = [:]
+    static func isFilePanelService(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if let known = panelServiceLock.withLock({ panelServicePIDs[pid] }) { return known }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        let path = length > 0 ? String(cString: buffer) : ""
+        let yes = WorkspaceInputCover.isFilePanelServicePath(path)
+        panelServiceLock.withLock {
+            if panelServicePIDs.count > 64 { panelServicePIDs.removeAll() }
+            panelServicePIDs[pid] = yes
+        }
+        if yes { Log.info("workspace: input allowed into the system Open/Save panel over its window (pid \(pid))") }
+        return yes
     }
 
     /// Each display-wide surface the window server decided for, logged once per owner and layer

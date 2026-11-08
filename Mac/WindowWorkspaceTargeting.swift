@@ -722,6 +722,8 @@ enum WorkspaceInputCover {
         /// Global, top-left origin.
         var bounds: CGRect
         var alpha: Double
+        /// The owning process (`kCGWindowOwnerPID`), -1 when unknown (never a file-panel companion).
+        var pid: Int32 = -1
     }
 
     enum Verdict: Equatable {
@@ -742,10 +744,16 @@ enum WorkspaceInputCover {
     ///   - displays: the active displays' bounds (global, top-left origin).
     ///   - hitTest: the window a mouse-down at `point` would hit, nil when unknown. Asked only
     ///     when every window over the point is a display-wide surface.
+    ///   - isFilePanelService: whether a process is the system Open/Save panel service
+    ///     (see `filePanelCompanion`). Defaults to never.
     static func verdict(target: UInt32, targetFrame: CGRect?, at point: CGPoint, above: [Window],
-                        ownSheets: Set<UInt32>, displays: [CGRect], hitTest: () -> UInt32?) -> Verdict {
+                        ownSheets: Set<UInt32>, displays: [CGRect],
+                        isFilePanelService: (Int32) -> Bool = { _ in false },
+                        hitTest: () -> UInt32?) -> Verdict {
+        let companion = filePanelCompanion(targetFrame: targetFrame, above: above, isFilePanelService: isFilePanelService)
         let covering = above.filter {
-            !ownSheets.contains($0.id) && $0.alpha > 0.01 && $0.owner != "Window Server" && $0.bounds.contains(point)
+            !ownSheets.contains($0.id) && $0.id != companion
+                && $0.alpha > 0.01 && $0.owner != "Window Server" && $0.bounds.contains(point)
         }
         if let cover = covering.first(where: { !isDisplayWideSurface($0, at: point, displays: displays) }) {
             return .covered(by: cover.id, cache: cover.bounds)
@@ -761,6 +769,42 @@ enum WorkspaceInputCover {
         return .clear
     }
 
+    /// How far a file-panel companion's frame may be from the target's, in points.
+    static let companionTolerance: CGFloat = 1
+
+    /// An Open/Save panel (`NSOpenPanel`/`NSSavePanel`, Chrome's upload chooser) is two windows
+    /// (RESEARCH_TEMPORARY_DIALOGS.md): the app's titled panel window, and over it, at the same
+    /// frame, the window of `com.apple.appkit.xpc.openAndSavePanelService` that draws the file
+    /// browser. A press on the app's panel window lands on the service's window, so without this
+    /// every press in the panel was refused as covered (QA 9000025: the chooser showed, nothing
+    /// in it could be clicked).
+    ///
+    /// The service's window is part of the target only when all of these hold; anything else over
+    /// the target still covers it:
+    /// - it is the window *directly* above the target (`above` is front to back, so the last one),
+    /// - its process is the sealed system panel service (`isFilePanelService`, checked by
+    ///   executable path under /System, never by name),
+    /// - it is a normal-layer, visible window,
+    /// - its frame is the target's on-screen frame (within `companionTolerance`).
+    static func filePanelCompanion(targetFrame: CGRect?, above: [Window], isFilePanelService: (Int32) -> Bool) -> UInt32? {
+        guard let targetFrame, let w = above.last, w.id != 0, w.pid > 0, w.layer == 0, w.alpha > 0.01 else { return nil }
+        let t = companionTolerance
+        guard abs(w.bounds.minX - targetFrame.minX) <= t, abs(w.bounds.minY - targetFrame.minY) <= t,
+              abs(w.bounds.width - targetFrame.width) <= t, abs(w.bounds.height - targetFrame.height) <= t,
+              isFilePanelService(w.pid) else { return nil }
+        return w.id
+    }
+
+    /// The panel service's bundle, as it appears in its executable's path.
+    static let filePanelServiceBundle = "com.apple.appkit.xpc.openAndSavePanelService.xpc"
+
+    /// Whether an executable path is the system Open/Save panel service. Only under /System
+    /// (the sealed system volume), so no other process can pass by its name or bundle id.
+    static func isFilePanelServicePath(_ path: String) -> Bool {
+        path.hasPrefix("/System/") && path.contains("/\(filePanelServiceBundle)/")
+            && !path.contains("/../")
+    }
+
     /// One `CGWindowListCopyWindowInfo` entry. Nil only without bounds (nothing to place it by).
     /// A missing value takes the reading that keeps the window a cover: no number (never the
     /// target or its sheet), layer 0 (never a display-wide surface), an unknown owner, opaque.
@@ -770,7 +814,8 @@ enum WorkspaceInputCover {
         return Window(id: (info[kCGWindowNumber as String] as? UInt32) ?? 0,
                       owner: info[kCGWindowOwnerName as String] as? String ?? "",
                       layer: info[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
-                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1)
+                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1,
+                      pid: (info[kCGWindowOwnerPID as String] as? Int32) ?? -1)
     }
 
     /// `point` (global, top-left origin) in Cocoa's global coordinates, which the window
