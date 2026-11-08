@@ -1629,6 +1629,7 @@ struct AppOpeningFailureAlert: ViewModifier {
         case .controlEnded: return String(localized: "Control Ended")
         case .tileChanged: return String(localized: "The Tile Changed")
         case .disconnected: return String(localized: "Disconnected")
+        case .macLocked: return String(localized: "\(macName) Locked")
         }
     }
 
@@ -1652,6 +1653,8 @@ struct AppOpeningFailureAlert: ViewModifier {
                 : String(localized: "That tile changed or was removed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
         case .disconnected:
             return String(localized: "The connection to \(macName) ended while \(name) was opening.")
+        case .macLocked:
+            return String(localized: "\(macName) locked while \(name) was opening, so nothing was put here. Try again now that it’s unlocked.")
         }
     }
 }

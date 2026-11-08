@@ -967,7 +967,16 @@ final class WorkspaceModel: ObservableObject {
             if windowMode { requestCatalog() }
             return
         }
+        // Whatever was in progress ends as a cancel: a drag, a float being moved or docked (put
+        // back; the Mac draws it again), and an app opening (nothing is placed from an answer
+        // or listing that arrives after the unlock; a "which window" question and its titles go).
+        abandonDrag(reason: "macLocked")
         cancelDrag()
+        if var o = appOpening {
+            let step = o.macLocked()
+            appOpening = o
+            performAppOpening(step)
+        }
         appDrop = nil
         stagePeekOpen = false; launchpadOpen = false
         if overviewOpen { closeOverview() }

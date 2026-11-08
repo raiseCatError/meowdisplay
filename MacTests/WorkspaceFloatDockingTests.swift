@@ -289,6 +289,26 @@ final class WorkspaceFloatDockingTests: XCTestCase {
         XCTAssertNotNil(m.layout.float(back))
     }
 
+    /// The Mac locking while a float docks: it is put back as on a cancel, and the Mac draws it
+    /// again after the unlock (#217 with #215's abandonDrag).
+    @MainActor
+    func testTheMacLockingMidDockPutsTheFloatBack() throws {
+        var sent: [[String: Any]] = []
+        let m = connectedModel { sent.append($0) }
+        let (_, back, _) = try arranged(m)
+        let before = m.layout
+        m.beginFloatGesture(back)
+        let (switched, _) = moveThenCircle(m, back, around: CGPoint(x: 360, y: 330))
+        XCTAssertEqual(switched, .dock)
+        XCTAssertEqual(m.dockingFloat, back)
+        m.apply(.macLock(MacLockNotice(state: .locked)))
+        XCTAssertEqual(m.layout, before, "put back exactly")
+        XCTAssertNil(m.dockingFloat)
+        XCTAssertNil(m.drag)
+        XCTAssertNil(m.floatGesture)
+        XCTAssertFalse(m.liftedFloats.contains(back), "the Mac draws it again")
+    }
+
     /// Cancel, a release on no target, or the system cancelling the touch: the float comes back
     /// exactly as it was (frame, size, view, behind the same float), drawn by the Mac again,
     /// with no undo step.

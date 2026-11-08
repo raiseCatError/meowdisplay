@@ -278,6 +278,19 @@ final class WorkspaceAppOpeningTests: XCTestCase {
         XCTAssertEqual(o.advance(windows: [window(20, "com.apple.iCal")], now: 3, control: .allowed, tileUnchanged: true), .none)
     }
 
+    /// The Mac locking stops it, including a "which window" question (its titles go); a late
+    /// answer or listing places nothing. It can be tried again after the unlock.
+    func testTheMacLockingStopsIt() {
+        var o = start().0
+        XCTAssertEqual(o.macLocked(), .fail(.macLocked))
+        XCTAssertTrue(o.isFinished)
+        XCTAssertTrue(WorkspaceAppOpening.Failure.macLocked.retryable)
+        XCTAssertEqual(o.macLocked(), .none)
+        XCTAssertEqual(o.launchAnswered(ok: true, now: 2), .none)
+        XCTAssertEqual(o.advance(windows: [window(20, "com.apple.iCal")], now: 3, control: .allowed, tileUnchanged: true), .none)
+        XCTAssertNotEqual(o.phase, .placed(window(20, "com.apple.iCal")))
+    }
+
     func testControlFollowsTheSessionAndTheMacsDecision() {
         typealias C = WorkspaceAppOpening.Control
         XCTAssertEqual(C(live: true, state: .allowed), .allowed)

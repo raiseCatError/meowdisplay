@@ -146,6 +146,9 @@ struct WorkspaceAppOpening: Equatable, Sendable {
         /// The tile was removed or shows another window now.
         case tileChanged
         case disconnected
+        /// The Mac locked before the window could be placed: nothing is placed later, from an
+        /// answer or a listing that comes after the unlock.
+        case macLocked
 
         /// Worth asking again as it is (the same app, the same tile).
         var retryable: Bool { ![.tileChanged, .disconnected].contains(self) }
@@ -340,6 +343,9 @@ struct WorkspaceAppOpening: Equatable, Sendable {
 
     /// The connection ended while waiting.
     mutating func disconnected() -> Step { isFinished ? .none : fail(.disconnected) }
+
+    /// The Mac locked: waiting or asking which window (with its titles) ends.
+    mutating func macLocked() -> Step { isFinished ? .none : fail(.macLocked) }
 
     private mutating func beginLaunch(_ windows: [CatalogWindowItem], now: TimeInterval) {
         known = Set(windows.filter { $0.bundleID == bundleID }.map(\.id))
