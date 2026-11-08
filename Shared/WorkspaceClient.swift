@@ -190,7 +190,7 @@ enum WorkspaceEvent: Sendable {
     case displayThumbnail(displayID: UInt32, data: Data)
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
-    case launchResult(bundleID: String, ok: Bool)
+    case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
     /// Lock This Mac (PROTOCOL.md 6.16).
@@ -292,7 +292,7 @@ enum WorkspaceEvent: Sendable {
             return .appCatalog(revision: rev, apps: Array(apps))
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
-            return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
+            return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false, window: obj["window"] as? Bool)
         case WireMessage.windowCloseResult:
             guard let id = u32(obj, "window"), let r = str(obj, "result", 32).flatMap(WindowCloseResult.init(rawValue:)) else { return nil }
             return .closeResult(windowID: id, result: r)
@@ -372,7 +372,10 @@ enum WorkspaceRequests {
     }
 
     /// Opens an app on the Mac without activating it (needs control).
-    static func appLaunch(_ bundle: String) -> [String: Any] { ["type": WireMessage.appLaunch, "bundle": bundle] }
+    /// `reveal`: Show a Window on Mac (the Mac brings the app forward so it opens a window).
+    static func appLaunch(_ bundle: String, reveal: Bool = false) -> [String: Any] {
+        reveal ? ["type": WireMessage.appLaunch, "bundle": bundle, "reveal": true] : ["type": WireMessage.appLaunch, "bundle": bundle]
+    }
 
     /// Minimizes the real Mac window: only from its own explicit action.
     static func minimizeWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
@@ -893,11 +896,11 @@ final class WorkspaceModel: ObservableObject {
                 if let c = catalog, !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
             }
             requestIcons()
-        case .launchResult(let bundle, let ok):
+        case .launchResult(let bundle, let ok, let window):
             if !ok { launching.remove(bundle); launchFailed = bundle }
             if var o = appOpening, o.bundleID == bundle {
-                let step = o.launchAnswered(ok: ok, now: clock())
-                Log.info("pickerOpen: launch answered bundle=\(bundle) ok=\(ok)")
+                let step = o.launchAnswered(ok: ok, window: window, now: clock())
+                Log.info("pickerOpen: launch answered bundle=\(bundle) ok=\(ok) window=\(window.map(String.init) ?? "-")")
                 appOpening = o
                 performAppOpening(step)
             }
@@ -1765,11 +1768,11 @@ final class WorkspaceModel: ObservableObject {
     /// Opens an app on the Mac (explicit action; the Mac refuses it without control and never activates it).
     /// False: nothing was sent.
     @discardableResult
-    func launch(_ bundle: String) -> Bool {
+    func launch(_ bundle: String, reveal: Bool = false) -> Bool {
         guard inputAllowed() else { return false }
         launchFailed = nil
         launching.insert(bundle)
-        return send(WorkspaceRequests.appLaunch(bundle))
+        return send(WorkspaceRequests.appLaunch(bundle, reveal: reveal))
     }
 
     // MARK: Local fullscreen (receiver only)
@@ -2046,11 +2049,12 @@ final class WorkspaceModel: ObservableObject {
         beginAppOpening(bundleID: app.bundleID, name: app.name, tile: replacingTile, drop: nil, requestingControl: requestingControl)
     }
 
-    private func beginAppOpening(bundleID: String, name: String, tile: String?, drop: WorkspaceAppOpening.Drop?, requestingControl: Bool) {
+    private func beginAppOpening(bundleID: String, name: String, tile: String?, drop: WorkspaceAppOpening.Drop?, requestingControl: Bool,
+                                 reveal: Bool = false) {
         dismissAppOpening()
         let control = appOpeningControl
         let (o, step) = WorkspaceAppOpening.start(bundleID: bundleID, name: name, tile: tile,
-                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source }, drop: drop,
+                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source }, drop: drop, reveal: reveal,
                                                   control: requestingControl && control == .allowed ? .off : control,
                                                   windows: catalog?.windows ?? [], now: clock())
         Log.info("pickerOpen: requested bundle=\(bundleID) tile=\(tile ?? "-") drop=\(drop != nil) control=\(control) request=\(requestingControl)")
@@ -2073,15 +2077,17 @@ final class WorkspaceModel: ObservableObject {
         performAppOpening(step)
     }
 
-    /// Try Again after a failure: the same app, for the same tile.
-    func retryAppOpening() {
+    /// Try Again after a failure: the same app, for the same tile. `reveal`: Show a Window on Mac
+    /// (after no window came), which asks the Mac to bring the app forward.
+    func retryAppOpening(reveal: Bool = false) {
         guard let o = appOpening, case .failed(let f) = o.phase, f.retryable else { return }
-        Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue)")
+        Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue) reveal=\(reveal)")
         if let drop = o.drop {
-            beginAppOpening(bundleID: o.bundleID, name: o.name, tile: o.tile, drop: drop, requestingControl: false)
+            beginAppOpening(bundleID: o.bundleID, name: o.name, tile: o.tile, drop: drop, requestingControl: false, reveal: reveal)
             return
         }
-        openAppFromPicker(WorkspacePickerSearch.AppToOpen(bundleID: o.bundleID, name: o.name, running: false))
+        guard overviewOpen else { return }
+        beginAppOpening(bundleID: o.bundleID, name: o.name, tile: replacingTile, drop: nil, requestingControl: false, reveal: reveal)
     }
 
     /// Cancel, OK, or the picker closing: stop waiting; nothing is placed.
@@ -2123,7 +2129,7 @@ final class WorkspaceModel: ObservableObject {
             break
         case .launch:
             Log.info("pickerOpen: launch sent bundle=\(o.bundleID) tile=\(o.tile ?? "-") known=\(o.known.count)")
-            if !launch(o.bundleID) {
+            if !launch(o.bundleID, reveal: o.reveal) {
                 let next = o.launchNotSent()
                 appOpening = o
                 performAppOpening(next)

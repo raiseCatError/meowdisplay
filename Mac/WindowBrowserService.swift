@@ -84,14 +84,40 @@ struct AppIconSendLedger: Equatable {
 
 /// Whether to open an app a receiver asked for (`appLaunch`, tested): a bundle id, and the
 /// session's control when the message arrived. Control is asked again right before the app opens
-/// (`AppCatalog.launch`), and only an app the Mac lists or runs is ever opened.
+/// (`AppCatalog.launch`), and only an app the Mac lists or runs is ever opened. `reveal` (the
+/// person's Show a Window on Mac) opens it brought forward; otherwise it opens in the background.
 enum AppLaunchGate {
-    enum Decision: Equatable { case launch(String), refuse(String) }
+    enum Decision: Equatable { case launch(String, reveal: Bool), refuse(String) }
 
     static func decide(_ obj: [String: Any], inputGranted: Bool) -> Decision {
         guard let bundle = obj["bundle"] as? String, !bundle.isEmpty, bundle.count <= 255 else { return .refuse("bundle") }
         guard inputGranted else { return .refuse("control") }
-        return .launch(bundle)
+        return .launch(bundle, reveal: obj["reveal"] as? Bool == true)
+    }
+}
+
+/// What an `appLaunch` did. `window`: false when the app was already running without an on-screen
+/// window and the background open didn't give it one (it won't: macOS sends an app its reopen
+/// only when it's brought forward, measured 2026-11-09 with Ghostty); nil when unknown.
+struct AppLaunchOutcome: Equatable, Sendable {
+    var ok: Bool
+    var window: Bool? = nil
+}
+
+/// On-screen normal windows of an app, from a `CGWindowListCopyWindowInfo` listing.
+enum AppWindowPresence {
+    static func normalWindowCount(_ list: [[String: Any]], pid: Int32) -> Int {
+        list.filter { info in
+            guard (info[kCGWindowOwnerPID as String] as? Int32) == pid, (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dict) else { return false }
+            return frame.width >= 40 && frame.height >= 30
+        }.count
+    }
+
+    static func onScreenNormalWindowCount(pid: Int32) -> Int {
+        normalWindowCount((CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? [], pid: pid)
     }
 }
 
@@ -142,11 +168,11 @@ final class WindowBrowserService: @unchecked Sendable {
     var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
     /// Integration tests only.
     var includeOwnProcessForTesting = false
-    /// Opens an app without activating it, asking `stillAllowed` right before. Unit tests replace
-    /// it, so they never open a real app.
-    var launchApp: (_ bundle: String, _ stillAllowed: @escaping @Sendable () -> Bool,
-                    _ done: @escaping @Sendable (Bool) -> Void) -> Void = { bundle, stillAllowed, done in
-        AppCatalog.shared.launch(bundle, stillAllowed: stillAllowed, completion: done)
+    /// Opens an app (without activating it unless `reveal`), asking `stillAllowed` right before.
+    /// Unit tests replace it, so they never open a real app.
+    var launchApp: (_ bundle: String, _ reveal: Bool, _ stillAllowed: @escaping @Sendable () -> Bool,
+                    _ done: @escaping @Sendable (AppLaunchOutcome) -> Void) -> Void = { bundle, reveal, stillAllowed, done in
+        AppCatalog.shared.launch(bundle, reveal: reveal, stillAllowed: stillAllowed, completion: done)
     }
     /// A new listing shortly after a launch, so the app's window reaches the receiver (tests turn it off).
     var refreshesAfterLaunch = true
@@ -217,13 +243,16 @@ final class WindowBrowserService: @unchecked Sendable {
                 switch AppLaunchGate.decide(obj, inputGranted: inputGranted) {
                 case .refuse(let why):
                     Log.info("workspace: appLaunch refused (\(why))")
-                case .launch(let bundle):
-                    Log.info("workspace: appLaunch \(bundle) opening")
-                    launchApp(bundle, controlStillAllowed) { [weak self] ok in
+                case .launch(let bundle, let reveal):
+                    Log.info("workspace: appLaunch \(bundle) opening\(reveal ? " brought forward (Show a Window on Mac)" : "")")
+                    launchApp(bundle, reveal, controlStillAllowed) { [weak self] outcome in
                         self?.queue.async {
                             guard let self, !self.stopped else { return }
-                            Log.info("workspace: appLaunch \(bundle) ok=\(ok)")
-                            self.sendMessage?(["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok])
+                            let ok = outcome.ok
+                            Log.info("workspace: appLaunch \(bundle) ok=\(ok) window=\(outcome.window.map(String.init) ?? "-")")
+                            var reply: [String: Any] = ["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok]
+                            if let window = outcome.window { reply["window"] = window }
+                            self.sendMessage?(reply)
                             if self.refreshesAfterLaunch {
                                 self.queue.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refresh(sendCatalog: true) }
                             }
@@ -643,27 +672,39 @@ final class AppCatalog: @unchecked Sendable {
         for w in toCall { w(list, rev) }
     }
 
-    /// Opens an app the Mac listed, WITHOUT activating it (no focus steal). Already
-    /// running: a reopen, which makes most apps show a window. `stillAllowed` (the session's
-    /// control) is asked right before opening; false: nothing opens.
-    func launch(_ bundle: String, stillAllowed: @escaping @Sendable () -> Bool = { true },
-                completion: @escaping @Sendable (Bool) -> Void) {
+    /// How long after a background open of an app that was running without a window to look for one.
+    static let windowCheckDelay: TimeInterval = 1.5
+
+    /// Opens an app the Mac listed, WITHOUT activating it (no focus steal), unless `reveal`: the
+    /// person's Show a Window on Mac, which brings it forward (macOS then sends it a reopen, so an
+    /// app running without a window opens one). `stillAllowed` (the session's control) is asked
+    /// right before opening; false: nothing opens. An app that was running with no on-screen
+    /// window and still has none `windowCheckDelay` after a background open is reported
+    /// `window: false` (Ghostty, 2026-11-09: the background open succeeds and shows nothing).
+    func launch(_ bundle: String, reveal: Bool = false, stillAllowed: @escaping @Sendable () -> Bool = { true },
+                completion: @escaping @Sendable (AppLaunchOutcome) -> Void) {
         let path: String? = lock.withLock { entries[bundle]?.path }
         DispatchQueue.main.async {
             guard stillAllowed() else {
                 Log.info("workspace: launch \(bundle) not opened: control ended")
-                completion(false); return
+                completion(AppLaunchOutcome(ok: false)); return
             }
             let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first
             guard let url = path.map(URL.init(fileURLWithPath:)) ?? (runningApp != nil ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) : nil) else {
-                completion(false); return
+                completion(AppLaunchOutcome(ok: false)); return
             }
+            let windowless = runningApp.map { AppWindowPresence.onScreenNormalWindowCount(pid: $0.processIdentifier) == 0 } ?? false
             let config = NSWorkspace.OpenConfiguration()
-            config.activates = false
+            config.activates = reveal
             config.addsToRecentItems = false
             NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
                 if let error { Log.info("workspace: launch \(bundle) failed \(error.localizedDescription)") }
-                completion(app != nil && error == nil)
+                guard let app, error == nil else { return completion(AppLaunchOutcome(ok: false)) }
+                guard windowless, !reveal else { return completion(AppLaunchOutcome(ok: true)) }
+                let pid = app.processIdentifier
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.windowCheckDelay) {
+                    completion(AppLaunchOutcome(ok: true, window: AppWindowPresence.onScreenNormalWindowCount(pid: pid) > 0))
+                }
             }
         }
     }
