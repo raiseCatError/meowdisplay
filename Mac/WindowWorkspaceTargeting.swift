@@ -207,6 +207,18 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     var canvas: CGSize = .zero
     /// Live window frames in global points, by window id.
     var windowFrames: [UInt32: CGRect] = [:]
+    /// What each window's capture shows, when it is more than the window: its rectangle relative
+    /// to the window's top-left, in points (`WindowCaptureExtent`). A window with a sheet hanging
+    /// past its edge is captured with the sheet, so the picture is larger than the window; the
+    /// pane draws that picture and maps input through this same rectangle, never the window's.
+    var contentExtents: [UInt32: CGRect] = [:]
+
+    /// The global rectangle a window's pane shows: its capture's extent, or the window itself.
+    func drawnFrame(_ id: UInt32) -> CGRect? {
+        guard let frame = windowFrames[id] else { return nil }
+        guard let e = contentExtents[id] else { return frame }
+        return e.offsetBy(dx: frame.minX, dy: frame.minY)
+    }
     private(set) var activeTile: String?
     private(set) var hoveredTile: String?
     private(set) var boundTile: String?
@@ -221,7 +233,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     static let paneCursorLimit = 64
 
     func transform(for a: WorkspaceTileAssignment) -> TileContentTransform? {
-        guard let frame = windowFrames[a.windowID], frame.width > 0, frame.height > 0 else { return nil }
+        guard let frame = drawnFrame(a.windowID), frame.width > 0, frame.height > 0 else { return nil }
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
                                     rotation: a.rotation, fit: a.fit, zoom: a.zoom)
@@ -240,7 +252,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     }
 
     private func global(_ a: WorkspaceTileAssignment, _ p: WorkspacePoint, clamped: Bool) -> CGPoint? {
-        guard let t = transform(for: a), let frame = windowFrames[a.windowID] else { return nil }
+        guard let t = transform(for: a), let frame = drawnFrame(a.windowID) else { return nil }
         let q = WorkspacePoint(x: p.x * canvas.width, y: p.y * canvas.height)
         guard let s = clamped ? t.clampedSourcePoint(fromCanvas: q) : t.sourcePoint(fromCanvas: q) else { return nil }
         return CGPoint(x: frame.minX + s.x, y: frame.minY + s.y)
@@ -429,7 +441,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
         guard canvas.width > 0, canvas.height > 0 else { return nil }
         for a in frontToBack {
-            guard let frame = windowFrames[a.windowID], frame.contains(g), let t = transform(for: a) else { continue }
+            guard let frame = drawnFrame(a.windowID), frame.contains(g), let t = transform(for: a) else { continue }
             let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
             guard let visible = t.visibleRect, visible.contains(q) else { continue }
             // Where a float covers this pane, the cursor isn't drawn over the float.
@@ -451,7 +463,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         let centre = CGPoint(x: g.midX, y: g.midY)
         let candidates = keyboardTarget.map { [$0] } ?? frontToBack
         for a in candidates {
-            guard let frame = windowFrames[a.windowID], frame.contains(centre), let t = transform(for: a) else { continue }
+            guard let frame = drawnFrame(a.windowID), frame.contains(centre), let t = transform(for: a) else { continue }
             let corners = [CGPoint(x: g.minX, y: g.minY), CGPoint(x: g.maxX, y: g.minY),
                            CGPoint(x: g.minX, y: g.maxY), CGPoint(x: g.maxX, y: g.maxY)].map {
                 t.canvasPoint(fromSource: WorkspacePoint(x: $0.x - frame.minX, y: $0.y - frame.minY))
@@ -708,6 +720,43 @@ enum WorkspaceCaptureSizing {
     }
 }
 
+// MARK: - Capture extent
+
+/// What a single-window capture shows, relative to its window. Measured on macOS 27 (QA 9000026,
+/// probe 2026-11-09): `SCContentFilter(desktopIndependentWindow:)` captures the window *with its
+/// child windows*. A sheet that hangs past the window's bottom makes the content the union
+/// (a 1000x332 window with an 880x448 sheet: content 1000x480), and a capture of the sheet window
+/// alone returns the whole parent-and-sheet tree, not the sheet. Drawing that content into the
+/// window's (or the sheet's) frame squashed and shifted the picture while input used the real
+/// geometry: taps missed Cancel, and taps beside the drawn chooser landed in it.
+enum WindowCaptureExtent {
+    /// Points of slack between a capture's content size and a frame (rounding, a sheet animating).
+    static let tolerance: CGFloat = 2
+
+    /// The capture's rectangle relative to `window`'s top-left, or nil when it is the window
+    /// itself (or can't be explained: then the window, as before). `content`: the capture's
+    /// content size in points (`contentRect` / `contentScale`); `children`: global frames of the
+    /// window's own sheets.
+    static func extent(window: CGRect, children: [CGRect], content: CGSize?) -> CGRect? {
+        guard let c = content, c.width > 0, c.height > 0, window.width > 0, window.height > 0,
+              !matches(c, window.size) else { return nil }
+        let tree = children.reduce(window) { $0.union($1) }
+        guard tree != window, matches(c, tree.size) else { return nil }
+        return tree.offsetBy(dx: -window.minX, dy: -window.minY)
+    }
+
+    /// A sheet's own capture shows only the sheet (older systems): it may be drawn over its window.
+    /// When it shows the whole tree (macOS 27), the window's capture already has the sheet in place.
+    static func isSheetOnly(sheet: CGSize, content: CGSize?) -> Bool {
+        guard let c = content else { return false }
+        return matches(c, sheet)
+    }
+
+    static func matches(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+}
+
 // MARK: - Covered windows
 
 /// Whether input at a point may go to a tiled window: nothing else may be over it there, so a
@@ -769,7 +818,10 @@ enum WorkspaceInputCover {
         if let cover = covering.first(where: { !isDisplayWideSurface($0, at: point, displays: displays) }) {
             return .covered(by: cover.id, cache: cover.bounds)
         }
-        guard targetFrame?.contains(point) == true else { return .outside }
+        // On the target: its own frame, or one of its own sheets (or Open/Save panel companions)
+        // listed over it, which may hang past the window's edge.
+        let onPart = above.contains { partOfTarget.contains($0.id) && $0.alpha > 0.01 && $0.bounds.contains(point) }
+        guard targetFrame?.contains(point) == true || (targetFrame != nil && onPart) else { return .outside }
         let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
         guard !covering.isEmpty else { return .clear }
         // Only display-wide surfaces are over the point: the window server knows where they

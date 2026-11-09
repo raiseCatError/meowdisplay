@@ -414,6 +414,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var sheetCaptures: [String: WindowTileCapture] = [:]
     private var sheetFrames: [UInt32: CGRect] = [:]
     private var sheetFailed = Set<UInt32>()
+    /// Sheets whose own capture shows their whole window (macOS 27): the window's capture already
+    /// draws them in place, so no second capture is started or drawn (`WindowCaptureExtent`).
+    private var sheetInTree = Set<UInt32>()
+    /// Windows whose capture showed more than the window at the last compose (their extents).
+    private var lastExtents: [UInt32: CGRect] = [:]
+    /// When a capture's content last didn't match its window or any known sheet (refresh asked).
+    private var unexplainedExtentAt: TimeInterval = 0
     /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
     /// Per pane: restarts so far, when the next may start, when macOS paused it. Reset when the
@@ -612,8 +619,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard dirty || now - lastComposeAt >= 1 else { return }
         dirty = false
         lastComposeAt = now
+        updateCaptureExtents(now: now)
         let targetingNow = inputLock.withLock { targeting }
         var drawn: [String: Int] = [:]
+        var inTree: [(tile: String, sheet: UInt32)] = []
         // A lifted float isn't drawn (the receiver draws it under the finger); its view is echoed
         // once it is drawn again.
         let items = assignments.filter(\.isOnCanvas).map { a -> WorkspaceCompositor.Item in
@@ -622,14 +631,23 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             let state = tileState[a.tileID]
             var overlay: WorkspaceCompositor.Overlay?
             if let sheet = sheetCaptures[a.tileID], sheet.assignmentGeneration == a.assignmentGeneration,
-               let f = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.windowFrames[a.windowID] {
-                overlay = .init(frame: f.pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY), content: f.content)
+               let f = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.drawnFrame(a.windowID) {
+                if WindowCaptureExtent.isSheetOnly(sheet: rect.size, content: f.sourcePoints) {
+                    // Only while the sheet's stream is live: a closed sheet's stream turns suspended
+                    // and keeps its last frame (measured), which must not stay drawn.
+                    if Self.isLiveStatus(sheet.healthNow.lastStatus) {
+                        overlay = .init(frame: f.pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY), content: f.content)
+                    }
+                } else if f.sourcePoints != nil {
+                    inTree.append((a.tileID, sheet.windowID))
+                }
             }
             if frame != nil { drawn[a.tileID] = a.viewEpoch }
             return WorkspaceCompositor.Item(rect: a.rect, transform: targetingNow.transform(for: a), frame: frame?.pixels,
                                             sourceSize: .zero, dimmed: state == "offscreen" || state == "closed" || state == "paused",
                                             overlay: overlay, content: frame?.content)
         }
+        for (tile, sheet) in inTree { dropSheetInTree(tile: tile, sheet: sheet) }
         if let buffer = compositor.compose(items) {
             deliverFrame?(buffer)
             // The receiver holds its instant local zoom until a frame with its latest view is out.
@@ -1018,6 +1036,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// One sheet per tiled window (the front-most), at the tile's pixels per point, while its window streams.
     private func ensureSheetCaptures() {
+        let listedSheets = Set((snapshot?.sheets.values.flatMap { $0.map(\.windowID) }) ?? [])
+        sheetInTree.formIntersection(listedSheets)
         for (id, capture) in sheetCaptures {
             let a = assignments.first { $0.tileID == id }
             let want = a.flatMap { snapshot?.sheets[$0.windowID]?.first?.windowID }
@@ -1034,9 +1054,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments where a.displayID == nil && sheetCaptures[a.tileID] == nil && captures[a.tileID] != nil {
             guard let sheet = snapshot?.sheets[a.windowID]?.first, let window = sheet.scWindow,
-                  !sheetFailed.contains(sheet.windowID), Self.reserveBudget() else { continue }
+                  !sheetFailed.contains(sheet.windowID), !sheetInTree.contains(sheet.windowID),
+                  Self.reserveBudget() else { continue }
             let capture = WindowTileCapture(tileID: a.tileID, windowID: sheet.windowID, assignmentGeneration: a.assignmentGeneration)
             capture.onFrame = { [weak self] in self?.queue.async { self?.dirty = true } }
+            // A sheet closing suspends its stream (measured): redraw without it and relist now.
+            capture.onStatus = { [weak self] status in
+                guard !Self.isLiveStatus(status) else { return }
+                self?.queue.async { self?.dirty = true; self?.refreshSoon() }
+            }
             capture.onStop = { [weak self] _ in
                 self?.queue.async {
                     guard let self, self.sheetCaptures[a.tileID] === capture else { return }
@@ -1100,7 +1126,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func sourceFrame(_ a: WorkspaceTileAssignment) -> CGRect? {
         if let d = a.displayID { return inputLock.withLock { targeting.windowFrames[a.windowID] } ?? CGDisplayBounds(d) }
         guard let frame = catalog[a.windowID]?.frame else { return nil }
-        if let real = captures[a.tileID]?.latestFrame()?.sourcePoints, real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
+        // Not while a sheet is open on it: then a larger capture is the window with its sheet
+        // (`WindowCaptureExtent`), not Stage Manager's thumbnail.
+        if snapshot?.sheets[a.windowID]?.isEmpty ?? true,
+           let real = captures[a.tileID]?.latestFrame()?.sourcePoints, real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
             return CGRect(origin: frame.origin, size: real)
         }
         return frame
@@ -1111,7 +1140,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard let sourceRect = sourceFrame(a), sourceRect.width > 0, sourceRect.height > 0 else {
             return CGSize(width: max(2, (a.rect.width * canvas.width).rounded()), height: max(2, (a.rect.height * canvas.height).rounded()))
         }
-        let frame = sourceRect.size
+        // A window shown with its sheet is captured whole (the sheet past its edge too).
+        let frame = lastExtents[a.windowID]?.size ?? sourceRect.size
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         let t = TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
                                      rotation: a.rotation, fit: a.fit, zoom: a.zoom)
@@ -1472,6 +1502,62 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 self?.replyMenuPress(req: req, ok: ok, error: ok ? nil : "changed")
                 self?.refreshSoon()
             }
+        }
+    }
+
+    /// Each window's capture extent from the frame drawn now (`WindowCaptureExtent`), shared with
+    /// input under `inputLock`. A sheet closing shows here first (the next frame is the window
+    /// again, measured on the same frame the Mac drops it): cached cover verdicts for that window
+    /// are dropped and the catalog refreshed, so input follows the window at once.
+    private func updateCaptureExtents(now: TimeInterval) {
+        let frames = inputLock.withLock { targeting.windowFrames }
+        var extents: [UInt32: CGRect] = [:]
+        var unexplained = false
+        for a in assignments where a.displayID == nil {
+            guard let capture = captures[a.tileID], capture.assignmentGeneration == a.assignmentGeneration,
+                  let f = capture.latestFrame(), let window = frames[a.windowID] else { continue }
+            let children = snapshot?.sheets[a.windowID]?.map(\.frame) ?? []
+            if let e = WindowCaptureExtent.extent(window: window, children: children, content: f.sourcePoints) {
+                extents[a.windowID] = e
+            } else if let c = f.sourcePoints, !WindowCaptureExtent.matches(c, window.size), c.width <= window.width * 1.5 + 1 {
+                unexplained = true   // a sheet the catalog hasn't listed yet (or one animating)
+            }
+        }
+        guard extents != lastExtents else {
+            if unexplained, now - unexplainedExtentAt > 1 { unexplainedExtentAt = now; refreshSoon() }
+            return
+        }
+        let changed = Set(extents.keys).symmetricDifference(lastExtents.keys)
+            .union(extents.keys.filter { lastExtents[$0] != nil && lastExtents[$0] != extents[$0] })
+        lastExtents = extents
+        inputLock.withLock {
+            targeting.contentExtents = extents
+            for w in changed { topmostCache[w] = nil }
+        }
+        if !changed.isEmpty {
+            Log.info("workspace: capture extent changed windows=\(changed.sorted()) now=\(extents.mapValues { "\(Int($0.width))x\(Int($0.height))" })")
+            refreshSoon()
+            retuneCaptures()
+            sendState(force: true)
+        }
+    }
+
+    /// A sheet capture that shows its whole window: stop it, its window's capture has the sheet.
+    private func dropSheetInTree(tile: String, sheet: UInt32) {
+        guard let capture = sheetCaptures[tile], capture.windowID == sheet else { return }
+        if sheetInTree.insert(sheet).inserted {
+            Log.info("workspace: sheet \(sheet) is drawn by its window's capture; no separate sheet capture")
+        }
+        sheetCaptures[tile] = nil
+        Self.releaseBudget(1)
+        dirty = true
+        Task { await capture.stop() }
+    }
+
+    static func isLiveStatus(_ status: SCFrameStatus?) -> Bool {
+        switch status {
+        case .complete?, .idle?, .started?, nil: return true
+        default: return false
         }
     }
 
