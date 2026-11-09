@@ -130,4 +130,41 @@ final class PairingPromptModelTests: XCTestCase {
         XCTAssertEqual(accepted, 0)
     }
 
+    func testRefusedGrantIsVisibleOnlyForThePendingAttempt() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        model.noteRefusedGrant()
+        XCTAssertFalse(model.grantRefused)
+        let first = Task { @MainActor in await model.request(self.pending()) }
+        await Task.yield()
+        model.noteRefusedGrant()
+        model.noteRefusedGrant()
+        XCTAssertTrue(model.grantRefused)
+        XCTAssertNotNil(model.pending)
+        model.decide(accept: false)
+        let accepted = await first.value
+        XCTAssertFalse(accepted)
+        XCTAssertFalse(model.grantRefused)
+        let second = Task { @MainActor in await model.request(self.pending("peer-b")) }
+        await Task.yield()
+        XCTAssertFalse(model.grantRefused)
+        model.decide(accept: false)
+        _ = await second.value
+    }
+
+    func testRefusedGrantDoesNotPreventTimeoutOrAuthorizeLater() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 50_000_000)
+        var accepted = 0
+        model.onAccepted = { _ in accepted += 1 }
+        let attempt = Task { @MainActor in await model.request(self.pending()) }
+        await Task.yield()
+        model.noteRefusedGrant()
+        XCTAssertTrue(model.grantRefused)
+        let result = await attempt.value
+        XCTAssertFalse(result)
+        XCTAssertFalse(model.grantRefused)
+        model.decide(accept: true)
+        XCTAssertEqual(accepted, 0)
+        XCTAssertNil(model.pending)
+    }
+
 }
