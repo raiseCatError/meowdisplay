@@ -393,6 +393,7 @@ enum WindowCatalogBuilder {
             listed.contains(window.id) && SheetConfirmation.confirms(pid: sheet.pid, sheet: sheet.id, sheetFrame: sheet.frame,
                                                                      window: window.id, windowFrame: window.frame)
         }
+        noteUnmatchedSheets(order: order, matched: Set(sheets.values.flatMap { $0 }), listed: listed)
         for (parent, ids) in sheets where listed.contains(parent) {
             result[parent] = ids.compactMap { id in
                 guard let sc = scByID[id] else { return nil }
@@ -400,6 +401,28 @@ enum WindowCatalogBuilder {
             }
         }
         return result.filter { !$0.value.isEmpty }
+    }
+
+    nonisolated(unsafe) private static var unmatchedLogged = Set<UInt32>()
+    private static let unmatchedLock = NSLock()
+
+    /// Diagnostics: a titled window of sheet size that lies inside a listed window of its app but
+    /// wasn't taken as its sheet is logged once, with why (ids, frames and order; never titles).
+    private static func noteUnmatchedSheets(order: [WindowSheetMatcher.Window], matched: Set<UInt32>, listed: Set<UInt32>) {
+        func r(_ f: CGRect) -> String { "\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))" }
+        for (i, w) in order.enumerated() where WindowSheetMatcher.isSheetSized(w) && !WindowSheetMatcher.isUntitled(w)
+            && !matched.contains(w.id) {
+            guard let parent = order[(i + 1)...].first(where: { $0.pid == w.pid && listed.contains($0.id) && $0.frame.contains(w.frame) })
+            else { continue }
+            let first = unmatchedLock.withLock { unmatchedLogged.insert(w.id).inserted }
+            guard first else { continue }
+            if unmatchedLock.withLock({ unmatchedLogged.count }) > 256 { unmatchedLock.withLock { unmatchedLogged = [w.id] } }
+            let between = order[(i + 1)...].prefix { $0.id != parent.id }.filter { $0.pid == w.pid }
+                .map { "\($0.id)/L\($0.layer)/\(r($0.frame))\($0.frame.intersects(w.frame) ? "/overlaps" : "")" }
+            let sits = WindowSheetMatcher.sits(w.frame, on: parent.frame)
+            Log.info("workspace: titled window \(w.id) (\(r(w.frame))) inside \(parent.id) (\(r(parent.frame))) not taken as its sheet: "
+                     + "sits=\(sits) app windows between=\(between)")
+        }
     }
 
     /// Installed apps the receiver may ask to open: /Applications only,
