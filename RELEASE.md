@@ -1,21 +1,29 @@
 # Release process
 
-## Platform availability — November 2, 2026
+## Platform availability — MeowDisplay 2.1.0
 
 | Platform | Available version | Get it |
 | --- | --- | --- |
-| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
-| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
-| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
-| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+| Mac app · macOS 14+ · share or receive | **2.1.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.1.0) |
+| Receiver-only Mac app · macOS 12+ | **2.1.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.1.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed testing** (not part of 2.1) | [Join closed testing](https://meowdisplay.app/android/early-access) · Mac companion [2.0.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) |
 
 The main Mac app includes both sharing and receiving: share this Mac's display,
 or use this Mac as another Mac's display. The separate Receiver-only app is
-also available for Macs running macOS 12 or later. Android 2.0 requires the
-Mac 2.0 app.
+also available for Macs running macOS 12 or later. Android 2.0 works with the
+Mac app 2.0 and 2.1 (without the 2.1 features); see
+[COMPATIBILITY.md](COMPATIBILITY.md). The Mac 2.0 downloads stay at their
+`v2.0.0` URLs.
 
+This table and the README describe 2.1.0 as released. They reach `main`
+only through the promotion PR that `release-publish` opens after the Mac
+release is Latest and the stores step has run. `RELEASE_AUTO_PROMOTE` stays
+unset for 2.1.0: merge that PR by hand only once `v2.1.0` is the Latest
+GitHub release and 2.1.0 is live on the App Store (the stores step can finish
+while iOS is still waiting).
 
-MeowDisplay 2.0 is the stable release. The main Mac app includes sender and
+MeowDisplay 2.0 was the previous stable release. The main Mac app includes sender and
 receiver roles; the separate Receiver-only app remains available. The
 publication gate and historical release process are documented below.
 

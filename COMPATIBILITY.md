@@ -13,7 +13,14 @@ versions and download links are in
 
 MeowDisplay has receiving apps on iPhone, iPad, Android and Mac. The main Mac
 app both shares and receives; the separate Receiver-only app runs on macOS 12
-or later. Android 2.0 (closed testing) requires the Mac 2.0 app. All
+or later. Android 2.0 (closed testing) works with the Mac app 2.0 and later.
+The Mac's updater (Sparkle) has one feed, so it offers Mac 2.1 to every Mac
+2.0 install, including Macs used with Android, and Android 2.0 keeps working
+with it over the same protocol (pv 22, pairing 13). It doesn't get the 2.1
+features. While a Mac 2.1 is locked, it sends Android 2.0 no picture and
+accepts none of its input: the Android screen shows video off (dark) with no
+lock notice, can't show or operate the lock screen, and resumes once the Mac
+is unlocked at the Mac. All
 receivers negotiate the same shared wire protocol but have different
 platforms, release channels and capability limits.
 

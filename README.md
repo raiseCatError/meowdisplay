@@ -18,7 +18,7 @@ trackpad-style input, gestures and a keyboard.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+**[Download MeowDisplay 2.1 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
 
 <br>
 
@@ -42,24 +42,54 @@ or server in the middle.
 to check platform support, input styles, pricing, feature limits and trade-offs
 before deciding what fits your setup.
 
-## MeowDisplay 2.0 — official release
+## MeowDisplay 2.1
 
-MeowDisplay 2.0 is officially released, with iPhone and iPad available on the
-App Store. Distribution differs by platform as shown below.
+MeowDisplay 2.1 is out for Mac, iPhone and iPad. Android stays on 2.0 in
+closed testing. Distribution differs by platform as shown below.
 
-### Platform availability — November 2, 2026
+### Platform availability
 
 | Platform | Available version | Get it |
 | --- | --- | --- |
-| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
-| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
-| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Mac app · macOS 14+ · share or receive | **2.1.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.1.0) |
+| Receiver-only Mac app · macOS 12+ | **2.1.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.1.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
 | Android · Android 10+ | **2.0 closed testing** | [Request early access](https://meowdisplay.app/android/early-access) |
 
 The main Mac app includes both sharing and receiving: share this Mac's display,
 or use this Mac as another Mac's display. The separate Receiver-only app is
-also available for Macs running macOS 12 or later. Android 2.0 requires the
-Mac 2.0 app.
+also available for Macs running macOS 12 or later.
+
+Android 2.0 works with the Mac app 2.0 and later, including 2.1. The 2.1
+features below are on iPhone and iPad only for now, and with Mac 2.1 a locked
+Mac shows as a dark screen on Android until it's unlocked at the Mac. If you'd
+rather stay on Mac 2.0, it remains available:
+[MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg).
+
+## What's new in MeowDisplay 2.1
+
+- **Floating windows:** in Window view, a Mac window can float over your panes.
+  Move it, resize it, throw it at an edge to tuck it away, and add it back to
+  the layout when you're done. You can turn floating windows off in Settings.
+- **Fill Window on Mac** and **Restore Previous Size on Mac** for a window in a pane.
+- **Window view:** the window picker also opens apps that aren’t running,
+  pane titles are clearer, and closing a window on the Mac tidies the layout:
+  its tab or floating window goes away, and a pane whose only window closed
+  stays, empty, with Choose Window and Remove Pane.
+- **Mission Control and Stage Manager:** notices only on the windows they
+  pause, and Stage Manager switches no longer touch the Dock.
+- **Lock screen:** while the Mac is locked, MeowDisplay shows nothing and
+  accepts no input by default. The one exception is lock screen control: an
+  iPhone or iPad that already has control (Always Allow Requests, or control
+  granted before the Mac locked) can show macOS's own lock screen and type the
+  password there, and macOS checks it. Each device's Allow Lock Screen Control
+  switch turns this off. Lock Mac asks for control first.
+- **Controls:** the arrow keypad gets its own Shift, Option and Command, and
+  Open and Save choosers in a pane take presses where you tap.
+- **Zoom While Typing** keeps the typing location above the keyboard.
+- **Mac app:** new installs start in the Dock and menu bar, with a menu-bar
+  icon drawn from the MeowDisplay mark, and Wi-Fi connections over QUIC find
+  the Mac more reliably.
 
 
 ## What's new in MeowDisplay 2.0
@@ -483,15 +513,15 @@ More in [SECURITY.md](SECURITY.md) and the
 | **MeowDisplay** (the Mac app for sharing and receiving) | macOS 14 or later |
 | **MeowDisplay Receiver** (a spare Mac as a display) | macOS 12 or later |
 | **MeowDisplay** for iPhone and iPad | iOS / iPadOS 16.4 or later |
-| **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 sender required. Build requirements: [AndroidReceiver/README.md](AndroidReceiver/README.md); features: [PARITY.md](PARITY.md) |
+| **MeowDisplay** for Android (closed beta) | Android 10 or later; Mac 2.0 or later required. Build requirements: [AndroidReceiver/README.md](AndroidReceiver/README.md); features: [PARITY.md](PARITY.md) |
 
 Remote control of the Mac needs Accessibility permission; capturing a
 display needs Screen Recording.
 
 ## Install
 
-The links in [Platform availability](#platform-availability--november-2-2026)
-install stable 2.0. The main Mac app can share and receive; choose the separate
+The links in [Platform availability](#platform-availability)
+install stable 2.1. The main Mac app can share and receive; choose the separate
 Receiver-only app when that is all the Mac needs.
 
 **Mac, with Homebrew (optional):** signed and notarized, macOS 14 or later.
