@@ -19,11 +19,19 @@ module MeowRelease
       lines << ""
       lines << (sha ? "Candidate `#{sha[0, 12]}` on `#{state.data['branch']}` · mode **#{state.mode}**" : "No candidate yet on `#{state.data['branch']}`")
       lines << "Required for publication: #{state.required_platforms.map { |p| NAMES.fetch(p) }.join(', ')}"
+      unless state.excluded_platforms.empty?
+        lines << "Excluded from this release (not built, uploaded, submitted or published): " \
+                 "#{state.excluded_platforms.map { |p| NAMES.fetch(p) }.join(', ')}"
+      end
       lines << ""
       lines << "| Platform | Stage | Build | Source | Artifacts | Store status | Blockers |"
       lines << "| --- | --- | --- | --- | --- | --- | --- |"
       PLATFORMS.each do |name|
         record = state.platform(name)
+        if state.excluded_platforms.include?(name)
+          lines << "| #{NAMES.fetch(name)} | Excluded from this release | — | — | — | — | — |"
+          next
+        end
         required = state.required_platforms.include?(name) ? "" : " (not required)"
         lines << [
           "#{NAMES.fetch(name)}#{required}",
@@ -85,7 +93,7 @@ module MeowRelease
     # Things only a person can do, in the order they come up.
     def waiting_on_people(state)
       list = []
-      PLATFORMS.each do |name|
+      (PLATFORMS - state.excluded_platforms).each do |name|
         record = state.platform(name)
         Array(record["blockers"]).each { |b| list << "#{NAMES.fetch(name)}: #{b}" } if record["stage"] == "blocked"
         list << "#{NAMES.fetch(name)}: #{record['blockers']&.first || 'rejected'} — fix it, then push a new candidate" if record["stage"] == "rejected"

@@ -40,6 +40,15 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
+      - name: Android is part of this release
+        run: |
+          set -euo pipefail
+          # release-candidate.yml skips this workflow for an excluded platform;
+          # refuse here too, so nothing below can build or upload it.
+          if [ "$(scripts/release/meow-release builds android --config .github/release-config.json)" != true ]; then
+            echo "::error::Android is excluded from this release (excludedPlatforms): nothing to build or upload"
+            exit 1
+          fi
       - name: Environment is protected
         env:
           GH_TOKEN: ${{ github.token }}

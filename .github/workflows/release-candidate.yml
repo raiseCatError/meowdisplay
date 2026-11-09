@@ -4,6 +4,8 @@ name: Release candidate
 # candidate for every platform and builds it: the two Mac apps
 # (release-mac.yml), the iPhone/iPad app (release-ios.yml) and the Android
 # app (release-android.yml), each verified, signed and staged or uploaded.
+# A platform the release config excludes (`excludedPlatforms`, Android only)
+# is skipped entirely.
 # Nothing here publishes, submits for review or touches a release or tag:
 # the release monitor follows the stores, and release-publish.yml, behind
 # its approval, is the only publisher.
@@ -30,6 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.plan.outputs.version }}
       sha: ${{ steps.plan.outputs.sha }}
+      android: ${{ steps.plan.outputs.android }}
     steps:
       - name: Only from release/<version>
         run: |
@@ -70,7 +73,11 @@ jobs:
           fi
           scripts/release/release-state.sh "$version" init STATE --config .github/release-config.json --version "$version"
           scripts/release/release-state.sh "$version" candidate STATE --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --config .github/release-config.json
-          { echo "version=$version"; echo "sha=$GITHUB_SHA"; } >> "$GITHUB_OUTPUT"
+          # A platform the release config excludes (excludedPlatforms) is not
+          # built, uploaded or recorded at all.
+          android=$(scripts/release/meow-release builds android --config .github/release-config.json)
+          [ "$android" = true ] || echo "Android is excluded from $version: no Android build or Google Play upload." | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "version=$version"; echo "sha=$GITHUB_SHA"; echo "android=$android"; } >> "$GITHUB_OUTPUT"
 
   mac:
     needs: plan
@@ -94,6 +101,7 @@ jobs:
 
   android:
     needs: plan
+    if: needs.plan.outputs.android == 'true'
     uses: ./.github/workflows/release-android.yml
     permissions:
       contents: write

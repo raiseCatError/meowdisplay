@@ -26,7 +26,10 @@ module MeowRelease
 
     def tick
       monitor_ios if @state.required_platforms.include?("ios")
-      if @state.required_platforms.include?("android")
+      if @config.excluded?("android")
+        # Left out of this release: Google Play is neither read nor written.
+        note("android: excluded from this release (excludedPlatforms); nothing sent to Google Play")
+      elsif @state.required_platforms.include?("android")
         monitor_android
       elsif @config.android_testing_release?
         follow_android_testing
@@ -59,7 +62,7 @@ module MeowRelease
       # replace it.
       if build && obs.attached_build && obs.attached_build.to_s != build.to_s &&
          %i[in_review approved].include?(AppleReview.classify(obs.version_state))
-        if @config.ios_submit_automatically?
+        if @config.ios_submission_allowed?(version: @state.version)
           act("ios: cancel the review of superseded build #{obs.attached_build}") { @apple.cancel_review(@state.version) }
         else
           block("ios", "build #{obs.attached_build} of a superseded candidate is in review; cancel it in App Store Connect")
@@ -115,8 +118,9 @@ module MeowRelease
     end
 
     def submit_ios(build)
-      unless @config.ios_submit_automatically?
-        return block("ios", "build #{build} is ready: submit it for review in App Store Connect")
+      unless @config.ios_submission_allowed?(version: @state.version)
+        return block("ios", "build #{build} is ready: submit it for review in App Store Connect, or authorize it " \
+                            "by dispatching the release monitor with submit_ios=#{@state.version}")
       end
 
       # Look again right before submitting: a submission that went through
