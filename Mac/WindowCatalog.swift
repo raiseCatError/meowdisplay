@@ -452,7 +452,7 @@ enum WindowCatalogBuilder {
             listed.contains(window.id) && SheetConfirmation.confirms(pid: sheet.pid, sheet: sheet.id, sheetFrame: sheet.frame,
                                                                      window: window.id, windowFrame: window.frame)
         }
-        noteUnmatchedSheets(order: order, matched: Set(sheets.values.flatMap { $0 }), listed: listed)
+        noteUnmatchedSheets(order: order, matched: Set(sheets.filter { listed.contains($0.key) }.values.flatMap { $0 }), listed: listed)
         let frames = attachedSheetFrames(sheets: sheets, listed: listed, scFrames: scByID.mapValues(\.frame), order: order)
         for (parent, list) in frames {
             result[parent] = list.map { s in
@@ -500,7 +500,7 @@ enum WindowCatalogBuilder {
     private static func noteUnmatchedSheets(order: [WindowSheetMatcher.Window], matched: Set<UInt32>, listed: Set<UInt32>) {
         func r(_ f: CGRect) -> String { "\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))" }
         for (i, w) in order.enumerated() where WindowSheetMatcher.isSheetSized(w) && !matched.contains(w.id) {
-            guard let parent = order[(i + 1)...].first(where: { $0.pid == w.pid && listed.contains($0.id) && $0.frame.contains(w.frame) })
+            guard let parent = order[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.frame.contains(w.frame) })
             else { continue }
             let first = unmatchedLock.withLock { unmatchedLogged.insert(w.id).inserted }
             guard first else { continue }
@@ -509,7 +509,7 @@ enum WindowCatalogBuilder {
                 .map { "\($0.id)/L\($0.layer)/\(r($0.frame))\($0.frame.intersects(w.frame) ? "/overlaps" : "")" }
             let sits = WindowSheetMatcher.sits(w.frame, on: parent.frame)
             Log.info("workspace: \(WindowSheetMatcher.isUntitled(w) ? "untitled" : "titled") window \(w.id) (\(r(w.frame))) inside \(parent.id) "
-                     + "(\(r(parent.frame))) not taken as its sheet: sits=\(sits) app windows between=\(between)")
+                     + "(\(r(parent.frame))) not taken as its sheet: sits=\(sits) parentListed=\(listed.contains(parent.id)) app windows between=\(between)")
         }
     }
 
