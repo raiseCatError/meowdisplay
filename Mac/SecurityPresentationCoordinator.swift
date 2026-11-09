@@ -273,7 +273,7 @@ private struct PairingPanelView: View {
     let onResolved: () -> Void
     @State private var armed = false
     private static var refusedGrantMessage: String {
-        String(localized: "Approval was blocked because the click came from software, such as Screen Sharing. Use a mouse or keyboard connected to this Mac, or a hardware KVM, then try again.")
+        String(localized: "Approval was blocked because the click came from software, such as Screen Sharing. Use a physical mouse or trackpad connected to this Mac, or a hardware KVM, then try again.")
     }
 
     var body: some View {
