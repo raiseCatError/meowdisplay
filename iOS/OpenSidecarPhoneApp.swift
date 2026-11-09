@@ -128,6 +128,13 @@ struct ReceiverScreen: View {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
 
+    /// The keyboard's place for the controls and the Mac: what the surface reported, only while
+    /// this keyboard is open and that surface is shown (`SoftwareKeyboardPresence`).
+    private var shownKeyboardRect: CGRect? {
+        SoftwareKeyboardPresence.visibleRect(reported: keyboardVisibleRect, keyboardActive: keyboardActive,
+                                             surfaceShown: showsReceiverSurface)
+    }
+
     private var route: ReceiverPresentationRoute {
         .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface, presentation: model.presentation)
     }
@@ -463,6 +470,7 @@ struct ReceiverScreen: View {
                                    receiver: model.receiver,
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
+                                   lockScreenShowing: lockScreenShowing,
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
@@ -608,7 +616,7 @@ struct ReceiverScreen: View {
                                                                      peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
                     // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
                     // too) and a docked keyboard (its visible rect is in the canvas's coordinates).
-                    let keyboardCover = keyboardVisibleRect.map { visible -> CGRect in
+                    let keyboardCover = shownKeyboardRect.map { visible -> CGRect in
                         let top = canvas.minY + visible.maxY
                         return CGRect(x: canvas.minX, y: top, width: canvas.width, height: max(0, geo.size.height - top))
                     }
@@ -631,7 +639,7 @@ struct ReceiverScreen: View {
                         keyboardActive: $keyboardActive,
                         showSettings: $showSettings,
                         keyboardAvailable: keyboardAvailable,
-                        keyboardVisibleRect: keyboardVisibleRect,
+                        keyboardVisibleRect: shownKeyboardRect,
                         containerSize: geo.size,
                         safeInsets: effectiveSafeInsets,
                         notchSide: physicalNotchSide,
@@ -651,7 +659,7 @@ struct ReceiverScreen: View {
                         } : nil
                         let promptCentre = clearOfFolds(
                             CGPoint(x: paneAnchor?.x ?? canvas.midX,
-                                    y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                    y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76),
                             size: CGSize(width: 260, height: 44), container: geo.size,
                             regions: reservedRegions)
@@ -994,8 +1002,13 @@ struct ReceiverScreen: View {
         // Caret-following Zoom While Typing: the Mac reads the focused text
         // caret only while the keyboard is up (a Mac that predates it never
         // gets this message).
-        .onChange(of: keyboardVisibleRect != nil) { open in
+        .onChange(of: shownKeyboardRect != nil) { open in
             model.receiver.sendKeyboardState(open: open)
+        }
+        // A closed keyboard leaves no place behind, even if the surface that reported it was
+        // rebuilt meanwhile and couldn't say it closed (unlocking from the lock screen).
+        .onChange(of: keyboardActive) { active in
+            if !active { keyboardVisibleRect = nil }
         }
         // Resume reopens the keyboard that was open when Home was chosen.
         .onChange(of: model.presentation.surfaceInteractive) { interactive in
@@ -2826,6 +2839,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// last touch when the keyboard opens if true; pans (never zooms) if
     /// false. Either way the typing area still ends up visible.
     let zoomWhileTyping: Bool
+    var lockScreenShowing = false
     /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
     /// reacts to keyboard-frame notifications while this is true, so a
     /// keyboard opened for an unrelated text field elsewhere in the app
@@ -3059,6 +3073,7 @@ struct VideoLayerView: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
+        uiView.setLockScreenShowing(lockScreenShowing)
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
@@ -3923,6 +3938,17 @@ struct VideoLayerView: UIViewRepresentable {
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
+        /// The Mac's own lock screen is what this surface shows: with the keyboard open, all of it
+        /// is fitted above the keyboard (`RemoteViewportCalculator.lockScreenKeyboardOpen`).
+        private var lockScreenShowing = false
+
+        func setLockScreenShowing(_ showing: Bool) {
+            guard showing != lockScreenShowing else { return }
+            lockScreenShowing = showing
+            guard keyboardVisibleRect != nil else { return }   // only matters while open
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
         func setZoomWhileTyping(_ enabled: Bool) {
             guard enabled != zoomWhileTypingEnabled else { return }
             zoomWhileTypingEnabled = enabled
@@ -4305,6 +4331,11 @@ struct VideoLayerView: UIViewRepresentable {
                 return RemoteViewportTransform(
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
                     displayedRect: rect)
+            }
+            if let keyboardVisibleRect, lockScreenShowing {
+                lastCaretBase = nil
+                return RemoteViewportCalculator.lockScreenKeyboardOpen(
+                    viewBounds: bounds, remoteAspectSize: video, visibleRect: keyboardVisibleRect)
             }
             if let keyboardVisibleRect {
                 let base = RemoteViewportCalculator.keyboardOpen(

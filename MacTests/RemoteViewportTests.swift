@@ -1085,4 +1085,36 @@ final class HighMagnificationViewportTests: XCTestCase {
         XCTAssertNil(RemoteViewportTransform.presented(position: .zero, boundsSize: .zero,
                                                        transform: .identity, remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1)))
     }
+
+    // MARK: - The Mac's lock screen with the keyboard open
+
+    /// QA 9000035 (iPad 1080x810, Mac 1920x1080, keyboard + strip ~446 pt): the password field,
+    /// below the lock screen's middle, was under the keyboard. The whole lock screen now sits in
+    /// what the keyboard leaves visible, so every row of it can be seen.
+    func testTheLockScreenFitsWhollyAboveTheKeyboard() {
+        let view = CGRect(x: 0, y: 0, width: 1080, height: 810)
+        let mac = CGSize(width: 1920, height: 1080)
+        let visible = CGRect(x: 0, y: 0, width: 1080, height: 364)
+        let t = RemoteViewportCalculator.lockScreenKeyboardOpen(viewBounds: view, remoteAspectSize: mac, visibleRect: visible)
+        XCTAssertEqual(t.remoteCrop, CGRect(x: 0, y: 0, width: 1, height: 1), "nothing cropped")
+        XCTAssertTrue(visible.insetBy(dx: -0.5, dy: -0.5).contains(t.displayedRect), "\(t.displayedRect) inside \(visible)")
+        XCTAssertEqual(t.displayedRect.height, 364, accuracy: 0.5, "as large as fits")
+        XCTAssertEqual(t.displayedRect.width / t.displayedRect.height, 1920.0 / 1080.0, accuracy: 0.01)
+        // The field's row (about 62% down) is in view; with the ordinary typing placement and no
+        // touch to aim at, it was below the visible area.
+        let fieldY = t.displayedRect.minY + 0.62 * t.displayedRect.height
+        XCTAssertLessThan(fieldY, visible.maxY)
+        let typing = RemoteViewportCalculator.keyboardOpen(viewBounds: view, remoteAspectSize: mac, visibleRect: visible,
+                                                           anchor: nil, zoomEnabled: true)
+        let shown = typing.displayedRect
+        let rowOnScreen = shown.minY + (0.62 - typing.remoteCrop.minY) / typing.remoteCrop.height * shown.height
+        XCTAssertGreaterThan(rowOnScreen, visible.maxY, "before: the field's row was under the keyboard")
+    }
+
+    func testNoVisibleAreaKeepsTheNormalPicture() {
+        let view = CGRect(x: 0, y: 0, width: 1080, height: 810)
+        let mac = CGSize(width: 1920, height: 1080)
+        XCTAssertEqual(RemoteViewportCalculator.lockScreenKeyboardOpen(viewBounds: view, remoteAspectSize: mac, visibleRect: .zero).displayedRect,
+                       RemoteViewportCalculator.normal(viewBounds: view, remoteAspectSize: mac).displayedRect)
+    }
 }

@@ -229,7 +229,7 @@ struct LockScreenFlow: Equatable, Sendable {
         waitingSince = nil
         switch reason {
         case "turnedOff"?:
-            phase = .failed(String(localized: "Lock Screen Control is off for this device on the Mac."))
+            phase = .failed(String(localized: "Lock Screen Control is turned off for this device on the Mac."))
         case "controlBeforeLock"?:
             phase = .failed(String(localized: "Control wasn't allowed before the Mac locked."))
         default:
@@ -284,13 +284,15 @@ enum MacLockedCoverPolicy {
         case .available:
             return String(localized: "Shows the Mac’s own lock screen here, so you can type its password.")
         case .needsControl:
-            return String(localized: "Asks this Mac for control first, then shows its lock screen here.")
+            // Only an Always Allow device, or an Ask device's pre-lock control carried over by the
+            // Mac: control comes back without a prompt, so it reads as one step.
+            return String(localized: "Shows the Mac’s own lock screen here, so you can type its password.")
         case .needsFullDesktop:
             return String(localized: "Switches to Full Desktop first, then shows the Mac’s lock screen here. Your view comes back once it’s unlocked.")
         case .unavailable(let why):
             switch why {
             case "turnedOff"?:
-                return String(localized: "Lock Screen Control is off for this device. It can be turned on in this device’s settings on the Mac.")
+                return String(localized: "Lock Screen Control is turned off for this device in its settings on the Mac. Unlock it at the Mac.")
             case "controlBeforeLock"?:
                 return String(localized: "This device didn’t have control before the Mac locked, and nobody can allow it while it’s locked. Unlock it at the Mac.")
             case "windowView"?:
@@ -303,5 +305,24 @@ enum MacLockedCoverPolicy {
                 return String(localized: "It can’t be unlocked from this device. Control can be requested once it’s unlocked.")
             }
         }
+    }
+}
+
+
+/// Where the on-screen keyboard is, as the controls and the Mac are told it.
+///
+/// Only the Mac picture's surface reports the keyboard's place, and only while it asked for the
+/// keyboard. A surface that goes away (a display-mode switch rebuilds it) can't report the
+/// keyboard closing, and the new surface has nothing to report until the keyboard moves. Unlocking
+/// the Mac from its lock screen does exactly that: the lock screen plays in Full Desktop, the Mac
+/// goes back to Window view, and the keyboard closes. QA 9000034 (iPad): the keyboard went
+/// away but the control tray stayed raised where the keyboard had been.
+///
+/// So a reported place counts only while this device's keyboard is open and the surface that
+/// reported it is still shown; otherwise the keyboard is closed.
+enum SoftwareKeyboardPresence {
+    static func visibleRect(reported: CGRect?, keyboardActive: Bool, surfaceShown: Bool) -> CGRect? {
+        guard keyboardActive, surfaceShown else { return nil }
+        return reported
     }
 }
