@@ -284,6 +284,23 @@ enum WindowSheetMatcher {
         return result
     }
 
+    /// Windows over `target` that may be its sheets, by shape alone, from the live on-screen
+    /// listing above it (front to back): the target's app, normal layer, visible, sheet-sized,
+    /// sitting on the target, with no other window of the app overlapping it between them. The
+    /// caller still has the app confirm each one (`SheetConfirmation`); a listing can lag behind a
+    /// sheet that is already on screen (QA 9000031/32: presses on an open chooser were refused
+    /// while the listing had no sheets for its window).
+    static func liveCandidates(targetPID: Int32, targetFrame: CGRect,
+                               aboveFrontToBack: [WorkspaceInputCover.Window]) -> [WorkspaceInputCover.Window] {
+        var accepted: [WorkspaceInputCover.Window] = []
+        var blockers: [CGRect] = []
+        for w in aboveFrontToBack.reversed() where w.pid == targetPID && w.layer == 0 && w.alpha > 0.01 {
+            let shaped = w.bounds.width >= 40 && w.bounds.height >= 30 && sits(w.bounds, on: targetFrame)
+            if shaped, !blockers.contains(where: { $0.intersects(w.bounds) }) { accepted.append(w) } else { blockers.append(w.bounds) }
+        }
+        return accepted
+    }
+
     static func isSheetShaped(_ w: Window) -> Bool { isSheetSized(w) && isUntitled(w) }
 
     static func isSheetSized(_ w: Window) -> Bool { w.layer == 0 && w.frame.width >= 40 && w.frame.height >= 30 }
