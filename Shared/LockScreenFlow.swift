@@ -305,3 +305,22 @@ enum MacLockedCoverPolicy {
         }
     }
 }
+
+
+/// Where the on-screen keyboard is, as the controls and the Mac are told it.
+///
+/// Only the Mac picture's surface reports the keyboard's place, and only while it asked for the
+/// keyboard. A surface that goes away (a display-mode switch rebuilds it) can't report the
+/// keyboard closing, and the new surface has nothing to report until the keyboard moves. Unlocking
+/// the Mac from its lock screen does exactly that: the lock screen plays in Full Desktop, the Mac
+/// goes back to Window view, and the keyboard closes. QA 9000034 (iPad): the keyboard went
+/// away but the control tray stayed raised where the keyboard had been.
+///
+/// So a reported place counts only while this device's keyboard is open and the surface that
+/// reported it is still shown; otherwise the keyboard is closed.
+enum SoftwareKeyboardPresence {
+    static func visibleRect(reported: CGRect?, keyboardActive: Bool, surfaceShown: Bool) -> CGRect? {
+        guard keyboardActive, surfaceShown else { return nil }
+        return reported
+    }
+}

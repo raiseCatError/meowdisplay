@@ -128,6 +128,13 @@ struct ReceiverScreen: View {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
 
+    /// The keyboard's place for the controls and the Mac: what the surface reported, only while
+    /// this keyboard is open and that surface is shown (`SoftwareKeyboardPresence`).
+    private var shownKeyboardRect: CGRect? {
+        SoftwareKeyboardPresence.visibleRect(reported: keyboardVisibleRect, keyboardActive: keyboardActive,
+                                             surfaceShown: showsReceiverSurface)
+    }
+
     private var route: ReceiverPresentationRoute {
         .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface, presentation: model.presentation)
     }
@@ -587,7 +594,7 @@ struct ReceiverScreen: View {
                         keyboardActive: $keyboardActive,
                         showSettings: $showSettings,
                         keyboardAvailable: keyboardAvailable,
-                        keyboardVisibleRect: keyboardVisibleRect,
+                        keyboardVisibleRect: shownKeyboardRect,
                         containerSize: geo.size,
                         safeInsets: effectiveSafeInsets,
                         notchSide: physicalNotchSide,
@@ -607,7 +614,7 @@ struct ReceiverScreen: View {
                         } : nil
                         let promptCentre = clearOfFolds(
                             CGPoint(x: paneAnchor?.x ?? canvas.midX,
-                                    y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                    y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76),
                             size: CGSize(width: 260, height: 44), container: geo.size,
                             regions: reservedRegions)
@@ -946,8 +953,13 @@ struct ReceiverScreen: View {
         // Caret-following Zoom While Typing: the Mac reads the focused text
         // caret only while the keyboard is up (a Mac that predates it never
         // gets this message).
-        .onChange(of: keyboardVisibleRect != nil) { open in
+        .onChange(of: shownKeyboardRect != nil) { open in
             model.receiver.sendKeyboardState(open: open)
+        }
+        // A closed keyboard leaves no place behind, even if the surface that reported it was
+        // rebuilt meanwhile and couldn't say it closed (unlocking from the lock screen).
+        .onChange(of: keyboardActive) { active in
+            if !active { keyboardVisibleRect = nil }
         }
         // Resume reopens the keyboard that was open when Home was chosen.
         .onChange(of: model.presentation.surfaceInteractive) { interactive in
