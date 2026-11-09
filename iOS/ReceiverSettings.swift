@@ -869,6 +869,7 @@ private struct ControlSettingsPage: View {
     @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @AppStorage(WorkspaceModel.defaultPlacementKey) private var defaultPlacement = WorkspacePlacement.pane.rawValue
+    @AppStorage(WorkspaceModel.floatingWindowsKey) private var floatingWindowsEnabled = true
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -964,10 +965,22 @@ private struct ControlSettingsPage: View {
                 }
                 Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
                     .accessibilityIdentifier("bringStripWindowsForward")
-                Picker("Default Window Placement", selection: $defaultPlacement) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Enable Floating Windows", isOn: $floatingWindowsEnabled)
+                        .accessibilityIdentifier("enableFloatingWindowsToggle")
+                    SettingNote(floatingWindowsEnabled
+                                ? "Windows can float over the layout in Window view."
+                                : "Windows open as panes or tabs. Windows that were floating are now in the layout.")
+                }
+                .settingsAnchor("enableFloatingWindows")
+                // Off: shows Pane, which is used; the saved choice comes back when it's on again.
+                Picker("Default Window Placement", selection: Binding(
+                    get: { floatingWindowsEnabled ? defaultPlacement : WorkspacePlacement.pane.rawValue },
+                    set: { defaultPlacement = $0 })) {
                     Text("Pane").tag(WorkspacePlacement.pane.rawValue)
                     Text("Floating").tag(WorkspacePlacement.float.rawValue)
                 }
+                .disabled(!floatingWindowsEnabled)
                 .settingsAnchor("defaultWindowPlacement")
                 .accessibilityIdentifier("defaultWindowPlacementPicker")
             } header: {

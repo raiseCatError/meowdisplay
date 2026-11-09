@@ -597,6 +597,9 @@ final class WorkspaceModel: ObservableObject {
     func cancelLeavingExtend() { leaveExtendRequest = nil }
 
     private let defaults: UserDefaults
+    /// Settings ▸ Controls ▸ Window Switcher ▸ Enable Floating Windows, as last read (this device only).
+    private var floatsAllowedHere = true
+    private var floatSettingObserver: NSObjectProtocol?
     private var saved = WorkspaceLayout()
     private var host: String?
     private var size = WorkspaceSize(width: 400, height: 800)
@@ -625,6 +628,17 @@ final class WorkspaceModel: ObservableObject {
         files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
         files.macKey = { [weak self] in self?.host }
         menus.send = { [weak self] m in self?.send(m) ?? false }
+        floatsAllowedHere = Self.floatingWindowsEnabled(in: defaults)
+        // Settings writes the switch with @AppStorage; only a change of it acts.
+        floatSettingObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
+        ) { [weak self] _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.floatingWindowsSettingChanged() }
+            } else {
+                Task { @MainActor in self?.floatingWindowsSettingChanged() }
+            }
+        }
     }
 
     /// The focused pane's app menus (a bar under its label).
@@ -831,6 +845,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func publish() {
+        settleFloatsIfTurnedOff()
         let adapted = WorkspaceAdaptation.adapt(saved, to: size, hinge: hinge, active: remote?.active, floatsShown: canFloat || !windowMode)
         if let full = localFullscreen, adapted.visible.tiles[full] == nil { localFullscreen = nil }
         // Local fullscreen is presentation only: the saved tree is untouched.
@@ -1879,17 +1894,69 @@ extension WorkspaceModel {
     /// Existing windows are never rearranged by it.
     static let defaultPlacementKey = "workspace.defaultPlacement"
     var defaultPlacement: WorkspacePlacement {
-        get { defaults.string(forKey: Self.defaultPlacementKey).flatMap(WorkspacePlacement.init(rawValue:)) ?? .pane }
+        // With Floating Windows off: Pane, the saved choice kept for when it's back on.
+        get { floatsAllowedHere ? defaults.string(forKey: Self.defaultPlacementKey).flatMap(WorkspacePlacement.init(rawValue:)) ?? .pane : .pane }
         set { defaults.set(newValue.rawValue, forKey: Self.defaultPlacementKey); objectWillChange.send() }
     }
 
+    /// Settings ▸ Controls ▸ Window Switcher ▸ Enable Floating Windows. On unless turned off on this
+    /// device (existing installs too). Receiver-local: never sent, the Mac's features unchanged.
+    nonisolated static let floatingWindowsKey = "workspace.floatingWindowsEnabled"
+    nonisolated static func floatingWindowsEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: floatingWindowsKey) as? Bool ?? true
+    }
+
+    var floatingWindowsEnabled: Bool {
+        get { floatsAllowedHere }
+        set { defaults.set(newValue, forKey: Self.floatingWindowsKey); floatingWindowsSettingChanged() }
+    }
+
+    /// Any write to this device's defaults lands here; only a change of the switch acts.
+    func floatingWindowsSettingChanged() {
+        let allowed = Self.floatingWindowsEnabled(in: defaults)
+        guard allowed != floatsAllowedHere else { return }
+        floatsAllowedHere = allowed
+        objectWillChange.send()
+        if !allowed, drag?.placement == .float { drag?.placement = .pane }
+        publish(); scheduleSend()
+    }
+
+    /// Floating Windows off: every float joins the layout as Add to Layout does it, a new pane
+    /// while there's room, else a tab of the focused (or last) pane. Tucked ones too, so nothing
+    /// waits at an edge. Each keeps its tile, window, capture and view; only the float frames go.
+    /// Turning the switch back on leaves the layout as it is. Runs on every publish, so a layout
+    /// loaded, restored or undone with floats settles the same way.
+    private func settleFloatsIfTurnedOff() {
+        guard !floatsAllowedHere, !saved.floats.isEmpty else { return }
+        floatGesture = nil; floatGestureStart = nil
+        let landscape = size.width >= size.height
+        let room = WorkspaceGeometry.capacity(for: size, hinge: hinge)
+        var next = saved
+        var tabTarget = lastFocusedPane.flatMap { arranged.orderedTileIDs.contains($0) ? $0 : nil } ?? arranged.orderedTileIDs.last
+        for id in saved.floats.map(\.tile) {   // back to front: the frontmost ends up the shown tab
+            if next.paneCount < room || tabTarget.map({ next.orderedTileIDs.contains($0) }) != true {
+                next = next.dockingAsPane(id, landscape: landscape)
+            } else if let target = tabTarget {
+                let docked = next.dockingAsTab(id, into: target)
+                if docked.isFloat(id) {
+                    next = next.dockingAsPane(id, landscape: landscape)
+                } else {
+                    next = docked
+                    tabTarget = id   // the merged pane takes the float's id
+                }
+            }
+        }
+        saved = next.compacted()
+        refreshMissing(); persist()
+    }
+
     /// Floating panes can be shown now (the Mac draws them).
-    var canFloatPanes: Bool { canFloat }
+    var canFloatPanes: Bool { canFloat && floatsAllowedHere }
 
     /// The pane's window can float: the Mac draws floats, and the tree keeps at least one pane
     /// (a tab of a pane always can, its pane stays).
     func canFloat(pane id: String, tab: Int? = nil) -> Bool {
-        guard canFloat, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
+        guard canFloat, floatsAllowedHere, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
         if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
         return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
     }
@@ -1909,7 +1976,7 @@ extension WorkspaceModel {
     /// view then starts with that desktop as the pane underneath, as when a window is dropped
     /// onto it; the person isn't asked). Never from Extend: leaving Extend removes this device's
     /// extended display, and macOS moves the windows on it, which a float must never cause.
-    var canOpenFloats: Bool { canFloat && (windowMode || (mirroring() && desktopDisplay != nil)) }
+    var canOpenFloats: Bool { canFloat && floatsAllowedHere && (windowMode || (mirroring() && desktopDisplay != nil)) }
 
     // MARK: Opening, floating, docking
 
