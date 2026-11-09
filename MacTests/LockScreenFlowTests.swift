@@ -10,6 +10,15 @@ final class LockScreenFlowTests: XCTestCase {
         MacLockNotice(state: state, remoteUnlock: remoteUnlock, lockScreen: offer)
     }
 
+    /// Asked here and shown: Show Lock Screen, then the Mac's `active`.
+    private func shown() -> LockScreenFlow {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.available), now: t0)
+        _ = flow.update(notice: locked(.active), connected: true, now: t0)
+        XCTAssertEqual(flow.phase, .showing)
+        return flow
+    }
+
     // MARK: begin
 
     func testNothingStartsWithoutRemoteUnlockEvenIfTheOfferSaysAvailable() {
@@ -121,25 +130,52 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(other.phase, .idle)
         XCTAssertEqual(other.update(notice: nil, connected: true, now: t0), .none, "a reset flow doesn't return anywhere")
 
-        var showing = LockScreenFlow()
-        _ = showing.update(notice: locked(.active), connected: true, now: t0)
-        XCTAssertEqual(showing.phase, .showing)
+        var showing = shown()
         _ = showing.update(notice: nil, connected: false, now: t0)
         XCTAssertEqual(showing.phase, .idle)
     }
 
     // MARK: active, hide
 
-    func testActiveFromTheMacIsShowingEvenWithoutAskingHere() {
+    /// F2: the Mac saying `active` without this device asking on this connection (a view left
+    /// from before a reconnect) is never shown: the flow asks the Mac to hide it.
+    func testActiveWithoutAskingOnThisConnectionIsNeverShown() {
         var flow = LockScreenFlow()
-        XCTAssertEqual(flow.update(notice: locked(.active), connected: true, now: t0), .none)
-        XCTAssertEqual(flow.phase, .showing)
+        XCTAssertEqual(flow.update(notice: locked(.active), connected: true, now: t0), .show(false))
+        XCTAssertEqual(flow.phase, .idle)
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: flow, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true))
+
+        // Shown, then the connection drops and comes back saying `active`: not resumed.
+        var again = shown()
+        _ = again.update(notice: nil, connected: false, now: t0)
+        XCTAssertFalse(again.askedOnThisConnection)
+        XCTAssertEqual(again.update(notice: locked(.active), connected: true, now: t0), .show(false))
+        XCTAssertEqual(again.phase, .idle)
+        // Only a fresh tap shows it again.
+        XCTAssertEqual(again.begin(notice: locked(.available), now: t0), .show(true))
+        XCTAssertEqual(again.update(notice: locked(.active), connected: true, now: t0), .none)
+        XCTAssertEqual(again.phase, .showing)
+
+        // Mid-switch to Full Desktop: the new connection's `active` before this device asked on it.
+        var switching = LockScreenFlow()
+        _ = switching.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = switching.update(notice: nil, connected: false, now: t0)
+        XCTAssertEqual(switching.update(notice: locked(.active), connected: true, now: t0), .show(false))
+        XCTAssertEqual(switching.phase, .waitingForFullDesktop)
+
+        // A late `active` after Hide doesn't bring it back.
+        var hidden = shown()
+        XCTAssertEqual(hidden.hide(now: t0), .show(false))
+        XCTAssertEqual(hidden.update(notice: locked(.active), connected: true, now: t0), .show(false))
+        XCTAssertEqual(hidden.phase, .idle)
     }
 
     func testHideAsksTheMacToHideAndKeepsTheWayBackUntilUnlock() {
         var flow = LockScreenFlow()
         XCTAssertEqual(flow.hide(now: t0), .none, "nothing to hide")
         _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = flow.update(notice: locked(.available), connected: true, now: t0)
         _ = flow.update(notice: locked(.active), connected: true, now: t0)
         XCTAssertEqual(flow.hide(now: t0), .show(false))
         XCTAssertEqual(flow.phase, .idle)
@@ -160,8 +196,7 @@ final class LockScreenFlowTests: XCTestCase {
     // MARK: Mac says no
 
     func testTurnedOffWhileShowingFailsWithoutRetrying() {
-        var flow = LockScreenFlow()
-        _ = flow.update(notice: locked(.active), connected: true, now: t0)
+        var flow = shown()
         XCTAssertEqual(flow.update(notice: locked(.unavailable("turnedOff"), remoteUnlock: false), connected: true, now: t0), .none)
         XCTAssertEqual(flow.phase, .failed("Lock Screen Control is off for this device on the Mac."))
         XCTAssertEqual(flow.update(notice: locked(.available), connected: true, now: t0), .none, "no automatic retry")
@@ -227,8 +262,7 @@ final class LockScreenFlowTests: XCTestCase {
     }
 
     func testShowingNeverTimesOut() {
-        var flow = LockScreenFlow()
-        _ = flow.update(notice: locked(.active), connected: true, now: t0)
+        var flow = shown()
         _ = flow.tick(now: t0.addingTimeInterval(3600))
         XCTAssertEqual(flow.phase, .showing)
     }
@@ -248,5 +282,72 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertFalse(locked(.active, remoteUnlock: false).showsMacLockScreen)
         XCTAssertFalse(locked(.active, state: .switchedOut).showsMacLockScreen)
         XCTAssertFalse(locked(.active, state: .unlocked).showsMacLockScreen)
+    }
+
+    // MARK: the cover (MacLockedCoverPolicy)
+
+    /// The cover stays up until the Mac says `active` AND video is on: no flash of the video-off
+    /// surface between the two.
+    func testTheCoverGivesWayOnlyToActiveWithVideoOn() {
+        let idle = LockScreenFlow()
+        let showing = shown()
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: false))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: true),
+                      "locked and not shown: covered even if video were on")
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: false),
+                      "active, video not on yet: still covered")
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: idle, videoEnabled: true), "not asked here")
+        XCTAssertTrue(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: false))
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, state: .switchedOut), flow: showing, videoEnabled: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: idle, videoEnabled: true), "unlocked, nothing going on")
+    }
+
+    /// The switch to Full Desktop drops the connection (`macLock` goes nil): the cover stays, with
+    /// the flow's status, until the new connection's Mac says something.
+    func testTheCoverStaysThroughTheModeSwitchReconnect() {
+        var flow = LockScreenFlow()
+        XCTAssertEqual(flow.begin(notice: locked(.needsFullDesktop), now: t0), .switchToFullDesktop)
+        _ = flow.update(notice: nil, connected: false, now: t0)
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true), "dropped mid-switch")
+        _ = flow.update(notice: nil, connected: true, now: t0)
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true), "reconnected, nothing said yet")
+        XCTAssertEqual(MacLockedCoverPolicy.coverNotice(nil), MacLockNotice(state: .locked), "drawn as locked, nothing offered")
+        XCTAssertEqual(flow.update(notice: locked(.needsControl), connected: true, now: t0), .requestControl)
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.needsControl), flow: flow, videoEnabled: false))
+        XCTAssertEqual(flow.update(notice: locked(.available), connected: true, now: t0), .show(true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: flow, videoEnabled: true))
+        _ = flow.update(notice: locked(.active), connected: true, now: t0)
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: false))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true))
+        // Any other drop ends the flow: no cover without a lock.
+        _ = flow.update(notice: nil, connected: false, now: t0)
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true))
+    }
+
+    /// Before the tap, the cover says what Show Lock Screen will do; when it isn't offered, why.
+    func testTheCoverSaysWhatWillHappenOrWhyNot() {
+        func text(_ offer: LockScreenOffer, remoteUnlock: Bool? = nil) -> String? {
+            MacLockedCoverPolicy.offerText(locked(offer, remoteUnlock: remoteUnlock ?? offer.offered))
+        }
+        XCTAssertEqual(text(.needsControl), "Asks this Mac for control first, then shows its lock screen here.")
+        XCTAssertTrue(text(.needsFullDesktop)?.hasPrefix("Switches to Full Desktop first") == true)
+        XCTAssertTrue(text(.available)?.hasPrefix("Shows the Mac’s own lock screen here") == true)
+        XCTAssertNil(text(.active))
+        XCTAssertTrue(text(.unavailable("turnedOff"))?.hasPrefix("Lock Screen Control is off for this device.") == true)
+        XCTAssertTrue(text(.unavailable("controlBeforeLock"))?.contains("didn’t have control before the Mac locked") == true)
+        XCTAssertTrue(text(.unavailable("windowView"))?.hasPrefix("This view can’t show the lock screen") == true)
+        XCTAssertEqual(text(.unavailable("neverAllow")), "This device is set to Never Allow control on the Mac.")
+        XCTAssertEqual(text(.unavailable("inputOff")), "Allow Input is off on the Mac.")
+        let generic = "It can’t be unlocked from this device. Control can be requested once it’s unlocked."
+        for why in [nil, "otherUser", "notAdmitted", "notLocked", "fromTheFuture"] as [String?] {
+            XCTAssertEqual(text(.unavailable(why)), generic, "\(String(describing: why))")
+        }
+        XCTAssertEqual(text(.available, remoteUnlock: false), generic, "remoteUnlock false is never an offer")
+        XCTAssertNil(MacLockedCoverPolicy.offerText(locked(.available, state: .switchedOut)), "another user: the detail says it")
+        XCTAssertNil(MacLockedCoverPolicy.offerText(locked(.available, state: .unknown)))
     }
 }

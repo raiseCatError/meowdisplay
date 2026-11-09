@@ -328,22 +328,43 @@ relays the picture and the keys; macOS's login window checks the password. Code:
   this connection has control, either because the device is set to Always Allow Requests (its
   request is granted without a prompt, as in the section above) or because the owner granted
   control on this connection before the Mac locked. A device set to Ask without that grant is
-  view-only and stays so: nothing is asked or granted behind the lock screen.
+  view-only and stays so: nothing is asked or granted behind the lock screen. All of it is checked
+  again for every input event while the view is on, not only when a setting changes.
+- **One connection.** The view belongs to the connection that asked for it. A reconnect or path
+  change ends it; the new connection starts without it (even with its grant back) and must ask
+  again. Its frames, pointer and input all require that connection, its grant and the lock.
 - **The switch.** Device settings ▸ Input Authorization ▸ Allow Lock Screen Control, per device,
-  stored next to the input policy it narrows (no second trust list), cleared by Forget. On by
-  default, so it only matters for devices that could control the Mac anyway. Turning it off ends a
-  view at once; turning it on is refused while any device controls the Mac, like Always Allow.
+  stored next to the input policy it narrows (no second trust list), cleared by Forget. **Off by
+  default (opt-in):** remote unlock stays disabled for every device, including devices paired
+  before this switch existed, until the owner turns it on for that device; only an explicit "on"
+  enables it, and it only matters for devices that could control the Mac anyway. Turning it off
+  ends a view at once; turning it on is refused while any device controls the Mac, like Always
+  Allow.
 - **Only on request, only fresh.** Nothing is shown until the device asks (`lockScreenRequest`).
-  Then the Mac drops any frame it held, wakes the display, and sends only frames encoded after
+  A connection can start the view at most once every 5 seconds (a quicker request gets the
+  current state), and each view wakes the display once. Then the Mac drops any frame it held,
+  wakes the display, and sends only frames encoded after
   the request, starting with a keyframe, so no picture from before the lock can go out. Sound,
-  windows, listings, Files, Clipboard, menus and the text caret stay off. Window view can't show
-  it (Full Desktop only); an Always Allow device is told to switch, an Ask device isn't offered it.
-- **Only the login window's input.** Pointer moves, left clicks and touches; character keys with
-  Shift or Option (Caps Lock rides along); Return, Tab, Delete, Forward Delete, Escape, Space and
-  the arrows; printable text up to 128 characters. Never Command or Control, function, media,
-  navigation or input-source keys, right-click, scrolling, Pencil, gestures, shortcuts, menus,
-  macros or window actions. Releases always go through so nothing stays held.
-- **Ends by itself.** On unlock (normal input and content resume for that session), on another
+  windows, listings, Files, Clipboard, menus and the text caret stay off. The pointer's position
+  and shape go only to the device showing it, only while it is shown. Window view and Extend
+  can't show it (Mirror only: Extend's display has no login window); an Always Allow device is
+  told to switch, an Ask device isn't offered it.
+- **Only what a password needs.** Pointer moves, left clicks and touches; character keys with
+  Shift or Option (Caps Lock rides along); Space, Return and Delete; printable text up to 128
+  characters. Never Tab, the arrows, Escape or Forward Delete (they only move focus to the login
+  window's other controls), Command or Control, function, media, navigation or input-source keys,
+  right-click, scrolling, Pencil, gestures, shortcuts, menus, macros or window actions. Releases
+  always go through so nothing stays held. A left click can still press the login window's own
+  buttons (Switch User, Sleep, Restart, Shut Down, accessibility): macOS handles those as at its
+  own screen; at worst that puts the Mac to sleep or shuts it down (a denial of service), and
+  another account's login switches users, which ends the view.
+- **On the iPad.** While the Mac is locked the keyboard is a secure, password-style one: no
+  autocorrect, spelling, capitals, smart punctuation or predictions, and its strip shows a fixed
+  label, never the characters or how many (also not to VoiceOver). Its local text and echo are
+  cleared on entering and leaving that mode, and it closes when the view ends.
+- **Ends by itself.** On unlock (normal input and content resume for that session; the receiver
+  is told to reset its input, and keys and text still in flight from the view are dropped for
+  1.5 seconds rather than typed into the app in front), on another
   user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow
   Input off, a disconnect, or two minutes without input. Held keys and buttons are released.
 - **Nothing kept.** Typed characters are passed to macOS and not logged, stored or inspected

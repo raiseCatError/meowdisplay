@@ -374,6 +374,7 @@ targets:
       - Shared/CursorPresentationPacer.swift
       - Shared/KeyboardEditPlanner.swift
       - Shared/TypedTextEcho.swift
+      - Shared/LockScreenKeyboard.swift
       - Shared/TextCaretWire.swift
       - Shared/ControlProfile.swift
       - Shared/StagePeek.swift

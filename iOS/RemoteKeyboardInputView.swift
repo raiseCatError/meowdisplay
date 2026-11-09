@@ -31,6 +31,8 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
     /// The Mac's name for the strip's placeholder ("Typing to <name>").
     /// `nil` reads "your Mac".
     var typingTarget: String?
+    /// Secure, suggestion-free, never echoed while the Mac is locked (`RemoteKeyboardTraits`).
+    var traits: RemoteKeyboardTraits = .normal
 
     func makeUIView(context: Context) -> RemoteKeyboardResponderView {
         let view = RemoteKeyboardResponderView()
@@ -40,6 +42,7 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
         view.onHardwareKeyUp = onHardwareKeyUp
         view.onRequestDismiss = onRequestDismiss
         view.setTypingTarget(typingTarget)
+        view.setTraits(traits)
         return view
     }
 
@@ -52,6 +55,7 @@ struct RemoteKeyboardInputView: UIViewRepresentable {
         uiView.onHardwareKeyUp = onHardwareKeyUp
         uiView.onRequestDismiss = onRequestDismiss
         uiView.setTypingTarget(typingTarget)
+        uiView.setTraits(traits)
         if isActive, !uiView.isFirstResponder {
             // Diagnostic breadcrumb for a real-device-only first-activation
             // crash under investigation — cheap, no behavior change. Remove
@@ -132,9 +136,35 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         strip.setTypingTarget(name)
     }
 
-    /// Pushes the echo to the strip's label.
+    private(set) var traits = RemoteKeyboardTraits.normal
+
+    /// Applies the traits. Entering or leaving the lock screen's secure keyboard clears the local
+    /// text and the echo, so nothing typed on one side shows (or is suggested) on the other.
+    func setTraits(_ next: RemoteKeyboardTraits) {
+        guard next != traits else { return }
+        traits = next
+        if markedTextRange != nil { unmarkText() }
+        isTrimming = true
+        text = ""
+        isTrimming = false
+        echo.clear()
+        isSecureTextEntry = next.secureEntry
+        autocorrectionType = next.autocorrection ? .default : .no
+        spellCheckingType = next.spellChecking ? .default : .no
+        autocapitalizationType = next.autocapitalization ? .sentences : .none
+        smartQuotesType = next.smartPunctuation ? .default : .no
+        smartDashesType = next.smartPunctuation ? .default : .no
+        smartInsertDeleteType = next.smartPunctuation ? .default : .no
+        if #available(iOS 17.0, *) { inlinePredictionType = next.inlinePrediction ? .default : .no }
+        textContentType = next.passwordContentType ? .password : nil
+        strip.setSecure(!next.echoesTypedText)
+        refreshStrip()
+        if isFirstResponder { reloadInputViews() }
+    }
+
+    /// Pushes the echo to the strip's label. Never while the traits say not to echo.
     private func refreshStrip() {
-        strip.show(echo)
+        strip.show(traits.echoesTypedText ? echo : TypedTextEcho())
     }
 
     @available(*, unavailable)
@@ -163,7 +193,9 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
         let deleteCount = KeyboardEditPlanner.graphemeCount(in: textView.text, utf16Range: range)
         let actions = KeyboardEditPlanner.plan(rangeLength: deleteCount, replacementText: text)
         // The strip mirrors exactly what is about to be sent, in the same order.
-        for edit in TypedTextEcho.edits(for: actions) { echo.apply(edit) }
+        if traits.echoesTypedText {
+            for edit in TypedTextEcho.edits(for: actions) { echo.apply(edit) }
+        }
         refreshStrip()
         for action in actions {
             switch action {
@@ -184,7 +216,9 @@ final class RemoteKeyboardResponderView: UITextView, UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
         // The word still being composed (marked text) shows in the strip but
         // is never sent: only its finished form reaches the Mac.
-        echo.apply(.composing(textView.markedTextRange.flatMap { textView.text(in: $0) } ?? ""))
+        if traits.echoesTypedText {
+            echo.apply(.composing(textView.markedTextRange.flatMap { textView.text(in: $0) } ?? ""))
+        }
         refreshStrip()
         guard !isTrimming, textView.markedTextRange == nil,
               textView.text.count > Self.maxLocalTextLength else { return }
@@ -341,6 +375,8 @@ final class TypingStripView: UIInputView {
     private let doneButton = UIButton(type: .system)
     private var typingTarget: String?
     private var echo = TypedTextEcho()
+    /// The Mac's lock screen: a fixed label, never the typed characters or how many.
+    private var secure = false
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 320, height: Self.minimumHeight), inputViewStyle: .keyboard)
@@ -356,6 +392,13 @@ final class TypingStripView: UIInputView {
         let target = (trimmed?.isEmpty ?? true) ? nil : trimmed
         guard target != typingTarget else { return }
         typingTarget = target
+        render()
+    }
+
+    func setSecure(_ value: Bool) {
+        guard value != secure else { return }
+        secure = value
+        if value { echo = TypedTextEcho() }
         render()
     }
 
@@ -438,6 +481,15 @@ final class TypingStripView: UIInputView {
         paragraph.alignment = .right
         // Keep the end of the line: the part just typed.
         paragraph.lineBreakMode = .byTruncatingHead
+        if secure {
+            let text = String(localized: "Typing to the Mac’s lock screen")
+            echoLabel.attributedText = NSAttributedString(string: text, attributes: [
+                .font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: paragraph,
+            ])
+            echoLabel.accessibilityLabel = text
+            echoLabel.accessibilityValue = nil
+            return
+        }
         if echo.isEmpty {
             let name = typingTarget ?? String(localized: "your Mac")
             let text = String(localized: "Typing to \(name)")

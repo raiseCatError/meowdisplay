@@ -161,8 +161,18 @@ struct ReceiverScreen: View {
                                                                     sessionOnScreen: route == .receiver)
     }
 
-    /// The Mac's own lock screen is up on this device: only the picture and a small banner show.
-    private var lockScreenShowing: Bool { model.receiver.macLock?.showsMacLockScreen ?? false }
+    /// The Mac's own lock screen is up on this device and playing: only the picture and a small
+    /// banner show. Until video is on, the locked cover stays (`MacLockedCoverPolicy`).
+    private var lockScreenShowing: Bool {
+        MacLockedCoverPolicy.showsLockScreen(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                             videoEnabled: model.receiver.videoEnabled)
+    }
+
+    /// The opaque locked cover is up, including through Show Lock Screen's switch to Full Desktop.
+    private var macLockedCoverShowing: Bool {
+        MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                        videoEnabled: model.receiver.videoEnabled)
+    }
 
     private var sessionActionsAnimation: Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .easeOut(duration: 0.22)
@@ -564,7 +574,9 @@ struct ReceiverScreen: View {
                                 modifiers, chord: controlStore.activeChordModifiers))
                         },
                         onRequestDismiss: { keyboardActive = false },
-                        typingTarget: model.workspace.hostName
+                        typingTarget: model.workspace.hostName,
+                        // While the Mac is locked, anything typed is its lock screen's password.
+                        traits: .current(macLocked: model.receiver.macLock != nil)
                     )
                     .frame(width: 1, height: 1)
                     .opacity(0)
@@ -826,10 +838,12 @@ struct ReceiverScreen: View {
         .modifier(WorkspaceDragGuard(model: model.workspace))
         // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
         .overlay {
-            if let lock = model.receiver.macLock, !lock.showsMacLockScreen {
-                MacLockedCover(notice: lock, macName: model.workspace.hostName,
+            if macLockedCoverShowing {
+                MacLockedCover(notice: MacLockedCoverPolicy.coverNotice(model.receiver.macLock),
+                               macName: model.workspace.hostName,
                                lockFlow: model.lockScreenFlow,
                                onShowLockScreen: { model.showLockScreen() },
+                               onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
                                onDisconnect: { model.receiver.disconnect() })
                     .transition(.opacity)
             }
@@ -845,6 +859,7 @@ struct ReceiverScreen: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
+        .animation(.easeOut(duration: 0.15), value: macLockedCoverShowing)
         .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {
@@ -2379,6 +2394,8 @@ final class ReceiverModel: ObservableObject {
     // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
     // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
     @Published private(set) var lockScreenFlow = LockScreenFlow()
+    /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
+    private var lockScreenReturnsToExtend = false
 
     func showLockScreen() {
         perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
@@ -2399,9 +2416,13 @@ final class ReceiverModel: ObservableObject {
         case .switchToFullDesktop:
             // Mirror: the main display, where macOS shows its login window (Extend's display
             // would show only its wallpaper).
+            lockScreenReturnsToExtend = !workspace.windowMode && receiver.confirmedDisplayMode == .extend
             if !receiver.requestDisplayMode(.mirror) { lockScreenFlow.couldNotPerform() }
         case .show(let show): receiver.requestLockScreen(show: show)
-        case .returnToWindowView: _ = receiver.requestWindowMode()
+        case .returnToWindowView:
+            // Back to where Show Lock Screen started: Window view, or Extend.
+            if lockScreenReturnsToExtend { _ = receiver.requestDisplayMode(.extend) } else { _ = receiver.requestWindowMode() }
+            lockScreenReturnsToExtend = false
         }
     }
 

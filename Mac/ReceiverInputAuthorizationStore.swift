@@ -84,13 +84,15 @@ enum ReceiverInputAuthorizationStore {
 
     /// Only ever narrows what the input policy above allows: a device may operate the Mac's lock
     /// screen only when its input policy and grant would let it control the Mac anyway
-    /// (`LockScreenEligibility`). On by default for such devices (Always Allow, or Ask with
-    /// control granted before the lock); the owner can turn it off per device. Stored here, with
-    /// the input policy it qualifies, keyed by the same peer id, removed by Forget.
+    /// (`LockScreenEligibility`). Off by default (opt-in): remote unlock stays disabled for every
+    /// device until the owner turns it on for that device. Only an explicit `true` turns it on; an
+    /// explicit `false` stays off, and a device with nothing stored (including every device from
+    /// before it became opt-in) is off. Stored here, with the input policy it qualifies, keyed by
+    /// the same peer id, removed by Forget.
     private static let lockScreenKey = "receiverLockScreenControl.v1"
 
     static func lockScreenControlAllowed(peerID: String, defaults: UserDefaults = .standard) -> Bool {
-        (defaults.dictionary(forKey: lockScreenKey) as? [String: Bool])?[peerID] ?? true
+        (defaults.dictionary(forKey: lockScreenKey) as? [String: Bool])?[peerID] ?? false
     }
 
     /// Turning it on widens what a device may do, so it's refused while any session has effective
@@ -100,7 +102,7 @@ enum ReceiverInputAuthorizationStore {
                                             defaults: UserDefaults = .standard) -> Bool {
         guard !allowed || !anySessionHasEffectiveInput else { return false }
         var values = defaults.dictionary(forKey: lockScreenKey) as? [String: Bool] ?? [:]
-        if allowed { values.removeValue(forKey: peerID) } else { values[peerID] = false }
+        values[peerID] = allowed
         defaults.set(values, forKey: lockScreenKey)
         return true
     }

@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The strip over the picture while the Mac's own lock screen is shown on this device
-/// (`lockScreen == .active`). The password is typed on the Mac's lock screen through the ordinary
-/// Full Desktop keyboard; this view never has a text field and never sees what is typed.
+/// (`lockScreen == .active`). The password is typed on the Mac's lock screen through the Full Desktop
+/// keyboard in its secure mode (`RemoteKeyboardTraits.lockScreen`: secure entry, no suggestions, no
+/// echo); this view never has a text field and never sees what is typed.
 struct LockScreenBanner: View {
     let keyboardAvailable: Bool
     let onKeyboard: () -> Void
