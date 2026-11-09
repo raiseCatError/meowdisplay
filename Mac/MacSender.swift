@@ -1566,12 +1566,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lockScreenActive = false
     /// The connection the view was started on: it never carries over to another one (F2).
     private var lockScreenGeneration: UInt64?
+    /// This view's number (`LockScreenViewNumbers`): its input carries it back, and nothing
+    /// tagged for another view (an earlier one, another connection's, another device's) goes.
+    private var lockScreenView: Int?
     /// `show:true` at most once per `LockScreenSessionPolicy.showInterval` on this connection (F7).
     private var lockScreenShowLimit = LockScreenShowRateLimit()
     /// Wake promotions for the view (one per view at most), for tests.
     private var lockScreenWakeCount = 0
     private var lockScreenFrames = LockScreenFrameGate()
     private var lockScreenLastInput: TimeInterval = 0
+    /// A refusal was logged since the view last started or ended (at most one line each).
+    private var lockScreenRefusalLogged = false
+    /// Refusal lines logged, for tests.
+    private var lockScreenRefusalLogCount = 0
     private var lockScreenIdleTimer: DispatchSourceTimer?
     /// Read by the injector for every event while the Mac is locked.
     let lockScreenInputGate = LockScreenInputGate()
@@ -1614,6 +1621,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             && sessionInputGrant.get() && privacyGate.state == .locked
     }
 
+    /// `queue`: the view tagged input may name now (nil: none live on this connection).
+    private var liveLockScreenView: Int? { lockScreenLive ? lockScreenView : nil }
+
     /// `queue`: the pointer's position and sprite are screen content. Unlocked: as always. Locked:
     /// only while this connection shows the lock screen, on the condition `sendFramed` admits that
     /// view's frames on (`LockScreenCursorPolicy`).
@@ -1635,7 +1645,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let privacy = privacyGate.state
         let offer: LockScreenOffer = privacy == .unlocked || lockScreenPermit == nil ? .unavailable(nil)
             : LockScreenEligibility.offer(lockScreenInputs(), active: lockScreenLive)
-        sendJSONObject(MacLockWire.message(privacy, lockScreen: offer))
+        sendJSONObject(MacLockWire.message(privacy, lockScreen: offer, view: liveLockScreenView))
     }
 
     /// `queue`: something the lock screen view depends on changed. No longer allowed: it ends.
@@ -1661,9 +1671,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("lockScreen: not shown (too soon)")
             return sendLockState()
         }
+        // Nothing held from before (a key, a modifier, a drag) is carried into the view.
+        inputInjector?.cancelActiveInput()
+        nativeAppGestureState.cancelAll()
+        let view = LockScreenViewNumbers.next()
         lockScreenActive = true
         lockScreenGeneration = activeConnectionGeneration
-        lockScreenInputGate.set(true)
+        lockScreenView = view
+        lockScreenInputGate.set(view: view)
+        lockScreenRefusalLogged = false
         lastPixelBuffer = nil
         needsKeyframe = true
         lockScreenFrames.start(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
@@ -1695,7 +1711,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard lockScreenActive else { return false }
         lockScreenActive = false
         lockScreenGeneration = nil
-        lockScreenInputGate.set(false)
+        lockScreenView = nil
+        lockScreenInputGate.set(view: nil)
+        lockScreenRefusalLogged = false
         lockScreenFrames.stop()
         resetCursorEcho()
         lockScreenIdleTimer?.cancel()
@@ -1711,7 +1729,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func reportRefusedLockScreenInput(keystrokes: Int, clicks: Int, _ refusal: LockScreenTaggedInput.Refusal) {
-        Log.info("lockScreen: refused input (\(refusal.rawValue), \(keystrokes) keystroke(s), \(clicks) click(s))")
+        // The log says only why, once per view (and once between views): never how many keys or
+        // clicks, or when each one was refused. The counts go to the device alone.
+        if !lockScreenRefusalLogged {
+            lockScreenRefusalLogged = true
+            lockScreenRefusalLogCount += 1
+            Log.info("lockScreen: refused input (\(refusal.rawValue))")
+        }
         guard keystrokes > 0 || clicks > 0, sessionAuthorization.isAdmitted, lastHello != nil else { return }
         sendJSONObject(LockScreenWire.inputRefused(count: keystrokes, clicks: clicks, reason: refusal.rawValue))
     }
@@ -1720,8 +1744,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// refused press is reported as a click; a move is dropped quietly).
     private func lockScreenPointerAdmits(type: String, _ obj: [String: Any]) -> Bool {
         let kind = LockScreenTaggedInput.pointerKind(type: type, phaseOrAction: obj[type == "touch" ? "phase" : "action"] as? String)
-        switch LockScreenTaggedInput.pointerDecision(kind, tagged: obj[LockScreenWire.inputTag] as? Bool == true,
-                                                     viewLive: lockScreenLive, unlocked: privacyGate.allowsInput) {
+        switch LockScreenTaggedInput.pointerDecision(kind, tag: LockScreenInputTag(message: obj),
+                                                     liveView: liveLockScreenView, unlocked: privacyGate.allowsInput) {
         case .deliver: return true
         case .drop: return false
         case .refuse(let refusal):
@@ -5532,6 +5556,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if type == WindowFrameWire.request { replyWindowFrame(obj, .privacyShield) }
             return
         }
+        // Lock episodes (PROTOCOL.md 6.19): scroll, Pencil, gestures and window or menu actions
+        // made while the device saw the Mac locked (tagged), or arriving while a lock screen view
+        // is live, never act, whenever they arrive. Touch, pointer and keyboard check their tag
+        // below, message by message.
+        if LockScreenInputTag.otherTypes.contains(type),
+           !LockScreenTaggedInput.otherInputAdmits(tag: LockScreenInputTag(message: obj), liveView: liveLockScreenView) {
+            if type == WireMessage.smartTouchProbe, let id = obj["id"] as? Int {
+                sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id, "scrollable": false, "windowDrag": false])
+            }
+            return
+        }
         switch type {
         case RemoteEndpointsWire.type:
             receiveRemoteEndpoints(payload)
@@ -5758,7 +5793,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
-                inputInjector?.handleTouch(phase: phase, x: x, y: y)
+                inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
+                    inputInjector?.handleTouch(phase: phase, x: x, y: y)
+                }
                 if let t = obj["t"] as? Double {
                     let delta = Date().timeIntervalSince1970 * 1000 - t
                     if delta > -50, delta < 1000 {
@@ -5783,25 +5820,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             default: .other
             }
             guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
-            switch action {
-            case "move":
-                if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
-                    inputInjector?.handlePointerMove(x: x, y: y)
+            inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
+                switch action {
+                case "move":
+                    if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
+                        inputInjector?.handlePointerMove(x: x, y: y)
+                    }
+                case "moveRelative":
+                    if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
+                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
+                    }
+                case "down":
+                    if let button = PointerButton.parse(obj["button"]) {
+                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                    }
+                case "up":
+                    if let button = PointerButton.parse(obj["button"]) {
+                        inputInjector?.handlePointerUp(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                    }
+                default:
+                    break   // unknown pointer action from a newer peer — ignore
                 }
-            case "moveRelative":
-                if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                    inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
-                }
-            case "down":
-                if let button = PointerButton.parse(obj["button"]) {
-                    inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
-                }
-            case "up":
-                if let button = PointerButton.parse(obj["button"]) {
-                    inputInjector?.handlePointerUp(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
-                }
-            default:
-                break   // unknown pointer action from a newer peer — ignore
             }
         case "pencil":
             guard receiverInputIsAllowed() else { return }
@@ -5863,9 +5902,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Typed for the lock screen (tagged) goes only to a live lock screen view; untagged
             // typing while it is live is refused. Refused keystrokes are reported, never dropped
             // silently. Releases always go.
+            let tag = LockScreenInputTag(message: obj)
             if let refusal = LockScreenTaggedInput.refusal(
-                action: action, tagged: obj[LockScreenWire.inputTag] as? Bool == true,
-                viewLive: lockScreenLive, unlocked: privacyGate.allowsInput) {
+                action: action, tag: tag, liveView: liveLockScreenView, unlocked: privacyGate.allowsInput) {
                 reportRefusedLockScreenInput(action: action, text: obj["text"] as? String, refusal)
                 return
             }
@@ -5881,41 +5920,43 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 guard receiverInputIsAllowed(keyEvent) else { return }
             }
-            switch action {
-            case "text":
-                if let text = obj["text"] as? String {
-                    inputInjector?.handleKeyboardText(text)
-                }
-            case "press":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    #if DEBUG
-                    if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
-                        Log.info("keyboardDebug: specialPress received usage=42")
+            inputInjector?.perform(for: InputEpisode(tag: tag)) {
+                switch action {
+                case "text":
+                    if let text = obj["text"] as? String {
+                        inputInjector?.handleKeyboardText(text)
                     }
-                    #endif
-                    inputInjector?.handleKeyboardPress(
-                        usage, modifiers: obj["modifiers"] as? [String] ?? [],
-                        exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                case "press":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        #if DEBUG
+                        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
+                            Log.info("keyboardDebug: specialPress received usage=42")
+                        }
+                        #endif
+                        inputInjector?.handleKeyboardPress(
+                            usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                            exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "down":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                          isRepeat: obj["repeat"] as? Bool == true,
+                                                          exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "up":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                        exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "modifierDown", "modifierUp":
+                    if let name = obj["modifier"] as? String {
+                        inputInjector?.handleModifier(name: name, down: action == "modifierDown")
+                    }
+                case "cancel":
+                    inputInjector?.cancelActiveInput()
+                default:
+                    break   // unknown keyboard action from a newer peer — ignore
                 }
-            case "down":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
-                                                      isRepeat: obj["repeat"] as? Bool == true,
-                                                      exactModifiers: ExactKeyModifiersWire.isExact(obj))
-                }
-            case "up":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
-                                                    exactModifiers: ExactKeyModifiersWire.isExact(obj))
-                }
-            case "modifierDown", "modifierUp":
-                if let name = obj["modifier"] as? String {
-                    inputInjector?.handleModifier(name: name, down: action == "modifierDown")
-                }
-            case "cancel":
-                inputInjector?.cancelActiveInput()
-            default:
-                break   // unknown keyboard action from a newer peer — ignore
             }
             // The caret just moved (or is about to): read it soon. Never on the lock screen.
             if privacyGate.allowsInput { textCaretFollower.noteInput() }
@@ -6180,9 +6221,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // against an in-flight or missing cancellation.
             inputInjector?.cancelActiveInput()
             let sessionInputGrant = self.sessionInputGrant
+            let privacyGate = self.privacyGate
             Task { @MainActor in
+                // Locked in the meantime: never onto the lock screen.
                 guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                           sessionGranted: sessionInputGrant.get()) else { return }
+                                                           sessionGranted: sessionInputGrant.get()),
+                      privacyGate.allowsInput else { return }
                 SystemGestureInvoker.invoke(gesture)
             }
         case "kf":
@@ -8057,6 +8101,10 @@ extension MacSender {
     /// rate limit (which has its own tests).
     func resetLockScreenShowLimitForTesting() async throws {
         try await onQueue { $0.lockScreenShowLimit.reset() }
+    }
+
+    var lockScreenRefusalLogCountForTesting: Int {
+        get async throws { try await onQueue { $0.lockScreenRefusalLogCount } }
     }
 
     var lockScreenWakeCountForTesting: Int {

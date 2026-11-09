@@ -117,7 +117,12 @@ final class MacSenderInputRevocationTests: XCTestCase {
     private func showLockScreen(_ sender: MacSender, _ show: Bool = true) async throws {
         try await receive(sender, LockScreenWire.request(show: show))
         try await sender.settleForTesting()
+        if show, let view = sent.last(type: MacLockWire.type)?[LockScreenWire.viewKey] as? Int { shownView = view }
     }
+
+    /// The lock screen view the Mac last announced (`macLockState` `lockScreenView`): what a
+    /// receiver showing it tags its input with. 0 (no view) until one is shown.
+    private var shownView = 0
 
     /// Shown: only what the login window needs reaches the Mac: clicks, character keys with
     /// Shift, Return, Delete. Command and Control, right-click, scroll, Pencil and the rest don't.
@@ -131,12 +136,12 @@ final class MacSenderInputRevocationTests: XCTestCase {
         try await showLockScreen(sender)
         XCTAssertEqual(sent.lastLockScreen, "active")
         XCTAssertEqual(sent.last(type: WireMessage.videoState)?["enabled"] as? Bool, true, "the lock screen picture is on")
-        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "move", "x": 0.5, "y": 0.5])
-        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
-        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "up", "button": "left", "clickCount": 1])
-        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyP.rawValue, "modifiers": ["shift"]])
-        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.deleteOrBackspace.rawValue])
-        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "move", "x": 0.5, "y": 0.5])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "down", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "up", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.keyP.rawValue, "modifiers": ["shift"]])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.deleteOrBackspace.rawValue])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
         let allowed = events.take()
         XCTAssertTrue(allowed.contains { $0.type == .leftMouseDown } && allowed.contains { $0.type == .leftMouseUp }, "\(allowed)")
         for usage in [HIDKeyUsage.keyP, .deleteOrBackspace, .returnOrEnter] {
@@ -144,14 +149,14 @@ final class MacSenderInputRevocationTests: XCTestCase {
         }
 
         let refused: [[String: Any]] = [
-            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyQ.rawValue, "modifiers": ["command"]],
-            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyA.rawValue, "modifiers": ["control"]],
-            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.f1.rawValue],
-            ["type": "keyboard", "lockScreen": true, "action": "modifierDown", "modifier": ControlModifier.command.rawValue],
-            ["type": "pointer", "lockScreen": true, "action": "down", "button": "right", "clickCount": 1],
+            ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.keyQ.rawValue, "modifiers": ["command"]],
+            ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.keyA.rawValue, "modifiers": ["control"]],
+            ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.f1.rawValue],
+            ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "modifierDown", "modifier": ControlModifier.command.rawValue],
+            ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "down", "button": "right", "clickCount": 1],
             ["type": "scroll", "dx": 0.0, "dy": 120.0],
             ["type": "pencil", "phase": "began", "x": 0.3, "y": 0.3, "pressure": 0.5],
-            ["type": "keyboard", "lockScreen": true, "action": "text", "text": "a\nb"],
+            ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "text", "text": "a\nb"],
         ]
         for message in refused { try await receive(sender, message) }
         let leaked = events.take().filter { [.keyDown, .rightMouseDown, .scrollWheel, .flagsChanged].contains($0.type) }
@@ -280,7 +285,7 @@ final class MacSenderInputRevocationTests: XCTestCase {
         var m: [String: Any] = ["type": "keyboard", "action": action]
         if let usage { m["usage"] = usage.rawValue }
         if let text { m["text"] = text }
-        if tagged { m[LockScreenWire.inputTag] = true }
+        if tagged { m[LockScreenWire.inputTag] = true; m[LockScreenWire.viewKey] = shownView }
         return m
     }
 
@@ -299,13 +304,13 @@ final class MacSenderInputRevocationTests: XCTestCase {
 
     private func touch(_ phase: String, tagged: Bool = true) -> [String: Any] {
         var m: [String: Any] = ["type": "touch", "phase": phase, "x": 0.5, "y": 0.5]
-        if tagged { m[LockScreenWire.inputTag] = true }
+        if tagged { m[LockScreenWire.inputTag] = true; m[LockScreenWire.viewKey] = shownView }
         return m
     }
 
     private func pointer(_ action: String, tagged: Bool = true) -> [String: Any] {
         var m: [String: Any] = ["type": "pointer", "action": action, "button": "left", "clickCount": 1, "x": 0.5, "y": 0.5]
-        if tagged { m[LockScreenWire.inputTag] = true }
+        if tagged { m[LockScreenWire.inputTag] = true; m[LockScreenWire.viewKey] = shownView }
         return m
     }
 
@@ -490,8 +495,8 @@ final class MacSenderInputRevocationTests: XCTestCase {
             XCTAssertEqual(sent.lastLockScreen, "active", reason)
             try await narrow(sender)
             _ = events.take()
-            try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
-            try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
+            try await receive(sender, ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "down", "button": "left", "clickCount": 1])
+            try await receive(sender, ["type": "keyboard", "lockScreen": true, "lockScreenView": shownView, "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
             XCTAssertEqual(events.take().filter { $0.type == .keyDown || $0.type == .leftMouseDown }, [], reason)
             XCTAssertNotEqual(sent.lastLockScreen, "active", "\(reason): the view ended")
             restore()
@@ -552,7 +557,7 @@ final class MacSenderInputRevocationTests: XCTestCase {
         let sender = try XCTUnwrap(sender)
         let generation = try await lockWithPermit(sender)
         try await showLockScreen(sender)
-        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "lockScreenView": shownView, "action": "down", "button": "left", "clickCount": 1])
         _ = events.take()
         sender.setLockScreenPermit(policy: .alwaysAllow, allowed: false)
         try await sender.settleForTesting()
@@ -585,6 +590,340 @@ final class MacSenderInputRevocationTests: XCTestCase {
         try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyC.rawValue, "modifiers": ["command"]])
         XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyC.keyCode) },
                       "unlocked: normal input, shortcuts included")
+    }
+
+    // MARK: - Lock episodes (PROTOCOL.md 6.19): every input family, both sides of each boundary
+
+    private func tagged(_ message: [String: Any], view: Int?) -> [String: Any] {
+        var m = message
+        m[LockScreenWire.inputTag] = true
+        if let view { m[LockScreenWire.viewKey] = view }
+        return m
+    }
+
+    private func unlock(_ sender: MacSender) async throws {
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+    }
+
+    private func key(_ action: String, _ usage: HIDKeyUsage) -> [String: Any] {
+        ["type": "keyboard", "action": action, "usage": usage.rawValue]
+    }
+
+    private func modifier(_ down: Bool, _ name: ControlModifier) -> [String: Any] {
+        ["type": "keyboard", "action": down ? "modifierDown" : "modifierUp", "modifier": name.rawValue]
+    }
+
+    /// Scroll, Pencil (with hover and its end), proximity in and out, a native gesture and a
+    /// Smart Touch probe: never lock screen input. (`gesture` is checked by the same gate but
+    /// not sent here: delivered by mistake, it would really run on this Mac.)
+    private let otherFamilies: [[String: Any]] = [
+        ["type": "scroll", "dx": 0.0, "dy": 120.0],
+        ["type": "scroll", "dx": 30.0, "dy": 0.0],
+        ["type": "pencil", "phase": "hover", "x": 0.3, "y": 0.3, "pressure": 0.0],
+        ["type": "pencil", "phase": "down", "x": 0.3, "y": 0.3, "pressure": 0.5],
+        ["type": "pencil", "phase": "move", "x": 0.35, "y": 0.35, "pressure": 0.5],
+        ["type": "pencil", "phase": "up", "x": 0.35, "y": 0.35, "pressure": 0.0],
+        ["type": "proximity", "entering": true, "x": 0.3, "y": 0.3],
+        ["type": "proximity", "entering": false, "x": 0.3, "y": 0.3],
+        ["type": WireMessage.nativeAppGesture, "kind": "magnify", "phase": "began", "delta": 0.1],
+        ["type": WireMessage.nativeAppGesture, "kind": "magnify", "phase": "ended", "delta": 0.0],
+    ]
+
+    /// The moment of unlock, with input in flight on both sides of it. Before: scroll, Pencil,
+    /// proximity and gestures never reach the lock screen, tagged or not. After: nothing made
+    /// while the device saw the Mac locked (tagged with the view, or without one) acts on the
+    /// desktop, whatever its family; presses and keystrokes are reported. Untagged input after
+    /// the unlock is ordinary input at once (no hold).
+    func testEveryInputFamilyInFlightAcrossTheUnlockStaysOnItsSide() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        let view = shownView
+        XCTAssertGreaterThan(view, 1, "the view is numbered")
+        _ = events.take()
+        for message in otherFamilies {
+            try await receive(sender, message)
+            try await receive(sender, tagged(message, view: view))
+        }
+        try await receive(sender, tagged(["type": WireMessage.smartTouchProbe, "id": 9, "x": 0.5, "y": 0.5], view: view))
+        XCTAssertEqual(events.take(), [], "nothing but touch, clicks and typing reaches the lock screen")
+        XCTAssertEqual(sent.last(type: WireMessage.smartTouchProbeResult)?["scrollable"] as? Bool, false, "a probe is still answered")
+
+        try await receive(sender, tagged(key("press", .keyA), view: view))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown }, "the view's own typing goes")
+
+        try await unlock(sender)
+        _ = events.take()
+        sent.clear()
+        let lockScreenFamilies: [[String: Any]] = [
+            touch("began", tagged: false), touch("moved", tagged: false),
+            pointer("down", tagged: false), pointer("move", tagged: false),
+            ["type": "pointer", "action": "moveRelative", "dx": 4.0, "dy": 4.0],
+            key("press", .returnOrEnter), key("down", .keyB), ["type": "keyboard", "action": "text", "text": "fake-pass-123"],
+            modifier(true, .shift),
+        ]
+        for message in otherFamilies + lockScreenFamilies {
+            try await receive(sender, tagged(message, view: view))
+            try await receive(sender, tagged(message, view: nil))   // typed while locked, not shown
+        }
+        XCTAssertEqual(events.take(), [], "nothing from the lock episode acts on the desktop")
+        XCTAssertEqual(Set(refusals.map(\.reason)), ["unlocked"])
+        XCTAssertEqual(refusals.map(\.count).reduce(0, +), 2 * (1 + 1 + 13), "every keystroke counted, both tags")
+        XCTAssertEqual(refusedClicks.map(\.clicks).reduce(0, +), 2 * 2, "every press counted, both tags")
+
+        try await receive(sender, ["type": "scroll", "dx": 0.0, "dy": 120.0])
+        try await receive(sender, ["type": "pencil", "phase": "down", "x": 0.3, "y": 0.3, "pressure": 0.5])
+        try await receive(sender, ["type": "pencil", "phase": "up", "x": 0.3, "y": 0.3, "pressure": 0.0])
+        let ordinary = events.take()
+        XCTAssertTrue(ordinary.contains { $0.type == .scrollWheel }, "untagged after the unlock: ordinary, no hold \(ordinary)")
+        XCTAssertTrue(ordinary.contains { $0.type == .leftMouseDown }, "\(ordinary)")
+    }
+
+    /// A drag or a long press begun on the lock screen whose rest arrives after the unlock: the
+    /// button is released exactly once (when the view ends, click count 0), and the rest of the
+    /// gesture (moves, its release) does nothing on the desktop, never a drag or a click there.
+    func testADragOrLongPressBegunOnTheLockScreenNeverContinuesOnTheDesktop() async throws {
+        for (useTouch, moves) in [(true, false), (true, true), (false, true), (false, false)] {
+            let label = "touch \(useTouch), moves \(moves)"
+            setUpSender()
+            let sender = try XCTUnwrap(sender)
+            try await lockWithPermit(sender)
+            try await showLockScreen(sender)
+            let view = shownView
+            _ = events.take()
+            try await receive(sender, tagged(useTouch ? touch("began", tagged: false) : pointer("down", tagged: false), view: view))
+            if moves { try await receive(sender, tagged(useTouch ? touch("moved", tagged: false) : pointer("move", tagged: false), view: view)) }
+            XCTAssertTrue(events.take().contains { $0.type == .leftMouseDown }, label)
+            try await unlock(sender)
+            XCTAssertEqual(events.take().filter { $0.type == .leftMouseUp }.count, 1, "\(label): released when the view ended")
+            for _ in 0..<3 {
+                try await receive(sender, tagged(useTouch ? touch("moved", tagged: false) : pointer("move", tagged: false), view: view))
+            }
+            try await receive(sender, tagged(useTouch ? touch("ended", tagged: false) : pointer("up", tagged: false), view: view))
+            XCTAssertEqual(events.take(), [], "\(label): the rest of the gesture does nothing on the desktop")
+            // The device's next, untagged stream is its own: a hover moves the pointer, no drag.
+            try await receive(sender, useTouch ? touch("moved", tagged: false) : pointer("move", tagged: false))
+            let after = events.take()
+            XCTAssertFalse(after.contains { [.leftMouseDown, .leftMouseDragged, .leftMouseUp].contains($0.type) }, "\(label): \(after)")
+        }
+    }
+
+    /// Modifiers and keys held across a boundary, both ways. From the lock screen into the
+    /// desktop: released at the unlock, a late release does nothing, and the next desktop key
+    /// carries no leftover Shift. From the desktop into the lock screen (even when the view starts
+    /// before the lock is announced): released when the view starts; the login window never sees
+    /// a desktop Command.
+    func testModifiersAndKeysHeldAcrossABoundaryNeverCarryOver() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        let view = shownView
+        let shift = Int64(ControlModifier.shift.keyCode)
+        _ = events.take()
+        try await receive(sender, tagged(modifier(true, .shift), view: view))
+        try await receive(sender, tagged(key("down", .keyA), view: view))
+        XCTAssertTrue(events.take().contains { $0.keyCode == shift }, "Shift held on the lock screen")
+        try await unlock(sender)
+        let released = events.take()
+        XCTAssertTrue(released.contains { $0.keyCode == shift } && released.contains { $0.type == .keyUp && $0.keyCode == Int64(HIDKeyUsage.keyA.keyCode) },
+                      "released at the unlock: \(released)")
+        XCTAssertFalse(released.contains { $0.type == .keyDown }, "\(released)")
+        try await receive(sender, tagged(modifier(false, .shift), view: view))
+        try await receive(sender, tagged(key("up", .keyA), view: view))
+        XCTAssertEqual(events.take(), [], "a late release releases nothing twice")
+        try await receive(sender, key("press", .keyB))
+        let typed = events.take().filter { $0.type == .keyDown }
+        XCTAssertEqual(typed.count, 1)
+        XCTAssertFalse(typed.first?.flags.contains(.maskShift) ?? true, "no Shift left over on the desktop")
+
+        // Desktop into the lock screen, the view starting before the lock is announced.
+        setUpSender()
+        let next = try XCTUnwrap(self.sender)
+        try await admitAndGrant(next)
+        try await receive(next, modifier(true, .command))
+        try await receive(next, key("down", .keyC))
+        let command = Int64(ControlModifier.command.keyCode)
+        XCTAssertTrue(events.take().contains { $0.keyCode == command })
+        next.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        privacyGate.set(.locked)   // `macPrivacyChanged` hasn't run yet
+        try await next.settleForTesting()
+        try await showLockScreen(next)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        let atStart = events.take()
+        XCTAssertTrue(atStart.contains { $0.keyCode == command } && atStart.contains { $0.type == .keyUp && $0.keyCode == Int64(HIDKeyUsage.keyC.keyCode) },
+                      "desktop keys released when the view starts: \(atStart)")
+        try await receive(next, tagged(key("press", .keyA), view: shownView))
+        let onLockScreen = events.take().filter { $0.type == .keyDown }
+        XCTAssertEqual(onLockScreen.count, 1)
+        XCTAssertFalse(onLockScreen.first?.flags.contains(.maskCommand) ?? true, "the login window never sees a desktop Command")
+        try await receive(next, modifier(false, .command))
+        try await receive(next, key("up", .keyC))
+        XCTAssertEqual(events.take(), [], "the desktop's late releases do nothing on the lock screen")
+    }
+
+    /// Disconnect and reconnect mid-episode: the old connection's view is gone with it. Its input,
+    /// still in flight or replayed on the new connection, is refused; a fresh view on the new
+    /// connection gets a new number, and only that one goes.
+    func testAReconnectMidEpisodeRefusesTheOldConnectionsView() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        let old = shownView
+        try await receive(sender, tagged(key("down", .keyA), view: old))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown })
+
+        let generation = try await admit(sender)   // a new connection
+        XCTAssertTrue(events.take().contains { $0.type == .keyUp }, "the held key is released with the connection")
+        sender.grantSessionInput(generation: generation)
+        sender.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        try await sender.settleForTesting()
+        sent.clear()
+        try await receive(sender, tagged(key("press", .keyB), view: old))
+        try await receive(sender, tagged(touch("began", tagged: false), view: old))
+        XCTAssertEqual(events.take(), [], "the old connection's view, on the new one")
+        XCTAssertEqual(Set(refusals.map(\.reason)), ["notShown"])
+
+        try await showLockScreen(sender)
+        let fresh = shownView
+        XCTAssertNotEqual(fresh, old)
+        try await receive(sender, tagged(key("press", .keyB), view: old))
+        try await receive(sender, tagged(key("up", .keyA), view: old))
+        XCTAssertEqual(events.take(), [], "still refused once a new view is live")
+        try await receive(sender, tagged(key("press", .keyB), view: fresh))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown }, "the new view's own input")
+    }
+
+    /// Control revoked mid-episode: held input is released at once, nothing tagged for that view
+    /// goes again, even after control comes back and a new view starts.
+    func testRevocationMidEpisodeEndsTheViewForGood() async throws {
+        let sender = try XCTUnwrap(sender)
+        let generation = try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        let old = shownView
+        try await receive(sender, tagged(modifier(true, .shift), view: old))
+        try await receive(sender, tagged(touch("began", tagged: false), view: old))
+        _ = events.take()
+        sender.revokeSessionInput()
+        try await sender.settleForTesting()
+        let released = events.take()
+        XCTAssertTrue(released.contains { $0.type == .leftMouseUp }, "\(released)")
+        XCTAssertTrue(released.contains { $0.keyCode == Int64(ControlModifier.shift.keyCode) }, "\(released)")
+        try await receive(sender, tagged(key("press", .keyA), view: old))
+        XCTAssertEqual(events.take(), [])
+
+        sender.grantSessionInput(generation: generation)
+        try await sender.settleForTesting()
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        XCTAssertNotEqual(shownView, old)
+        sent.clear()
+        try await receive(sender, tagged(key("press", .keyA), view: old))
+        try await receive(sender, tagged(touch("ended", tagged: false), view: old))
+        XCTAssertEqual(events.take(), [], "the revoked view's input, after control came back")
+        XCTAssertEqual(refusals.map(\.reason), ["notShown"])
+        try await receive(sender, tagged(key("press", .keyA), view: shownView))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown })
+    }
+
+    /// Two devices, each showing the lock screen on its own connection: neither's tag works on
+    /// the other's connection.
+    func testTwoDevicesCantUseEachOthersView() async throws {
+        guard let tls else { return XCTFail("no TLS") }
+        let first = try XCTUnwrap(sender)
+        try await lockWithPermit(first)
+        try await showLockScreen(first)
+        let firstView = shownView
+
+        let otherEvents = RecordingEventSink()
+        let otherSent = SentMessages()
+        let second = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
+                               name: "Second Phone", mode: .mirror)
+        second.privacyGate = privacyGate
+        let generation = try await admit(second, events: otherEvents, sent: otherSent)
+        second.grantSessionInput(generation: generation)
+        second.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        try await second.settleForTesting()
+        try await receive(second, LockScreenWire.request(show: true))
+        try await second.settleForTesting()
+        let secondView = try XCTUnwrap(otherSent.last(type: MacLockWire.type)?[LockScreenWire.viewKey] as? Int)
+        XCTAssertNotEqual(firstView, secondView)
+        _ = events.take()
+        _ = otherEvents.take()
+        sent.clear()
+
+        try await receive(second, tagged(key("press", .keyA), view: firstView))
+        try await receive(second, tagged(touch("began", tagged: false), view: firstView))
+        XCTAssertEqual(otherEvents.take(), [], "the first device's view on the second's connection")
+        XCTAssertEqual(otherSent.all(type: LockScreenWire.inputRefused).compactMap { $0["reason"] as? String }, ["notShown", "notShown"])
+        try await receive(first, tagged(key("press", .keyA), view: secondView))
+        XCTAssertEqual(events.take(), [], "and the other way round")
+        try await receive(first, tagged(key("press", .keyA), view: firstView))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown })
+        try await receive(second, tagged(key("press", .keyA), view: secondView))
+        XCTAssertTrue(otherEvents.take().contains { $0.type == .keyDown })
+    }
+
+    /// Retransmitted or reordered input from an earlier view (hidden, then shown again on the same
+    /// connection) is refused; bare and malformed tags (an older build's `"lockScreen":true`, a
+    /// boolean or string view) never name a view; a release from an earlier view never releases
+    /// what the live one holds.
+    func testInputFromAnEarlierViewAndMalformedTagsAreRefused() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        let first = shownView
+        try await showLockScreen(sender, false)
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        let second = shownView
+        XCTAssertNotEqual(first, second)
+        _ = events.take()
+        sent.clear()
+        let press = key("press", .keyA)
+        try await receive(sender, tagged(press, view: first))
+        var bare = press
+        bare[LockScreenWire.inputTag] = true
+        try await receive(sender, bare)
+        var boolView = press
+        boolView[LockScreenWire.viewKey] = true
+        try await receive(sender, boolView)
+        var stringView = press
+        stringView[LockScreenWire.viewKey] = "\(second)"
+        try await receive(sender, stringView)
+        var negative = press
+        negative[LockScreenWire.viewKey] = -second
+        try await receive(sender, negative)
+        XCTAssertEqual(events.take(), [], "none of these names the live view")
+        XCTAssertEqual(refusals.map(\.reason), Array(repeating: "notShown", count: 5))
+
+        try await receive(sender, tagged(key("down", .keyC), view: second))
+        _ = events.take()
+        try await receive(sender, tagged(key("up", .keyC), view: first))
+        XCTAssertEqual(events.take(), [], "an earlier view's release releases nothing of this one")
+        try await receive(sender, tagged(key("up", .keyC), view: second))
+        XCTAssertTrue(events.take().contains { $0.type == .keyUp })
+    }
+
+    /// The log says why input was refused, once per view and once between views: never how many
+    /// keystrokes or clicks, or each one's moment.
+    func testRefusalsAreLoggedOncePerViewWithoutCounts() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        let start = try await sender.lockScreenRefusalLogCountForTesting
+        for _ in 0..<5 { try await receive(sender, typed("press", .keyA)) }
+        var logged = try await sender.lockScreenRefusalLogCountForTesting
+        XCTAssertEqual(logged - start, 1, "five refusals before any view: one line")
+        try await showLockScreen(sender)
+        for _ in 0..<5 { try await receive(sender, typed("press", .keyA, tagged: false)) }
+        logged = try await sender.lockScreenRefusalLogCountForTesting
+        XCTAssertEqual(logged - start, 2, "five during the view: one more")
+        try await unlock(sender)
+        for _ in 0..<5 { try await receive(sender, typed("text", text: "fake-pass-123")) }
+        logged = try await sender.lockScreenRefusalLogCountForTesting
+        XCTAssertEqual(logged - start, 3, "five after it ended: one more")
+        XCTAssertEqual(refusals.count, 15, "the device is still told about each")
     }
 
     override func tearDown() {
@@ -744,12 +1083,12 @@ final class MacSenderInputRevocationTests: XCTestCase {
     private static let peerID = "revocation-test-phone"
 
     @discardableResult
-    private func admit(_ sender: MacSender) async throws -> UInt64 {
+    private func admit(_ sender: MacSender, events: RecordingEventSink? = nil, sent: SentMessages? = nil) async throws -> UInt64 {
         let hello: [String: Any] = ["type": "hello", "pixelsWide": 2532, "pixelsHigh": 1170, "scale": 3.0,
                                     "device": "iPhone", "id": Self.peerID, "pv": WireProtocol.version]
         return try await sender.admitConnectionForTesting(
             helloJSON: try JSONSerialization.data(withJSONObject: hello),
-            pinnedSPKI: Data([0x30, 0x59]), eventSink: events, sent: sent.record)
+            pinnedSPKI: Data([0x30, 0x59]), eventSink: events ?? self.events, sent: (sent ?? self.sent).record)
     }
 
     @discardableResult

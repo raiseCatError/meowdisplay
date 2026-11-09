@@ -384,20 +384,32 @@ relays the picture and the keys; macOS's login window checks the password. Code:
   makes a grant that didn't exist, never applies to Never Allow, and never changes the device's
   setting. Without a pre-lock grant, nothing is asked or granted behind the lock: the device says
   to unlock at the Mac.
-- **Meant for the lock screen, or not at all.** The receiver tags every key, touch and click it
-  sends while it shows the lock screen. The Mac delivers tagged input only while that
-  connection's view is live, so keys, touches and clicks still in flight when the Mac unlocks (or
-  after a hide or reconnect) are refused, never typed or clicked into the app in front; untagged
-  input while the view is live is refused too. Every refused keystroke and click is reported to
-  that device by count and reason (never content), and it says so; refused pointer moves are
-  just dropped. Releases always go, and the Mac releases only what it pressed, so no button stays
-  held. Ordinary input after an unlock isn't held back.
+- **Meant for the lock screen, or not at all.** Each view gets a number the Mac never reuses.
+  While the device sees the Mac locked it tags every input message (keys, touches, clicks,
+  scrolls, Pencil, gestures, window and menu actions, a hardware keyboard or pointer), with the
+  view's number while it shows one. The Mac delivers tagged input only to the live view it names,
+  on that connection, and only touches, clicks and the login window's keys; untagged input only
+  when no view is live. So input still in flight when the Mac unlocks (or after a hide, a new
+  view, a reconnect, a revoke, or from another device) is refused, never typed, clicked or
+  scrolled into the app in front, and desktop input never reaches the lock screen. Scroll, Pencil,
+  proximity and gestures never act while a view is live or when tagged, so one begun on the lock
+  screen can't continue on the desktop. Every refused keystroke and click is reported to that
+  device by count and reason (never content), and it says so; refused moves are just dropped.
+- **Held input stays in its episode.** Keys, modifiers and buttons belong to the episode (the
+  desktop, or one view) that pressed them. The Mac releases them when the view starts or ends and,
+  under the injector's own lock, before anything of another episode acts, so a modifier or drag
+  never carries across an unlock or into the lock screen; a release from another episode releases
+  nothing. The device ends every touch, drag, scroll and its momentum, Pencil stroke and gesture
+  in progress, and stops delayed actions, whenever its tag changes. Ordinary input after an
+  unlock isn't held back.
 - **Ends by itself.** On unlock (normal input and content resume for that session; the receiver
   is told to reset its input), on another
   user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow
   Input off, a disconnect, or two minutes without input. Held keys and buttons are released.
 - **Nothing kept.** Typed characters are passed to macOS and not logged, stored or inspected
-  beyond the key filter above; debug logging of keys is off while locked.
+  beyond the key filter above; debug logging of keys is off while locked (on the Mac, and on the
+  device whenever it sees the Mac locked). The Mac logs that input was refused and why at most
+  once per view (and once between views), never how many keys or clicks, or when.
 - **Limits.** The Mac can't tell what macOS draws on its lock screen; it relies on macOS's own
   lock state and the login window. Anyone holding a trusted device that has control can try
   passwords on the lock screen, under macOS's own rate limits, as they could at the Mac's

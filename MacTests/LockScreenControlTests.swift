@@ -148,16 +148,20 @@ final class LockScreenControlTests: XCTestCase {
 
     func testTaggedTypingGoesOnlyToALiveViewAndEveryRefusalIsReported() {
         typealias T = LockScreenTaggedInput
-        XCTAssertNil(T.refusal(action: "press", tagged: true, viewLive: true, unlocked: false))
-        XCTAssertEqual(T.refusal(action: "press", tagged: true, viewLive: false, unlocked: true), .unlocked, "unlock race")
-        XCTAssertEqual(T.refusal(action: "text", tagged: true, viewLive: false, unlocked: false), .notShown, "forged or late tag")
-        XCTAssertEqual(T.refusal(action: "down", tagged: false, viewLive: true, unlocked: false), .untagged)
-        XCTAssertNil(T.refusal(action: "press", tagged: false, viewLive: false, unlocked: true), "ordinary input after unlock")
-        XCTAssertNil(T.refusal(action: "press", tagged: false, viewLive: false, unlocked: false),
+        let view7 = LockScreenInputTag(view: 7)
+        XCTAssertNil(T.refusal(action: "press", tag: view7, liveView: 7, unlocked: false))
+        XCTAssertEqual(T.refusal(action: "press", tag: view7, liveView: nil, unlocked: true), .unlocked, "unlock race")
+        XCTAssertEqual(T.refusal(action: "text", tag: view7, liveView: nil, unlocked: false), .notShown, "forged or late tag")
+        XCTAssertEqual(T.refusal(action: "press", tag: view7, liveView: 8, unlocked: false), .notShown, "an earlier view's")
+        XCTAssertEqual(T.refusal(action: "press", tag: LockScreenInputTag(view: nil), liveView: 7, unlocked: false), .notShown,
+                       "typed while locked without the view")
+        XCTAssertEqual(T.refusal(action: "down", tag: nil, liveView: 7, unlocked: false), .untagged)
+        XCTAssertNil(T.refusal(action: "press", tag: nil, liveView: nil, unlocked: true), "ordinary input after unlock")
+        XCTAssertNil(T.refusal(action: "press", tag: nil, liveView: nil, unlocked: false),
                      "locked without the view: the privacy gate drops it as before")
         for release in ["up", "modifierUp", "cancel"] {
-            for (tagged, live, unlocked) in [(true, false, true), (false, true, false), (true, false, false)] {
-                XCTAssertNil(T.refusal(action: release, tagged: tagged, viewLive: live, unlocked: unlocked), "releases always go")
+            for (tag, live, unlocked) in [(view7, nil, true), (nil, 7, false), (view7, nil, false), (view7, 8, false)] as [(LockScreenInputTag?, Int?, Bool)] {
+                XCTAssertNil(T.refusal(action: release, tag: tag, liveView: live, unlocked: unlocked), "releases always go")
             }
         }
         XCTAssertEqual(T.keystrokes(action: "press", text: nil), 1)
@@ -177,20 +181,24 @@ final class LockScreenControlTests: XCTestCase {
             XCTAssertEqual(T.pointerKind(type: type, phaseOrAction: value), .release)
         }
         XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "teleport"), .other)
+        let view7 = LockScreenInputTag(view: 7)
         // Presses.
-        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: true, unlocked: false), .deliver)
-        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: true), .refuse(.unlocked))
-        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: false), .refuse(.notShown))
-        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: true, unlocked: false), .refuse(.untagged))
-        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: false, unlocked: true), .deliver)
-        // Moves: quietly dropped when not for a live view.
-        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: true, unlocked: false), .deliver)
-        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: false, unlocked: true), .drop)
-        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: true, unlocked: false), .drop)
-        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: false, unlocked: true), .deliver)
+        XCTAssertEqual(T.pointerDecision(.press, tag: view7, liveView: 7, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.press, tag: view7, liveView: nil, unlocked: true), .refuse(.unlocked))
+        XCTAssertEqual(T.pointerDecision(.press, tag: view7, liveView: nil, unlocked: false), .refuse(.notShown))
+        XCTAssertEqual(T.pointerDecision(.press, tag: view7, liveView: 8, unlocked: false), .refuse(.notShown))
+        XCTAssertEqual(T.pointerDecision(.press, tag: nil, liveView: 7, unlocked: false), .refuse(.untagged))
+        XCTAssertEqual(T.pointerDecision(.press, tag: nil, liveView: nil, unlocked: true), .deliver)
+        // Moves (and an unknown action): quietly dropped when not for a live view.
+        XCTAssertEqual(T.pointerDecision(.move, tag: view7, liveView: 7, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.move, tag: view7, liveView: nil, unlocked: true), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tag: view7, liveView: 8, unlocked: false), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tag: nil, liveView: 7, unlocked: false), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tag: nil, liveView: nil, unlocked: true), .deliver)
+        XCTAssertEqual(T.pointerDecision(.other, tag: view7, liveView: nil, unlocked: true), .drop)
         // Releases, always.
-        for (tagged, live, unlocked) in [(true, false, true), (false, true, false), (true, false, false), (false, false, true)] {
-            XCTAssertEqual(T.pointerDecision(.release, tagged: tagged, viewLive: live, unlocked: unlocked), .deliver)
+        for (tag, live, unlocked) in [(view7, nil, true), (nil, 7, false), (view7, nil, false), (nil, nil, true)] as [(LockScreenInputTag?, Int?, Bool)] {
+            XCTAssertEqual(T.pointerDecision(.release, tag: tag, liveView: live, unlocked: unlocked), .deliver)
         }
     }
 
