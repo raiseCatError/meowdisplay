@@ -223,6 +223,10 @@ final class ReceiverUISink: Sendable {
         target?.applyMacLockUpdate(notice)
     }
 
+    func publishLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
+        target?.applyLockScreenInputRefusal(refusal)
+    }
+
     func publishAllowInputStateChange(_ state: SessionInputWireState) {
         target?.applyAllowInputStateChangeUpdate(state)
     }

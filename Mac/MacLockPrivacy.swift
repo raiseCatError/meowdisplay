@@ -66,12 +66,21 @@ final class MacPrivacyGate: @unchecked Sendable {
 
     private let lock = NSLock()
     private var value: MacScreenPrivacy
+    private var episode: UInt64 = 0
 
     init(_ state: MacScreenPrivacy) { value = state }
 
     var state: MacScreenPrivacy {
         lock.lock(); defer { lock.unlock() }
         return value
+    }
+
+    /// Counts every change into a state other than unlocked (a lock, a user switch, unknown), so
+    /// anything bound to one lock (`LockScreenGrantHandoffs`) is void after an unlock, a switch or
+    /// a relock.
+    var lockEpisode: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return episode
     }
 
     var allowsContent: Bool { state.allowsContent }
@@ -84,6 +93,7 @@ final class MacPrivacyGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard value != s else { return false }
         value = s
+        if s != .unlocked { episode &+= 1 }
         return true
     }
 }

@@ -2902,6 +2902,11 @@ final class SenderController: ObservableObject {
         }
         sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
             guard let self, let session, self.owns(session) else { return }
+            // Locked, switching to Mirror for the lock screen: an Ask device's pre-lock control
+            // goes with it, once (`LockScreenGrantHandoffs`).
+            if requestedMode == .mirror, session.displayAssignment.mode != .mirror {
+                self.issueLockScreenHandoff(for: session)
+            }
             // This receiver's own Mirror/Extend control: this device only.
             self.requestMode(CaptureMode(requestedMode), for: session)
         }
@@ -3724,7 +3729,10 @@ final class SenderController: ObservableObject {
         let applied = ReceiverInputAuthorizationStore.setPolicy(
             policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
         objectWillChange.send()
-        if applied { pushLockScreenPermit(peerID: peerID) }
+        if applied {
+            lockScreenHandoffs.revoke(peerID: peerID)
+            pushLockScreenPermit(peerID: peerID)
+        }
         return applied
     }
 
@@ -3736,7 +3744,10 @@ final class SenderController: ObservableObject {
         let applied = ReceiverInputAuthorizationStore.setLockScreenControlAllowed(
             allowed, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
         objectWillChange.send()
-        if applied { pushLockScreenPermit(peerID: peerID) }
+        if applied {
+            if !allowed { lockScreenHandoffs.revoke(peerID: peerID) }
+            pushLockScreenPermit(peerID: peerID)
+        }
         return applied
     }
 
@@ -3752,7 +3763,36 @@ final class SenderController: ObservableObject {
     private func pushLockScreenPermit(to session: DeviceSession) {
         guard let peerID = session.deviceID else { return }
         session.sender.setLockScreenPermit(policy: ReceiverInputAuthorizationStore.policy(peerID: peerID),
-                                           allowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID))
+                                           allowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID),
+                                           handoff: lockScreenHandoffs.isValid(lockScreenHandoffCheck(peerID: peerID)))
+    }
+
+    // MARK: Lock screen control: an Ask device's pre-lock control across the switch to Mirror
+
+    /// Mac-internal, single-use, ≤10 s, bound to the device's pinned key and this lock episode
+    /// (`LockScreenGrantHandoffs`). Never on the wire.
+    private var lockScreenHandoffs = LockScreenGrantHandoffs()
+
+    /// The device as its pin says now, and this Mac's lock state now.
+    private func lockScreenHandoffCheck(peerID: String) -> LockScreenGrantHandoffs.Check {
+        LockScreenGrantHandoffs.Check(peerID: peerID, pinnedKey: TrustStore.shared.pin(peerID: peerID),
+                                      lockEpisode: MacPrivacyGate.shared.lockEpisode,
+                                      privacy: MacPrivacyGate.shared.state,
+                                      onConsole: LoginSessionConsole.shared.isOnConsole,
+                                      now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// The device asked to switch this session to Mirror. Issued only for an Ask device whose
+    /// identity this connection proved, while locked, with Allow Lock Screen Control on and a live
+    /// grant a person gave before the lock; otherwise any old ticket is dropped.
+    private func issueLockScreenHandoff(for session: DeviceSession) {
+        guard let peerID = session.deviceID else { return }
+        let issued = lockScreenHandoffs.issue(
+            lockScreenHandoffCheck(peerID: peerID),
+            policy: ReceiverInputAuthorizationStore.policy(peerID: peerID),
+            lockScreenControlAllowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID),
+            sessionGranted: session.sender.hasSessionInputGrant)
+        if issued { Log.info("lockScreen: control handoff issued for the switch to Mirror") }
     }
 
     /// Mac owner manually revokes an active session's control grant from
@@ -3918,13 +3958,27 @@ final class SenderController: ObservableObject {
     /// `MacSender.grantSessionInput(generation:)`).
     func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64) {
         guard let peerID = session.deviceID else { return }
+        let policy = ReceiverInputAuthorizationStore.policy(peerID: peerID)
+        let screenLocked = !MacPrivacyGate.shared.allowsInput
+        let onConsole = LoginSessionConsole.shared.isOnConsole
+        // An Ask device's first request on the new Mirror connection spends its handoff ticket,
+        // granted or not; re-checked here against the pin, the lock episode and the console.
+        var handoff = false
+        if screenLocked, policy == .ask, allowInput, onConsole,
+           lockScreenHandoffs.tickets[peerID] != nil {
+            handoff = lockScreenHandoffs.redeem(lockScreenHandoffCheck(peerID: peerID))
+                && ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID)
+            Log.info("lockScreen: control handoff \(handoff ? "redeemed" : "refused")")
+            pushLockScreenPermit(to: session)   // spent: no longer offered as `needsControl`
+        }
         // Mac-wide master off (the owner already said no globally) or this
         // login session switched out: never surface a prompt for a request
         // that can't succeed (`InputControlRequestRoute`).
         switch InputControlRequestRoute.route(masterEnabled: allowInput,
-                                              onConsole: LoginSessionConsole.shared.isOnConsole,
-                                              screenLocked: !MacPrivacyGate.shared.allowsInput,
-                                              policy: ReceiverInputAuthorizationStore.policy(peerID: peerID)) {
+                                              onConsole: onConsole,
+                                              screenLocked: screenLocked,
+                                              lockScreenHandoff: handoff,
+                                              policy: policy) {
         case .deny(let state):
             session.sender.denySessionInput(state: state)
         case .grant:

@@ -533,8 +533,10 @@ struct ReceiverScreen: View {
                         }
                         .allowsHitTesting(false)   // never block touch input
                     }
+                    // The ordinary keyboard never types on the Mac's lock screen: that has its own.
                     RemoteKeyboardInputView(
-                        isActive: $keyboardActive,
+                        isActive: Binding(get: { keyboardActive && !lockScreenShowing },
+                                          set: { keyboardActive = $0 }),
                         onCommitText: { commitKeyboardText($0) },
                         onSpecialPress: { usage in
                             model.receiver.sendKeyboardPress(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
@@ -549,10 +551,19 @@ struct ReceiverScreen: View {
                                 modifiers, chord: controlStore.activeChordModifiers))
                         },
                         onRequestDismiss: { keyboardActive = false },
-                        typingTarget: model.workspace.hostName,
-                        // While the Mac is locked, anything typed is its lock screen's password.
-                        traits: .current(macLocked: model.receiver.macLock != nil)
+                        typingTarget: model.workspace.hostName
                     )
+                    .frame(width: 1, height: 1)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+                    // The Mac's lock screen: a bare key input (no predictions, AutoFill or echo),
+                    // its keys tagged for the lock screen, no chord modifiers.
+                    LockScreenKeyInputView(
+                        isActive: keyboardActive && lockScreenShowing,
+                        onText: { model.receiver.sendKeyboardText($0) },
+                        onReturn: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue)) },
+                        onDelete: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardDeleteOrBackspace.rawValue)) },
+                        onRequestDismiss: { keyboardActive = false })
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
@@ -827,8 +838,32 @@ struct ReceiverScreen: View {
         }
         // The lock screen going away (Hide, or the Mac unlocking) closes the keyboard it opened.
         .onChange(of: lockScreenShowing) { showing in
-            if !showing { keyboardActive = false }
+            // Either way the open keyboard closes: the ordinary one never types on the lock
+            // screen, and the lock screen's never types on the desktop.
+            keyboardActive = false
+            _ = showing
         }
+        // The Mac locked: whatever keyboard was open closes (the cover is up).
+        .onChange(of: model.receiver.macLock != nil) { locked in
+            if locked { keyboardActive = false }
+        }
+        // Keystrokes the Mac refused (typed for the lock screen after it unlocked, for example):
+        // said in one line, never silently lost.
+        .overlay(alignment: .top) {
+            if let notice = model.lockScreenInputNotice {
+                Label(notice, systemImage: "keyboard.badge.exclamationmark")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 60)
+                    .transition(slideTransition(from: .top))
+                    .accessibilityAddTraits(.isStaticText)
+                    .accessibilityIdentifier("lockScreenInputNotice")
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.lockScreenInputNotice)
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
         .fullScreenCover(item: Binding(get: { requiredUpdate }, set: { _ in })) { update in
@@ -2345,11 +2380,24 @@ final class ReceiverModel: ObservableObject {
     // MARK: Show Lock Screen (PROTOCOL.md 6.19)
     // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
     // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
-    @Published private(set) var lockScreenFlow = LockScreenFlow()
+    @Published private(set) var lockScreenFlow = LockScreenFlow() {
+        didSet { syncLockScreenInputTag() }
+    }
     /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
     private var lockScreenReturnsToExtend = false
+    /// Going back to Extend waits for video (the receiver can't ask for Extend while the locked
+    /// Mac says video is off): retried once it's on.
+    private var lockScreenExtendReturnPending = false
+    /// The Mac Show Lock Screen started on. Another Mac on the connection stops the flow (fail
+    /// closed): nothing is asked of, or switched on, a Mac the user didn't start it with.
+    private var lockScreenMacID: String?
+    /// "N keystrokes weren't sent: …" (`lockScreenInputRefused`), shown briefly.
+    @Published private(set) var lockScreenInputNotice: String?
+    private var lockScreenRefusalTotal: (refusal: LockScreenInputRefusal, at: Date)?
+    private var lockScreenNoticeGeneration = 0
 
     func showLockScreen() {
+        lockScreenMacID = receiver.connectedMacPeerID
         perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
     }
 
@@ -2358,7 +2406,41 @@ final class ReceiverModel: ObservableObject {
     }
 
     private func lockScreenInputsChanged() {
+        if receiver.connected, let current = receiver.connectedMacPeerID, lockScreenFlow.phase != .idle {
+            if let started = lockScreenMacID, started != current {
+                Log.info("lockScreen: another Mac on the connection — stopped")
+                lockScreenFlow.abandon()
+                lockScreenReturnsToExtend = false
+                lockScreenExtendReturnPending = false
+                lockScreenMacID = nil
+                return
+            }
+            if lockScreenMacID == nil { lockScreenMacID = current }
+        }
         perform(lockScreenFlow.update(notice: receiver.macLock, connected: receiver.connected, now: Date()))
+        if lockScreenExtendReturnPending, receiver.connected, receiver.videoEnabled, receiver.macLock == nil {
+            lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+        }
+    }
+
+    /// Keys leave tagged for the lock screen exactly while this device shows it (asked here, and
+    /// the Mac says `active`): the Mac then never types them on the desktop.
+    private func syncLockScreenInputTag() {
+        receiver.lockScreenInputTagged = (receiver.macLock?.showsMacLockScreen ?? false) && lockScreenFlow.isShowing
+    }
+
+    private func lockScreenInputRefused(_ refusal: LockScreenInputRefusal) {
+        let now = Date()
+        var total = refusal
+        if let last = lockScreenRefusalTotal, now.timeIntervalSince(last.at) < 3 { total = last.refusal.adding(refusal) }
+        lockScreenRefusalTotal = (total, now)
+        lockScreenInputNotice = total.notice
+        lockScreenNoticeGeneration &+= 1
+        let generation = lockScreenNoticeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.lockScreenNoticeGeneration == generation else { return }
+            self.lockScreenInputNotice = nil
+        }
     }
 
     private func perform(_ action: LockScreenAction) {
@@ -2372,8 +2454,13 @@ final class ReceiverModel: ObservableObject {
             if !receiver.requestDisplayMode(.mirror) { lockScreenFlow.couldNotPerform() }
         case .show(let show): receiver.requestLockScreen(show: show)
         case .returnToWindowView:
-            // Back to where Show Lock Screen started: Window view, or Extend.
-            if lockScreenReturnsToExtend { _ = receiver.requestDisplayMode(.extend) } else { _ = receiver.requestWindowMode() }
+            // Back to where Show Lock Screen started: Window view, or Extend (after an unlock, or
+            // after a failed or refused attempt). Never on another Mac (`lockScreenInputsChanged`).
+            if lockScreenReturnsToExtend {
+                lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+            } else {
+                _ = receiver.requestWindowMode()
+            }
             lockScreenReturnsToExtend = false
         }
     }
@@ -2433,6 +2520,16 @@ final class ReceiverModel: ObservableObject {
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$videoEnabled
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$lockScreenInputRefusal
+            .compactMap { $0?.refusal }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] refusal in self?.lockScreenInputRefused(refusal) }
             .store(in: &cancellables)
         Timer.publish(every: 1, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in

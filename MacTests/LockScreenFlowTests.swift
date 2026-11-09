@@ -90,16 +90,61 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(refused.phase, .failed("Lock Screen Control is off for this device on the Mac."))
     }
 
-    /// Timed out while switching, then the Mac turns out unlocked: still back to Window view.
-    func testATimeoutThenAnUnlockStillReturnsToWindowView() {
+    /// Timed out after switching: back to the previous view at once, still locked, once.
+    func testATimeoutAfterTheSwitchReturnsToThePreviousView() {
         var flow = LockScreenFlow()
         _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
         let undecided = locked(.unavailable(nil), remoteUnlock: false)
-        XCTAssertEqual(flow.update(notice: undecided, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 1)), .none)
+        XCTAssertEqual(flow.update(notice: undecided, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 1)),
+                       .returnToWindowView)
         XCTAssertEqual(flow.phase, .failed("The Mac didn't respond."))
+        XCTAssertFalse(flow.returnToWindowView)
+        XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 2)), .none)
+    }
+
+    /// Refused after switching (the Ask device's handoff expired, the switch turned off): back to
+    /// the previous view at once, with the reason shown.
+    func testARefusalAfterTheSwitchReturnsToThePreviousView() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = flow.update(notice: nil, connected: false, now: t0)
+        XCTAssertEqual(flow.update(notice: locked(.needsControl), connected: true, now: t0), .requestControl)
+        XCTAssertEqual(flow.update(notice: locked(.unavailable("controlBeforeLock"), remoteUnlock: false), connected: true, now: t0),
+                       .returnToWindowView)
+        XCTAssertEqual(flow.phase, .failed("Control wasn't allowed before the Mac locked."))
+        XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0), .none, "once")
+    }
+
+    /// Timed out while the switch's reconnect is still down: the way back waits for a connection.
+    func testAFailureWhileDisconnectedReturnsOnceConnected() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        XCTAssertEqual(flow.update(notice: nil, connected: false, now: t0.addingTimeInterval(LockScreenFlow.timeout + 1)), .none)
         XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0.addingTimeInterval(LockScreenFlow.timeout + 2)),
                        .returnToWindowView)
-        XCTAssertEqual(flow.phase, .idle)
+    }
+
+    /// The switch itself didn't happen: nothing to go back from.
+    func testCouldNotPerformLeavesNoWayBack() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        flow.couldNotPerform()
+        XCTAssertFalse(flow.returnToWindowView)
+        XCTAssertEqual(flow.update(notice: locked(.needsFullDesktop), connected: true, now: t0), .none)
+    }
+
+    /// Another Mac on the connection: stop, switch nothing.
+    func testAbandonOnAnotherMacSwitchesNothing() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        flow.abandon()
+        XCTAssertEqual(flow.phase, .failed("Connected to a different Mac, so Show Lock Screen stopped."))
+        XCTAssertFalse(flow.returnToWindowView)
+        XCTAssertFalse(flow.askedOnThisConnection)
+        XCTAssertEqual(flow.update(notice: nil, connected: true, now: t0), .none)
+        var idle = LockScreenFlow()
+        idle.abandon()
+        XCTAssertEqual(idle.phase, .idle, "nothing to stop")
     }
 
     func testAfterTheSwitchAvailableShowsDirectly() {

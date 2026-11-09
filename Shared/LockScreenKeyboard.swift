@@ -1,35 +1,68 @@
 import Foundation
 
-/// How the receiver's keyboard behaves, as plain values (UIKit maps them in
-/// `RemoteKeyboardResponderView`). While the Mac is locked, what is typed is a password for its
-/// own lock screen (SECURITY.md "Lock screen control"): secure entry, no autocorrect, spelling,
-/// capitals, smart punctuation or predictions (nothing learns or suggests it), and nothing of it
-/// shown or read out (the typing strip shows a fixed label, never the characters or their count).
-struct RemoteKeyboardTraits: Equatable, Sendable {
-    var secureEntry: Bool
+/// The lock screen's own keyboard on iOS (`LockScreenKeyResponder`), as plain values so they can be
+/// tested off-device. What is typed there is the Mac's login password (SECURITY.md "Lock screen
+/// control"), so the responder is a bare `UIKeyInput`, never a `UITextInput`: iOS has no document
+/// around the caret, so there is no QuickType or prediction bar, no AutoFill, no text replacement
+/// and nothing to learn from. On top of that it says secure entry (no learning, no dictation, no
+/// keyboard caching), no content type (nothing for AutoFill to match), and no autocorrect,
+/// spelling, capitals or smart punctuation. Nothing typed is shown, counted or read out: the strip
+/// over the keyboard says a fixed label.
+struct LockScreenKeyInputTraits: Equatable, Sendable {
+    var secureTextEntry: Bool
     var autocorrection: Bool
     var spellChecking: Bool
-    /// Sentence capitals; off means none.
     var autocapitalization: Bool
     var smartPunctuation: Bool
-    var inlinePrediction: Bool
-    /// Marks the field as a password (`textContentType = .password`).
-    var passwordContentType: Bool
-    /// The typing strip (and its accessibility value) mirrors what is typed.
+    /// `UITextContentType` raw value; nil sets none.
+    var contentType: String?
+    /// `UITextInput` (a document iOS can read, predict from and fill). Never for the lock screen.
+    var documentContext: Bool
+    /// The strip or accessibility shows what was typed (or how much).
     var echoesTypedText: Bool
 
-    /// The ordinary keyboard: the system's own settings for suggestions, the strip echoes.
-    static let normal = RemoteKeyboardTraits(secureEntry: false, autocorrection: true, spellChecking: true,
-                                             autocapitalization: true, smartPunctuation: true,
-                                             inlinePrediction: true, passwordContentType: false,
-                                             echoesTypedText: true)
-    /// Typing into the Mac's lock screen.
-    static let lockScreen = RemoteKeyboardTraits(secureEntry: true, autocorrection: false, spellChecking: false,
-                                                 autocapitalization: false, smartPunctuation: false,
-                                                 inlinePrediction: false, passwordContentType: true,
-                                                 echoesTypedText: false)
+    static let lockScreen = LockScreenKeyInputTraits(
+        secureTextEntry: true, autocorrection: false, spellChecking: false, autocapitalization: false,
+        smartPunctuation: false, contentType: nil, documentContext: false, echoesTypedText: false)
+}
 
-    /// `macLocked`: the Mac said it's locked (`macLockState`), so anything typed can only reach its
-    /// lock screen: always the secure traits then, shown or not.
-    static func current(macLocked: Bool) -> RemoteKeyboardTraits { macLocked ? .lockScreen : .normal }
+/// What one keyboard callback of the lock screen's responder sends (tagged `lockScreen`).
+enum LockScreenKeyInputPlan {
+    enum Action: Equatable, Sendable {
+        case text(String)
+        case returnKey
+        case delete
+    }
+
+    /// The Mac takes text in pieces of at most this many characters.
+    static let maxTextChunk = 128
+
+    /// `insertText`: line breaks are Return; Tab and other control characters are dropped (the
+    /// lock screen takes neither); the rest goes as text, in order.
+    static func plan(insertText text: String) -> [Action] {
+        var actions: [Action] = []
+        var pending = ""
+        func flush() {
+            while !pending.isEmpty {
+                let piece = String(pending.prefix(maxTextChunk))
+                actions.append(.text(piece))
+                pending.removeFirst(piece.count)
+            }
+        }
+        for character in text {
+            if character == "\n" || character == "\r" || character == "\r\n" {
+                flush()
+                actions.append(.returnKey)
+            } else if character.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) {
+                continue
+            } else {
+                pending.append(character)
+            }
+        }
+        flush()
+        return actions
+    }
+
+    /// `deleteBackward`.
+    static let deleteBackward: [Action] = [.delete]
 }

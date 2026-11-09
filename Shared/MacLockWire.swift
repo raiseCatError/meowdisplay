@@ -27,6 +27,59 @@ enum LockScreenWire {
     static let welcomeFeature = "lockScreenControl"
 
     static func request(show: Bool) -> [String: Any] { ["type": request, "show": show] }
+
+    /// Receiver -> Mac, on `keyboard` messages sent while this device shows the lock screen:
+    /// `"lockScreen":true`. Additive: a Mac that doesn't know it ignores it.
+    static let inputTag = "lockScreen"
+
+    /// Mac -> receiver: `{"type":"lockScreenInputRefused","count":N,"reason":R}`: N keystrokes
+    /// weren't delivered. R: `unlocked` (typed for the lock screen, but the Mac had unlocked),
+    /// `notShown` (typed for the lock screen, which isn't shown on this connection), `untagged`
+    /// (typed outside the lock screen's keyboard while it is shown).
+    static let inputRefused = "lockScreenInputRefused"
+
+    static func inputRefused(count: Int, reason: String) -> [String: Any] {
+        ["type": inputRefused, "count": count, "reason": reason]
+    }
+}
+
+/// The receiver's copy of `lockScreenInputRefused`.
+struct LockScreenInputRefusal: Equatable, Sendable {
+    var count: Int
+    var reason: String
+
+    init(count: Int, reason: String) {
+        self.count = count
+        self.reason = reason
+    }
+
+    /// Nil for anything malformed (no positive count).
+    init?(message: [String: Any]) {
+        guard message["type"] as? String == LockScreenWire.inputRefused,
+              let count = message["count"] as? Int, count > 0, count <= 100_000 else { return nil }
+        self.count = count
+        reason = String((message["reason"] as? String ?? "").prefix(32))
+    }
+
+    /// One plain line for the receiver.
+    var notice: String {
+        switch reason {
+        case "unlocked":
+            return count == 1 ? String(localized: "1 keystroke wasn’t sent: the Mac unlocked.")
+                              : String(localized: "\(count) keystrokes weren’t sent: the Mac unlocked.")
+        case "untagged":
+            return count == 1 ? String(localized: "1 keystroke wasn’t sent: use the lock screen’s keyboard.")
+                              : String(localized: "\(count) keystrokes weren’t sent: use the lock screen’s keyboard.")
+        default:
+            return count == 1 ? String(localized: "1 keystroke wasn’t sent: the lock screen isn’t shown.")
+                              : String(localized: "\(count) keystrokes weren’t sent: the lock screen isn’t shown.")
+        }
+    }
+
+    /// Several refusals close together read as one notice when the reason is the same.
+    func adding(_ other: LockScreenInputRefusal) -> LockScreenInputRefusal {
+        other.reason == reason ? LockScreenInputRefusal(count: count + other.count, reason: reason) : other
+    }
 }
 
 /// What the Mac offers this device for its lock screen while it's locked.
