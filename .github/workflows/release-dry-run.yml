@@ -8,7 +8,8 @@ name: Release dry run
 #  - which of its expected secrets and variables are missing (by name only;
 #    no value is ever printed);
 #  - read-only credential checks: Sparkle-key continuity with the PUBLISHED
-#    baseline apps (baseline.env), the Developer ID certificate in match, App Store Connect
+#    baseline apps (baseline.env), the Developer ID identity in match (with its
+#    private key, in a throwaway keychain), App Store Connect
 #    and Google Play API access, and the website App's token and installation
 #    (check-website-app-access.sh: reads only, never pushes or opens a PR).
 # Manual only, from release/<version>. GitHub can dispatch it once this file
@@ -86,16 +87,13 @@ jobs:
         if: ${{ !cancelled() && steps.protected.outcome == 'success' && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         with:
           ssh-private-key: ${{ secrets.MATCH_DEPLOY_KEY }}
-      - name: Developer ID certificate in match (read-only)
+      - name: Developer ID identity in match, with its private key (read-only)
         if: ${{ !cancelled() && steps.protected.outcome == 'success' && !contains(steps.secrets.outputs.missing, 'MATCH_') }}
         env:
           MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-        run: |
-          bundle exec fastlane run match type:developer_id readonly:true \
-            app_identifier:com.raisecaterror.meowdisplay.mac,com.raisecaterror.meowdisplay.mac.receiver \
-            team_id:"$DEVELOPMENT_TEAM" platform:macos
+        run: scripts/release/check-developer-id-identity.sh
       - name: Fail if anything is missing
         if: ${{ !cancelled() && steps.protected.outcome == 'success' && steps.secrets.outputs.missing != '' }}
         env:
