@@ -2,7 +2,7 @@
 
 **MeowDisplay 2.0 is the stable Mac and iPhone/iPad release.** The main Mac
 app shares and receives; the separate Receiver-only app remains available.
-Android 2.0 is in closed testing and requires Mac 2.0. Android requires Android 10+ and has no USB
+Android 2.0 is in closed testing and works with Mac 2.0 or later (it doesn't get the 2.1 features; see [COMPATIBILITY.md](COMPATIBILITY.md)). Android requires Android 10+ and has no USB
 transport. See [platform availability](README.md#platform-availability--november-2-2026).
 
 
