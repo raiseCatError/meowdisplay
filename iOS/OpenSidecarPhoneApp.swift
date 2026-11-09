@@ -445,6 +445,7 @@ struct ReceiverScreen: View {
                                    receiver: model.receiver,
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
+                                   lockScreenShowing: lockScreenShowing,
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
@@ -2790,6 +2791,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// last touch when the keyboard opens if true; pans (never zooms) if
     /// false. Either way the typing area still ends up visible.
     let zoomWhileTyping: Bool
+    var lockScreenShowing = false
     /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
     /// reacts to keyboard-frame notifications while this is true, so a
     /// keyboard opened for an unrelated text field elsewhere in the app
@@ -3023,6 +3025,7 @@ struct VideoLayerView: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
+        uiView.setLockScreenShowing(lockScreenShowing)
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
@@ -3887,6 +3890,17 @@ struct VideoLayerView: UIViewRepresentable {
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
+        /// The Mac's own lock screen is what this surface shows: with the keyboard open, all of it
+        /// is fitted above the keyboard (`RemoteViewportCalculator.lockScreenKeyboardOpen`).
+        private var lockScreenShowing = false
+
+        func setLockScreenShowing(_ showing: Bool) {
+            guard showing != lockScreenShowing else { return }
+            lockScreenShowing = showing
+            guard keyboardVisibleRect != nil else { return }   // only matters while open
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
         func setZoomWhileTyping(_ enabled: Bool) {
             guard enabled != zoomWhileTypingEnabled else { return }
             zoomWhileTypingEnabled = enabled
@@ -4269,6 +4283,11 @@ struct VideoLayerView: UIViewRepresentable {
                 return RemoteViewportTransform(
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
                     displayedRect: rect)
+            }
+            if let keyboardVisibleRect, lockScreenShowing {
+                lastCaretBase = nil
+                return RemoteViewportCalculator.lockScreenKeyboardOpen(
+                    viewBounds: bounds, remoteAspectSize: video, visibleRect: keyboardVisibleRect)
             }
             if let keyboardVisibleRect {
                 let base = RemoteViewportCalculator.keyboardOpen(

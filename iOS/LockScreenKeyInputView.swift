@@ -37,7 +37,7 @@ struct LockScreenKeyInputView: UIViewRepresentable {
         if isActive, !uiView.isFirstResponder {
             uiView.becomeFirstResponder()
         } else if !isActive, uiView.isFirstResponder {
-            uiView.resignFirstResponder()
+            uiView.resignOnRequest()
         }
     }
 
@@ -49,7 +49,7 @@ struct LockScreenKeyInputView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: LockScreenKeyResponder, coordinator: ()) {
-        if uiView.isFirstResponder { uiView.resignFirstResponder() }
+        if uiView.isFirstResponder { uiView.resignOnRequest() }
     }
 }
 
@@ -90,9 +90,29 @@ final class LockScreenKeyResponder: UIView, UIKeyInput {
         accessibilityLabel = String(localized: "Mac lock screen keyboard")
         accessibilityValue = nil
         strip.onDone = { [weak self] in
-            self?.resignFirstResponder()
+            self?.resignOnRequest()
             self?.onRequestDismiss?()
         }
+    }
+
+    /// Set while the app itself closes the keyboard (it already knows).
+    private var resigningOnRequest = false
+
+    func resignOnRequest() {
+        resigningOnRequest = true
+        defer { resigningOnRequest = false }
+        _ = resignFirstResponder()
+    }
+
+    /// The keyboard closed by iOS, not by the app: its own hide-keyboard key, or a hardware
+    /// keyboard's. The app is told, so it stops asking for the keyboard; otherwise it reopened it
+    /// at once and the hide key seemed to do nothing (QA 9000035, iPad).
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned, !resigningOnRequest, let dismiss = onRequestDismiss {
+            DispatchQueue.main.async { dismiss() }
+        }
+        return resigned
     }
 
     @available(*, unavailable)

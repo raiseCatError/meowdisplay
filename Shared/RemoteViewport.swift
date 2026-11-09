@@ -503,6 +503,20 @@ enum RemoteViewportCalculator {
         return clamped(visibleMin + visibleSize / 2 - point)
     }
 
+    /// The Mac's own lock screen with the keyboard open: the whole lock screen, fitted into what
+    /// the keyboard leaves visible. There's no caret to follow and no touch on the picture to aim
+    /// at (the keyboard opens from the lock-screen banner), so `keyboardOpen` would centre the
+    /// picture and leave the password field, which sits below the middle, under the keyboard
+    /// (QA 9000035, iPad). The field and its dots must stay in view while typing the password.
+    static func lockScreenKeyboardOpen(viewBounds: CGRect, remoteAspectSize: CGSize,
+                                       visibleRect: CGRect) -> RemoteViewportTransform {
+        guard visibleRect.width > 0, visibleRect.height > 0 else {
+            return normal(viewBounds: viewBounds, remoteAspectSize: remoteAspectSize)
+        }
+        let fitted = fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
+        return fitted.isValid ? fitted : normal(viewBounds: viewBounds, remoteAspectSize: remoteAspectSize)
+    }
+
     // MARK: - Shared geometry primitives
 
     /// The whole unit square, aspect-fit into `bounds` — the "show
