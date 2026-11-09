@@ -2225,7 +2225,8 @@ Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.
   already locked. On a change to a locked state it is followed by `inputReset` and
   `videoState` with `enabled:false`, so a receiver that doesn't know `macLockState` still drops
   its last picture.
-- While locked the Mac sends no media (video, audio, window frames), no cursor or cursor image and
+- While locked the Mac sends no media (video, audio, window frames), no cursor or cursor image
+  (except to a device showing the lock screen, 6.19) and
   none of `windowCatalog`, `windowThumbnail`, `appIcon`, `workspaceState`, `workspaceView`,
   `workspaceBackdrop`, `appCatalog`, `displayThumbnail`, `files`, `menu`, `menuResult`,
   `appLaunchResult`, `windowCloseResult`, `clip` or `textCaret`. Session messages (`welcome`,
@@ -2252,11 +2253,13 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
   - `active`: it is shown on this device.
   - `needsControl`: ask for control first (`allowInputRequest`); the Mac grants it without a
     prompt (Always Allow), then answers `available`.
-  - `needsFullDesktop`: switch to Full Desktop first (Window view can't show it); receivers pick
-    Mirror, the main display, where macOS shows its login window. Control is asked for again on
-    the new connection.
+  - `needsFullDesktop`: switch to Full Desktop first (Window view and Extend can't show it: the
+    login window is only on the main display); receivers pick Mirror, the main display, where
+    macOS shows its login window. Control is asked for again on the new connection.
   - any other word: not offered; the word is the Mac's reason (`controlBeforeLock`, `turnedOff`,
-    `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView`, `unavailable`). Unknown
+    `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView` (also sent in Extend),
+    `unavailable`). `turnedOff` is what every device gets until the Mac's owner turns on Allow Lock
+    Screen Control for it (off by default, SECURITY.md). Unknown
     words mean not offered. `unavailable` right after connecting can mean the Mac hasn't matched
     the connection to its device settings yet; a receiver that just switched modes for this waits
     for the next `macLockState` (or its own timeout).
@@ -2265,16 +2268,21 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
 - Receiver → Mac: `{"type":"lockScreenRequest","show":true|false}`. The Mac answers with
   `macLockState`. `show:true` when allowed: `lockScreen:"active"`, then `videoState` with
   `enabled:true` and fresh frames of the lock screen (a keyframe first; nothing from before the
-  request). `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
+  request), and `cursor`/`cursorImg` again, for this device only, while it lasts. `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
 - While `active`, the Mac accepts only `touch`, pointer `move`/`moveRelative`, `down`/`up` with the
-  left button, and `keyboard` `press`/`down`/`up` of character keys, Return, Tab, Delete, Forward
-  Delete, Escape, Space and the arrows with only `shift`, `option` or `capsLock` in `modifiers`,
+  left button, and `keyboard` `press`/`down`/`up` of character keys, Space, Return and Delete
+  (not Tab, the arrows, Escape or Forward Delete) with only `shift`, `option` or `capsLock` in `modifiers`,
   `modifierDown`/`modifierUp` of Shift or Option, and `text` of up to 128 printable characters.
   Everything else is dropped. Releases always go through.
 - The Mac ends the view (`lockScreen` no longer `active`, `inputReset`, `videoState
-  enabled:false`) when it is no longer allowed, after 120 s without input, or on unlock. On
-  unlock `macLockState` says `unlocked` and the session continues as before; a receiver that
-  switched modes to show the lock screen switches back.
+  enabled:false`) when it is no longer allowed (checked on every input event too), after 120 s
+  without input, or on unlock. On unlock `macLockState` says `unlocked`, `inputReset` follows, and
+  `keyboard` messages other than releases are dropped for 1.5 s; then the session continues as
+  before; a receiver that switched modes to show the lock screen switches back.
+- The view belongs to the connection that asked: any new connection starts without it and must
+  send `show:true` again. A receiver never treats `active` it didn't ask for on the current
+  connection as shown (it answers `show:false`). `show:true` starts a view at most once per 5 s
+  per connection; a quicker one is answered with the current `macLockState`.
 
 #### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
 

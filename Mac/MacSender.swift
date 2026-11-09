@@ -1564,6 +1564,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lockScreenPermit: (policy: PeerInputRequestPolicy, allowed: Bool)?
     /// This receiver shows macOS's lock screen and puts its restricted input in (`queue`).
     private var lockScreenActive = false
+    /// The connection the view was started on: it never carries over to another one (F2).
+    private var lockScreenGeneration: UInt64?
+    /// After the view ends because the Mac unlocked, keys and text still in flight from it are
+    /// dropped for a moment so they can't type into the app in front (`LockScreenUnlockHold`).
+    private var lockScreenUnlockHold = LockScreenUnlockHold()
+    /// `show:true` at most once per `LockScreenSessionPolicy.showInterval` on this connection (F7).
+    private var lockScreenShowLimit = LockScreenShowRateLimit()
+    /// Wake promotions for the view (one per view at most), for tests.
+    private var lockScreenWakeCount = 0
     private var lockScreenFrames = LockScreenFrameGate()
     private var lockScreenLastInput: TimeInterval = 0
     private var lockScreenIdleTimer: DispatchSourceTimer?
@@ -1595,7 +1604,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                      onConsole: LoginSessionConsole.shared.isOnConsole, privacy: privacyGate.state,
                                      policy: lockScreenPermit?.policy ?? .neverAllow,
                                      lockScreenControlAllowed: lockScreenPermit?.allowed ?? false,
-                                     sessionGranted: sessionInputGrant.get(), windowView: mode == .window)
+                                     sessionGranted: sessionInputGrant.get(), windowView: mode == .window,
+                                     extend: mode == .extend)
+    }
+
+    /// `queue`: the lock screen view is live for this connection: started on it, its grant still
+    /// held, macOS still showing its lock screen. Everything the view lets out or in reads this.
+    private var lockScreenLive: Bool {
+        lockScreenActive && lockScreenGeneration == activeConnectionGeneration
+            && sessionInputGrant.get() && privacyGate.state == .locked
+    }
+
+    /// `queue`: the pointer's position and sprite are screen content. Unlocked: as always. Locked:
+    /// only while this connection shows the lock screen, on the condition `sendFramed` admits that
+    /// view's frames on (`LockScreenCursorPolicy`).
+    private var cursorEchoAllowed: Bool {
+        LockScreenCursorPolicy.allows(privacy: privacyGate.state, lockScreenActive: lockScreenLive)
+    }
+
+    /// `queue`: send the pointer's position and sprite again on the next poll (a drop while they
+    /// weren't allowed must not count as sent).
+    private func resetCursorEcho() {
+        lastCursorPNGHash = 0
+        lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
     }
 
     /// `queue`: the lock state and what this device may do about it.
@@ -1603,7 +1635,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard sessionAuthorization.isAdmitted, lastHello != nil else { return }
         let privacy = privacyGate.state
         let offer: LockScreenOffer = privacy == .unlocked || lockScreenPermit == nil ? .unavailable(nil)
-            : LockScreenEligibility.offer(lockScreenInputs(), active: lockScreenActive)
+            : LockScreenEligibility.offer(lockScreenInputs(), active: lockScreenLive)
         sendJSONObject(MacLockWire.message(privacy, lockScreen: offer))
     }
 
@@ -1625,12 +1657,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("lockScreen: not shown (\(why.rawValue))")
             return sendLockState()
         }
+        // Repeated show:true (a stuck or hostile receiver) can't keep waking the display.
+        guard lockScreenShowLimit.admits(now: ProcessInfo.processInfo.systemUptime) else {
+            Log.info("lockScreen: not shown (too soon)")
+            return sendLockState()
+        }
         lockScreenActive = true
+        lockScreenGeneration = activeConnectionGeneration
         lockScreenInputGate.set(true)
         lastPixelBuffer = nil
         needsKeyframe = true
         lockScreenFrames.start(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
         lockScreenLastInput = ProcessInfo.processInfo.systemUptime
+        resetCursorEcho()   // the login window's pointer goes out from the first poll
+        // One wake per view; views start at most once per `showInterval` (checked above).
+        lockScreenWakeCount += 1
         _ = InteractiveWakePromotion.promote(reason: "MEOW Lock Screen")
         startLockScreenIdleTimer()
         Log.info("lockScreen: shown on \(endpointName)")
@@ -1638,20 +1679,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendVideoState()
     }
 
-    /// `queue`. Held keys and buttons are released; the picture stops again while locked.
+    /// `queue`. Held keys and buttons are released; the picture stops again while locked. The
+    /// receiver is told to reset its input (also when the view ends because the Mac unlocked, so
+    /// nothing it still holds or sends lands in the app in front).
     private func endLockScreen() {
-        guard lockScreenActive else { return }
+        guard stopLockScreenView() else { return }
+        if sessionAuthorization.isAdmitted, lastHello != nil {
+            sendJSONObject(["type": WireMessage.inputReset])
+        }
+        sendVideoState()
+    }
+
+    /// `queue`: the view's own state, with nothing sent. Returns whether a view was on.
+    @discardableResult
+    private func stopLockScreenView() -> Bool {
+        guard lockScreenActive else { return false }
         lockScreenActive = false
+        lockScreenGeneration = nil
         lockScreenInputGate.set(false)
         lockScreenFrames.stop()
+        resetCursorEcho()
         lockScreenIdleTimer?.cancel()
         lockScreenIdleTimer = nil
         inputInjector?.cancelActiveInput()
         nativeAppGestureState.cancelAll()
-        if !privacyGate.allowsContent, sessionAuthorization.isAdmitted, lastHello != nil {
-            sendJSONObject(["type": WireMessage.inputReset])
-        }
-        sendVideoState()
+        return true
     }
 
     private func startLockScreenIdleTimer() {
@@ -1676,10 +1728,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// what the login window needs (`LockScreenInputFilter`). Unlocked: `receiverInputIsAllowed()`.
     private func receiverInputIsAllowed(_ event: LockScreenInputEvent) -> Bool {
         guard !privacyGate.allowsInput else { return receiverInputIsAllowed() }
-        guard lockScreenActive, privacyGate.state == .locked,
+        guard lockScreenLive,
               sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
               captureStateSnapshot().allowsInput else {
             inputInjector?.cancelActiveInput()
+            return false
+        }
+        // Every event re-checks who may operate the lock screen, not only when something
+        // announces a change (F5): no longer allowed, the view ends here.
+        if let why = LockScreenEligibility.denial(lockScreenInputs()) {
+            Log.info("lockScreen: ended (\(why.rawValue), on input)")
+            endLockScreen()
+            sendLockState()
             return false
         }
         guard LockScreenInputFilter.allows(event) else { return false }
@@ -1698,9 +1758,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             // The lock screen view lasts only while the Mac shows its lock screen: unlocked, the
             // normal picture and input resume; another user or unknown, it ends.
-            if self.lockScreenActive, state != .locked { self.endLockScreen() }
+            if self.lockScreenActive, state != .locked {
+                // Unlocked from the view: keys and text still in flight from it are dropped for a
+                // moment rather than typed into the app in front.
+                if state.allowsContent { self.lockScreenUnlockHold.start(now: ProcessInfo.processInfo.systemUptime) }
+                self.endLockScreen()
+            }
             if state.allowsContent {
                 self.needsKeyframe = true
+                self.resetCursorEcho()   // nothing of the pointer went out while locked
             } else {
                 self.inputInjector?.cancelActiveInput()
                 self.nativeAppGestureState.cancelAll()
@@ -1751,7 +1817,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // While the Mac is locked every receiver is told video is off: it drops its last picture
         // (an older one too, which doesn't know `macLockState`).
         sendJSONObject(["type": WireMessage.videoState,
-                        "enabled": videoEnabled && (privacyGate.allowsContent || lockScreenActive),
+                        "enabled": videoEnabled && (privacyGate.allowsContent || lockScreenLive),
                         "width": capturePixelsWide,
                         "height": capturePixelsHigh], channel: .video)
     }
@@ -5137,6 +5203,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func pollCursorPosition() {
+        // Locked and not showing the lock screen here: nothing, and nothing counts as sent.
+        // (The sprite's hash is left alone here: resetting it on every poll would re-encode the
+        // sprite 30 times a second while locked. Begin, end and unlock reset it.)
+        guard cursorEchoAllowed else {
+            lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
+            return
+        }
         // Pointer position is screen content: admitted connections only.
         guard transportController.isReady, sessionAuthorization.isAdmitted, captureDisplayID != 0,
               let loc = CGEvent(source: nil)?.location else {
@@ -5210,7 +5284,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCursorPane: (kx: Double, rotation: Int)?
 
     private func sendCursor(_ fields: String) {
-        guard privacyGate.allowsContent else { return }
+        guard cursorEchoAllowed else { return }
         cursorSeq &+= 1
         sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
     }
@@ -5295,13 +5369,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
         let selfBox = self.selfBox
-        queue.async {
-            guard let sender = selfBox.currentOnQueue(), sender.privacyGate.allowsContent else { return }
-            sender.sendJSONFrame(msg)
-        }
+        queue.async { selfBox.currentOnQueue()?.sendCursorSprite(msg) }
         #if DEBUG
         logCursorTraceIfDue(reason: "cursorImg sent: \(png.count) bytes size=\(size) hot=\(hot)")
         #endif
+    }
+
+    /// `queue`: the sprite, under the same rule as the position (`cursorEchoAllowed`). Dropped, it
+    /// is sent again once allowed: the lock screen view and the unlock reset `lastCursorPNGHash`.
+    private func sendCursorSprite(_ msg: String) {
+        guard cursorEchoAllowed else { return }
+        sendJSONFrame(msg)
     }
 
     /// Re-renders `image` into a smaller bitmap, preserving aspect ratio, so
@@ -5739,6 +5817,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // "recovering" (see receiverKeyboardInputIsAllowed), on top of
             // the usual Allow Input requirement.
             guard receiverKeyboardInputIsAllowed(), let action = obj["action"] as? String else { return }
+            // Just unlocked from the lock screen view: what was typed for the password stays out.
+            guard lockScreenUnlockHold.allows(action: action, now: ProcessInfo.processInfo.systemUptime) else { return }
             if !privacyGate.allowsInput {
                 let modifiers = obj["modifiers"] as? [String] ?? []
                 let keyEvent: LockScreenInputEvent = switch action {
@@ -6237,6 +6317,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
         textCaretFollower.stop()
+        // The lock screen view belongs to the connection that asked: a new one starts without it
+        // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
+        if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
+        lockScreenUnlockHold.clear()
+        lockScreenShowLimit.reset()
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
         windowBrowser?.setActive(false)
@@ -6853,7 +6938,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                       generation == self.captureGenerationNow,
                       connectionGeneration == self.activeConnectionGeneration else { return }
                 // Locked: only the lock screen view's own frames (encoded after it began, keyframe first).
-                let lockScreenFrame = !self.privacyGate.allowsContent && self.lockScreenActive
+                let lockScreenFrame = !self.privacyGate.allowsContent && self.lockScreenLive
                     && self.lockScreenFrames.accepts(encodedAtMs: capturedAtMs, keyframe: keyframe)
                 self.sendFramed(framedForSend, lockScreenFrame: lockScreenFrame)
             }
@@ -7317,7 +7402,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Locked: no picture or sound leaves, including a frame captured or queued just before;
         // only the lock screen view's video, which the encoder output vetted (`LockScreenFrameGate`).
         guard privacyGate.allowsContent
-              || (kind == "video" && lockScreenFrame && lockScreenActive && privacyGate.state == .locked) else { return }
+              || (kind == "video" && lockScreenFrame && lockScreenLive) else { return }
         // Media rides its own channel: over QUIC, Video and Audio are
         // independent streams, and the in-flight accounting is per channel
         // (video backpressure never gates audio) and per transport epoch (a
@@ -7880,6 +7965,57 @@ extension MacSender {
     }
 
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
+
+    /// Changes the device's permit without the review a real change runs (F5: the per-event check
+    /// alone must refuse).
+    func setLockScreenPermitWithoutReviewForTesting(policy: PeerInputRequestPolicy, allowed: Bool) async throws {
+        try await onQueue { $0.lockScreenPermit = (policy, allowed) }
+    }
+
+    /// Lets a test show the lock screen again on the same connection without waiting out the
+    /// rate limit (which has its own tests).
+    func resetLockScreenShowLimitForTesting() async throws {
+        try await onQueue { $0.lockScreenShowLimit.reset() }
+    }
+
+    /// Ends the short post-unlock keyboard hold, as time passing would.
+    func endUnlockHoldForTesting() async throws {
+        try await onQueue { $0.lockScreenUnlockHold.clear() }
+    }
+
+    var lockScreenWakeCountForTesting: Int {
+        get async throws { try await onQueue { $0.lockScreenWakeCount } }
+    }
+
+    /// Whether the encoder output would hand a fresh lock-screen keyframe to `sendFramed` now.
+    func lockScreenFramesWouldSendForTesting() async throws -> Bool {
+        try await onQueue { sender in
+            !sender.privacyGate.allowsContent && sender.lockScreenLive
+                && sender.lockScreenFrames.accepts(encodedAtMs: Int64(Date().timeIntervalSince1970 * 1000) + 1, keyframe: true)
+        }
+    }
+
+    /// The cursor position and sprite paths as the pollers reach them (`queue`).
+    func sendCursorForTesting(_ fields: String) async throws {
+        try await onQueue { $0.sendCursor(fields) }
+    }
+
+    func sendCursorSpriteForTesting(_ json: String) async throws {
+        try await onQueue { $0.sendCursorSprite(json) }
+    }
+
+    /// Marks a position and sprite as already sent, as a poll would.
+    func markCursorSentForTesting() async throws {
+        try await onQueue { sender in
+            sender.lastCursorSent = (0.5, 0.5, true)
+            sender.lastCursorPNGHash = 42
+        }
+    }
+
+    /// Whether the next poll sends the position and sprite again.
+    func cursorEchoWillResendForTesting() async throws -> Bool {
+        try await onQueue { sender in !sender.lastCursorSent.visible && sender.lastCursorPNGHash == 0 }
+    }
 }
 #endif
 

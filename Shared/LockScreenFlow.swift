@@ -34,6 +34,10 @@ struct LockScreenFlow: Equatable, Sendable {
     /// The flow switched from Window view to Full Desktop and goes back once the Mac unlocks.
     private(set) var returnToWindowView = false
     private var waitingSince: Date?
+    /// This device asked the Mac to show its lock screen (`show(true)`) on the current connection.
+    /// Without that, the Mac saying `active` (a view left from before a reconnect) is never shown
+    /// here: the flow asks it to hide instead.
+    private(set) var askedOnThisConnection = false
 
     var isWaiting: Bool {
         switch phase {
@@ -53,11 +57,14 @@ struct LockScreenFlow: Equatable, Sendable {
         guard let notice, notice.isLocked, notice.remoteUnlock else { return .none }
         switch notice.lockScreen {
         case .active:
+            // The user tapped while the Mac already shows it here.
+            askedOnThisConnection = true
             phase = .showing
             waitingSince = nil
             return .none
         case .available:
             enter(.waitingForActive, now)
+            askedOnThisConnection = true
             return .show(true)
         case .needsControl:
             enter(.waitingForControl, now)
@@ -76,6 +83,7 @@ struct LockScreenFlow: Equatable, Sendable {
         guard phase == .showing else { return .none }
         phase = .idle
         waitingSince = nil
+        askedOnThisConnection = false
         return .show(false)
     }
 
@@ -98,6 +106,7 @@ struct LockScreenFlow: Equatable, Sendable {
     mutating func update(notice: MacLockNotice?, connected: Bool, now: Date) -> LockScreenAction {
         checkTimeout(now)
         guard connected else {
+            askedOnThisConnection = false   // a new connection has to ask again
             if phase != .waitingForFullDesktop { reset() }
             return .none
         }
@@ -111,7 +120,11 @@ struct LockScreenFlow: Equatable, Sendable {
         if !notice.remoteUnlock, offer.offered { offer = .unavailable(nil) }
         switch phase {
         case .idle:
-            if offer == .active { phase = .showing }
+            guard offer == .active else { return .none }
+            // Never resumed on its own (after a reconnect, or a late answer to Hide): only what
+            // this device asked for on this connection shows.
+            guard askedOnThisConnection else { return .show(false) }
+            phase = .showing
             return .none
         case .failed:
             return .none
@@ -124,6 +137,7 @@ struct LockScreenFlow: Equatable, Sendable {
         case .waitingForControl, .waitingForFullDesktop, .waitingForActive:
             switch offer {
             case .active:
+                guard askedOnThisConnection else { return .show(false) }
                 phase = .showing
                 waitingSince = nil
                 return .none
@@ -137,6 +151,7 @@ struct LockScreenFlow: Equatable, Sendable {
             case .available:
                 guard phase != .waitingForActive else { return .none }
                 enter(.waitingForActive, now)
+                askedOnThisConnection = true
                 return .show(true)
             case .needsControl:
                 guard phase == .waitingForFullDesktop else { return .none }
@@ -162,6 +177,7 @@ struct LockScreenFlow: Equatable, Sendable {
     }
 
     private mutating func reset() {
+        askedOnThisConnection = false
         phase = .idle
         returnToWindowView = false
         waitingSince = nil
@@ -197,5 +213,65 @@ extension MacLockNotice {
     /// (the Mac sends fresh frames) instead of the opaque cover. Never true without the Mac saying so.
     var showsMacLockScreen: Bool {
         state == .locked && remoteUnlock && lockScreen == .active
+    }
+}
+
+/// What the receiver shows while the Mac is locked, as pure decisions (the views only draw them).
+/// The opaque cover stays up until the Mac's lock screen is both `active` and playing here: no
+/// moment shows the video-off surface (Trackpad) or anything else behind it, the mode switch's
+/// reconnect included.
+enum MacLockedCoverPolicy {
+    /// The Mac's lock screen picture shows (with its banner): the Mac says `active` for this
+    /// device, this device asked for it (`flow.isShowing`), and video is on. Never without the
+    /// Mac saying so.
+    static func showsLockScreen(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool) -> Bool {
+        (notice?.showsMacLockScreen ?? false) && flow.isShowing && videoEnabled
+    }
+
+    /// The cover is up: the Mac is locked and its lock screen isn't playing here yet, or the flow
+    /// is between steps with nothing said by the Mac (the drop and reconnect of the switch to Full
+    /// Desktop, which clears `macLock`).
+    static func showsCover(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool) -> Bool {
+        if let notice { return notice.isLocked && !showsLockScreen(notice: notice, flow: flow, videoEnabled: videoEnabled) }
+        return flow.isWaiting
+    }
+
+    /// The notice the cover draws: the Mac's, or, mid-switch before the new connection says
+    /// anything, locked with nothing offered (the flow's status says what's happening).
+    static func coverNotice(_ notice: MacLockNotice?) -> MacLockNotice {
+        notice ?? MacLockNotice(state: .locked)
+    }
+
+    /// One plain line about Show Lock Screen for this device: before the tap, what it will do;
+    /// when it isn't offered, why. Nil while it's active or the Mac isn't showing its lock screen.
+    static func offerText(_ notice: MacLockNotice) -> String? {
+        guard notice.state == .locked else { return nil }
+        var offer = notice.lockScreen
+        if !notice.remoteUnlock, offer.offered { offer = .unavailable(nil) }
+        switch offer {
+        case .active:
+            return nil
+        case .available:
+            return String(localized: "Shows the Mac’s own lock screen here, so you can type its password.")
+        case .needsControl:
+            return String(localized: "Asks this Mac for control first, then shows its lock screen here.")
+        case .needsFullDesktop:
+            return String(localized: "Switches to Full Desktop first, then shows the Mac’s lock screen here. Your view comes back once it’s unlocked.")
+        case .unavailable(let why):
+            switch why {
+            case "turnedOff"?:
+                return String(localized: "Lock Screen Control is off for this device. It can be turned on in this device’s settings on the Mac.")
+            case "controlBeforeLock"?:
+                return String(localized: "This device didn’t have control before the Mac locked, so it can’t show the lock screen.")
+            case "windowView"?:
+                return String(localized: "This view can’t show the lock screen, and this device can’t get control again while the Mac is locked.")
+            case "neverAllow"?:
+                return String(localized: "This device is set to Never Allow control on the Mac.")
+            case "inputOff"?:
+                return String(localized: "Allow Input is off on the Mac.")
+            default:
+                return String(localized: "It can’t be unlocked from this device. Control can be requested once it’s unlocked.")
+            }
+        }
     }
 }

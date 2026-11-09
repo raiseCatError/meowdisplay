@@ -99,7 +99,7 @@ struct ReceiverDeviceDetailView: View {
                     } else {
                         Text("This is a request policy, not a live toggle: even Always Allow Requests still requires the device to explicitly ask each session, and never bypasses the Allow Input master switch on the Input page.")
                     }
-                    Text("Lock Screen Control lets this device show the Mac's own lock screen while it is locked, so you can type your password there. Only with control: Always Allow Requests, or control allowed before the Mac locked. Only typing, Return, Tab, Delete, the arrows and clicks reach the lock screen. Keys go straight to macOS: MeowDisplay doesn't check, log or keep your password.")
+                    Text("Lock Screen Control lets this device show the Mac's own lock screen while it is locked, so you can type your password there. Off unless you turn it on for this device. Only with control: Always Allow Requests, or control allowed before the Mac locked. Only typing, Return, Delete and clicks reach the lock screen. Keys go straight to macOS: MeowDisplay doesn't check, log or keep your password.")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

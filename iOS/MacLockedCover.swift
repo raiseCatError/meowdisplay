@@ -3,12 +3,14 @@ import SwiftUI
 /// Shown, opaque, over everything while the Mac's screen is locked or switched to another user
 /// (`macLockState`). Nothing of the Mac is behind it: the Mac sends no picture, sound, window
 /// names or stills meanwhile, and this device dropped what it had. It says where unlocking
-/// happens; MeowDisplay never asks for or carries the Mac's password.
+/// happens; MeowDisplay never asks for or carries the Mac's password. It stays up through every step
+/// of Show Lock Screen until the Mac's lock screen is playing here (`MacLockedCoverPolicy`).
 struct MacLockedCover: View {
     let notice: MacLockNotice
     let macName: String
     var lockFlow = LockScreenFlow()
     var onShowLockScreen: () -> Void = {}
+    var onHideLockScreen: () -> Void = {}
     let onDisconnect: () -> Void
 
     /// The Mac offers its own lock screen to this device (or is waiting on a step toward it).
@@ -34,22 +36,23 @@ struct MacLockedCover: View {
         case .unknown:
             return String(localized: "MeowDisplay can’t confirm the Mac is unlocked, so nothing is shown. Unlock it at the Mac to continue.")
         default:
-            if offersLockScreen {
+            if offersLockScreen || lockFlow.isWaiting || notice.showsMacLockScreen {
                 return String(localized: "Unlock it at the Mac, or show its lock screen here.")
             }
-            return String(localized: "Unlock it at the Mac to continue. It can’t be unlocked from this device, and control can be requested once it’s unlocked.")
+            return String(localized: "Unlock it at the Mac to continue.")
         }
     }
 
     @ViewBuilder private var lockScreenControls: some View {
         VStack(spacing: 8) {
             if lockFlow.isWaiting {
-                HStack(spacing: 8) {
-                    ProgressView().tint(.white)
-                    Text(waitingText).font(.callout).foregroundStyle(.white.opacity(0.85))
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("macLockedLockScreenStatus")
+                status(waitingText)
+            } else if notice.showsMacLockScreen, lockFlow.isShowing {
+                // The Mac said `active`; the picture isn't playing yet.
+                status(String(localized: "Waiting for the lock screen picture…"))
+                Button("Cancel", action: onHideLockScreen)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("macLockedHideLockScreen")
             } else if offersLockScreen {
                 Button(action: onShowLockScreen) {
                     Label("Show Lock Screen", systemImage: "lock.open.fill")
@@ -58,6 +61,11 @@ struct MacLockedCover: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .accessibilityIdentifier("macLockedShowLockScreen")
+                if let offerText = MacLockedCoverPolicy.offerText(notice) {
+                    Text(offerText).font(.callout).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("macLockedLockScreenOffer")
+                }
                 Text("Type your Mac password on its own lock screen. MeowDisplay passes the keys to macOS and doesn’t check, log or keep them.")
                     .font(.footnote).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -67,10 +75,24 @@ struct MacLockedCover: View {
                     Text(message).font(.callout).foregroundStyle(.orange).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("macLockedLockScreenStatus")
+                } else if !offersLockScreen, !notice.showsMacLockScreen, let reason = MacLockedCoverPolicy.offerText(notice) {
+                    // Not offered: why, in plain words.
+                    Text(reason).font(.callout).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("macLockedLockScreenOffer")
                 }
             }
         }
         .padding(.top, 4)
+    }
+
+    private func status(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().tint(.white)
+            Text(text).font(.callout).foregroundStyle(.white.opacity(0.85))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("macLockedLockScreenStatus")
     }
 
     private var lockFlowFailed: Bool {
@@ -99,7 +121,7 @@ struct MacLockedCover: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Your layout comes back when it’s unlocked.")
                     .font(.footnote).foregroundStyle(.white.opacity(0.55)).multilineTextAlignment(.center)
-                if offersLockScreen || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
+                if notice.state == .locked || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
                 Button("Disconnect", role: .destructive, action: onDisconnect)
                     .buttonStyle(.bordered)
                     .padding(.top, 6)

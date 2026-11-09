@@ -165,6 +165,187 @@ final class MacSenderInputRevocationTests: XCTestCase {
         XCTAssertEqual(events.take().filter { $0.type != .leftMouseUp && $0.type != .keyUp }, [])
     }
 
+    /// The pointer (position and sprite) is screen content: locked, nothing of it goes out, and
+    /// a drop doesn't count as sent. Showing the lock screen sends it again from the first poll,
+    /// to this connection only, while the view lasts; hiding it stops it; unlocking resends it.
+    func testTheCursorGoesOutOnlyWhileTheLockScreenIsShown() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        let position = "\"x\":0.5,\"y\":0.5,\"v\":1"
+        let sprite = "{\"type\":\"cursorImg\",\"png\":\"\"}"
+        func pointerSent() async throws -> (cursor: Bool, sprite: Bool) {
+            sent.clear()
+            try await sender.sendCursorForTesting(position)
+            try await sender.sendCursorSpriteForTesting(sprite)
+            return (sent.contains(type: "cursor"), sent.contains(type: "cursorImg"))
+        }
+
+        try await sender.markCursorSentForTesting()
+        var out = try await pointerSent()
+        XCTAssertFalse(out.cursor, "locked, not shown: no position")
+        XCTAssertFalse(out.sprite, "locked, not shown: no sprite")
+
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        let resendOnShow = try await sender.cursorEchoWillResendForTesting()
+        XCTAssertTrue(resendOnShow, "the view starts: position and sprite go out again")
+        out = try await pointerSent()
+        XCTAssertTrue(out.cursor, "shown: the login window's pointer")
+        XCTAssertTrue(out.sprite)
+
+        try await sender.markCursorSentForTesting()
+        try await showLockScreen(sender, false)
+        let resendOnHide = try await sender.cursorEchoWillResendForTesting()
+        XCTAssertTrue(resendOnHide)
+        out = try await pointerSent()
+        XCTAssertFalse(out.cursor, "hidden: nothing again")
+        XCTAssertFalse(out.sprite)
+
+        // Another user switching in ends the view: nothing, even though it was shown.
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        privacyGate.set(.switchedOut)
+        sender.macPrivacyChanged(.switchedOut)
+        try await sender.settleForTesting()
+        out = try await pointerSent()
+        XCTAssertFalse(out.cursor, "another user on the console")
+        XCTAssertFalse(out.sprite)
+
+        try await sender.markCursorSentForTesting()
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+        let resendOnUnlock = try await sender.cursorEchoWillResendForTesting()
+        XCTAssertTrue(resendOnUnlock, "unlocked: sent again")
+        out = try await pointerSent()
+        XCTAssertTrue(out.cursor)
+        XCTAssertTrue(out.sprite)
+    }
+
+    /// Extend's display never shows the login window: switch to Mirror first, never `available`.
+    func testExtendIsSentToMirrorForTheLockScreen() async throws {
+        guard let tls else { return XCTFail("no TLS") }
+        privacyGate.set(.unlocked)
+        sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
+                           name: "Revocation Test Phone", mode: .extend)
+        sender?.privacyGate = privacyGate
+        sent.clear()
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        XCTAssertEqual(sent.lastLockScreen, "needsFullDesktop")
+        try await showLockScreen(sender)
+        XCTAssertNotEqual(sent.lastLockScreen, "active", "never shown in Extend")
+        try await sendEveryInputKind(sender)
+        XCTAssertEqual(events.take(), [], "nothing reaches the lock screen from Extend")
+    }
+
+    /// F2: the view belongs to the connection that asked. A new connection (the grant given back
+    /// without a prompt or not) starts without it: not `active`, no frames, no input, until it
+    /// sends a fresh `show:true` itself.
+    func testTheViewNeverCarriesOverToANewConnection() async throws {
+        for regrant in [false, true] {
+            setUpSender()
+            let sender = try XCTUnwrap(sender)
+            try await lockWithPermit(sender)
+            try await showLockScreen(sender)
+            XCTAssertEqual(sent.lastLockScreen, "active")
+            let framesBefore = try await sender.lockScreenFramesWouldSendForTesting()
+            XCTAssertTrue(framesBefore, "shown: fresh frames go")
+
+            let generation = try await admit(sender)   // the connection ended; a new one
+            if regrant {
+                sender.grantSessionInput(generation: generation)
+                try await sender.settleForTesting()
+            }
+            sent.clear()
+            sender.setLockScreenPermit(policy: .alwaysAllow, allowed: true)   // the app vouches again
+            try await sender.settleForTesting()
+            XCTAssertEqual(sent.lastLockScreen, regrant ? "available" : "needsControl", "regrant \(regrant)")
+            let framesAfter = try await sender.lockScreenFramesWouldSendForTesting()
+            XCTAssertFalse(framesAfter, "regrant \(regrant): no lock screen frames on the new connection")
+            XCTAssertFalse(sent.contains(type: "cursor"))
+            _ = events.take()
+            try await sendEveryInputKind(sender)
+            try await receive(sender, ["type": "keyboard", "action": "text", "text": "fake-pass-123"])
+            XCTAssertEqual(events.take().filter { $0.type != .leftMouseUp && $0.type != .keyUp && $0.type != .rightMouseUp }, [],
+                           "regrant \(regrant): nothing reaches the lock screen")
+            if regrant {
+                try await showLockScreen(sender)
+                XCTAssertEqual(sent.lastLockScreen, "active", "a fresh show:true on the new connection")
+            }
+        }
+    }
+
+    /// F3: unlocked (at the Mac, Touch ID, Watch) while the receiver types into the view: the
+    /// receiver is told to reset input, and keys and text still in flight don't land in the app now
+    /// in front.
+    func testUnlockFromTheViewDropsTypingInFlight() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown }, "typed on the lock screen")
+        sent.clear()
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+        XCTAssertTrue(sent.contains(type: WireMessage.inputReset), "the receiver resets its input")
+        _ = events.take()
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyB.rawValue])
+        try await receive(sender, ["type": "keyboard", "action": "text", "text": "fake-pass-123"])
+        try await receive(sender, ["type": "keyboard", "action": "down", "usage": HIDKeyUsage.keyC.rawValue])
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
+        XCTAssertEqual(events.take().filter { $0.type != .keyUp && $0.type != .flagsChanged }, [],
+                       "nothing in flight is typed into the app in front")
+        try await receive(sender, ["type": "keyboard", "action": "up", "usage": HIDKeyUsage.keyC.rawValue])
+        try await sender.endUnlockHoldForTesting()
+        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyD.rawValue])
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyD.keyCode) },
+                      "after the hold, normal input")
+    }
+
+    /// F5: every event re-checks the whole eligibility (policy, switch, console), not only the
+    /// places that announce a change: a permit changed with no review is refused on the next event.
+    func testEveryLockScreenEventRechecksEligibility() async throws {
+        let narrowings: [(String, (MacSender) async throws -> Void, () -> Void)] = [
+            ("neverAllow", { try await $0.setLockScreenPermitWithoutReviewForTesting(policy: .neverAllow, allowed: true) }, {}),
+            ("turnedOff", { try await $0.setLockScreenPermitWithoutReviewForTesting(policy: .alwaysAllow, allowed: false) }, {}),
+            ("otherUser", { _ in LoginSessionConsole.shared.set(onConsole: false) }, { LoginSessionConsole.shared.set(onConsole: true) }),
+        ]
+        for (reason, narrow, restore) in narrowings {
+            setUpSender()
+            let sender = try XCTUnwrap(sender)
+            try await lockWithPermit(sender)
+            try await showLockScreen(sender)
+            XCTAssertEqual(sent.lastLockScreen, "active", reason)
+            try await narrow(sender)
+            _ = events.take()
+            try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
+            try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
+            XCTAssertEqual(events.take().filter { $0.type == .keyDown || $0.type == .leftMouseDown }, [], reason)
+            XCTAssertNotEqual(sent.lastLockScreen, "active", "\(reason): the view ended")
+            restore()
+        }
+    }
+
+    /// F7: a receiver toggling show:true/false can't keep waking the display: at most one view,
+    /// and one wake, per 5 s on a connection.
+    func testRepeatedShowWakesAtMostOnce() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        for _ in 0..<20 {
+            try await receive(sender, LockScreenWire.request(show: true))
+            try await receive(sender, LockScreenWire.request(show: false))
+        }
+        try await sender.settleForTesting()
+        let wakes = try await sender.lockScreenWakeCountForTesting
+        XCTAssertEqual(wakes, 1)
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "available", "too soon: answered with the current state")
+        let wakesAfter = try await sender.lockScreenWakeCountForTesting
+        XCTAssertEqual(wakesAfter, 1)
+    }
+
     /// A view-only Ask device (no control granted before the lock), a device set to Never Allow,
     /// one with the switch off, and one the app hasn't vouched for yet are never shown it.
     func testOnlyAPreAuthorizedDeviceIsShownTheLockScreen() async throws {
@@ -211,6 +392,7 @@ final class MacSenderInputRevocationTests: XCTestCase {
         XCTAssertEqual(events.take().filter { $0.type != .leftMouseUp && $0.type != .keyUp }, [])
 
         sender.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        try await sender.resetLockScreenShowLimitForTesting()
         try await showLockScreen(sender)
         XCTAssertEqual(sent.lastLockScreen, "active")
         sender.revokeSessionInput()
@@ -223,12 +405,14 @@ final class MacSenderInputRevocationTests: XCTestCase {
         // the session goes on as before.
         sender.grantSessionInput(generation: generation)
         try await sender.settleForTesting()
+        try await sender.resetLockScreenShowLimitForTesting()
         try await showLockScreen(sender)
         XCTAssertEqual(sent.lastLockScreen, "active")
         privacyGate.set(.unlocked)
         sender.macPrivacyChanged(.unlocked)
         try await sender.settleForTesting()
         XCTAssertNil(sent.last(type: MacLockWire.type)?["lockScreen"], "unlocked: nothing to offer")
+        try await sender.endUnlockHoldForTesting()   // the post-unlock hold has its own test
         try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyC.rawValue, "modifiers": ["command"]])
         XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyC.keyCode) },
                       "unlocked: normal input, shortcuts included")

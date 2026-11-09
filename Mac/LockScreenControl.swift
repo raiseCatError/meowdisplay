@@ -26,8 +26,9 @@ enum LockScreenDenial: String, Equatable, Sendable, CaseIterable {
     case needsControl
     /// Ask device without control granted before the Mac locked: nothing is asked while locked.
     case controlBeforeLock
-    /// In Window view, which can't show the lock screen, on a device that isn't set to Always
-    /// Allow: Full Desktop is a new connection, whose control an Ask device can't get while locked.
+    /// In Window view or Extend, which can't show the lock screen, on a device that isn't set to
+    /// Always Allow: Mirror is a new connection, whose control an Ask device can't get while locked.
+    /// (Extend reuses this word: its display shows only wallpaper, never the login window.)
     case windowView
 }
 
@@ -49,6 +50,12 @@ enum LockScreenEligibility {
         var sessionGranted: Bool
         /// The session is in Window view (the lock screen shows only in Full Desktop).
         var windowView = false
+        /// The session is in Extend: its virtual display shows wallpaper, never macOS's login
+        /// window, which is on the main display. Treated as Window view: Mirror first.
+        var extend = false
+
+        /// Not Mirror: the lock screen can't be shown on this connection.
+        var needsMirror: Bool { windowView || extend }
     }
 
     /// Nil: allowed.
@@ -60,16 +67,18 @@ enum LockScreenEligibility {
         guard i.policy != .neverAllow else { return .neverAllow }
         guard i.lockScreenControlAllowed else { return .turnedOff }
         guard i.sessionGranted else { return i.policy == .alwaysAllow ? .needsControl : .controlBeforeLock }
-        return i.windowView ? .windowView : nil
+        return i.needsMirror ? .windowView : nil
     }
 
-    /// What this device is told (`macLockState`). In Window view: Full Desktop first when the new
-    /// connection will get control back without a prompt (Always Allow), else not offered.
+    /// What this device is told (`macLockState`). In Window view or Extend: Full Desktop (Mirror)
+    /// first when the new connection will get control back without a prompt (Always Allow), else
+    /// not offered.
     static func offer(_ i: Inputs, active: Bool) -> LockScreenOffer {
         if active { return .active }
-        if i.windowView {
+        if i.needsMirror {
             var fullDesktop = i
             fullDesktop.windowView = false
+            fullDesktop.extend = false
             fullDesktop.sessionGranted = false
             switch denial(fullDesktop) {
             case .needsControl?: return .needsFullDesktop
@@ -100,10 +109,11 @@ enum LockScreenInputEvent: Equatable, Sendable {
     case other
 }
 
-/// What the login window needs, and nothing more: pointer moves and primary clicks (a touch is
-/// one), character keys with Shift or Option (passwords), Return, Tab, Delete, Forward Delete,
-/// Escape, Space and the arrows. No Command or Control, no function, navigation, input-source
-/// or media keys, no right-click, scrolling or gestures.
+/// What typing a password needs, and nothing more: pointer moves and primary clicks (a touch is
+/// one), character keys with Shift or Option, Space, Return and Delete. No Tab, arrows, Escape or
+/// Forward Delete (they only move focus to the login window's Switch User, power and accessibility
+/// controls), no Command or Control, no function, navigation, input-source or media keys, no
+/// right-click, scrolling or gestures. `InputInjector` enforces the same filter again.
 enum LockScreenInputFilter {
     /// Held modifiers (`modifierDown`): Shift and Option. Caps Lock also rides on typed keys.
     static let allowedModifiers: Set<String> = [ControlModifier.shift.rawValue, ControlModifier.option.rawValue]
@@ -111,8 +121,7 @@ enum LockScreenInputFilter {
 
     static let allowedKeys: Set<HIDKeyUsage> = {
         var keys: Set<HIDKeyUsage> = [
-            .returnOrEnter, .escape, .deleteOrBackspace, .tab, .spacebar, .forwardDelete,
-            .rightArrow, .leftArrow, .downArrow, .upArrow,
+            .returnOrEnter, .deleteOrBackspace, .spacebar,
             .minus, .equal, .leftBracket, .rightBracket, .backslash, .semicolon, .quote, .comma, .period, .slash, .grave,
             // Character keys of other layouts and of a numeric keypad (a hardware keyboard).
             .nonUSBackslash, .international1, .international3,
@@ -173,6 +182,16 @@ struct LockScreenFrameGate: Equatable, Sendable {
     }
 }
 
+/// The pointer's position and sprite (`cursor`, `cursorImg`) are screen content. Unlocked: sent as
+/// always. Locked: only to the connection showing the lock screen, and only while macOS shows it
+/// (the condition `MacSender.sendFramed` admits that view's frames on). Another user, unknown, or
+/// locked without the view: never.
+enum LockScreenCursorPolicy {
+    static func allows(privacy: MacScreenPrivacy, lockScreenActive: Bool) -> Bool {
+        privacy.allowsContent || (lockScreenActive && privacy == .locked)
+    }
+}
+
 /// The lock screen view's on/off, read by the injector for every event on any thread.
 final class LockScreenInputGate: @unchecked Sendable {
     private let lock = NSLock()
@@ -186,4 +205,40 @@ enum LockScreenSessionPolicy {
     /// Without input for this long the lock screen view ends (the cover stays; asking again
     /// starts a new one). Bounded so a forgotten device doesn't keep the Mac's lock screen lit.
     static let idleTimeout: TimeInterval = 120
+    /// A connection may start the view at most this often; a quicker `show:true` is answered with
+    /// the current state and wakes nothing (F7).
+    static let showInterval: TimeInterval = 5
+    /// After the view ends because the Mac unlocked, keys and text in flight from it are dropped
+    /// for this long (`LockScreenUnlockHold`).
+    static let unlockKeyboardHold: TimeInterval = 1.5
+}
+
+/// `show:true` rate limit for one connection: the first is admitted, then none until
+/// `showInterval` has passed since the last one admitted. Reset for a new connection.
+struct LockScreenShowRateLimit: Equatable, Sendable {
+    private var lastAdmitted: TimeInterval?
+
+    mutating func admits(now: TimeInterval) -> Bool {
+        if let last = lastAdmitted, now - last < LockScreenSessionPolicy.showInterval, now >= last { return false }
+        lastAdmitted = now
+        return true
+    }
+
+    mutating func reset() { lastAdmitted = nil }
+}
+
+/// The moment after the Mac unlocks from the lock screen view: keyboard input still in flight
+/// from it (password keys, text) is dropped, so it can't type into the app in front. Releases and
+/// cancels always go through. Bounded: the protocol has no receiver input epoch to wait for.
+struct LockScreenUnlockHold: Equatable, Sendable {
+    private var until: TimeInterval?
+
+    mutating func start(now: TimeInterval) { until = now + LockScreenSessionPolicy.unlockKeyboardHold }
+    mutating func clear() { until = nil }
+
+    /// `action`: the `keyboard` message's action.
+    func allows(action: String, now: TimeInterval) -> Bool {
+        guard let until, now < until else { return true }
+        return ["up", "modifierUp", "cancel"].contains(action)
+    }
 }

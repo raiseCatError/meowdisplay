@@ -6,10 +6,10 @@ import XCTest
 final class LockScreenControlTests: XCTestCase {
     private func inputs(policy: PeerInputRequestPolicy = .alwaysAllow, granted: Bool = true,
                         privacy: MacScreenPrivacy = .locked, allowed: Bool = true,
-                        windowView: Bool = false) -> LockScreenEligibility.Inputs {
+                        windowView: Bool = false, extend: Bool = false) -> LockScreenEligibility.Inputs {
         LockScreenEligibility.Inputs(admitted: true, masterInput: true, onConsole: true, privacy: privacy,
                                      policy: policy, lockScreenControlAllowed: allowed,
-                                     sessionGranted: granted, windowView: windowView)
+                                     sessionGranted: granted, windowView: windowView, extend: extend)
     }
 
     // MARK: Who
@@ -54,17 +54,46 @@ final class LockScreenControlTests: XCTestCase {
         XCTAssertEqual(LockScreenEligibility.denial(inputs(windowView: true)), .windowView, "never shown in Window view")
     }
 
+    /// Extend's display shows wallpaper, never the login window (on the main display): never
+    /// `available` there. Like Window view: Always Allow switches to Mirror first, an Ask device
+    /// isn't offered it (its grant doesn't carry to the new connection). No consent changes.
+    func testExtendIsNeverOfferedDirectlyOnlyViaMirror() {
+        XCTAssertEqual(LockScreenEligibility.denial(inputs(extend: true)), .windowView, "never shown in Extend")
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(extend: true), active: false), .needsFullDesktop)
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(granted: false, extend: true), active: false), .needsFullDesktop)
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, extend: true), active: false), .unavailable("windowView"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, extend: true), active: false), .unavailable("windowView"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(allowed: false, extend: true), active: false), .unavailable("turnedOff"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .neverAllow, extend: true), active: false), .unavailable("neverAllow"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(), active: false), .available, "Mirror: offered as before")
+    }
+
+    // MARK: The pointer
+
+    /// Position and sprite: unlocked as always; locked only while this connection shows the lock
+    /// screen and macOS says locked (the same rule as its frames). Never for another user or unknown.
+    func testTheCursorGoesOutOnlyWithTheLockScreenView() {
+        XCTAssertTrue(LockScreenCursorPolicy.allows(privacy: .unlocked, lockScreenActive: false))
+        XCTAssertTrue(LockScreenCursorPolicy.allows(privacy: .unlocked, lockScreenActive: true))
+        XCTAssertTrue(LockScreenCursorPolicy.allows(privacy: .locked, lockScreenActive: true))
+        XCTAssertFalse(LockScreenCursorPolicy.allows(privacy: .locked, lockScreenActive: false), "locked, not shown here")
+        for p in [MacScreenPrivacy.switchedOut, .unknown] {
+            XCTAssertFalse(LockScreenCursorPolicy.allows(privacy: p, lockScreenActive: true), "\(p)")
+            XCTAssertFalse(LockScreenCursorPolicy.allows(privacy: p, lockScreenActive: false), "\(p)")
+        }
+    }
+
     // MARK: Which input
 
     func testOnlyWhatTheLoginWindowNeeds() {
         let allowed: [LockScreenInputEvent] = [
             .touch, .pointerMove, .pointerButton(.left), .release,
             .key(.keyA, modifiers: []), .key(.keyZ, modifiers: ["shift"]), .key(.digit5, modifiers: ["option"]),
-            .key(.returnOrEnter, modifiers: []), .key(.tab, modifiers: ["shift"]), .key(.deleteOrBackspace, modifiers: []),
-            .key(.escape, modifiers: []), .key(.leftArrow, modifiers: []), .key(.spacebar, modifiers: ["capsLock"]),
+            .key(.returnOrEnter, modifiers: []), .key(.deleteOrBackspace, modifiers: []),
+            .key(.spacebar, modifiers: ["capsLock"]), .key(.spacebar, modifiers: []),
             .key(.period, modifiers: []), .key(.keypad7, modifiers: []), .key(.nonUSBackslash, modifiers: ["option"]),
             .modifier("shift"), .modifier("option"),
-            .text("p@ss wörd!"),
+            .text("fake-pass-123"), .text("f@ke wörd!"),
         ]
         for e in allowed { XCTAssertTrue(LockScreenInputFilter.allows(e), "\(e)") }
         let refused: [LockScreenInputEvent] = [
@@ -77,6 +106,73 @@ final class LockScreenControlTests: XCTestCase {
             .text(String(repeating: "a", count: LockScreenInputFilter.maxTextLength + 1)),
         ]
         for e in refused { XCTAssertFalse(LockScreenInputFilter.allows(e), "\(e)") }
+    }
+
+    /// F6: Tab, the arrows, Escape and Forward Delete only move focus to the login window's other
+    /// controls (Switch User, power, accessibility): never on the lock screen, with any modifier.
+    func testFocusAndNavigationKeysAreRefused() {
+        let removed: [HIDKeyUsage] = [.tab, .escape, .forwardDelete, .leftArrow, .rightArrow, .upArrow, .downArrow]
+        for usage in removed {
+            XCTAssertFalse(LockScreenInputFilter.allowedKeys.contains(usage), "\(usage)")
+            for modifiers in [[], ["shift"], ["option"], ["capsLock"]] as [[String]] {
+                XCTAssertFalse(LockScreenInputFilter.allows(.key(usage, modifiers: modifiers)), "\(usage) \(modifiers)")
+            }
+        }
+        // What a password needs stays.
+        for usage in [HIDKeyUsage.keyF, .digit1, .spacebar, .returnOrEnter, .deleteOrBackspace, .minus] {
+            XCTAssertTrue(LockScreenInputFilter.allows(.key(usage, modifiers: [])), "\(usage)")
+        }
+        XCTAssertTrue(LockScreenInputFilter.allows(.pointerButton(.left)))
+        XCTAssertFalse(LockScreenInputFilter.allows(.pointerButton(.right)))
+    }
+
+    // MARK: Rate and timing
+
+    /// F7: show:true starts a view at most once per 5 s per connection.
+    func testShowIsRateLimitedPerConnection() {
+        var limit = LockScreenShowRateLimit()
+        XCTAssertTrue(limit.admits(now: 100))
+        for i in 1..<20 { XCTAssertFalse(limit.admits(now: 100 + Double(i) * 0.05), "\(i)") }
+        XCTAssertFalse(limit.admits(now: 104.9))
+        XCTAssertTrue(limit.admits(now: 105))
+        XCTAssertFalse(limit.admits(now: 106))
+        limit.reset()
+        XCTAssertTrue(limit.admits(now: 106), "a new connection")
+    }
+
+    /// F3: right after an unlock from the view, keys and text in flight are dropped; releases go.
+    func testUnlockHoldDropsTypingButNotReleases() {
+        var hold = LockScreenUnlockHold()
+        for a in ["text", "press", "down", "modifierDown", "up"] { XCTAssertTrue(hold.allows(action: a, now: 0), a) }
+        hold.start(now: 10)
+        for a in ["text", "press", "down", "modifierDown", "somethingNew"] {
+            XCTAssertFalse(hold.allows(action: a, now: 10.1), a)
+            XCTAssertFalse(hold.allows(action: a, now: 11.49), a)
+        }
+        for a in ["up", "modifierUp", "cancel"] { XCTAssertTrue(hold.allows(action: a, now: 10.1), a) }
+        XCTAssertTrue(hold.allows(action: "text", now: 10 + LockScreenSessionPolicy.unlockKeyboardHold), "bounded")
+        hold.start(now: 20)
+        hold.clear()
+        XCTAssertTrue(hold.allows(action: "text", now: 20.1))
+    }
+
+    // MARK: The receiver's keyboard (F1)
+
+    func testTheKeyboardIsSecureWhileTheMacIsLocked() {
+        let locked = RemoteKeyboardTraits.current(macLocked: true)
+        XCTAssertEqual(locked, .lockScreen)
+        XCTAssertTrue(locked.secureEntry)
+        XCTAssertTrue(locked.passwordContentType)
+        XCTAssertFalse(locked.autocorrection)
+        XCTAssertFalse(locked.spellChecking)
+        XCTAssertFalse(locked.autocapitalization)
+        XCTAssertFalse(locked.smartPunctuation)
+        XCTAssertFalse(locked.inlinePrediction)
+        XCTAssertFalse(locked.echoesTypedText, "the strip never shows or reads out what is typed")
+        let normal = RemoteKeyboardTraits.current(macLocked: false)
+        XCTAssertEqual(normal, .normal)
+        XCTAssertFalse(normal.secureEntry)
+        XCTAssertTrue(normal.echoesTypedText)
     }
 
     // MARK: Which frames
@@ -105,10 +201,27 @@ final class LockScreenControlTests: XCTestCase {
         return defaults
     }
 
+    /// Remote unlock is opt-in: off for every device until the owner turns it on for it.
+    func testTheSwitchIsOffByDefault() {
+        let d = isolatedDefaults()
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "never-set", defaults: d), "off by default")
+        // A device trusted with input (even Always Allow) still has it off until turned on.
+        _ = ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: "always", anySessionHasEffectiveInput: false, defaults: d)
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "always", defaults: d))
+        // What a device's stored value says stays as stored: an explicit off stays off, an explicit
+        // on stays on.
+        d.set(["off-before": false, "on-explicit": true], forKey: "receiverLockScreenControl.v1")
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "off-before", defaults: d))
+        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "on-explicit", defaults: d))
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "never-set", defaults: d))
+    }
+
     func testTheSwitchOnlyNarrowsAndForgetClearsIt() {
         let d = isolatedDefaults()
         let id = "lock-screen-peer"
-        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d), "on by default")
+        XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: false, defaults: d),
+                      "turned on by the owner")
+        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
         XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(false, peerID: id, anySessionHasEffectiveInput: true, defaults: d),
                       "turning it off always works")
         XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
@@ -121,7 +234,12 @@ final class LockScreenControlTests: XCTestCase {
 
         ReceiverInputAuthorizationStore.setLockScreenControlAllowed(false, peerID: id, anySessionHasEffectiveInput: false, defaults: d)
         ReceiverInputAuthorizationStore.removePolicy(peerID: id, defaults: d)
-        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d), "Forget leaves nothing behind")
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d), "Forget leaves nothing behind: off")
+        XCTAssertNil((d.dictionary(forKey: "receiverLockScreenControl.v1") as? [String: Bool])?[id])
+        // Forget after it was turned on: back to the default, off.
+        ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: false, defaults: d)
+        ReceiverInputAuthorizationStore.removePolicy(peerID: id, defaults: d)
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
     }
 
     // MARK: Wire
