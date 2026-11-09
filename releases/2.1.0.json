@@ -46,7 +46,7 @@
   ],
   "platforms": {
     "mac": {
-      "stage": "signed",
+      "stage": "uploaded",
       "sha": "94c796fc34fd699776764d67d2f26013909a308e",
       "build": "2.1.0",
       "runId": 42720735729,
@@ -71,7 +71,7 @@
       "blockers": [
 
       ],
-      "updatedAt": "2026-11-09T23:45:55Z"
+      "updatedAt": "2026-11-09T23:45:57Z"
     },
     "ios": {
       "stage": "uploaded",
@@ -167,6 +167,13 @@
       "platform": "mac",
       "from": "pending",
       "to": "signed"
+    },
+    {
+      "at": "2026-11-09T23:45:57Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "signed",
+      "to": "uploaded"
     }
   ]
 }
