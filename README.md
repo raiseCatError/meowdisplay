@@ -18,7 +18,9 @@ trackpad-style input, gestures and a keyboard.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a> · <a href="https://meowdisplay.app/android/early-access"><img src="https://img.shields.io/badge/Android-Closed%20testing-000000?style=for-the-badge&amp;logo=android&amp;logoColor=3DDC84" alt="Android: join closed testing on Google Play" height="28" align="center"></a>
+
+<sub>Mac 2.0.0 stable, shares and receives (macOS 14+) · [Mac Receiver 2.0.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) for older Macs (macOS 12+) · iPhone and iPad 2.0.0 on the App Store · Android 2.0 in Google Play closed testing, not yet public · [All official downloads](https://meowdisplay.app/downloads)</sub>
 
 <br>
 
@@ -54,12 +56,13 @@ App Store. Distribution differs by platform as shown below.
 | Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
 | Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
 | iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
-| Android · Android 10+ | **2.0 closed testing** | [Request early access](https://meowdisplay.app/android/early-access) |
+| Android · Android 10+ | **2.0 Google Play closed testing** (not yet public) | [Join closed testing](https://meowdisplay.app/android/early-access) |
 
 The main Mac app includes both sharing and receiving: share this Mac's display,
 or use this Mac as another Mac's display. The separate Receiver-only app is
 also available for Macs running macOS 12 or later. Android 2.0 requires the
-Mac 2.0 app.
+Mac 2.0 app. Checksums and every official download are on
+[meowdisplay.app/downloads](https://meowdisplay.app/downloads).
 
 
 ## What's new in MeowDisplay 2.0
@@ -508,7 +511,7 @@ and installs MeowDisplay into `/Applications`. Update with
 `brew install --cask raiseCatError/tap/meowdisplay-receiver`.
 
 **Mac, direct download:** get `MeowDisplay.dmg` (or `MeowDisplayReceiver.dmg`)
-from the [latest release](https://github.com/raiseCatError/meowdisplay/releases/latest)
+from the [2.0.0 release](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0)
 and drag the app to Applications.
 
 **iPhone and iPad:** install MeowDisplay from the
@@ -517,10 +520,13 @@ iPadOS 16.4 or later).
 
 ## Getting started
 
-1. [Download MeowDisplay for Mac](https://github.com/raiseCatError/meowdisplay/releases/latest/download/MeowDisplay.dmg), open the DMG, drag MeowDisplay to
+1. [Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg), open the DMG, drag MeowDisplay to
    Applications and open it.
 2. Install [MeowDisplay from the App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) on your iPhone or iPad
-   and open it.
+   and open it. Android is in Google Play closed testing: follow the
+   [early-access steps](https://meowdisplay.app/android/early-access). For
+   another Mac, use the main app or
+   [MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) (macOS 12+).
 3. Connect over USB or Wi-Fi, and pair the devices by confirming the matching
    code.
 4. Choose **Mirror** or **Extend**.
