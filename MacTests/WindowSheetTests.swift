@@ -64,6 +64,25 @@ final class WindowSheetTests: XCTestCase {
                        [18371: [18396]])
     }
 
+    func testASheetScreenCaptureKitDoesNotListIsStillItsWindows() {
+        // QA 9000030: the third Open sheet in a row was matched but missing from ScreenCaptureKit's
+        // listing, so it was dropped and presses on it were refused as covered.
+        let window = w(18474, CGRect(x: 160, y: 198, width: 1100, height: 762), title: "Chooser Target")
+        let sheet = w(18509, CGRect(x: 270, y: 355, width: 880, height: 448))
+        let matched = WindowSheetMatcher.sheets(frontToBack: [sheet, window])
+        XCTAssertEqual(matched, [18474: [18509]])
+        let unlisted = WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [18474], scFrames: [:], order: [sheet, window])
+        XCTAssertEqual(unlisted[18474]?.map(\.id), [18509])
+        XCTAssertEqual(unlisted[18474]?.first?.frame, sheet.frame)
+        XCTAssertEqual(unlisted[18474]?.first?.fromCapture, false)
+        let listed = WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [18474],
+                                                              scFrames: [18509: CGRect(x: 270, y: 355, width: 880, height: 448)],
+                                                              order: [sheet, window])
+        XCTAssertEqual(listed[18474]?.first?.fromCapture, true)
+        // A window that isn't listed keeps no sheets.
+        XCTAssertTrue(WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [], scFrames: [:], order: [sheet, window]).isEmpty)
+    }
+
     func testATitledSheetIsASheetOnlyWhenTheAppConfirmsIt() {
         XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]), [:], "unconfirmed: an ordinary window")
         var asked: [(UInt32, UInt32)] = []
