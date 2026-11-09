@@ -166,13 +166,53 @@ final class LockScreenControlTests: XCTestCase {
         XCTAssertEqual(T.keystrokes(action: "modifierDown", text: nil), 0)
     }
 
+    func testPressesFollowTheTagRuleMovesDropQuietlyReleasesAlwaysGo() {
+        typealias T = LockScreenTaggedInput
+        XCTAssertEqual(T.pointerKind(type: "touch", phaseOrAction: "began"), .press)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "down"), .press)
+        XCTAssertEqual(T.pointerKind(type: "touch", phaseOrAction: "moved"), .move)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "move"), .move)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "moveRelative"), .move)
+        for (type, value) in [("touch", "ended"), ("touch", "cancelled"), ("pointer", "up")] {
+            XCTAssertEqual(T.pointerKind(type: type, phaseOrAction: value), .release)
+        }
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "teleport"), .other)
+        // Presses.
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: true, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: true), .refuse(.unlocked))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: false), .refuse(.notShown))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: true, unlocked: false), .refuse(.untagged))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: false, unlocked: true), .deliver)
+        // Moves: quietly dropped when not for a live view.
+        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: true, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: false, unlocked: true), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: true, unlocked: false), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: false, unlocked: true), .deliver)
+        // Releases, always.
+        for (tagged, live, unlocked) in [(true, false, true), (false, true, false), (true, false, false), (false, false, true)] {
+            XCTAssertEqual(T.pointerDecision(.release, tagged: tagged, viewLive: live, unlocked: unlocked), .deliver)
+        }
+    }
+
     func testTheRefusalNoticeIsPlainAndCounts() {
         let one = LockScreenInputRefusal(message: LockScreenWire.inputRefused(count: 1, reason: "unlocked"))
         XCTAssertEqual(one?.notice, "1 keystroke wasn’t sent: the Mac unlocked.")
         let two = one.map { $0.adding(LockScreenInputRefusal(count: 1, reason: "unlocked")) }
         XCTAssertEqual(two?.notice, "2 keystrokes weren’t sent: the Mac unlocked.")
         XCTAssertEqual(LockScreenInputRefusal(count: 3, reason: "untagged").notice,
-                       "3 keystrokes weren’t sent: use the lock screen’s keyboard.")
+                       "3 keystrokes weren’t sent: use the lock screen’s keyboard and touches.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 0, clicks: 1, reason: "unlocked").notice,
+                       "1 click wasn’t sent: the Mac unlocked.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 2, clicks: 1, reason: "unlocked").notice,
+                       "2 keystrokes and 1 click weren’t sent: the Mac unlocked.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 0, clicks: 1, reason: "unlocked")
+                        .adding(LockScreenInputRefusal(count: 1, reason: "unlocked")).notice,
+                       "1 keystroke and 1 click weren’t sent: the Mac unlocked.")
+        let clicks = LockScreenInputRefusal(message: LockScreenWire.inputRefused(count: 0, clicks: 2, reason: "notShown"))
+        XCTAssertEqual(clicks?.clicks, 2)
+        XCTAssertEqual(clicks?.notice, "2 clicks weren’t sent: the lock screen isn’t shown.")
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": 0, "clicks": 0, "reason": "unlocked"]))
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": -1, "clicks": 2, "reason": "unlocked"]))
         XCTAssertEqual(LockScreenInputRefusal(count: 2, reason: "notShown").notice,
                        "2 keystrokes weren’t sent: the lock screen isn’t shown.")
         XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": 0, "reason": "unlocked"]))

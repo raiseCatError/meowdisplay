@@ -1707,10 +1707,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// `queue`: tells the receiver how many keystrokes weren't delivered, and why (never what).
     private func reportRefusedLockScreenInput(action: String, text: String?, _ refusal: LockScreenTaggedInput.Refusal) {
-        let count = LockScreenTaggedInput.keystrokes(action: action, text: text)
-        Log.info("lockScreen: refused keyboard input (\(refusal.rawValue), \(count) keystroke(s))")
-        guard count > 0, sessionAuthorization.isAdmitted, lastHello != nil else { return }
-        sendJSONObject(LockScreenWire.inputRefused(count: count, reason: refusal.rawValue))
+        reportRefusedLockScreenInput(keystrokes: LockScreenTaggedInput.keystrokes(action: action, text: text), clicks: 0, refusal)
+    }
+
+    private func reportRefusedLockScreenInput(keystrokes: Int, clicks: Int, _ refusal: LockScreenTaggedInput.Refusal) {
+        Log.info("lockScreen: refused input (\(refusal.rawValue), \(keystrokes) keystroke(s), \(clicks) click(s))")
+        guard keystrokes > 0 || clicks > 0, sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        sendJSONObject(LockScreenWire.inputRefused(count: keystrokes, clicks: clicks, reason: refusal.rawValue))
+    }
+
+    /// `queue`: a `touch` or `pointer` message against the tag rule. False: not delivered (a
+    /// refused press is reported as a click; a move is dropped quietly).
+    private func lockScreenPointerAdmits(type: String, _ obj: [String: Any]) -> Bool {
+        let kind = LockScreenTaggedInput.pointerKind(type: type, phaseOrAction: obj[type == "touch" ? "phase" : "action"] as? String)
+        switch LockScreenTaggedInput.pointerDecision(kind, tagged: obj[LockScreenWire.inputTag] as? Bool == true,
+                                                     viewLive: lockScreenLive, unlocked: privacyGate.allowsInput) {
+        case .deliver: return true
+        case .drop: return false
+        case .refuse(let refusal):
+            reportRefusedLockScreenInput(keystrokes: 0, clicks: 1, refusal)
+            return false
+        }
     }
 
     private func startLockScreenIdleTimer() {
@@ -5715,7 +5732,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
         case "touch":
-            guard receiverInputIsAllowed(.touch) else { return }
+            guard lockScreenPointerAdmits(type: "touch", obj), receiverInputIsAllowed(.touch) else { return }
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
@@ -5743,7 +5760,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             case "up": .release
             default: .other
             }
-            guard receiverInputIsAllowed(pointerEvent) else { return }
+            guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
             switch action {
             case "move":
                 if let x = obj["x"] as? Double, let y = obj["y"] as? Double {

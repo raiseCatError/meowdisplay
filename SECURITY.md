@@ -356,12 +356,14 @@ relays the picture and the keys; macOS's login window checks the password. Code:
   makes a grant that didn't exist, never applies to Never Allow, and never changes the device's
   setting. Without a pre-lock grant, nothing is asked or granted behind the lock: the device says
   to unlock at the Mac.
-- **Typed for the lock screen, or not at all.** The receiver tags every key it sends while it
-  shows the lock screen. The Mac delivers tagged keys only while that connection's view is live,
-  so keys still in flight when the Mac unlocks (or after a hide or reconnect) are refused, never
-  typed into the app in front; untagged keys while the view is live are refused too. Every
-  refused keystroke is reported to that device by count and reason (never content), and it says
-  so; nothing is dropped silently, and ordinary typing after an unlock isn't held back.
+- **Meant for the lock screen, or not at all.** The receiver tags every key, touch and click it
+  sends while it shows the lock screen. The Mac delivers tagged input only while that
+  connection's view is live, so keys, touches and clicks still in flight when the Mac unlocks (or
+  after a hide or reconnect) are refused, never typed or clicked into the app in front; untagged
+  input while the view is live is refused too. Every refused keystroke and click is reported to
+  that device by count and reason (never content), and it says so; refused pointer moves are
+  just dropped. Releases always go, and the Mac releases only what it pressed, so no button stays
+  held. Ordinary input after an unlock isn't held back.
 - **Ends by itself.** On unlock (normal input and content resume for that session; the receiver
   is told to reset its input), on another
   user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow

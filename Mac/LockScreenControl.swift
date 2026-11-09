@@ -302,6 +302,8 @@ struct LockScreenGrantHandoffs: Sendable {
 /// receiver is told how many keystrokes didn't go (`lockScreenInputRefused`). Untagged keyboard
 /// input while the view is live is refused and reported too; untagged input otherwise is ordinary
 /// input (while locked without the view, the privacy gate drops it as before). Releases always go.
+/// Touches and clicks follow the same rule: a press is refused and reported as a click, a move is
+/// dropped quietly (`pointerDecision`).
 enum LockScreenTaggedInput {
     enum Refusal: String, Equatable, Sendable {
         /// Tagged, but the Mac is unlocked now.
@@ -318,6 +320,50 @@ enum LockScreenTaggedInput {
         guard !releaseActions.contains(action) else { return nil }
         if tagged { return viewLive ? nil : (unlocked ? .unlocked : .notShown) }
         return viewLive ? .untagged : nil
+    }
+
+    /// What a `touch` or `pointer` message is, for the tag rule.
+    enum PointerKind: Equatable, Sendable {
+        /// `touch` `began`, `pointer` `down`.
+        case press
+        /// `touch` `moved` (a drag or hover), `pointer` `move`/`moveRelative`.
+        case move
+        /// `touch` `ended`/`cancelled`, `pointer` `up`.
+        case release
+        case other
+    }
+
+    static func pointerKind(type: String, phaseOrAction: String?) -> PointerKind {
+        switch (type, phaseOrAction) {
+        case ("touch", "began"?), ("pointer", "down"?): return .press
+        case ("touch", "moved"?), ("pointer", "move"?), ("pointer", "moveRelative"?): return .move
+        case ("touch", "ended"?), ("touch", "cancelled"?), ("pointer", "up"?): return .release
+        default: return .other
+        }
+    }
+
+    enum PointerDecision: Equatable, Sendable {
+        /// On to the usual gates (and, while locked, the lock screen filter).
+        case deliver
+        /// A move that isn't for a live view: dropped without a word (it isn't input anyone typed).
+        case drop
+        /// A press that can't go: never posted, reported as a click.
+        case refuse(Refusal)
+    }
+
+    /// Presses and moves follow the keyboard's rule; releases always go (the injector releases
+    /// only what it pressed, so a release whose press was refused posts nothing).
+    static func pointerDecision(_ kind: PointerKind, tagged: Bool, viewLive: Bool, unlocked: Bool) -> PointerDecision {
+        switch kind {
+        case .release, .other:
+            return .deliver
+        case .press:
+            if tagged { return viewLive ? .deliver : .refuse(unlocked ? .unlocked : .notShown) }
+            return viewLive ? .refuse(.untagged) : .deliver
+        case .move:
+            if tagged { return viewLive ? .deliver : .drop }
+            return viewLive ? .drop : .deliver
+        }
     }
 
     /// Keystrokes a refused `keyboard` message held: a press or down is one, text one per character.
