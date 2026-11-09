@@ -31,4 +31,64 @@ final class AppPresentationTests: XCTestCase {
     func testExactlyThreeModesAreOffered() {
         XCTAssertEqual(Set(AppPresentation.allCases), [.dock, .menuBar, .dockAndMenuBar])
     }
+
+    // MARK: - Default for new installs (2.1.0)
+
+    private var suites: [String] = []
+
+    private func freshDefaults() -> UserDefaults {
+        let name = "AppPresentationTests.\(UUID().uuidString)"
+        suites.append(name)
+        return UserDefaults(suiteName: name)!
+    }
+
+    override func tearDown() {
+        for name in suites { UserDefaults().removePersistentDomain(forName: name) }
+        suites.removeAll()
+        super.tearDown()
+    }
+
+    func testANewInstallStartsAsDockAndMenuBarAndSavesIt() {
+        let defaults = freshDefaults()
+        XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), .dockAndMenuBar)
+        XCTAssertEqual(defaults.string(forKey: "presentation"), "dockAndMenuBar")
+        // Sparkle's first-launch flag, written after the first resolve, changes nothing later.
+        defaults.set(true, forKey: "SUHasLaunchedBefore")
+        XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), .dockAndMenuBar)
+    }
+
+    func testAnEarlierInstallThatNeverChoseKeepsMenuBarOnly() {
+        for marker in AppPresentationStore.previousLaunchMarkers {
+            let defaults = freshDefaults()
+            defaults.set(true, forKey: marker)
+            XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), .menuBar, marker)
+            XCTAssertEqual(defaults.string(forKey: "presentation"), "menuBar", "saved, so it never changes: \(marker)")
+        }
+    }
+
+    func testASavedChoiceIsAlwaysKept() {
+        for saved in AppPresentation.allCases {
+            for usedBefore in [false, true] {
+                let defaults = freshDefaults()
+                defaults.set(saved.rawValue, forKey: "presentation")
+                if usedBefore { defaults.set(true, forKey: "SUHasLaunchedBefore") }
+                XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), saved)
+                XCTAssertEqual(defaults.string(forKey: "presentation"), saved.rawValue)
+            }
+        }
+    }
+
+    func testAValueFromANewerVersionIsLeftAlone() {
+        let defaults = freshDefaults()
+        defaults.set("somethingNewer", forKey: "presentation")
+        XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), .menuBar)
+        XCTAssertEqual(defaults.string(forKey: "presentation"), "somethingNewer")
+    }
+
+    func testResolvingAgainChangesNothing() {
+        let defaults = freshDefaults()
+        let first = AppPresentationStore.resolve(defaults: defaults)
+        defaults.set(["id"], forKey: "knownReceiverIdentifiers")   // a device paired during the first run
+        XCTAssertEqual(AppPresentationStore.resolve(defaults: defaults), first)
+    }
 }
