@@ -419,6 +419,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var unexplainedExtentAt: TimeInterval = 0
     /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
+    /// Sheets the app confirmed from the live window list that the latest listing doesn't have
+    /// yet, by window (inputLock). The listing can stay behind a sheet for as long as it's open
+    /// (Chrome's Open panel, QA 9000037: minutes), so its capture extent, its presses and typing
+    /// into it use these too. Replaced by each live look; ids aren't reused, so a closed one is inert.
+    private var liveSheets: [UInt32: [UInt32: CGRect]] = [:]
+    /// The latest listing's sheet frames by window (inputLock), for the keyboard check.
+    private var ownSheetFrames: [UInt32: [CGRect]] = [:]
+    /// `queue`: when each window's live sheets were last looked for (at most twice a second).
+    private var liveSheetLookAt: [UInt32: TimeInterval] = [:]
     /// The listing `sheetCovers` came from (diagnostics for refused presses): when it was taken
     /// and which windows it listed.
     private var coversListing: (at: TimeInterval, listed: Set<UInt32>) = (0, [])
@@ -769,7 +778,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
         let listedIDs = Set(snap.windows.map(\.windowID))
-        inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers; coversListing = (snap.takenAt, listedIDs) }
+        let listedSheetFrames = snap.sheets.mapValues { $0.map(\.frame) }
+        inputLock.withLock {
+            targeting.windowFrames = frames; sheetCovers = covers; coversListing = (snap.takenAt, listedIDs)
+            ownSheetFrames = listedSheetFrames
+        }
         ensureCaptures()
         if WorkspaceCaptureRetune.needed(oldFrames: previousFrames, newFrames: frames,
                                          oldStates: previousStates, newStates: tileState) {
@@ -1420,8 +1433,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         for a in assignments where a.displayID == nil {
             guard let capture = captures[a.tileID], capture.assignmentGeneration == a.assignmentGeneration,
                   let f = capture.latestFrame(), let window = frames[a.windowID] else { continue }
-            let children = snapshot?.sheets[a.windowID]?.map(\.frame) ?? []
-            if let e = WindowCaptureExtent.extent(window: window, children: children, content: f.sourcePoints) {
+            let listed = snapshot?.sheets[a.windowID]?.map(\.frame) ?? []
+            var live = Array(inputLock.withLock { liveSheets[a.windowID] ?? [:] }.values)
+            var e = WindowCaptureExtent.extent(window: window, children: listed + live, content: f.sourcePoints)
+            if e == nil, let c = f.sourcePoints, !WindowCaptureExtent.matches(c, window.size),
+               now - (liveSheetLookAt[a.windowID] ?? 0) > 0.5 {
+                // More than the window and no known sheet explains it: a sheet the listing hasn't
+                // caught up with. Look for it live (the app must confirm it).
+                liveSheetLookAt[a.windowID] = now
+                let found = Self.liveSheets(windowID: a.windowID, pid: a.pid, frame: window)
+                inputLock.withLock { liveSheets[a.windowID] = found }
+                live = Array(found.values)
+                e = WindowCaptureExtent.extent(window: window, children: listed + live, content: f.sourcePoints)
+            }
+            if let e {
                 extents[a.windowID] = e
             } else if let c = f.sourcePoints, !WindowCaptureExtent.matches(c, window.size), c.width <= window.width * 1.5 + 1 {
                 unexplained = true   // a sheet the catalog hasn't listed yet (or one animating)
@@ -1562,7 +1587,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 var focusedID: UInt32?
                 var isChild = false
                 if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
-                    isChild = info.isChild
+                    // The active window's own sheet (an Open or Save panel) has the focus: typing
+                    // goes to it, as part of the window (QA 9000037: Escape and Return were lost).
+                    let sheetFrames = (ownSheetFrames[active.windowID] ?? []) + Array((liveSheets[active.windowID] ?? [:]).values)
+                    isChild = info.isChild || WorkspaceKeyboardGate.focusIsOwnSheet(
+                        focusedFrame: info.frame, sheetFrames: sheetFrames, matches: Self.framesMatch)
                     focusedID = WorkspaceKeyboardGate.focusedTileWindow(
                         active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
                         frames: targeting.windowFrames, matches: Self.framesMatch)
@@ -1628,7 +1657,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let displays = Self.activeDisplayBounds()
         var asked: UInt32??
         let targetFrame = Self.currentFrame(windowID)
-        var ownSheets = sheetCovers[windowID] ?? []
+        var ownSheets = (sheetCovers[windowID] ?? []).union(Array((liveSheets[windowID] ?? [:]).keys))
         // A sheet already on screen that the latest listing doesn't have yet: the live listing
         // above the target finds it by shape and the app must confirm it (always, titled or not).
         if let targetFrame, let pid = targeting.assignments.first(where: { $0.windowID == windowID })?.pid {
@@ -1636,6 +1665,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             where !ownSheets.contains(c.id) && c.bounds.contains(point)
                 && SheetConfirmation.confirms(pid: pid, sheet: c.id, sheetFrame: c.bounds, window: windowID, windowFrame: targetFrame) {
                 ownSheets.insert(c.id)
+                liveSheets[windowID, default: [:]][c.id] = c.bounds
                 if loggedCovers.insert("live-sheet#\(c.id)").inserted {
                     Log.info("workspace: sheet \(c.id) of \(windowID) confirmed from the live window list (not in the latest listing)")
                 }
@@ -1852,6 +1882,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
     }
 
+    /// Sheets of `windowID` on screen now that the app confirms through Accessibility, from the
+    /// live list of windows above it (`WindowSheetMatcher.liveCandidates`, `SheetConfirmation`).
+    private static func liveSheets(windowID: UInt32, pid: Int32, frame: CGRect) -> [UInt32: CGRect] {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return [:] }
+        let above = info.compactMap(WorkspaceInputCover.window(from:))
+        var found: [UInt32: CGRect] = [:]
+        for c in WindowSheetMatcher.liveCandidates(targetPID: pid, targetFrame: frame, aboveFrontToBack: above)
+        where SheetConfirmation.confirms(pid: pid, sheet: c.id, sheetFrame: c.bounds, window: windowID, windowFrame: frame) {
+            found[c.id] = c.bounds
+        }
+        if !found.isEmpty { Log.info("workspace: sheets \(found.keys.sorted()) of \(windowID) found live for its capture") }
+        return found
+    }
+
     private static func focusedWindow(pid: Int32) -> (frame: CGRect, isChild: Bool)? {
         guard AXIsProcessTrusted() else { return nil }
         let app = AXUIElementCreateApplication(pid)
@@ -1864,7 +1908,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         var subrole: CFTypeRef?
         AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
         let s = subrole as? String ?? ""
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role)
         let child = s == (kAXDialogSubrole as String) || s == (kAXSystemDialogSubrole as String) || s == (kAXFloatingWindowSubrole as String)
+            || (role as? String) == (kAXSheetRole as String)
         return (frame, child)
     }
 
