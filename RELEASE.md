@@ -16,6 +16,13 @@ Mac app 2.0 and 2.1 (without the 2.1 features); see
 [COMPATIBILITY.md](COMPATIBILITY.md). The Mac 2.0 downloads stay at their
 `v2.0.0` URLs.
 
+This table and the README describe 2.1.0 as released. They reach `main`
+only through the promotion PR that `release-publish` opens after the Mac
+release is Latest and the stores step has run. `RELEASE_AUTO_PROMOTE` stays
+unset for 2.1.0: merge that PR by hand only once `v2.1.0` is the Latest
+GitHub release and 2.1.0 is live on the App Store (the stores step can finish
+while iOS is still waiting).
+
 MeowDisplay 2.0 was the previous stable release. The main Mac app includes sender and
 receiver roles; the separate Receiver-only app remains available. The
 publication gate and historical release process are documented below.

@@ -72,13 +72,18 @@ rather stay on Mac 2.0, it remains available:
   Move it, resize it, throw it at an edge to tuck it away, and add it back to
   the layout when you're done. You can turn floating windows off in Settings.
 - **Fill Window on Mac** and **Restore Previous Size on Mac** for a window in a pane.
-- **Window view:** the window picker also opens apps that aren’t
-  running, clearer pane titles, and windows closed on the Mac leave the layout.
+- **Window view:** the window picker also opens apps that aren’t running,
+  pane titles are clearer, and closing a window on the Mac tidies the layout:
+  its tab or floating window goes away, and a pane whose only window closed
+  stays, empty, with Choose Window and Remove Pane.
 - **Mission Control and Stage Manager:** notices only on the windows they
   pause, and Stage Manager switches no longer touch the Dock.
-- **Lock screen:** while the Mac is locked, MeowDisplay shows and accepts
-  nothing. Trusted iPhones and iPads can operate the Mac's own lock screen,
-  and Lock Mac asks for control first.
+- **Lock screen:** while the Mac is locked, MeowDisplay shows nothing and
+  accepts no input by default. The one exception is lock screen control: an
+  iPhone or iPad that already has control (Always Allow Requests, or control
+  granted before the Mac locked) can show macOS's own lock screen and type the
+  password there, and macOS checks it. Each device's Allow Lock Screen Control
+  switch turns this off. Lock Mac asks for control first.
 - **Controls:** the arrow keypad gets its own Shift, Option and Command, and
   Open and Save choosers in a pane take presses where you tap.
 - **Zoom While Typing** keeps the typing location above the keyboard.
