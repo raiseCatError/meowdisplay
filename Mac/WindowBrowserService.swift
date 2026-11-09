@@ -147,6 +147,9 @@ final class WindowBrowserService: @unchecked Sendable {
     private var displays: [DisplayCatalogEntry] = []
     private var scDisplays: [UInt32: SCDisplay] = [:]
     private var refreshInFlight = false
+    /// When the listing in flight started, and whether its slowness was logged (diagnostics).
+    private var refreshStartedAt: TimeInterval = 0
+    private var slowRefreshLogged = false
     private var refreshQueuedCatalog: Bool?
     private var lastCatalogRequestAt: TimeInterval = 0
     private var active = true
@@ -300,8 +303,17 @@ final class WindowBrowserService: @unchecked Sendable {
     func refresh(sendCatalog: Bool) {
         queue.async { [self] in
             guard !stopped else { return }
-            guard !refreshInFlight else { refreshQueuedCatalog = (refreshQueuedCatalog ?? false) || sendCatalog; return }
+            guard !refreshInFlight else {
+                refreshQueuedCatalog = (refreshQueuedCatalog ?? false) || sendCatalog
+                let waited = ProcessInfo.processInfo.systemUptime - refreshStartedAt
+                if waited > 3, !slowRefreshLogged {
+                    slowRefreshLogged = true
+                    Log.info("workspace: window listing still running after \(Int(waited)) s; newer listings wait")
+                }
+                return
+            }
             refreshInFlight = true
+            refreshStartedAt = ProcessInfo.processInfo.systemUptime
             let ledgerIn = ledgerLock.withLock { ledger }
             let includeOwn = includeOwnProcessForTesting
             Task { [weak self] in
@@ -310,6 +322,10 @@ final class WindowBrowserService: @unchecked Sendable {
                 self?.queue.async {
                     guard let self else { return }
                     self.refreshInFlight = false
+                    if self.slowRefreshLogged {
+                        self.slowRefreshLogged = false
+                        Log.info("workspace: window listing finished after \(Int(ProcessInfo.processInfo.systemUptime - self.refreshStartedAt)) s")
+                    }
                     if let queued = self.refreshQueuedCatalog { self.refreshQueuedCatalog = nil; self.refresh(sendCatalog: queued) }
                     if let content { self.updateDisplays(content.displays) }
                     guard let (snap, ledgerOut) = built else {
