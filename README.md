@@ -18,7 +18,7 @@ trackpad-style input, gestures and a keyboard.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a> · <a href="https://meowdisplay.app/android/early-access"><img src="https://img.shields.io/badge/Android-Closed%20testing-000000?style=for-the-badge&amp;logo=android&amp;logoColor=3DDC84" alt="Android: join closed testing on Google Play" height="28" align="center"></a>
+**[Download MeowDisplay 2.0 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a> · <a href="https://meowdisplay.app/android/early-access"><img src="https://img.shields.io/badge/Android-Closed%20testing-000000?style=for-the-badge&amp;logo=android&amp;logoColor=3DDC84" alt="Android: join closed testing on Google Play" height="44" align="center"></a>
 
 <sub>Mac 2.0.0 stable, shares and receives (macOS 14+) · [Mac Receiver 2.0.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) for older Macs (macOS 12+) · iPhone and iPad 2.0.0 on the App Store · Android 2.0 in Google Play closed testing, not yet public · [All official downloads](https://meowdisplay.app/downloads)</sub>
 
