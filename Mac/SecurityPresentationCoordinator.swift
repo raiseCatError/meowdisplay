@@ -50,10 +50,12 @@ enum SecurityPresentationCoordinator {
         let delegate = PairingPanelWindowDelegate(prompt: prompt)
         pairingPanelDelegate = delegate
         panel.delegate = delegate
-        panel.contentView = NSHostingView(rootView: PairingPanelView(prompt: prompt, onResolved: {
+        let hostingController = NSHostingController(rootView: PairingPanelView(prompt: prompt, onResolved: {
             Log.info("uiDebug: pairing panel closed reason=resolved")
             panel.orderOut(nil)
         }))
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
         SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
         Log.info("uiDebug: pairing panel orderedFront visible=\(panel.isVisible) keyWindow=\(panel.isKeyWindow)")
     }
@@ -270,6 +272,9 @@ private struct PairingPanelView: View {
     @ObservedObject var prompt: PairingPromptModel
     let onResolved: () -> Void
     @State private var armed = false
+    private static var refusedGrantMessage: String {
+        String(localized: "Approval was blocked because the click came from software, such as Screen Sharing. Use a mouse or keyboard connected to this Mac, or a hardware KVM, then try again.")
+    }
 
     var body: some View {
         Group {
@@ -295,6 +300,12 @@ private struct PairingPanelView: View {
                         Text(PairingCopy.sasHelper).font(.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
+                    if prompt.grantRefused {
+                        Text(Self.refusedGrantMessage)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if prompt.panelPhase == .authenticatingOwner {
                         // The system's Touch ID / password prompt is open: say
                         // so, rather than leave the code up with a disabled
@@ -313,7 +324,13 @@ private struct PairingPanelView: View {
                         Button("Cancel", role: .cancel) { prompt.decide(accept: false) }
                             .keyboardShortcut(.cancelAction)
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
-                            guard ConsentGrant.allowed() else { return }
+                            guard ConsentGrant.allowed() else {
+                                prompt.noteRefusedGrant()
+                                NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
+                                    userInfo: [.announcement: Self.refusedGrantMessage,
+                                               .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+                                return
+                            }
                             // Only now, after a hardware press on the grant
                             // itself, does MeowDisplay come forward, so the
                             // owner-authentication prompt that may follow
@@ -343,7 +360,7 @@ private struct PairingPanelView: View {
                 Color.clear.frame(width: 1, height: 1)
             }
         }
-        .frame(minWidth: 360)
+        .frame(width: 380)
         // Stays open while waiting for the other device; closes only when the
         // attempt has neither a pending SAS nor a local confirmation.
         .modifier(ArmsAfterDelay(armed: $armed, key: prompt.pending?.id))
