@@ -3308,10 +3308,15 @@ struct VideoLayerView: UIViewRepresentable {
         private var keyboardVisibleRect: CGRect? {
             didSet {
                 // A closed keyboard forgets the caret: the next session starts
-                // from the Mac's first reading, not a stale one.
+                // from the Mac's first reading, not a stale one. It also drops
+                // the typing reveal, so the picture returns to exactly the
+                // zoom and pan the user had.
                 if keyboardVisibleRect == nil {
-                    textCaret = nil
+                    typingFocus.keyboardClosed()
                     lastCaretBase = nil
+                    typingReveal = .zero
+                } else {
+                    typingRevealNeedsUpdate = true
                 }
             }
         }
@@ -3350,12 +3355,24 @@ struct VideoLayerView: UIViewRepresentable {
         // simply never call the note*Anchor* methods below).
         private var lastAnchor: CGPoint?
         // The Mac's focused text caret, normalized to the remote display
-        // (`textCaret` wire message). While known it replaces the touch anchor
-        // as the typing focus, on both axes; `lastCaretBase` is the picture
-        // placement it produced, so it only moves once the caret leaves the
-        // comfortable inner region (`RemoteViewportCalculator.keyboardOpen`).
-        private var textCaret: CGRect?
+        // (`textCaret` wire message), and which of it or the last touch steers
+        // the view (`TypingFocus`). While it steers, the caret replaces the
+        // touch anchor on both axes; `lastCaretBase` is the picture placement
+        // it produced, so it only moves once the caret leaves the comfortable
+        // inner region (`RemoteViewportCalculator.keyboardOpen`).
+        private var typingFocus = TypingFocus()
         private var lastCaretBase: CGRect?
+        // With the keyboard open over a picture the user zoomed or panned by
+        // hand: how far it is moved so the typing location shows above the
+        // keyboard (`RemoteViewportCalculator.typingRevealOffset`). Added on
+        // top of `manualZoom`, never folded into it, and zero again once the
+        // keyboard closes. Recomputed only when the typing location, the
+        // keyboard or the view's size changes — never while a pinch or Move
+        // View gesture is under way, so it can't pull the picture from under
+        // the fingers.
+        private var typingReveal = CGVector.zero
+        private var typingRevealNeedsUpdate = false
+        private var typingRevealBoundsSize = CGSize.zero
         // True only while layoutSubviews is running inside the UIView.animate
         // block a keyboard-frame change (or a live preference toggle) drives
         // — lets the content layer's geometry inherit that animation instead
@@ -3500,7 +3517,7 @@ struct VideoLayerView: UIViewRepresentable {
             let points = navigationTouches.values
                 .sorted { ObjectIdentifier($0).hashValue < ObjectIdentifier($1).hashValue }
                 .map { $0.location(in: self) }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             var next = navigationSession.update(points: points, current: manualZoom, base: base,
                                                 allowsZoom: true,
                                                 allowsRotation: rotateTarget == .viewport)
@@ -3915,16 +3932,25 @@ struct VideoLayerView: UIViewRepresentable {
         /// The Mac's text caret changed (nil: none known). Re-targets the
         /// open keyboard's viewport with the same short ease as an anchor change.
         func setTextCaret(_ caret: CGRect?) {
-            guard caret != textCaret else { return }
+            retargetTyping { $0.caretReported(caret) }
+        }
+
+        /// Applies a change to the typing focus and, with the keyboard open,
+        /// eases the picture to it. Most caret moves stay inside the
+        /// comfortable region and leave the picture where it is: only a real
+        /// change animates.
+        private func retargetTyping(_ change: (inout TypingFocus) -> Void) {
+            var next = typingFocus
+            change(&next)
+            guard next != typingFocus else { return }
             guard keyboardVisibleRect != nil else {
-                textCaret = caret
+                typingFocus = next
                 return
             }
-            // Most caret moves stay inside the comfortable region and leave
-            // the picture where it is: only animate a real change.
-            let before = unzoomedBaseTransform().displayedRect
-            textCaret = caret
-            guard unzoomedBaseTransform().displayedRect != before else { return }
+            let before = presentationBase().displayedRect
+            typingFocus = next
+            typingRevealNeedsUpdate = true
+            guard presentationBase().displayedRect != before else { return }
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3943,6 +3969,7 @@ struct VideoLayerView: UIViewRepresentable {
             guard enabled != zoomWhileTypingEnabled else { return }
             zoomWhileTypingEnabled = enabled
             guard keyboardVisibleRect != nil else { return }   // only matters while open
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -4114,7 +4141,9 @@ struct VideoLayerView: UIViewRepresentable {
         /// visibly changing yet.
         private func setAnchor(_ normalized: CGPoint) {
             lastAnchor = normalized
+            typingFocus.touched()
             guard keyboardVisibleRect != nil else { return }
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -4224,7 +4253,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func updateCurrentTransform() {
-            let base = unzoomedBaseTransform()
+            let base = presentationBase()
             currentTransform = VideoInteractionPolicy.viewportTransform(
                 base: base, state: manualZoom, videoEnabled: videoEnabled)
             keyboardPictureTarget = keyboardVisibleRect != nil && videoEnabled && base.isValid
@@ -4280,11 +4309,55 @@ struct VideoLayerView: UIViewRepresentable {
                 transform: layer.affineTransform(), remoteCrop: currentTransform.remoteCrop) ?? currentTransform
         }
 
+        /// `unzoomedBaseTransform` moved by `typingReveal`: what manual zoom
+        /// is composed on, in `updateCurrentTransform` and in the pinch and
+        /// Move View gestures alike, so a touch maps to where the picture is
+        /// drawn. Moving the base moves the zoomed picture by the same amount
+        /// (manual zoom's clamp depends only on the base's size).
+        private func presentationBase() -> RemoteViewportTransform {
+            let base = unzoomedBaseTransform()
+            guard base.isValid, let keyboardVisibleRect, videoEnabled, !lockScreenShowing,
+                  workspacePinch == nil, !manualZoom.isIdentity else {
+                // Nothing to reveal: the keyboard-open base already shows the
+                // typing location. A zoom the user pinches in from here is
+                // theirs until the typing location or the keyboard changes.
+                typingReveal = .zero
+                typingRevealNeedsUpdate = false
+                return base
+            }
+            if bounds.size != typingRevealBoundsSize {
+                typingRevealBoundsSize = bounds.size
+                typingRevealNeedsUpdate = true
+            }
+            if typingRevealNeedsUpdate, !manualViewportGestureActive {
+                typingRevealNeedsUpdate = false
+                if let focus = typingFocusRect {
+                    typingReveal = RemoteViewportCalculator.typingRevealOffset(
+                        of: RemoteViewportCalculator.applyManualZoom(to: base, state: manualZoom),
+                        focus: focus, visibleRect: keyboardVisibleRect, current: typingReveal)
+                }
+            }
+            return base.offsetBy(typingReveal)
+        }
+
+        /// The typing location for `typingReveal`: the caret that steers, or
+        /// the last touch as a point.
+        private var typingFocusRect: CGRect? {
+            if let caret = typingFocus.steeringCaret { return caret }
+            return lastAnchor.map { CGRect(origin: $0, size: .zero) }
+        }
+
+        /// A pinch or Move View gesture is moving the picture right now.
+        private var manualViewportGestureActive: Bool {
+            if navigationSession.touchCount > 0 { return true }
+            guard let recognizer = twoFingerRecognizer, recognizer.intent == .viewportZoomPan else { return false }
+            return recognizer.state == .began || recognizer.state == .changed
+        }
+
         /// The normal or keyboard-adjusted presentation, *before* manual
-        /// zoom/pan — the fixed reference frame both `updateCurrentTransform`
-        /// and the live pinch/pan gesture (`manualZoomGestureBase`) compose
-        /// on top of, so there is exactly one place that decides between
-        /// `.normal`/`.keyboardOpen`.
+        /// zoom/pan and the typing reveal — the fixed reference frame
+        /// `presentationBase` moves, so there is exactly one place that
+        /// decides between `.normal`/`.keyboardOpen`.
         private func unzoomedBaseTransform() -> RemoteViewportTransform {
             guard let video = receiver?.videoSize, video != .zero,
                   bounds.width > 0, bounds.height > 0 else {
@@ -4332,8 +4405,8 @@ struct VideoLayerView: UIViewRepresentable {
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
                     zoomEnabled: zoomWhileTypingEnabled,
-                    caret: textCaret, previous: lastCaretBase)
-                lastCaretBase = textCaret == nil ? nil : base.displayedRect
+                    caret: typingFocus.steeringCaret, previous: lastCaretBase)
+                lastCaretBase = typingFocus.steeringCaret == nil ? nil : base.displayedRect
                 return base
             }
             lastCaretBase = nil
@@ -4752,7 +4825,7 @@ struct VideoLayerView: UIViewRepresentable {
             twoFingerActive = false
             cancelPointerAndLegacyTouchState()   // also cancels any remote-scroll momentum — see its doc
             manualZoomGestureStart = manualZoom
-            manualZoomGestureBase = unzoomedBaseTransform().displayedRect
+            manualZoomGestureBase = presentationBase().displayedRect
             engagedSnapQuarter = nil
         }
 
@@ -4950,11 +5023,12 @@ struct VideoLayerView: UIViewRepresentable {
                 return
             }
             guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
                 current: manualZoom, memory: manualZoomMemory, base: base) else { return }
             manualZoom = toggled.current
             manualZoomMemory = toggled.memory
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
