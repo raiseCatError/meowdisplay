@@ -1561,14 +1561,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// The app's answer for this device: its input policy and Allow Lock Screen Control, pushed
     /// once its pinned identity is proven (`onHello`) and on every change (`setLockScreenPermit`).
     /// Until then: not offered, and refused.
-    private var lockScreenPermit: (policy: PeerInputRequestPolicy, allowed: Bool)?
+    private var lockScreenPermit: (policy: PeerInputRequestPolicy, allowed: Bool, handoff: Bool)?
     /// This receiver shows macOS's lock screen and puts its restricted input in (`queue`).
     private var lockScreenActive = false
     /// The connection the view was started on: it never carries over to another one (F2).
     private var lockScreenGeneration: UInt64?
-    /// After the view ends because the Mac unlocked, keys and text still in flight from it are
-    /// dropped for a moment so they can't type into the app in front (`LockScreenUnlockHold`).
-    private var lockScreenUnlockHold = LockScreenUnlockHold()
     /// `show:true` at most once per `LockScreenSessionPolicy.showInterval` on this connection (F7).
     private var lockScreenShowLimit = LockScreenShowRateLimit()
     /// Wake promotions for the view (one per view at most), for tests.
@@ -1588,12 +1585,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Main actor (the app): this device's input policy and Allow Lock Screen Control changed or
-    /// are first known. Narrowing ends a lock screen view at once.
-    func setLockScreenPermit(policy: PeerInputRequestPolicy, allowed: Bool) {
+    /// are first known. Narrowing ends a lock screen view at once. `handoff`: a valid
+    /// `LockScreenGrantHandoffs` ticket waits for this device (its pre-lock control, carried across
+    /// the switch to Mirror), so asking for control will be granted once without a prompt.
+    func setLockScreenPermit(policy: PeerInputRequestPolicy, allowed: Bool, handoff: Bool = false) {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
-            self.lockScreenPermit = (policy, allowed)
+            self.lockScreenPermit = (policy, allowed, handoff)
             self.reviewLockScreen()
         }
     }
@@ -1605,7 +1604,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                      policy: lockScreenPermit?.policy ?? .neverAllow,
                                      lockScreenControlAllowed: lockScreenPermit?.allowed ?? false,
                                      sessionGranted: sessionInputGrant.get(), windowView: mode == .window,
-                                     extend: mode == .extend)
+                                     extend: mode == .extend, handoffPending: lockScreenPermit?.handoff ?? false)
     }
 
     /// `queue`: the lock screen view is live for this connection: started on it, its grant still
@@ -1706,6 +1705,31 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    /// `queue`: tells the receiver how many keystrokes weren't delivered, and why (never what).
+    private func reportRefusedLockScreenInput(action: String, text: String?, _ refusal: LockScreenTaggedInput.Refusal) {
+        reportRefusedLockScreenInput(keystrokes: LockScreenTaggedInput.keystrokes(action: action, text: text), clicks: 0, refusal)
+    }
+
+    private func reportRefusedLockScreenInput(keystrokes: Int, clicks: Int, _ refusal: LockScreenTaggedInput.Refusal) {
+        Log.info("lockScreen: refused input (\(refusal.rawValue), \(keystrokes) keystroke(s), \(clicks) click(s))")
+        guard keystrokes > 0 || clicks > 0, sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        sendJSONObject(LockScreenWire.inputRefused(count: keystrokes, clicks: clicks, reason: refusal.rawValue))
+    }
+
+    /// `queue`: a `touch` or `pointer` message against the tag rule. False: not delivered (a
+    /// refused press is reported as a click; a move is dropped quietly).
+    private func lockScreenPointerAdmits(type: String, _ obj: [String: Any]) -> Bool {
+        let kind = LockScreenTaggedInput.pointerKind(type: type, phaseOrAction: obj[type == "touch" ? "phase" : "action"] as? String)
+        switch LockScreenTaggedInput.pointerDecision(kind, tagged: obj[LockScreenWire.inputTag] as? Bool == true,
+                                                     viewLive: lockScreenLive, unlocked: privacyGate.allowsInput) {
+        case .deliver: return true
+        case .drop: return false
+        case .refuse(let refusal):
+            reportRefusedLockScreenInput(keystrokes: 0, clicks: 1, refusal)
+            return false
+        }
+    }
+
     private func startLockScreenIdleTimer() {
         lockScreenIdleTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -1758,12 +1782,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             // The lock screen view lasts only while the Mac shows its lock screen: unlocked, the
             // normal picture and input resume; another user or unknown, it ends.
-            if self.lockScreenActive, state != .locked {
-                // Unlocked from the view: keys and text still in flight from it are dropped for a
-                // moment rather than typed into the app in front.
-                if state.allowsContent { self.lockScreenUnlockHold.start(now: ProcessInfo.processInfo.systemUptime) }
-                self.endLockScreen()
-            }
+            // Keys typed for it and still in flight are refused by their tag
+            // (`LockScreenTaggedInput`), never typed into the app in front.
+            if self.lockScreenActive, state != .locked { self.endLockScreen() }
             if state.allowsContent {
                 self.needsKeyframe = true
                 self.resetCursorEcho()   // nothing of the pointer went out while locked
@@ -5733,7 +5754,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
         case "touch":
-            guard receiverInputIsAllowed(.touch) else { return }
+            guard lockScreenPointerAdmits(type: "touch", obj), receiverInputIsAllowed(.touch) else { return }
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
@@ -5761,7 +5782,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             case "up": .release
             default: .other
             }
-            guard receiverInputIsAllowed(pointerEvent) else { return }
+            guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
             switch action {
             case "move":
                 if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
@@ -5838,9 +5859,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // the capture lifecycle to be fully running, not merely
             // "recovering" (see receiverKeyboardInputIsAllowed), on top of
             // the usual Allow Input requirement.
-            guard receiverKeyboardInputIsAllowed(), let action = obj["action"] as? String else { return }
-            // Just unlocked from the lock screen view: what was typed for the password stays out.
-            guard lockScreenUnlockHold.allows(action: action, now: ProcessInfo.processInfo.systemUptime) else { return }
+            guard let action = obj["action"] as? String else { return }
+            // Typed for the lock screen (tagged) goes only to a live lock screen view; untagged
+            // typing while it is live is refused. Refused keystrokes are reported, never dropped
+            // silently. Releases always go.
+            if let refusal = LockScreenTaggedInput.refusal(
+                action: action, tagged: obj[LockScreenWire.inputTag] as? Bool == true,
+                viewLive: lockScreenLive, unlocked: privacyGate.allowsInput) {
+                reportRefusedLockScreenInput(action: action, text: obj["text"] as? String, refusal)
+                return
+            }
+            guard receiverKeyboardInputIsAllowed() else { return }
             if !privacyGate.allowsInput {
                 let modifiers = obj["modifiers"] as? [String] ?? []
                 let keyEvent: LockScreenInputEvent = switch action {
@@ -6363,7 +6392,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // The lock screen view belongs to the connection that asked: a new one starts without it
         // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
         if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
-        lockScreenUnlockHold.clear()
         lockScreenShowLimit.reset()
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
@@ -8022,18 +8050,13 @@ extension MacSender {
     /// Changes the device's permit without the review a real change runs (F5: the per-event check
     /// alone must refuse).
     func setLockScreenPermitWithoutReviewForTesting(policy: PeerInputRequestPolicy, allowed: Bool) async throws {
-        try await onQueue { $0.lockScreenPermit = (policy, allowed) }
+        try await onQueue { $0.lockScreenPermit = (policy, allowed, false) }
     }
 
     /// Lets a test show the lock screen again on the same connection without waiting out the
     /// rate limit (which has its own tests).
     func resetLockScreenShowLimitForTesting() async throws {
         try await onQueue { $0.lockScreenShowLimit.reset() }
-    }
-
-    /// Ends the short post-unlock keyboard hold, as time passing would.
-    func endUnlockHoldForTesting() async throws {
-        try await onQueue { $0.lockScreenUnlockHold.clear() }
     }
 
     var lockScreenWakeCountForTesting: Int {

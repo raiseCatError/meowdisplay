@@ -811,6 +811,13 @@ final class StreamReceiver: ObservableObject {
     /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
     /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
     @MainActor @Published private(set) var macLock: MacLockNotice?
+    /// This device shows the Mac's lock screen (6.19): every `keyboard`, `touch` and `pointer`
+    /// message it sends carries `"lockScreen":true`, so the Mac delivers it only to a live lock
+    /// screen view and never to the desktop after an unlock. Set by the app from what it shows.
+    @MainActor var lockScreenInputTagged = false
+    /// The Mac's latest report of keystrokes it didn't deliver (`lockScreenInputRefused`), with a
+    /// counter so the same report twice still reads as news.
+    @MainActor @Published private(set) var lockScreenInputRefusal: (refusal: LockScreenInputRefusal, sequence: Int)?
     /// Set when the Mac authoritatively rejects a Mirror request made
     /// WHILE already confirmed extending (see `SenderController.requestMode`)
     /// — a simple informational state, never the "Use Extend?" offer, since
@@ -2970,6 +2977,9 @@ final class StreamReceiver: ObservableObject {
             if notice.isLocked, notice.lockScreen != .active { resetDecoderForVideoStateChange() }
             DispatchQueue.main.async { uiSink.publishMacLock(notice) }
             workspaceEvents.emit(.macLock(notice))
+        case LockScreenWire.inputRefused:
+            guard let refusal = LockScreenInputRefusal(message: obj) else { return }
+            DispatchQueue.main.async { uiSink.publishLockScreenInputRefusal(refusal) }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -3283,7 +3293,7 @@ final class StreamReceiver: ObservableObject {
               remoteInputMayLeave(isRelease: RemoteInputTransmission.isRelease(phase: phase)) else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = presentationTiming.clockOffsetMs { msg["t"] = nowMs + offset }
-        sendUIControl(msg)
+        sendTaggedInput(msg)
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
@@ -3306,14 +3316,14 @@ final class StreamReceiver: ObservableObject {
     /// button implied.
     @MainActor func sendPointerMove(x: Double, y: Double) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendUIControl(["type": "pointer", "action": "move", "x": x, "y": y])
+        sendTaggedInput(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
     /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
     /// `scroll`), no button implied.
     @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendUIControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
+        sendTaggedInput(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
     }
 
     /// Presses `button` down at the Mac's current cursor position with the
@@ -3321,7 +3331,7 @@ final class StreamReceiver: ObservableObject {
     /// `NSEvent.clickCount`/`CGEventClickState`).
     @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendUIControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
+        sendTaggedInput(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Releases `button`. Every `down` a receiver sends MUST be followed by
@@ -3330,7 +3340,7 @@ final class StreamReceiver: ObservableObject {
     /// contract).
     @MainActor func sendPointerUp(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
-        sendUIControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
+        sendTaggedInput(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Smart Touch (Experimental) probe — callers MUST check
@@ -3370,7 +3380,15 @@ final class StreamReceiver: ObservableObject {
     /// only finished text (see `RemoteKeyboardInputView`).
     @MainActor func sendKeyboardText(_ text: String) {
         guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty, remoteInputMayLeave() else { return }
-        sendUIControl(["type": "keyboard", "action": "text", "text": text])
+        sendTaggedInput(["type": "keyboard", "action": "text", "text": text])
+    }
+
+    /// Every `keyboard`, `touch` and `pointer` message leaves through here: tagged while this
+    /// device shows the lock screen.
+    @MainActor private func sendTaggedInput(_ message: [String: Any]) {
+        var message = message
+        if lockScreenInputTagged { message[LockScreenWire.inputTag] = true }
+        sendUIControl(message)
     }
 
     /// Tells the Mac whether the on-screen keyboard is open so it can follow
@@ -3404,7 +3422,7 @@ final class StreamReceiver: ObservableObject {
             Log.info("keyboardDebug: specialPress sent usage=\(usage)")
         }
         #endif
-        sendUIControl(ExactKeyModifiersWire.keyMessage(
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
             action: "press", usage: usage, modifiers: modifiers,
             exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
@@ -3413,8 +3431,8 @@ final class StreamReceiver: ObservableObject {
         guard displayState == .running,
               macProtocolVersion >= WireProtocol.receiverControlsWireVersion,
               remoteInputMayLeave(isRelease: !down) else { return }
-        sendUIControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
-                     "modifier": modifier.rawValue])
+        sendTaggedInput(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
+                             "modifier": modifier.rawValue])
     }
 
     @MainActor func sendCancelActiveInput() {
@@ -3782,7 +3800,7 @@ final class StreamReceiver: ObservableObject {
     /// The Mac keeps a key's exact flags from its down for its repeats and up.
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
-        sendUIControl(ExactKeyModifiersWire.keyMessage(
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
             action: "down", usage: usage, modifiers: modifiers, isRepeat: isRepeat,
             exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
@@ -3794,7 +3812,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendUIControl(ExactKeyModifiersWire.keyMessage(
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
             action: "up", usage: usage, modifiers: modifiers,
             exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
@@ -6161,6 +6179,10 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyActiveStreamCodecUpdate(_ codec: StreamCodec) {
         activeStreamCodec = codec
+    }
+
+    @MainActor func applyLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
+        lockScreenInputRefusal = (refusal, (lockScreenInputRefusal?.sequence ?? 0) &+ 1)
     }
 
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {

@@ -6,10 +6,11 @@ import XCTest
 final class LockScreenControlTests: XCTestCase {
     private func inputs(policy: PeerInputRequestPolicy = .alwaysAllow, granted: Bool = true,
                         privacy: MacScreenPrivacy = .locked, allowed: Bool = true,
-                        windowView: Bool = false, extend: Bool = false) -> LockScreenEligibility.Inputs {
+                        windowView: Bool = false, extend: Bool = false, handoff: Bool = false) -> LockScreenEligibility.Inputs {
         LockScreenEligibility.Inputs(admitted: true, masterInput: true, onConsole: true, privacy: privacy,
                                      policy: policy, lockScreenControlAllowed: allowed,
-                                     sessionGranted: granted, windowView: windowView, extend: extend)
+                                     sessionGranted: granted, windowView: windowView, extend: extend,
+                                     handoffPending: handoff)
     }
 
     // MARK: Who
@@ -49,7 +50,10 @@ final class LockScreenControlTests: XCTestCase {
         // prompt; an Ask device's grant doesn't carry over, so it isn't offered.
         XCTAssertEqual(LockScreenEligibility.offer(inputs(windowView: true), active: false), .needsFullDesktop)
         XCTAssertEqual(LockScreenEligibility.offer(inputs(granted: false, windowView: true), active: false), .needsFullDesktop)
-        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, windowView: true), active: false), .unavailable("windowView"))
+        // Ask with control a person granted before the lock: Mirror first, the grant carried once.
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, windowView: true), active: false), .needsFullDesktop)
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, windowView: true), active: false),
+                       .unavailable("controlBeforeLock"), "no pre-lock grant: nothing to carry")
         XCTAssertEqual(LockScreenEligibility.offer(inputs(allowed: false, windowView: true), active: false), .unavailable("turnedOff"))
         XCTAssertEqual(LockScreenEligibility.denial(inputs(windowView: true)), .windowView, "never shown in Window view")
     }
@@ -61,8 +65,8 @@ final class LockScreenControlTests: XCTestCase {
         XCTAssertEqual(LockScreenEligibility.denial(inputs(extend: true)), .windowView, "never shown in Extend")
         XCTAssertEqual(LockScreenEligibility.offer(inputs(extend: true), active: false), .needsFullDesktop)
         XCTAssertEqual(LockScreenEligibility.offer(inputs(granted: false, extend: true), active: false), .needsFullDesktop)
-        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, extend: true), active: false), .unavailable("windowView"))
-        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, extend: true), active: false), .unavailable("windowView"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, extend: true), active: false), .needsFullDesktop)
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, extend: true), active: false), .unavailable("controlBeforeLock"))
         XCTAssertEqual(LockScreenEligibility.offer(inputs(allowed: false, extend: true), active: false), .unavailable("turnedOff"))
         XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .neverAllow, extend: true), active: false), .unavailable("neverAllow"))
         XCTAssertEqual(LockScreenEligibility.offer(inputs(), active: false), .available, "Mirror: offered as before")
@@ -140,39 +144,206 @@ final class LockScreenControlTests: XCTestCase {
         XCTAssertTrue(limit.admits(now: 106), "a new connection")
     }
 
-    /// F3: right after an unlock from the view, keys and text in flight are dropped; releases go.
-    func testUnlockHoldDropsTypingButNotReleases() {
-        var hold = LockScreenUnlockHold()
-        for a in ["text", "press", "down", "modifierDown", "up"] { XCTAssertTrue(hold.allows(action: a, now: 0), a) }
-        hold.start(now: 10)
-        for a in ["text", "press", "down", "modifierDown", "somethingNew"] {
-            XCTAssertFalse(hold.allows(action: a, now: 10.1), a)
-            XCTAssertFalse(hold.allows(action: a, now: 11.49), a)
+    // MARK: Tagged lock screen typing
+
+    func testTaggedTypingGoesOnlyToALiveViewAndEveryRefusalIsReported() {
+        typealias T = LockScreenTaggedInput
+        XCTAssertNil(T.refusal(action: "press", tagged: true, viewLive: true, unlocked: false))
+        XCTAssertEqual(T.refusal(action: "press", tagged: true, viewLive: false, unlocked: true), .unlocked, "unlock race")
+        XCTAssertEqual(T.refusal(action: "text", tagged: true, viewLive: false, unlocked: false), .notShown, "forged or late tag")
+        XCTAssertEqual(T.refusal(action: "down", tagged: false, viewLive: true, unlocked: false), .untagged)
+        XCTAssertNil(T.refusal(action: "press", tagged: false, viewLive: false, unlocked: true), "ordinary input after unlock")
+        XCTAssertNil(T.refusal(action: "press", tagged: false, viewLive: false, unlocked: false),
+                     "locked without the view: the privacy gate drops it as before")
+        for release in ["up", "modifierUp", "cancel"] {
+            for (tagged, live, unlocked) in [(true, false, true), (false, true, false), (true, false, false)] {
+                XCTAssertNil(T.refusal(action: release, tagged: tagged, viewLive: live, unlocked: unlocked), "releases always go")
+            }
         }
-        for a in ["up", "modifierUp", "cancel"] { XCTAssertTrue(hold.allows(action: a, now: 10.1), a) }
-        XCTAssertTrue(hold.allows(action: "text", now: 10 + LockScreenSessionPolicy.unlockKeyboardHold), "bounded")
-        hold.start(now: 20)
-        hold.clear()
-        XCTAssertTrue(hold.allows(action: "text", now: 20.1))
+        XCTAssertEqual(T.keystrokes(action: "press", text: nil), 1)
+        XCTAssertEqual(T.keystrokes(action: "down", text: nil), 1)
+        XCTAssertEqual(T.keystrokes(action: "text", text: "fake-pass-123"), 13)
+        XCTAssertEqual(T.keystrokes(action: "modifierDown", text: nil), 0)
+    }
+
+    func testPressesFollowTheTagRuleMovesDropQuietlyReleasesAlwaysGo() {
+        typealias T = LockScreenTaggedInput
+        XCTAssertEqual(T.pointerKind(type: "touch", phaseOrAction: "began"), .press)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "down"), .press)
+        XCTAssertEqual(T.pointerKind(type: "touch", phaseOrAction: "moved"), .move)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "move"), .move)
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "moveRelative"), .move)
+        for (type, value) in [("touch", "ended"), ("touch", "cancelled"), ("pointer", "up")] {
+            XCTAssertEqual(T.pointerKind(type: type, phaseOrAction: value), .release)
+        }
+        XCTAssertEqual(T.pointerKind(type: "pointer", phaseOrAction: "teleport"), .other)
+        // Presses.
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: true, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: true), .refuse(.unlocked))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: true, viewLive: false, unlocked: false), .refuse(.notShown))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: true, unlocked: false), .refuse(.untagged))
+        XCTAssertEqual(T.pointerDecision(.press, tagged: false, viewLive: false, unlocked: true), .deliver)
+        // Moves: quietly dropped when not for a live view.
+        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: true, unlocked: false), .deliver)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: true, viewLive: false, unlocked: true), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: true, unlocked: false), .drop)
+        XCTAssertEqual(T.pointerDecision(.move, tagged: false, viewLive: false, unlocked: true), .deliver)
+        // Releases, always.
+        for (tagged, live, unlocked) in [(true, false, true), (false, true, false), (true, false, false), (false, false, true)] {
+            XCTAssertEqual(T.pointerDecision(.release, tagged: tagged, viewLive: live, unlocked: unlocked), .deliver)
+        }
+    }
+
+    func testTheRefusalNoticeIsPlainAndCounts() {
+        let one = LockScreenInputRefusal(message: LockScreenWire.inputRefused(count: 1, reason: "unlocked"))
+        XCTAssertEqual(one?.notice, "1 keystroke wasn’t sent: the Mac unlocked.")
+        let two = one.map { $0.adding(LockScreenInputRefusal(count: 1, reason: "unlocked")) }
+        XCTAssertEqual(two?.notice, "2 keystrokes weren’t sent: the Mac unlocked.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 3, reason: "untagged").notice,
+                       "3 keystrokes weren’t sent: use the lock screen’s keyboard and touches.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 0, clicks: 1, reason: "unlocked").notice,
+                       "1 click wasn’t sent: the Mac unlocked.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 2, clicks: 1, reason: "unlocked").notice,
+                       "2 keystrokes and 1 click weren’t sent: the Mac unlocked.")
+        XCTAssertEqual(LockScreenInputRefusal(count: 0, clicks: 1, reason: "unlocked")
+                        .adding(LockScreenInputRefusal(count: 1, reason: "unlocked")).notice,
+                       "1 keystroke and 1 click weren’t sent: the Mac unlocked.")
+        let clicks = LockScreenInputRefusal(message: LockScreenWire.inputRefused(count: 0, clicks: 2, reason: "notShown"))
+        XCTAssertEqual(clicks?.clicks, 2)
+        XCTAssertEqual(clicks?.notice, "2 clicks weren’t sent: the lock screen isn’t shown.")
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": 0, "clicks": 0, "reason": "unlocked"]))
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": -1, "clicks": 2, "reason": "unlocked"]))
+        XCTAssertEqual(LockScreenInputRefusal(count: 2, reason: "notShown").notice,
+                       "2 keystrokes weren’t sent: the lock screen isn’t shown.")
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "count": 0, "reason": "unlocked"]))
+        XCTAssertNil(LockScreenInputRefusal(message: ["type": LockScreenWire.inputRefused, "reason": "unlocked"]))
+    }
+
+    // MARK: An Ask device's pre-lock control across the switch to Mirror
+
+    private func check(peer: String = "ask-peer", key: Data? = Data([1, 2, 3]), episode: UInt64 = 7,
+                       privacy: MacScreenPrivacy = .locked, onConsole: Bool = true, now: TimeInterval = 100) -> LockScreenGrantHandoffs.Check {
+        LockScreenGrantHandoffs.Check(peerID: peer, pinnedKey: key, lockEpisode: episode, privacy: privacy, onConsole: onConsole, now: now)
+    }
+
+    func testAHandoffIsIssuedOnlyFromALivePreLockGrantOfAnAskDevice() {
+        var h = LockScreenGrantHandoffs()
+        XCTAssertFalse(h.issue(check(), policy: .ask, lockScreenControlAllowed: true, sessionGranted: false), "no grant: nothing to carry")
+        XCTAssertFalse(h.issue(check(), policy: .alwaysAllow, lockScreenControlAllowed: true, sessionGranted: true), "Always Allow needs none")
+        XCTAssertFalse(h.issue(check(), policy: .neverAllow, lockScreenControlAllowed: true, sessionGranted: true))
+        XCTAssertFalse(h.issue(check(), policy: .ask, lockScreenControlAllowed: false, sessionGranted: true), "switch off")
+        XCTAssertFalse(h.issue(check(privacy: .unlocked), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true))
+        XCTAssertFalse(h.issue(check(privacy: .switchedOut), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true))
+        XCTAssertFalse(h.issue(check(onConsole: false), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true))
+        XCTAssertFalse(h.issue(check(key: nil), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true), "unpaired")
+        XCTAssertTrue(h.tickets.isEmpty)
+        XCTAssertTrue(h.issue(check(), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true))
+        XCTAssertTrue(h.isValid(check(now: 105)))
+    }
+
+    func testAHandoffIsSingleUseBoundAndShortLived() {
+        func issued() -> LockScreenGrantHandoffs {
+            var h = LockScreenGrantHandoffs()
+            h.issue(check(), policy: .ask, lockScreenControlAllowed: true, sessionGranted: true)
+            return h
+        }
+        var h = issued()
+        XCTAssertTrue(h.redeem(check(now: 103)))
+        XCTAssertFalse(h.redeem(check(now: 104)), "single use")
+        // Every binding: expired, another key (re-paired), another lock episode (unlocked or
+        // relocked in between), unlocked now, switched out, another device, a clock running back.
+        let wrong: [(String, LockScreenGrantHandoffs.Check)] = [
+            ("expired", check(now: 100 + LockScreenGrantHandoffs.lifetime + 0.01)),
+            ("key", check(key: Data([9]))),
+            ("no key", check(key: nil)),
+            ("episode", check(episode: 8)),
+            ("unlocked", check(privacy: .unlocked)),
+            ("unknown", check(privacy: .unknown)),
+            ("console", check(onConsole: false)),
+            ("clock", check(now: 99)),
+        ]
+        for (name, c) in wrong {
+            var h = issued()
+            XCTAssertFalse(h.redeem(c), name)
+            XCTAssertFalse(h.redeem(check(now: 101)), "\(name): a failed attempt spends it too")
+        }
+        var other = issued()
+        XCTAssertFalse(other.redeem(check(peer: "someone-else")))
+        XCTAssertTrue(other.redeem(check(now: 100 + LockScreenGrantHandoffs.lifetime)), "inside its lifetime")
+        var revoked = issued()
+        revoked.revoke(peerID: "ask-peer")
+        XCTAssertFalse(revoked.redeem(check()))
+        // Issuing again without a grant clears an older ticket.
+        var replaced = issued()
+        replaced.issue(check(), policy: .ask, lockScreenControlAllowed: true, sessionGranted: false)
+        XCTAssertFalse(replaced.redeem(check()))
+    }
+
+    func testOnlyAValidHandoffGrantsAnAskRequestWhileLocked() {
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, screenLocked: true, policy: .ask),
+                       .deny(.notAllowed), "never a prompt or a grant behind the lock")
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, screenLocked: true,
+                                                      lockScreenHandoff: true, policy: .ask), .grant)
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, screenLocked: true,
+                                                      lockScreenHandoff: true, policy: .neverAllow), .deny(.requestsDisabled))
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: false, onConsole: true, screenLocked: true,
+                                                      lockScreenHandoff: true, policy: .ask), .deny(.notAllowed))
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: false, screenLocked: true,
+                                                      lockScreenHandoff: true, policy: .ask), .deny(.notAllowed))
+        XCTAssertEqual(InputControlRequestRoute.route(masterEnabled: true, onConsole: true, screenLocked: false,
+                                                      lockScreenHandoff: true, policy: .ask), .ask, "unlocked: the person decides")
+        // The new connection is told `needsControl` only while the ticket is valid.
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, handoff: true), active: false), .needsControl)
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false), active: false), .unavailable("controlBeforeLock"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .neverAllow, granted: false, handoff: true), active: false), .unavailable("neverAllow"))
+        XCTAssertEqual(LockScreenEligibility.offer(inputs(policy: .ask, granted: false, allowed: false, handoff: true), active: false),
+                       .unavailable("turnedOff"))
+    }
+
+    func testEveryNewLockIsANewEpisode() {
+        let gate = MacPrivacyGate(.unlocked)
+        let e0 = gate.lockEpisode
+        gate.set(.locked)
+        let e1 = gate.lockEpisode
+        XCTAssertNotEqual(e0, e1)
+        gate.set(.locked)
+        XCTAssertEqual(gate.lockEpisode, e1, "no change, same episode")
+        gate.set(.switchedOut)
+        XCTAssertNotEqual(gate.lockEpisode, e1, "another user in between")
+        let e2 = gate.lockEpisode
+        gate.set(.unlocked)
+        gate.set(.locked)
+        XCTAssertNotEqual(gate.lockEpisode, e2, "relocked")
     }
 
     // MARK: The receiver's keyboard (F1)
 
-    func testTheKeyboardIsSecureWhileTheMacIsLocked() {
-        let locked = RemoteKeyboardTraits.current(macLocked: true)
-        XCTAssertEqual(locked, .lockScreen)
-        XCTAssertTrue(locked.secureEntry)
-        XCTAssertTrue(locked.passwordContentType)
-        XCTAssertFalse(locked.autocorrection)
-        XCTAssertFalse(locked.spellChecking)
-        XCTAssertFalse(locked.autocapitalization)
-        XCTAssertFalse(locked.smartPunctuation)
-        XCTAssertFalse(locked.inlinePrediction)
-        XCTAssertFalse(locked.echoesTypedText, "the strip never shows or reads out what is typed")
-        let normal = RemoteKeyboardTraits.current(macLocked: false)
-        XCTAssertEqual(normal, .normal)
-        XCTAssertFalse(normal.secureEntry)
-        XCTAssertTrue(normal.echoesTypedText)
+    /// The lock screen's own responder: no document context (so no predictions, AutoFill or text
+    /// replacement), secure entry, no content type, nothing corrected, capitalised or echoed.
+    func testTheLockScreenKeyboardHasNoDocumentNoAutoFillAndNoEcho() {
+        let t = LockScreenKeyInputTraits.lockScreen
+        XCTAssertFalse(t.documentContext, "UIKeyInput only, never UITextInput")
+        XCTAssertTrue(t.secureTextEntry)
+        XCTAssertNil(t.contentType, "no content type: nothing for AutoFill to match")
+        XCTAssertFalse(t.autocorrection)
+        XCTAssertFalse(t.spellChecking)
+        XCTAssertFalse(t.autocapitalization)
+        XCTAssertFalse(t.smartPunctuation)
+        XCTAssertFalse(t.echoesTypedText)
+    }
+
+    func testTheLockScreenKeyboardSendsTextReturnAndDeleteOnly() {
+        typealias P = LockScreenKeyInputPlan
+        XCTAssertEqual(P.plan(insertText: "fake-pass-123"), [.text("fake-pass-123")])
+        XCTAssertEqual(P.plan(insertText: "\n"), [.returnKey])
+        XCTAssertEqual(P.plan(insertText: "ab\ncd"), [.text("ab"), .returnKey, .text("cd")])
+        XCTAssertEqual(P.plan(insertText: "\r\n"), [.returnKey])
+        XCTAssertEqual(P.plan(insertText: "\t"), [], "Tab moves focus on the login window: never sent")
+        XCTAssertEqual(P.plan(insertText: "a\u{1b}b"), [.text("ab")])
+        XCTAssertEqual(P.plan(insertText: "f\u{e4}ke p\u{e4}ss"), [.text("fäke päss")], "Unicode characters stay")
+        let long = String(repeating: "x", count: P.maxTextChunk * 2 + 3)
+        XCTAssertEqual(P.plan(insertText: long).count, 3)
+        XCTAssertEqual(P.deleteBackward, [.delete])
     }
 
     // MARK: Which frames

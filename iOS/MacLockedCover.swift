@@ -56,7 +56,7 @@ struct MacLockedCover: View {
             } else if offersLockScreen {
                 Button(action: onShowLockScreen) {
                     Label("Show Lock Screen", systemImage: "lock.open.fill")
-                        .frame(minWidth: 200)
+                        .frame(minWidth: 180)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -108,28 +108,37 @@ struct MacLockedCover: View {
         }
     }
 
+    private var content: some View {
+        VStack(spacing: 14) {
+            Image(systemName: notice.state == .switchedOut ? "person.2.fill" : "lock.fill")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .accessibilityHidden(true)
+            Text(title).font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
+            Text(detail).font(.body).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Your layout comes back when it’s unlocked.")
+                .font(.footnote).foregroundStyle(.white.opacity(0.55)).multilineTextAlignment(.center)
+            if notice.state == .locked || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
+            Button("Disconnect", role: .destructive, action: onDisconnect)
+                .buttonStyle(.bordered)
+                .padding(.top, 6)
+                .accessibilityIdentifier("macLockedDisconnect")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: 460)
+        .accessibilityElement(children: .contain)
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 14) {
-                Image(systemName: notice.state == .switchedOut ? "person.2.fill" : "lock.fill")
-                    .font(.system(size: 40, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .accessibilityHidden(true)
-                Text(title).font(.title2.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
-                Text(detail).font(.body).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("Your layout comes back when it’s unlocked.")
-                    .font(.footnote).foregroundStyle(.white.opacity(0.55)).multilineTextAlignment(.center)
-                if notice.state == .locked || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
-                Button("Disconnect", role: .destructive, action: onDisconnect)
-                    .buttonStyle(.bordered)
-                    .padding(.top, 6)
-                    .accessibilityIdentifier("macLockedDisconnect")
+            // A phone in landscape (compact height) or large text: the same content, scrolling.
+            ViewThatFits(in: .vertical) {
+                content
+                ScrollView { content.frame(maxWidth: .infinity) }
             }
-            .padding(.horizontal, 28)
-            .frame(maxWidth: 460)
-            .accessibilityElement(children: .contain)
         }
         .contentShape(Rectangle())
         .onTapGesture {}   // takes every touch: nothing reaches the views behind

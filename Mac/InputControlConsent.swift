@@ -73,14 +73,17 @@ enum InputControlRequestRoute: Equatable {
     /// owner chose, but input waits for the unlock (`MacPrivacyGate`): it never reaches the lock
     /// screen, so it never unlocks anything. Ask is refused at once instead of showing a prompt
     /// nobody can answer behind the lock screen (the receiver says to unlock the Mac first);
-    /// never an implicit grant. Never Allow stays refused.
+    /// never an implicit grant. Never Allow stays refused. The one exception for Ask:
+    /// `lockScreenHandoff`, a valid `LockScreenGrantHandoffs` ticket, i.e. control a person
+    /// granted this device before the lock, carried across this Mac's own switch to Mirror.
     static func route(masterEnabled: Bool, onConsole: Bool, screenLocked: Bool = false,
+                      lockScreenHandoff: Bool = false,
                       policy: PeerInputRequestPolicy) -> InputControlRequestRoute {
         guard masterEnabled, onConsole else { return .deny(.notAllowed) }
         switch policy {
         case .neverAllow: return .deny(.requestsDisabled)
         case .alwaysAllow: return .grant
-        case .ask: return screenLocked ? .deny(.notAllowed) : .ask
+        case .ask: return screenLocked ? (lockScreenHandoff ? .grant : .deny(.notAllowed)) : .ask
         }
     }
 }

@@ -54,6 +54,11 @@ enum LockScreenEligibility {
         /// window, which is on the main display. Treated as Window view: Mirror first.
         var extend = false
 
+        /// An Ask device's control, granted by a person before the Mac locked, will be carried
+        /// across this Mac's own switch to Mirror (`LockScreenGrantHandoffs`): asking for control
+        /// on the new connection is granted once, without a prompt.
+        var handoffPending = false
+
         /// Not Mirror: the lock screen can't be shown on this connection.
         var needsMirror: Bool { windowView || extend }
     }
@@ -66,25 +71,28 @@ enum LockScreenEligibility {
         guard i.privacy == .locked else { return .notLocked }
         guard i.policy != .neverAllow else { return .neverAllow }
         guard i.lockScreenControlAllowed else { return .turnedOff }
-        guard i.sessionGranted else { return i.policy == .alwaysAllow ? .needsControl : .controlBeforeLock }
+        guard i.sessionGranted else {
+            let regainsWithoutPrompt = i.policy == .alwaysAllow || (i.policy == .ask && i.handoffPending)
+            return regainsWithoutPrompt ? .needsControl : .controlBeforeLock
+        }
         return i.needsMirror ? .windowView : nil
     }
 
     /// What this device is told (`macLockState`). In Window view or Extend: Full Desktop (Mirror)
-    /// first when the new connection will get control back without a prompt (Always Allow), else
-    /// not offered.
+    /// first when the new connection will get control back without a prompt: Always Allow, or an
+    /// Ask device whose control a person granted on this connection before the lock (carried by
+    /// a one-time handoff). An Ask device without that grant isn't offered it (`controlBeforeLock`).
     static func offer(_ i: Inputs, active: Bool) -> LockScreenOffer {
         if active { return .active }
         if i.needsMirror {
             var fullDesktop = i
             fullDesktop.windowView = false
             fullDesktop.extend = false
+            fullDesktop.handoffPending = i.sessionGranted || i.handoffPending
             fullDesktop.sessionGranted = false
             switch denial(fullDesktop) {
-            case .needsControl?: return .needsFullDesktop
-            case .controlBeforeLock?: return .unavailable(LockScreenDenial.windowView.rawValue)
+            case .needsControl?, nil: return .needsFullDesktop
             case let d?: return .unavailable(d.rawValue)
-            case nil: return .needsFullDesktop
             }
         }
         switch denial(i) {
@@ -208,9 +216,6 @@ enum LockScreenSessionPolicy {
     /// A connection may start the view at most this often; a quicker `show:true` is answered with
     /// the current state and wakes nothing (F7).
     static let showInterval: TimeInterval = 5
-    /// After the view ends because the Mac unlocked, keys and text in flight from it are dropped
-    /// for this long (`LockScreenUnlockHold`).
-    static let unlockKeyboardHold: TimeInterval = 1.5
 }
 
 /// `show:true` rate limit for one connection: the first is admitted, then none until
@@ -227,18 +232,146 @@ struct LockScreenShowRateLimit: Equatable, Sendable {
     mutating func reset() { lastAdmitted = nil }
 }
 
-/// The moment after the Mac unlocks from the lock screen view: keyboard input still in flight
-/// from it (password keys, text) is dropped, so it can't type into the app in front. Releases and
-/// cancels always go through. Bounded: the protocol has no receiver input epoch to wait for.
-struct LockScreenUnlockHold: Equatable, Sendable {
-    private var until: TimeInterval?
 
-    mutating func start(now: TimeInterval) { until = now + LockScreenSessionPolicy.unlockKeyboardHold }
-    mutating func clear() { until = nil }
+/// An Ask device's pre-lock control, carried across this Mac's own switch from Window view or
+/// Extend to Mirror for the lock screen (the switch rebuilds the session on a new connection,
+/// which would otherwise start without control, and nobody can approve a prompt behind the lock).
+///
+/// Mac-internal: nothing goes on the wire, the receiver can't present or forge it. A ticket is
+/// issued only from a live grant a person gave this device before the lock, and only for the
+/// Mirror switch; it is bound to the device's peer id and pinned key, this login session being on
+/// the console, and the lock episode (any unlock, user switch or relock voids it); it lasts at
+/// most `lifetime` and is spent by the first request for control, granted or not. It never
+/// creates a grant that didn't exist, never applies to Never Allow or Always Allow, and never
+/// changes the device's policy.
+struct LockScreenGrantHandoffs: Sendable {
+    struct Ticket: Equatable, Sendable {
+        var peerID: String
+        var pinnedKey: Data
+        var lockEpisode: UInt64
+        var issuedAt: TimeInterval
+    }
 
-    /// `action`: the `keyboard` message's action.
-    func allows(action: String, now: TimeInterval) -> Bool {
-        guard let until, now < until else { return true }
-        return ["up", "modifierUp", "cancel"].contains(action)
+    static let lifetime: TimeInterval = 10
+
+    private(set) var tickets: [String: Ticket] = [:]
+
+    /// Where the ticket is checked: the device as proven now, and the Mac's state now.
+    struct Check: Equatable, Sendable {
+        var peerID: String
+        var pinnedKey: Data?
+        var lockEpisode: UInt64
+        var privacy: MacScreenPrivacy
+        var onConsole: Bool
+        var now: TimeInterval
+    }
+
+    /// The device asked to switch to Mirror while locked. Issued only when every condition holds;
+    /// returns whether it was.
+    @discardableResult
+    mutating func issue(_ c: Check, policy: PeerInputRequestPolicy, lockScreenControlAllowed: Bool,
+                        sessionGranted: Bool) -> Bool {
+        tickets.removeValue(forKey: c.peerID)
+        guard let key = c.pinnedKey, !key.isEmpty, c.privacy == .locked, c.onConsole,
+              policy == .ask, lockScreenControlAllowed, sessionGranted else { return false }
+        tickets[c.peerID] = Ticket(peerID: c.peerID, pinnedKey: key, lockEpisode: c.lockEpisode, issuedAt: c.now)
+        return true
+    }
+
+    func isValid(_ c: Check) -> Bool {
+        guard let t = tickets[c.peerID], let key = c.pinnedKey else { return false }
+        return t.pinnedKey == key && t.lockEpisode == c.lockEpisode && c.privacy == .locked && c.onConsole
+            && c.now >= t.issuedAt && c.now - t.issuedAt <= Self.lifetime
+    }
+
+    /// The device's first request for control on the new connection: spends the ticket whatever
+    /// the answer. True only when it was valid.
+    mutating func redeem(_ c: Check) -> Bool {
+        let valid = isValid(c)
+        tickets.removeValue(forKey: c.peerID)
+        return valid
+    }
+
+    /// Forget, Never Allow, the switch off: no ticket survives.
+    mutating func revoke(peerID: String) { tickets.removeValue(forKey: peerID) }
+}
+
+/// Keyboard input the receiver sends while it shows the lock screen carries `"lockScreen":true`
+/// (PROTOCOL.md 6.19). The Mac delivers it only while that connection's view is live; after the
+/// view ended (an unlock in between, a hide, a reconnect) it never reaches the desktop, and the
+/// receiver is told how many keystrokes didn't go (`lockScreenInputRefused`). Untagged keyboard
+/// input while the view is live is refused and reported too; untagged input otherwise is ordinary
+/// input (while locked without the view, the privacy gate drops it as before). Releases always go.
+/// Touches and clicks follow the same rule: a press is refused and reported as a click, a move is
+/// dropped quietly (`pointerDecision`).
+enum LockScreenTaggedInput {
+    enum Refusal: String, Equatable, Sendable {
+        /// Tagged, but the Mac is unlocked now.
+        case unlocked
+        /// Tagged, but this connection isn't showing the lock screen.
+        case notShown
+        /// Not tagged while the lock screen is shown: not typed for it.
+        case untagged
+    }
+
+    static let releaseActions: Set<String> = ["up", "modifierUp", "cancel"]
+
+    static func refusal(action: String, tagged: Bool, viewLive: Bool, unlocked: Bool) -> Refusal? {
+        guard !releaseActions.contains(action) else { return nil }
+        if tagged { return viewLive ? nil : (unlocked ? .unlocked : .notShown) }
+        return viewLive ? .untagged : nil
+    }
+
+    /// What a `touch` or `pointer` message is, for the tag rule.
+    enum PointerKind: Equatable, Sendable {
+        /// `touch` `began`, `pointer` `down`.
+        case press
+        /// `touch` `moved` (a drag or hover), `pointer` `move`/`moveRelative`.
+        case move
+        /// `touch` `ended`/`cancelled`, `pointer` `up`.
+        case release
+        case other
+    }
+
+    static func pointerKind(type: String, phaseOrAction: String?) -> PointerKind {
+        switch (type, phaseOrAction) {
+        case ("touch", "began"?), ("pointer", "down"?): return .press
+        case ("touch", "moved"?), ("pointer", "move"?), ("pointer", "moveRelative"?): return .move
+        case ("touch", "ended"?), ("touch", "cancelled"?), ("pointer", "up"?): return .release
+        default: return .other
+        }
+    }
+
+    enum PointerDecision: Equatable, Sendable {
+        /// On to the usual gates (and, while locked, the lock screen filter).
+        case deliver
+        /// A move that isn't for a live view: dropped without a word (it isn't input anyone typed).
+        case drop
+        /// A press that can't go: never posted, reported as a click.
+        case refuse(Refusal)
+    }
+
+    /// Presses and moves follow the keyboard's rule; releases always go (the injector releases
+    /// only what it pressed, so a release whose press was refused posts nothing).
+    static func pointerDecision(_ kind: PointerKind, tagged: Bool, viewLive: Bool, unlocked: Bool) -> PointerDecision {
+        switch kind {
+        case .release, .other:
+            return .deliver
+        case .press:
+            if tagged { return viewLive ? .deliver : .refuse(unlocked ? .unlocked : .notShown) }
+            return viewLive ? .refuse(.untagged) : .deliver
+        case .move:
+            if tagged { return viewLive ? .deliver : .drop }
+            return viewLive ? .drop : .deliver
+        }
+    }
+
+    /// Keystrokes a refused `keyboard` message held: a press or down is one, text one per character.
+    static func keystrokes(action: String, text: String?) -> Int {
+        switch action {
+        case "press", "down": return 1
+        case "text": return text?.count ?? 0
+        default: return 0
+        }
     }
 }

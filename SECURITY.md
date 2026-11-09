@@ -347,8 +347,9 @@ relays the picture and the keys; macOS's login window checks the password. Code:
   the request, starting with a keyframe, so no picture from before the lock can go out. Sound,
   windows, listings, Files, Clipboard, menus and the text caret stay off. The pointer's position
   and shape go only to the device showing it, only while it is shown. Window view and Extend
-  can't show it (Mirror only: Extend's display has no login window); an Always Allow device is
-  told to switch, an Ask device isn't offered it.
+  can't show it (Mirror only: Extend's display has no login window); an Always Allow device, or
+  an Ask device with a pre-lock grant (see "Ask devices"), is told to switch, any other Ask device
+  isn't offered it. After the unlock, or a failed or refused attempt, it goes back to its view.
 - **Only what a password needs.** Pointer moves, left clicks and touches; character keys with
   Shift or Option (Caps Lock rides along); Space, Return and Delete; printable text up to 128
   characters. Never Tab, the arrows, Escape or Forward Delete (they only move focus to the login
@@ -358,13 +359,32 @@ relays the picture and the keys; macOS's login window checks the password. Code:
   buttons (Switch User, Sleep, Restart, Shut Down, accessibility): macOS handles those as at its
   own screen; at worst that puts the Mac to sleep or shuts it down (a denial of service), and
   another account's login switches users, which ends the view.
-- **On the iPad.** While the Mac is locked the keyboard is a secure, password-style one: no
-  autocorrect, spelling, capitals, smart punctuation or predictions, and its strip shows a fixed
-  label, never the characters or how many (also not to VoiceOver). Its local text and echo are
-  cleared on entering and leaving that mode, and it closes when the view ends.
+- **On the iPad.** The lock screen has its own keyboard: a bare key input (iOS `UIKeyInput`, not
+  a text document), so iOS has nothing to predict from, fill or replace: no QuickType bar, no
+  AutoFill (no password suggestions), no text replacement, no learning. It also asks for secure
+  entry (no dictation, nothing cached) and no autocorrect, spelling, capitals or smart
+  punctuation. It keeps no text, and its strip shows a fixed label, never the characters or how
+  many (also not to VoiceOver). It closes when the view ends; the ordinary keyboard isn't used
+  on the lock screen. A hardware keyboard types directly (its keys are tagged the same way).
+- **Ask devices.** An Ask device can use the lock screen only with control a person granted it
+  before the Mac locked. In Window view or Extend that grant is on a connection that can't show
+  the lock screen; switching to Mirror makes a new one, so the Mac (only the Mac, never the
+  device) keeps a one-time ticket: issued only from that live grant, bound to the device's pinned
+  key, this lock (any unlock, user switch or relock voids it) and this login session on the
+  console, valid 10 seconds, spent by the first control request on the new connection. It never
+  makes a grant that didn't exist, never applies to Never Allow, and never changes the device's
+  setting. Without a pre-lock grant, nothing is asked or granted behind the lock: the device says
+  to unlock at the Mac.
+- **Meant for the lock screen, or not at all.** The receiver tags every key, touch and click it
+  sends while it shows the lock screen. The Mac delivers tagged input only while that
+  connection's view is live, so keys, touches and clicks still in flight when the Mac unlocks (or
+  after a hide or reconnect) are refused, never typed or clicked into the app in front; untagged
+  input while the view is live is refused too. Every refused keystroke and click is reported to
+  that device by count and reason (never content), and it says so; refused pointer moves are
+  just dropped. Releases always go, and the Mac releases only what it pressed, so no button stays
+  held. Ordinary input after an unlock isn't held back.
 - **Ends by itself.** On unlock (normal input and content resume for that session; the receiver
-  is told to reset its input, and keys and text still in flight from the view are dropped for
-  1.5 seconds rather than typed into the app in front), on another
+  is told to reset its input), on another
   user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow
   Input off, a disconnect, or two minutes without input. Held keys and buttons are released.
 - **Nothing kept.** Typed characters are passed to macOS and not logged, stored or inspected

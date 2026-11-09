@@ -38,6 +38,9 @@ struct LockScreenFlow: Equatable, Sendable {
     /// Without that, the Mac saying `active` (a view left from before a reconnect) is never shown
     /// here: the flow asks it to hide instead.
     private(set) var askedOnThisConnection = false
+    /// The flow failed after switching modes: go back to where it started on the next update
+    /// with a connection (a refused or failed attempt doesn't strand the device in Mirror).
+    private var returnPending = false
 
     var isWaiting: Bool {
         switch phase {
@@ -92,7 +95,18 @@ struct LockScreenFlow: Equatable, Sendable {
     mutating func couldNotPerform() {
         guard isWaiting else { return }
         waitingSince = nil
+        // The switch itself didn't happen: there is nothing to go back from.
+        returnToWindowView = false
+        returnPending = false
         phase = .failed(String(localized: "The Mac isn't offering its lock screen to this device."))
+    }
+
+    /// The connection is to another Mac than the one Show Lock Screen started on (identity
+    /// uncertain): stop, without switching anything on this one.
+    mutating func abandon() {
+        guard phase != .idle else { return }
+        reset()
+        phase = .failed(String(localized: "Connected to a different Mac, so Show Lock Screen stopped."))
     }
 
     /// The failure message was read.
@@ -107,9 +121,10 @@ struct LockScreenFlow: Equatable, Sendable {
         checkTimeout(now)
         guard connected else {
             askedOnThisConnection = false   // a new connection has to ask again
-            if phase != .waitingForFullDesktop { reset() }
+            if phase != .waitingForFullDesktop, !returnPending { reset() }
             return .none
         }
+        if returnPending { return takeReturn() }
         guard let notice, notice.isLocked else {
             // Nothing from the new connection yet: not an unlock while switching.
             if notice == nil, phase == .waitingForFullDesktop { return .none }
@@ -131,7 +146,7 @@ struct LockScreenFlow: Equatable, Sendable {
         case .showing:
             switch offer {
             case .active: return .none
-            case .unavailable(let why): fail(why); return .none
+            case .unavailable(let why): return failed(why)
             default: phase = .idle; return .none   // the Mac ended it
             }
         case .waitingForControl, .waitingForFullDesktop, .waitingForActive:
@@ -146,8 +161,7 @@ struct LockScreenFlow: Equatable, Sendable {
                 // to this device: no decision yet, keep waiting (the timeout still applies).
                 return .none
             case .unavailable(let why):
-                fail(why)
-                return .none
+                return failed(why)
             case .available:
                 guard phase != .waitingForActive else { return .none }
                 enter(.waitingForActive, now)
@@ -178,6 +192,7 @@ struct LockScreenFlow: Equatable, Sendable {
 
     private mutating func reset() {
         askedOnThisConnection = false
+        returnPending = false
         phase = .idle
         returnToWindowView = false
         waitingSince = nil
@@ -193,6 +208,21 @@ struct LockScreenFlow: Equatable, Sendable {
         guard isWaiting, let since = waitingSince, now.timeIntervalSince(since) >= Self.timeout else { return }
         phase = .failed(String(localized: "The Mac didn't respond."))
         waitingSince = nil
+        returnPending = returnToWindowView
+    }
+
+    private mutating func failed(_ reason: String?) -> LockScreenAction {
+        fail(reason)
+        returnPending = returnToWindowView
+        return takeReturn()
+    }
+
+    /// Back to where the flow started (Window view or Extend), once.
+    private mutating func takeReturn() -> LockScreenAction {
+        returnPending = false
+        guard returnToWindowView else { return .none }
+        returnToWindowView = false
+        return .returnToWindowView
     }
 
     private mutating func fail(_ reason: String?) {
@@ -262,7 +292,7 @@ enum MacLockedCoverPolicy {
             case "turnedOff"?:
                 return String(localized: "Lock Screen Control is off for this device. It can be turned on in this device’s settings on the Mac.")
             case "controlBeforeLock"?:
-                return String(localized: "This device didn’t have control before the Mac locked, so it can’t show the lock screen.")
+                return String(localized: "This device didn’t have control before the Mac locked, and nobody can allow it while it’s locked. Unlock it at the Mac.")
             case "windowView"?:
                 return String(localized: "This view can’t show the lock screen, and this device can’t get control again while the Mac is locked.")
             case "neverAllow"?:

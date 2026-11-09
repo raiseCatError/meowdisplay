@@ -2382,8 +2382,31 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
 - The Mac ends the view (`lockScreen` no longer `active`, `inputReset`, `videoState
   enabled:false`) when it is no longer allowed (checked on every input event too), after 120 s
   without input, or on unlock. On unlock `macLockState` says `unlocked`, `inputReset` follows, and
-  `keyboard` messages other than releases are dropped for 1.5 s; then the session continues as
-  before; a receiver that switched modes to show the lock screen switches back.
+  the session continues as before; a receiver that switched modes to show the lock screen switches
+  back (also when the attempt failed or was refused after the switch).
+- Receivers add `"lockScreen":true` to every `keyboard`, `touch` and `pointer` message they send
+  while they show the lock screen (its keyboard, touches and clicks, or a hardware keyboard or
+  pointer then). The Mac delivers tagged input only while this connection's view is live; tagged
+  input arriving after it ended (an unlock in between, a hide, a reconnect, or a device that never
+  had it) never reaches the desktop. Untagged input while the view is live is refused too.
+  Untagged input otherwise is ordinary input (no hold after an unlock).
+  - Keystrokes (`keyboard` `press`/`down`, one each; `text`, one per character) and presses
+    (`touch` `began`, `pointer` `down`, one click each) that are refused are reported to that
+    receiver: `{"type":"lockScreenInputRefused","count":N,"clicks":C,"reason":R}`, R `unlocked`,
+    `notShown` or `untagged`. Receivers say so in one line ("1 click wasn't sent: the Mac
+    unlocked").
+  - Moves (`touch` `moved`, `pointer` `move`/`moveRelative`) that can't go are dropped without a
+    report.
+  - Releases (`keyboard` `up`/`modifierUp`/`cancel`, `touch` `ended`/`cancelled`, `pointer` `up`)
+    always go: the Mac releases only what it pressed, so a release whose press was refused posts
+    nothing, and a press posted on the lock screen is released when the view ends or by its own
+    release, never left held.
+- An Ask device in Window view or Extend whose control a person granted on that connection before
+  the lock is offered `needsFullDesktop`: when it asks to switch to Mirror the Mac keeps a
+  one-time, Mac-internal ticket (never on the wire) bound to the device's pinned key, this lock
+  and this login session on the console, valid 10 s; the new Mirror connection is told
+  `needsControl` and its first `allowInputRequest` is granted once without a prompt. Without such
+  a grant it is told `controlBeforeLock`; nothing is asked or granted behind the lock.
 - The view belongs to the connection that asked: any new connection starts without it and must
   send `show:true` again. A receiver never treats `active` it didn't ask for on the current
   connection as shown (it answers `show:false`). `show:true` starts a view at most once per 5 s

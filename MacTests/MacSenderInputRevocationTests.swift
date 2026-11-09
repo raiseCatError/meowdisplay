@@ -131,12 +131,12 @@ final class MacSenderInputRevocationTests: XCTestCase {
         try await showLockScreen(sender)
         XCTAssertEqual(sent.lastLockScreen, "active")
         XCTAssertEqual(sent.last(type: WireMessage.videoState)?["enabled"] as? Bool, true, "the lock screen picture is on")
-        try await receive(sender, ["type": "pointer", "action": "move", "x": 0.5, "y": 0.5])
-        try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
-        try await receive(sender, ["type": "pointer", "action": "up", "button": "left", "clickCount": 1])
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyP.rawValue, "modifiers": ["shift"]])
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.deleteOrBackspace.rawValue])
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "move", "x": 0.5, "y": 0.5])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "up", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyP.rawValue, "modifiers": ["shift"]])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.deleteOrBackspace.rawValue])
+        try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
         let allowed = events.take()
         XCTAssertTrue(allowed.contains { $0.type == .leftMouseDown } && allowed.contains { $0.type == .leftMouseUp }, "\(allowed)")
         for usage in [HIDKeyUsage.keyP, .deleteOrBackspace, .returnOrEnter] {
@@ -144,14 +144,14 @@ final class MacSenderInputRevocationTests: XCTestCase {
         }
 
         let refused: [[String: Any]] = [
-            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyQ.rawValue, "modifiers": ["command"]],
-            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue, "modifiers": ["control"]],
-            ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.f1.rawValue],
-            ["type": "keyboard", "action": "modifierDown", "modifier": ControlModifier.command.rawValue],
-            ["type": "pointer", "action": "down", "button": "right", "clickCount": 1],
+            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyQ.rawValue, "modifiers": ["command"]],
+            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyA.rawValue, "modifiers": ["control"]],
+            ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.f1.rawValue],
+            ["type": "keyboard", "lockScreen": true, "action": "modifierDown", "modifier": ControlModifier.command.rawValue],
+            ["type": "pointer", "lockScreen": true, "action": "down", "button": "right", "clickCount": 1],
             ["type": "scroll", "dx": 0.0, "dy": 120.0],
             ["type": "pencil", "phase": "began", "x": 0.3, "y": 0.3, "pressure": 0.5],
-            ["type": "keyboard", "action": "text", "text": "a\nb"],
+            ["type": "keyboard", "lockScreen": true, "action": "text", "text": "a\nb"],
         ]
         for message in refused { try await receive(sender, message) }
         let leaked = events.take().filter { [.keyDown, .rightMouseDown, .scrollWheel, .flagsChanged].contains($0.type) }
@@ -276,14 +276,127 @@ final class MacSenderInputRevocationTests: XCTestCase {
         }
     }
 
-    /// F3: unlocked (at the Mac, Touch ID, Watch) while the receiver types into the view: the
-    /// receiver is told to reset input, and keys and text still in flight don't land in the app now
-    /// in front.
-    func testUnlockFromTheViewDropsTypingInFlight() async throws {
+    private func typed(_ action: String, _ usage: HIDKeyUsage? = nil, text: String? = nil, tagged: Bool = true) -> [String: Any] {
+        var m: [String: Any] = ["type": "keyboard", "action": action]
+        if let usage { m["usage"] = usage.rawValue }
+        if let text { m["text"] = text }
+        if tagged { m[LockScreenWire.inputTag] = true }
+        return m
+    }
+
+    private var refusals: [(count: Int, reason: String)] {
+        sent.all(type: LockScreenWire.inputRefused).compactMap { m in
+            (m["count"] as? Int).map { ($0, m["reason"] as? String ?? "") }
+        }
+    }
+
+    private var refusedClicks: [(clicks: Int, reason: String)] {
+        sent.all(type: LockScreenWire.inputRefused).compactMap { m in
+            guard let clicks = m["clicks"] as? Int, clicks > 0 else { return nil }
+            return (clicks, m["reason"] as? String ?? "")
+        }
+    }
+
+    private func touch(_ phase: String, tagged: Bool = true) -> [String: Any] {
+        var m: [String: Any] = ["type": "touch", "phase": phase, "x": 0.5, "y": 0.5]
+        if tagged { m[LockScreenWire.inputTag] = true }
+        return m
+    }
+
+    private func pointer(_ action: String, tagged: Bool = true) -> [String: Any] {
+        var m: [String: Any] = ["type": "pointer", "action": action, "button": "left", "clickCount": 1, "x": 0.5, "y": 0.5]
+        if tagged { m[LockScreenWire.inputTag] = true }
+        return m
+    }
+
+    private let pressTypes: [CGEventType] = [.leftMouseDown, .rightMouseDown]
+    private let moveTypes: [CGEventType] = [.mouseMoved, .leftMouseDragged]
+
+    /// Unlock race with clicks: a tagged press (touch or pointer) still in flight when the Mac
+    /// unlocks is never posted to the desktop and is reported as a click; its release posts
+    /// nothing (no press was posted); tagged moves after the view ended are dropped quietly.
+    func testUnlockRaceRefusesTaggedPressesAndReportsClicks() async throws {
         let sender = try XCTUnwrap(sender)
         try await lockWithPermit(sender)
         try await showLockScreen(sender)
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
+        privacyGate.set(.unlocked)
+        sender.macPrivacyChanged(.unlocked)
+        try await sender.settleForTesting()
+        _ = events.take()
+        sent.clear()
+        try await receive(sender, touch("began"))
+        try await receive(sender, touch("moved"))
+        try await receive(sender, pointer("down"))
+        try await receive(sender, pointer("move"))
+        XCTAssertEqual(events.take().filter { pressTypes.contains($0.type) || moveTypes.contains($0.type) }, [],
+                       "nothing pressed or moved on the desktop")
+        XCTAssertEqual(refusedClicks.map(\.reason), ["unlocked", "unlocked"])
+        XCTAssertEqual(refusedClicks.map(\.clicks).reduce(0, +), 2)
+        XCTAssertEqual(sent.all(type: LockScreenWire.inputRefused).count, 2, "moves aren't reported")
+        try await receive(sender, touch("ended"))
+        try await receive(sender, pointer("up"))
+        XCTAssertEqual(events.take().filter { $0.type == .leftMouseUp }, [], "no press was posted: its release posts nothing")
+        // Ordinary (untagged) clicks after the unlock go at once.
+        try await receive(sender, pointer("down", tagged: false))
+        try await receive(sender, pointer("up", tagged: false))
+        let after = events.take()
+        XCTAssertTrue(after.contains { $0.type == .leftMouseDown } && after.contains { $0.type == .leftMouseUp }, "\(after)")
+    }
+
+    /// A press posted on the lock screen whose release arrives after the unlock: the button is
+    /// never left held (released when the view ends, and the late release is safe).
+    func testAPressPostedBeforeTheUnlockIsAlwaysReleased() async throws {
+        for useTouch in [false, true] {
+            setUpSender()
+            let sender = try XCTUnwrap(sender)
+            try await lockWithPermit(sender)
+            try await showLockScreen(sender)
+            try await receive(sender, useTouch ? touch("began") : pointer("down"))
+            XCTAssertTrue(events.take().contains { $0.type == .leftMouseDown }, "pressed on the lock screen (touch \(useTouch))")
+            privacyGate.set(.unlocked)
+            sender.macPrivacyChanged(.unlocked)
+            try await sender.settleForTesting()
+            try await receive(sender, useTouch ? touch("ended") : pointer("up"))
+            let released = events.take()
+            XCTAssertEqual(released.filter { $0.type == .leftMouseUp }.count, 1, "released exactly once (touch \(useTouch)): \(released)")
+            XCTAssertFalse(released.contains { pressTypes.contains($0.type) })
+            XCTAssertTrue(refusedClicks.isEmpty, "a release is never refused")
+        }
+    }
+
+    /// A tagged press from a connection that never showed the view (forged), and an untagged
+    /// press while the view is shown: refused, never posted, reported.
+    func testForgedAndUntaggedPressesAreRefusedAndReported() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        sent.clear()
+        try await receive(sender, pointer("down"))
+        try await receive(sender, touch("began"))
+        XCTAssertEqual(events.take().filter { pressTypes.contains($0.type) }, [])
+        XCTAssertEqual(refusedClicks.map(\.reason), ["notShown", "notShown"])
+
+        try await showLockScreen(sender)
+        sent.clear()
+        try await receive(sender, pointer("down", tagged: false))
+        try await receive(sender, touch("began", tagged: false))
+        try await receive(sender, pointer("move", tagged: false))
+        XCTAssertEqual(events.take().filter { pressTypes.contains($0.type) || moveTypes.contains($0.type) }, [],
+                       "untagged while shown")
+        XCTAssertEqual(refusedClicks.map(\.reason), ["untagged", "untagged"])
+        try await receive(sender, pointer("down"))
+        XCTAssertTrue(events.take().contains { $0.type == .leftMouseDown }, "tagged while shown")
+        try await receive(sender, pointer("up"))
+    }
+
+    /// F3 / explicit tags: unlocked (at the Mac, Touch ID, Watch) while the receiver types into the
+    /// view. Keys and text typed for the lock screen and still in flight never land in the app now
+    /// in front; the receiver is told how many didn't go. Its ordinary (untagged) typing after the
+    /// unlock is delivered at once: no hold.
+    func testUnlockRaceRefusesTaggedTypingAndReportsItButNotOrdinaryTyping() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        try await receive(sender, typed("press", .keyA))
         XCTAssertTrue(events.take().contains { $0.type == .keyDown }, "typed on the lock screen")
         sent.clear()
         privacyGate.set(.unlocked)
@@ -291,17 +404,74 @@ final class MacSenderInputRevocationTests: XCTestCase {
         try await sender.settleForTesting()
         XCTAssertTrue(sent.contains(type: WireMessage.inputReset), "the receiver resets its input")
         _ = events.take()
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyB.rawValue])
-        try await receive(sender, ["type": "keyboard", "action": "text", "text": "fake-pass-123"])
-        try await receive(sender, ["type": "keyboard", "action": "down", "usage": HIDKeyUsage.keyC.rawValue])
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.returnOrEnter.rawValue])
+        try await receive(sender, typed("press", .keyB))
+        try await receive(sender, typed("text", text: "fake-pass-123"))
+        try await receive(sender, typed("down", .keyC))
+        try await receive(sender, typed("press", .returnOrEnter))
         XCTAssertEqual(events.take().filter { $0.type != .keyUp && $0.type != .flagsChanged }, [],
-                       "nothing in flight is typed into the app in front")
-        try await receive(sender, ["type": "keyboard", "action": "up", "usage": HIDKeyUsage.keyC.rawValue])
-        try await sender.endUnlockHoldForTesting()
-        try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyD.rawValue])
+                       "nothing typed for the lock screen reaches the app in front")
+        XCTAssertEqual(refusals.map(\.reason), ["unlocked", "unlocked", "unlocked", "unlocked"])
+        XCTAssertEqual(refusals.map(\.count).reduce(0, +), 1 + 13 + 1 + 1, "every keystroke counted")
+        try await receive(sender, typed("up", .keyC))   // a release always goes
+        sent.clear()
+        try await receive(sender, typed("press", .keyD, tagged: false))
         XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyD.keyCode) },
-                      "after the hold, normal input")
+                      "untagged after the unlock: ordinary input, no hold")
+        XCTAssertTrue(refusals.isEmpty)
+    }
+
+    /// Tagged typing while this connection doesn't show the lock screen (not asked, hidden, or a
+    /// forged tag from a device that never had the view) is refused and reported; untagged typing
+    /// while it is shown is refused and reported too.
+    func testTagsAreHonouredOnlyWithALiveView() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        sent.clear()
+        try await receive(sender, typed("text", text: "fake-pass-123"))
+        try await receive(sender, typed("press", .keyA))
+        XCTAssertEqual(events.take().filter { $0.type == .keyDown }, [], "locked, not shown")
+        XCTAssertEqual(refusals.map(\.reason), ["notShown", "notShown"])
+
+        try await showLockScreen(sender)
+        sent.clear()
+        try await receive(sender, typed("press", .keyA, tagged: false))
+        try await receive(sender, typed("text", text: "x", tagged: false))
+        XCTAssertEqual(events.take().filter { $0.type == .keyDown }, [], "untagged while shown")
+        XCTAssertEqual(refusals.map(\.reason), ["untagged", "untagged"])
+        try await receive(sender, typed("press", .keyA))
+        XCTAssertTrue(events.take().contains { $0.type == .keyDown }, "tagged while shown")
+
+        try await showLockScreen(sender, false)
+        sent.clear()
+        try await receive(sender, typed("press", .keyA))
+        XCTAssertEqual(events.take().filter { $0.type == .keyDown }, [], "hidden")
+        XCTAssertEqual(refusals.map(\.reason), ["notShown"])
+
+        // Another device's connection, never shown the view, forging the tag: refused, reported.
+        setUpSender()
+        let forger = try XCTUnwrap(self.sender)
+        try await lockWithPermit(forger, policy: .ask, grant: true)
+        sent.clear()
+        try await receive(forger, typed("press", .keyA))
+        try await receive(forger, typed("text", text: "fake-pass-123"))
+        XCTAssertEqual(events.take().filter { $0.type == .keyDown }, [])
+        XCTAssertEqual(refusals.map(\.reason), ["notShown", "notShown"])
+    }
+
+    /// An Ask device's Mirror connection after this Mac's own switch: offered `needsControl` only
+    /// while the app vouches for a pre-lock grant (the handoff); never otherwise.
+    func testAnAskDeviceIsOfferedControlOnlyWithAHandoff() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender, policy: .ask, grant: false)
+        XCTAssertEqual(sent.lastLockScreen, "controlBeforeLock")
+        sender.setLockScreenPermit(policy: .ask, allowed: true, handoff: true)
+        try await sender.settleForTesting()
+        XCTAssertEqual(sent.lastLockScreen, "needsControl")
+        try await showLockScreen(sender)
+        XCTAssertNotEqual(sent.lastLockScreen, "active", "nothing before control")
+        sender.setLockScreenPermit(policy: .ask, allowed: true, handoff: false)   // spent or expired
+        try await sender.settleForTesting()
+        XCTAssertEqual(sent.lastLockScreen, "controlBeforeLock")
     }
 
     /// F5: every event re-checks the whole eligibility (policy, switch, console), not only the
@@ -320,8 +490,8 @@ final class MacSenderInputRevocationTests: XCTestCase {
             XCTAssertEqual(sent.lastLockScreen, "active", reason)
             try await narrow(sender)
             _ = events.take()
-            try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
-            try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
+            try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
+            try await receive(sender, ["type": "keyboard", "lockScreen": true, "action": "press", "usage": HIDKeyUsage.keyA.rawValue])
             XCTAssertEqual(events.take().filter { $0.type == .keyDown || $0.type == .leftMouseDown }, [], reason)
             XCTAssertNotEqual(sent.lastLockScreen, "active", "\(reason): the view ended")
             restore()
@@ -382,7 +552,7 @@ final class MacSenderInputRevocationTests: XCTestCase {
         let sender = try XCTUnwrap(sender)
         let generation = try await lockWithPermit(sender)
         try await showLockScreen(sender)
-        try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": 1])
+        try await receive(sender, ["type": "pointer", "lockScreen": true, "action": "down", "button": "left", "clickCount": 1])
         _ = events.take()
         sender.setLockScreenPermit(policy: .alwaysAllow, allowed: false)
         try await sender.settleForTesting()
@@ -412,7 +582,6 @@ final class MacSenderInputRevocationTests: XCTestCase {
         sender.macPrivacyChanged(.unlocked)
         try await sender.settleForTesting()
         XCTAssertNil(sent.last(type: MacLockWire.type)?["lockScreen"], "unlocked: nothing to offer")
-        try await sender.endUnlockHoldForTesting()   // the post-unlock hold has its own test
         try await receive(sender, ["type": "keyboard", "action": "press", "usage": HIDKeyUsage.keyC.rawValue, "modifiers": ["command"]])
         XCTAssertTrue(events.take().contains { $0.type == .keyDown && $0.keyCode == Int64(HIDKeyUsage.keyC.keyCode) },
                       "unlocked: normal input, shortcuts included")
@@ -710,6 +879,10 @@ private final class SentMessages: @unchecked Sendable {
 
     func contains(type: String) -> Bool {
         lock.withLock { messages.contains { $0["type"] as? String == type } }
+    }
+
+    func all(type: String) -> [[String: Any]] {
+        lock.withLock { messages.filter { $0["type"] as? String == type } }
     }
 
     func last(type: String) -> [String: Any]? {
