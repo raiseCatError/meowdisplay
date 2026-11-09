@@ -453,24 +453,53 @@ enum WindowCatalogBuilder {
                                                                      window: window.id, windowFrame: window.frame)
         }
         noteUnmatchedSheets(order: order, matched: Set(sheets.values.flatMap { $0 }), listed: listed)
-        for (parent, ids) in sheets where listed.contains(parent) {
-            result[parent] = ids.compactMap { id in
-                guard let sc = scByID[id] else { return nil }
-                return AttachedSheet(windowID: id, frame: sc.frame, scWindow: sc)
+        let frames = attachedSheetFrames(sheets: sheets, listed: listed, scFrames: scByID.mapValues(\.frame), order: order)
+        for (parent, list) in frames {
+            result[parent] = list.map { s in
+                if !s.fromCapture {
+                    noteOnce(s.id, "workspace: sheet \(s.id) of \(parent) isn't listed by ScreenCaptureKit; taken from the window list")
+                }
+                return AttachedSheet(windowID: s.id, frame: s.frame, scWindow: scByID[s.id])
             }
         }
         return result.filter { !$0.value.isEmpty }
     }
 
+    /// Each listed window's sheets and their frames: ScreenCaptureKit's when it lists the sheet,
+    /// else the window list's. A sheet ScreenCaptureKit doesn't list (yet) is still its window's,
+    /// so presses on it are on the window (QA 9000030: the third Open sheet in a row went unlisted
+    /// and every press on it was refused); it just has no capture of its own.
+    static func attachedSheetFrames(sheets: [UInt32: [UInt32]], listed: Set<UInt32>, scFrames: [UInt32: CGRect],
+                                    order: [WindowSheetMatcher.Window]) -> [UInt32: [(id: UInt32, frame: CGRect, fromCapture: Bool)]] {
+        var result: [UInt32: [(id: UInt32, frame: CGRect, fromCapture: Bool)]] = [:]
+        for (parent, ids) in sheets where listed.contains(parent) {
+            let list = ids.compactMap { id -> (id: UInt32, frame: CGRect, fromCapture: Bool)? in
+                if let f = scFrames[id] { return (id, f, true) }
+                guard let w = order.first(where: { $0.id == id }) else { return nil }
+                return (id, w.frame, false)
+            }
+            if !list.isEmpty { result[parent] = list }
+        }
+        return result
+    }
+
     nonisolated(unsafe) private static var unmatchedLogged = Set<UInt32>()
     private static let unmatchedLock = NSLock()
+    nonisolated(unsafe) private static var notedOnce = Set<UInt32>()
+
+    private static func noteOnce(_ id: UInt32, _ message: @autoclosure () -> String) {
+        let first = unmatchedLock.withLock { () -> Bool in
+            if notedOnce.count > 256 { notedOnce.removeAll() }
+            return notedOnce.insert(id).inserted
+        }
+        if first { Log.info(message()) }
+    }
 
     /// Diagnostics: a titled window of sheet size that lies inside a listed window of its app but
     /// wasn't taken as its sheet is logged once, with why (ids, frames and order; never titles).
     private static func noteUnmatchedSheets(order: [WindowSheetMatcher.Window], matched: Set<UInt32>, listed: Set<UInt32>) {
         func r(_ f: CGRect) -> String { "\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))" }
-        for (i, w) in order.enumerated() where WindowSheetMatcher.isSheetSized(w) && !WindowSheetMatcher.isUntitled(w)
-            && !matched.contains(w.id) {
+        for (i, w) in order.enumerated() where WindowSheetMatcher.isSheetSized(w) && !matched.contains(w.id) {
             guard let parent = order[(i + 1)...].first(where: { $0.pid == w.pid && listed.contains($0.id) && $0.frame.contains(w.frame) })
             else { continue }
             let first = unmatchedLock.withLock { unmatchedLogged.insert(w.id).inserted }
@@ -479,8 +508,8 @@ enum WindowCatalogBuilder {
             let between = order[(i + 1)...].prefix { $0.id != parent.id }.filter { $0.pid == w.pid }
                 .map { "\($0.id)/L\($0.layer)/\(r($0.frame))\($0.frame.intersects(w.frame) ? "/overlaps" : "")" }
             let sits = WindowSheetMatcher.sits(w.frame, on: parent.frame)
-            Log.info("workspace: titled window \(w.id) (\(r(w.frame))) inside \(parent.id) (\(r(parent.frame))) not taken as its sheet: "
-                     + "sits=\(sits) app windows between=\(between)")
+            Log.info("workspace: \(WindowSheetMatcher.isUntitled(w) ? "untitled" : "titled") window \(w.id) (\(r(w.frame))) inside \(parent.id) "
+                     + "(\(r(parent.frame))) not taken as its sheet: sits=\(sits) app windows between=\(between)")
         }
     }
 
