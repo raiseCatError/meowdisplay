@@ -10,19 +10,26 @@
   "excludedPlatforms": [
     "android"
   ],
-  "candidate": null,
+  "candidate": {
+    "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+    "runId": 42710323487,
+    "createdAt": "2026-11-09T22:16:28Z"
+  },
   "superseded": [
 
   ],
   "platforms": {
     "mac": {
-      "stage": "pending"
+      "stage": "pending",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
     },
     "ios": {
-      "stage": "pending"
+      "stage": "pending",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
     },
     "android": {
-      "stage": "pending"
+      "stage": "pending",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
     }
   },
   "website": {
@@ -35,6 +42,12 @@
     {
       "at": "2026-11-09T22:16:26Z",
       "event": "created"
+    },
+    {
+      "at": "2026-11-09T22:16:28Z",
+      "event": "candidate",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "runId": 42710323487
     }
   ]
 }
