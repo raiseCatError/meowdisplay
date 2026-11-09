@@ -11,34 +11,51 @@
     "android"
   ],
   "candidate": {
-    "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
-    "runId": 42710323487,
-    "createdAt": "2026-11-09T22:16:28Z"
+    "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+    "runId": 42720735729,
+    "createdAt": "2026-11-09T23:28:46Z"
   },
   "superseded": [
+    {
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "at": "2026-11-09T23:28:46Z",
+      "platforms": {
+        "mac": {
+          "stage": "failed",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+          "blockers": "Mac pipeline skipped (run 42710323487)",
+          "updatedAt": "2026-11-09T22:19:00Z"
+        },
+        "ios": {
+          "stage": "uploaded",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+          "build": 1,
+          "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
+          "runId": 42710323487,
+          "blockers": [
 
+          ],
+          "updatedAt": "2026-11-09T22:26:02Z"
+        },
+        "android": {
+          "stage": "pending",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
+        }
+      }
+    }
   ],
   "platforms": {
     "mac": {
-      "stage": "failed",
-      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
-      "blockers": "Mac pipeline skipped (run 42710323487)",
-      "updatedAt": "2026-11-09T22:19:00Z"
+      "stage": "pending",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
     },
     "ios": {
-      "stage": "uploaded",
-      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
-      "build": 1,
-      "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
-      "runId": 42710323487,
-      "blockers": [
-
-      ],
-      "updatedAt": "2026-11-09T22:26:02Z"
+      "stage": "pending",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
     },
     "android": {
       "stage": "pending",
-      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
     }
   },
   "website": {
@@ -85,6 +102,12 @@
       "platform": "ios",
       "from": "signed",
       "to": "uploaded"
+    },
+    {
+      "at": "2026-11-09T23:28:46Z",
+      "event": "candidate",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "runId": 42720735729
     }
   ]
 }
