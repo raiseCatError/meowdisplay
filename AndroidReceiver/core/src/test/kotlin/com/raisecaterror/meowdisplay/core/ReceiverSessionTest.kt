@@ -590,6 +590,74 @@ class ReceiverSessionTest {
         assertFalse("Request Control is asked for again", session.inputAllowed)
     }
 
+    // MARK: Mac lock (PROTOCOL.md 6.18)
+
+    private fun admitted(): FakeLink = connect(MAC_A).also { session.say(it, invite("s1")) }
+    private fun controls(type: String) = events.filterIsInstance<SessionEvent.Control>().count { it.type == type }
+
+    @Test
+    fun whileTheMacIsLockedNoContentMessageOrPictureGetsThrough() {
+        val link = admitted()
+        session.say(link, """{"type":"allowInputState","allowed":true,"state":"allowed"}""")
+        session.onFrame(link, keyframe())
+        assertEquals(1, videoEvents())
+        session.say(link, """{"type":"windowCatalog","windows":[]}""")
+        assertEquals(1, controls("windowCatalog"))
+        events.clear()
+        session.say(link, """{"type":"macLockState","state":"locked","remoteUnlock":false}""")
+        assertTrue(session.macLocked)
+        val lock = events.filterIsInstance<SessionEvent.MacLock>().single()
+        assertTrue(lock.notice.isLocked)
+        assertFalse("no input while locked", session.sendInput(tap))
+        assertFalse("no window request while locked", session.sendWorkspace(buildJsonObject { put("type", "windowCatalogRequest") }))
+        for (t in listOf("windowCatalog", "windowThumbnail", "workspaceBackdrop", "appCatalog", "appIcon", "workspaceState", "menu", "clip", "files")) {
+            session.say(link, """{"type":"$t"}""")
+        }
+        session.say(link, """{"type":"cursor","x":0.5,"y":0.5,"v":1,"s":9}""")
+        session.say(link, """{"type":"textCaret","v":1,"x":0.1,"y":0.1,"s":9}""")
+        session.onFrame(link, keyframe())
+        assertEquals(emptyList<SessionEvent>(), events.filter { it is SessionEvent.Control || it is SessionEvent.Video || it is SessionEvent.Cursor || it is SessionEvent.TextCaret })
+        session.say(link, """{"type":"receiverUI"}""")
+        assertEquals("session-level controls still pass", 1, controls("receiverUI"))
+    }
+
+    @Test
+    fun everyStateButUnlockedLocksAndUnlockingRestoresNothing() {
+        val link = admitted()
+        for (state in listOf("locked", "switchedOut", "unknown", "from-the-future")) {
+            session.say(link, """{"type":"macLockState","state":"$state"}""")
+            assertTrue(state, session.macLocked)
+        }
+        events.clear()
+        session.say(link, """{"type":"macLockState","state":"unlocked"}""")
+        assertFalse(session.macLocked)
+        assertFalse(events.filterIsInstance<SessionEvent.MacLock>().single().notice.isLocked)
+        assertEquals("no replay of anything from before the lock", 0, events.count { it is SessionEvent.Control })
+        // Fresh messages work again.
+        session.say(link, """{"type":"windowCatalog","windows":[]}""")
+        assertEquals(1, controls("windowCatalog"))
+    }
+
+    @Test
+    fun aMalformedNoticeNeitherLocksNorUnlocks() {
+        val link = admitted()
+        session.say(link, """{"type":"macLockState","state":"locked"}""")
+        session.say(link, """{"type":"macLockState"}""")
+        assertTrue(session.macLocked)
+    }
+
+    @Test
+    fun aNewConnectionStartsUnlockedAndCanLockAgain() {
+        val first = admitted()
+        session.say(first, """{"type":"macLockState","state":"locked"}""")
+        assertTrue(session.macLocked)
+        val second = connect(MAC_A)
+        assertFalse("the lock state belongs to the connection", session.macLocked)
+        session.say(second, invite("s2"))
+        session.say(second, """{"type":"macLockState","state":"locked"}""")
+        assertTrue(session.macLocked)
+    }
+
     // MARK: Waiting for the Mac's own user
 
     private fun inviteAwaiting(id: String) =

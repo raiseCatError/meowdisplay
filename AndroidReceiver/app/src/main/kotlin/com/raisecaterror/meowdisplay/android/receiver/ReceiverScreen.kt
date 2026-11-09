@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
@@ -72,6 +73,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -343,8 +345,12 @@ fun ReceiverScreen(
             onRelease = { if (controller.inputView === it) controller.inputView = null },
         )
 
+        // The Mac is locked: an opaque cover over everything of the Mac. It takes the touches, so none
+        // reaches the lock screen; the controls tray (Disconnect, Settings) stays above it.
+        if (state.macLocked) MacLockedCover()
+
         if (pictureInPicture) return@BoxWithConstraints
-        if (workspace != null) {
+        if (workspace != null && !state.macLocked) {
             val wsUi by workspace.ui.collectAsState()
             LaunchedEffect(frame, folds, transform) {
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
@@ -375,7 +381,7 @@ fun ReceiverScreen(
 
         // Stage Peek: in every mode (browsing never switches modes; only a tap or a drop does), above
         // the controls. Only its edge strip takes touches until it opens; the picture never moves.
-        if (workspace != null && immersive && prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) {
+        if (workspace != null && immersive && !state.macLocked && prefs.windowSwitcher == WindowSwitcherStyle.StagePeek) {
             val wsUi by workspace.ui.collectAsState()
             val peekFrame = canvas ?: windowRect
             val peekSafe = CGRect(
@@ -606,6 +612,24 @@ internal fun InputPromptCapsule(kind: ReceiverInputPrompt.Kind?, onTap: () -> Un
             contentAlignment = Alignment.Center,
         ) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        }
+    }
+}
+
+/** The opaque "locked" screen (PROTOCOL.md 6.18). The Mac is unlocked at the Mac; nothing here asks for a password. */
+@Composable
+private fun MacLockedCover() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
+            .semantics(mergeDescendants = true) { contentDescription = "This Mac is locked. Unlock it at the Mac."; liveRegion = LiveRegionMode.Polite },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("This Mac is locked", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Text("Unlock it at the Mac to carry on.", color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
     }
 }

@@ -58,6 +58,8 @@ sealed interface SessionEvent {
     data class Audio(val frame: AudioMediaFrame) : SessionEvent
     data class VideoState(val enabled: Boolean, val width: Int?, val height: Int?) : SessionEvent
     data class AudioState(val enabled: Boolean) : SessionEvent
+    /** The Mac's lock screen came up or went (`macLockState`): show nothing of the Mac while [notice] is locked. */
+    data class MacLock(val notice: MacLockNotice) : SessionEvent
     data class CodecChanged(val codec: StreamCodec) : SessionEvent
     data class DisplayPaused(val paused: Boolean) : SessionEvent
     data class DisplayModeConfirmed(val mode: DisplayMode) : SessionEvent
@@ -260,6 +262,7 @@ class ReceiverSession(
         incompatible = false
         macPV = null
         macFeatures = emptySet()
+        macLock.reset()
         remoteEndpointsConnection++
         streamModel.reset()
         publishStreamSettings()
@@ -438,9 +441,15 @@ class ReceiverSession(
     /** Sends one input message when [inputAllowed] and the Mac speaks [minimumPV]; false when withheld. */
     @Synchronized
     override fun sendInput(message: JsonObject, minimumPV: Int): Boolean {
-        if (!inputAllowed || (macPV ?: 0) < minimumPV) return false
+        if (!inputAllowed || macLock.locked || (macPV ?: 0) < minimumPV) return false
         return send(message)
     }
+
+    /** The Mac's lock state on this connection (fail closed: see [MacLockGate]). */
+    private val macLock = MacLockGate()
+
+    /** True while the Mac says it is locked: no content is accepted and no workspace request is sent. */
+    @get:Synchronized val macLocked: Boolean get() = macLock.locked
 
     /** Features from this connection's welcome. */
     @Volatile var macFeatures: Set<String> = emptySet()
@@ -457,7 +466,7 @@ class ReceiverSession(
     /** A window-workspace message (PROTOCOL.md 6.10): admitted sessions with a Mac that offers windows only. */
     @Synchronized
     fun sendWorkspace(message: JsonObject): Boolean {
-        if (link == null || !admission.admitted || "window" !in macFeatures) return false
+        if (link == null || !admission.admitted || "window" !in macFeatures || macLock.locked) return false
         return send(message)
     }
 
@@ -642,6 +651,12 @@ class ReceiverSession(
                 publishStreamSettings()
                 deliver("videoState", SessionEvent.VideoState(message.enabled, message.width?.takeIf(::isSaneDimension), message.height?.takeIf(::isSaneDimension)))
             }
+            is SenderMessage.MacLock -> {
+                val changed = macLock.apply(message.notice)
+                // Lock: the last picture goes now, whatever else the Mac sent or didn't. Unlock restores nothing.
+                if (macLock.locked) video.reset()
+                if (changed || macLock.locked) deliver("macLock", SessionEvent.MacLock(message.notice))
+            }
             is SenderMessage.AudioState -> deliver("audioState", SessionEvent.AudioState(message.enabled))
             is SenderMessage.CodecState -> if (message.codec != video.codec) {
                 // The decoder follows at once (it orders with the frames); the app hears at admission.
@@ -662,8 +677,8 @@ class ReceiverSession(
                 deliver("displayMode", SessionEvent.DisplayModeConfirmed(message.mode))
             }
             is SenderMessage.Cursor -> {
-                // No cursor before admission (6.9): it is not state worth holding.
-                if (!admission.admitted) return
+                // No cursor before admission (6.9): it is not state worth holding. None while locked.
+                if (!admission.admitted || macLock.locked) return
                 val sequence = message.sequence
                 if (sequence != null) {
                     if (sequence <= lastCursorSequence) return
@@ -672,8 +687,8 @@ class ReceiverSession(
                 emit(SessionEvent.Cursor(message.x, message.y, message.visible, message.pane))
             }
             is SenderMessage.TextCaret -> {
-                // Like the cursor: nothing before admission, and a reordered frame is dropped.
-                if (!admission.admitted) return
+                // Like the cursor: nothing before admission or while locked, and a reordered frame is dropped.
+                if (!admission.admitted || macLock.locked) return
                 val sequence = message.sequence
                 if (sequence != null) {
                     if (sequence <= lastTextCaretSequence) return
@@ -691,6 +706,8 @@ class ReceiverSession(
                 if (setting != null) {
                     streamModel.apply(setting)
                     publishStreamSettings()
+                } else if (macLock.locked && !MacLockWire.passesWhileLocked(message.type)) {
+                    // Window titles, stills, backdrops, app lists, Files, menus, clipboard: nothing while locked.
                 } else {
                     deliver("other:" + message.type, SessionEvent.Control(message.type, message.body))
                 }
@@ -822,7 +839,7 @@ class ReceiverSession(
         host.received(from.peerID, report)
     }
 
-    private fun mediaAdmitted() = link != null && admission.admitted && !incompatible
+    private fun mediaAdmitted() = link != null && admission.admitted && !incompatible && !macLock.locked
 
     private fun deliver(kind: String, event: SessionEvent) {
         if (admission.admitted) {
@@ -873,6 +890,7 @@ class ReceiverSession(
         input.forget()
         inputGranted = false
         paused = false
+        macLock.reset()
         heldState.clear()
         streamModel.reset()
         publishStreamSettings()

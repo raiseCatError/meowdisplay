@@ -164,6 +164,9 @@ sealed interface SenderMessage {
     data class InviteCancel(val id: String) : SenderMessage
     data class AllowInputState(val allowed: Boolean, val state: InputWireState) : SenderMessage
     data class VideoState(val enabled: Boolean, val width: Int?, val height: Int?) : SenderMessage
+
+    /** The Mac's lock screen is up or gone (PROTOCOL.md 6.18). */
+    data class MacLock(val notice: MacLockNotice) : SenderMessage
     data class AudioState(val enabled: Boolean) : SenderMessage
     data class CodecState(val codec: StreamCodec) : SenderMessage
     data class DisplayPaused(val paused: Boolean) : SenderMessage
@@ -237,6 +240,7 @@ sealed interface SenderMessage {
                     AllowInputState(allowed, InputWireState.of(obj.string("state")) ?: if (allowed) InputWireState.Allowed else InputWireState.Off)
                 }
                 "videoState" -> VideoState(obj.bool("enabled") ?: return null, obj.int("width"), obj.int("height"))
+                MacLockWire.TYPE -> MacLockNotice.parse(obj)?.let(::MacLock)
                 "audioState" -> AudioState(obj.bool("enabled") ?: return null)
                 "streamCodecState" -> StreamCodec.of(obj.string("codec"))?.let(::CodecState)
                 "displayState" -> when (obj.string("state")) {
