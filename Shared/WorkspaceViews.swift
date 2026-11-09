@@ -1499,7 +1499,7 @@ struct WindowOverviewView: View {
                 Button("Open on Mac") { model.openAppFromPicker(app) }
                     .accessibilityIdentifier("pickerOpenAppConfirm")
                     .accessibilityLabel(String(localized: "Open \(app.name) on Mac"))
-            } else if inputAllowed, model.controlState() != .requestsDisabled {
+            } else if model.appOpenOffer != .unavailable {
                 Button("Request Control & Open") { model.openAppFromPicker(app, requestingControl: true) }
                     .accessibilityIdentifier("pickerOpenAppRequestControl")
                     .accessibilityLabel(String(localized: "Request control and open \(app.name)"))
@@ -1517,6 +1517,7 @@ struct WindowOverviewView: View {
 
     private func openMessage(_ app: WorkspacePickerSearch.AppToOpen) -> String {
         if !canOpenApps {
+            if !model.inputAllowed() { return String(localized: "Opening apps needs a live connection with control of the Mac.") }
             if model.controlState() == .requestsDisabled {
                 return WorkspaceAppDropDialogs.refusedMessage(macName)
             }
@@ -1761,7 +1762,7 @@ struct WorkspaceAppDropDialogs: ViewModifier {
                 Button("Open on Mac") { model.openAppForDrop(d) }
                     .accessibilityIdentifier("appDropOpenOnMac")
                     .accessibilityLabel(String(localized: "Open \(d.app.name) on Mac"))
-            } else if model.inputAllowed(), model.controlState() != .requestsDisabled {
+            } else if model.appOpenOffer == .requestControl {
                 Button("Request Control & Open") { model.openAppForDrop(d, requestingControl: true) }
                     .accessibilityIdentifier("appDropRequestControlAndOpen")
                     .accessibilityLabel(String(localized: "Request control and open \(d.app.name)"))

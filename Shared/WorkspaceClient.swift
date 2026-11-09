@@ -1423,6 +1423,22 @@ final class WorkspaceModel: ObservableObject {
     var requestControl: () -> Void = {}
     var canControlMac: Bool { inputAllowed() && controlState() == .allowed }
 
+    /// What a question about opening an app can offer: open it now, ask the Mac for control and
+    /// open it once allowed, or neither (no live connection, or the Mac refuses requests). The
+    /// picker and the Stage Peek drop ask the same way. QA 9000033: the picker gated the request
+    /// on the view's input flag, which is false whenever control isn't held, so without control
+    /// its question had no button at all.
+    enum AppOpenOffer: Equatable { case open, requestControl, unavailable }
+
+    var appOpenOffer: AppOpenOffer {
+        guard inputAllowed() else { return .unavailable }
+        switch controlState() {
+        case .allowed: return .open
+        case .requestsDisabled: return .unavailable
+        default: return .requestControl
+        }
+    }
+
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
     /// Add to Current Stage: Stage Manager's own action on the strip item holding this pane's
     /// window (needs control; the Mac answers in its state).
