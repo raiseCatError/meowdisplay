@@ -46,8 +46,32 @@
   ],
   "platforms": {
     "mac": {
-      "stage": "pending",
-      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
+      "stage": "signed",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "build": "2.1.0",
+      "runId": 42720735729,
+      "artifacts": [
+        {
+          "name": "MeowDisplay.dmg",
+          "sha256": "d02273969b8a00fc7269f69ab6440bae92028bcb55b9e5f4765cb5d925e8c316"
+        },
+        {
+          "name": "MeowDisplayReceiver.dmg",
+          "sha256": "4981863429e85dacf916287e466867ff1c38c838bc364c0ae483739b8d17eaf7"
+        },
+        {
+          "name": "appcast-receiver.xml",
+          "sha256": "306cd1cbc1f415bf7668892be261907ea66f0a381a56b7f6921c3e6758f36609"
+        },
+        {
+          "name": "appcast.xml",
+          "sha256": "b97d8bdddec17083407dbc08bc23052b84d6d3f7440ddfd6e4443d78f50548d5"
+        }
+      ],
+      "blockers": [
+
+      ],
+      "updatedAt": "2026-11-09T23:45:55Z"
     },
     "ios": {
       "stage": "uploaded",
@@ -136,6 +160,13 @@
       "platform": "ios",
       "from": "signed",
       "to": "uploaded"
+    },
+    {
+      "at": "2026-11-09T23:45:55Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "pending",
+      "to": "signed"
     }
   ]
 }
