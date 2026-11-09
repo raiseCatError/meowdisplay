@@ -419,6 +419,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var unexplainedExtentAt: TimeInterval = 0
     /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
+    /// The listing `sheetCovers` came from (diagnostics for refused presses): when it was taken
+    /// and which windows it listed.
+    private var coversListing: (at: TimeInterval, listed: Set<UInt32>) = (0, [])
     /// Per pane: restarts so far, when the next may start, when macOS paused it. Reset when the
     /// pane shows another source or the receiver asks to retry.
     private struct Recovery {
@@ -765,7 +768,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         restoreLedger.prune { catalog[$0.window]?.generation == $0.generation }
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
-        inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
+        let listedIDs = Set(snap.windows.map(\.windowID))
+        inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers; coversListing = (snap.takenAt, listedIDs) }
         ensureCaptures()
         if WorkspaceCaptureRetune.needed(oldFrames: previousFrames, newFrames: frames,
                                          oldStates: previousStates, newStates: tileState) {
@@ -1704,7 +1708,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         loggedCovers.insert(key)
         func r(_ f: CGRect?) -> String { f.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil" }
         let near = above.suffix(6).map { "\($0.id)/\($0.owner)/pid\($0.pid)/L\($0.layer)/\(r($0.bounds))" }
-        Log.info("workspace: input check target=\(target) frame=\(r(targetFrame)) sheets=\(ownSheets.sorted()) "
+        let age = ProcessInfo.processInfo.systemUptime - coversListing.at
+        let listing = String(format: "listing age=%.1fs targetListed=%@", age, coversListing.listed.contains(target) ? "yes" : "no")
+        Log.info("workspace: input check target=\(target) frame=\(r(targetFrame)) sheets=\(ownSheets.sorted()) \(listing) "
                  + "point=\(Int(point.x)),\(Int(point.y)) verdict=\(verdict) nearest-above(back last)=\(near)")
     }
 
