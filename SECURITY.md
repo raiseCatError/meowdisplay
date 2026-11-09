@@ -281,8 +281,12 @@ reaches it. Unknown counts as locked, never as unlocked.
   app icons, app list, Stage Peek or picker content, Remote Finder listings, pane menus, text
   caret or clipboard. Frames captured or queued just before the lock are dropped too. Devices are
   told the Mac is locked and that video is off, so even an older receiver drops its last
-  picture. The receiver covers everything with an opaque "locked" screen and forgets the stills
-  and window names it held; the layout is kept and restored after the unlock.
+  picture. The iOS and Android receivers cover everything with an opaque "locked" screen,
+  forget the stills, backdrops, window names and app lists they held, close Stage Peek and the
+  window pickers, and ignore any content message that still arrives. The layout is kept, but
+  after the unlock content comes back only from fresh messages from the Mac, never from a cache.
+  Android treats `macLockState` like iOS (anything but a clear `unlocked`, including a state it
+  doesn't know, counts as locked) and offers no Show Lock Screen or remote unlock.
 - **Nothing gets in.** Keys, buttons, touches and drags the device was holding are released at
   the lock; everything sent afterwards is dropped until the Mac unlocks, so nothing reaches the
   lock screen or a window behind it. A device set to Ask is refused without a prompt (nobody

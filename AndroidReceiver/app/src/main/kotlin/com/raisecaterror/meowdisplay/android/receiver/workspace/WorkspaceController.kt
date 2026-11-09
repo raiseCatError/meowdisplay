@@ -232,6 +232,9 @@ class WorkspaceController(
     private var history = WHistory()
     private var nextTile = 1
     private var catalogAwaitingSend = false
+    /** The Mac's lock screen is up (`macLockState`): nothing of it is shown, kept or accepted. */
+    private var macLocked = false
+    private var macFeatures: Set<String> = emptySet()
     private val sendRunnable = Runnable { sendNow() }
     private var throttledSendPending = false
     private val throttledSend = Runnable { throttledSendPending = false; sendNow() }
@@ -295,7 +298,10 @@ class WorkspaceController(
         when (event) {
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
             is SessionEvent.PrivacyShield -> state.update { it.copy(privacyShieldNotice = event.on, privacyNoticeSeq = it.privacyNoticeSeq + 1) }
+            is SessionEvent.MacLock -> if (event.notice.isLocked) onMacLocked() else onMacUnlocked()
             is SessionEvent.MacFeatures -> {
+                macFeatures = event.features
+                if (macLocked) return
                 state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features, canLockMac = LockMacWire.FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
                 clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in event.features)
@@ -309,6 +315,8 @@ class WorkspaceController(
                 publish()
             }
             is SessionEvent.Disconnected, SessionEvent.AdmissionWithdrawn -> {
+                macLocked = false
+                macFeatures = emptySet()
                 main.removeCallbacks(sendRunnable)
                 fullDisplayMode = DisplayMode.Mirror
                 planner.reset()
@@ -323,7 +331,7 @@ class WorkspaceController(
                         canCloseWindows = false, closingWindows = emptySet(), closeNotice = null)
                 }
             }
-            is SessionEvent.Control -> when (event.type) {
+            is SessionEvent.Control -> if (macLocked) Unit else when (event.type) {
                 WorkspaceWire.CATALOG -> onCatalog(WindowCatalog.parse(event.body))
                 WorkspaceWire.WORKSPACE_STATE -> {
                     val parsed = WorkspaceState.parse(event.body)
@@ -368,6 +376,45 @@ class WorkspaceController(
             }
             else -> Unit
         }
+    }
+
+    /**
+     * The Mac locked (or can't say it is unlocked): forget everything it showed, close every surface
+     * that listed or pictured it, and stop asking. The arrangement (which tiles, where) is the
+     * device's own and stays; nothing the Mac sent is kept, so nothing can reappear on unlock.
+     */
+    private fun onMacLocked() {
+        macLocked = true
+        main.removeCallbacks(sendRunnable); main.removeCallbacks(throttledSend)
+        throttledSendPending = false
+        catalogAwaitingSend = false
+        planner.reset(); appRevision = null
+        clearViews()
+        thumbs.value = emptyMap(); thumbAge.clear(); iconState.value = emptyMap(); displayThumbs.value = emptyMap()
+        files.setAvailable(false)
+        clipboard.setAvailable(false)
+        (clipboard.platform as? AndroidClipboardPlatform)?.forgetSent()
+        menus.setAvailable(false)
+        state.update {
+            it.copy(
+                remote = null, catalog = null, apps = emptyList(), missing = emptySet(), launching = emptySet(), launchFailed = null,
+                overviewOpen = false, replacingTile = null, railExpanded = false, stagePeekOpen = false, launchpadOpen = false,
+                arranging = false, hovered = null, drag = null, appDrop = null, closingWindows = emptySet(), closeNotice = null,
+                lockMac = null, privacyShieldNotice = null,
+            )
+        }
+        publish()
+    }
+
+    /** The Mac is unlocked: ask again. Nothing from before the lock is restored. */
+    private fun onMacUnlocked() {
+        if (!macLocked) return
+        macLocked = false
+        val f = macFeatures
+        files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in f)
+        clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in f)
+        menus.setAvailable(AppMenuWire.WELCOME_FEATURE in f)
+        if (state.value.windowMode) { catalogAwaitingSend = true; requestCatalog() }
     }
 
     private fun loadFor(peerID: String) {
