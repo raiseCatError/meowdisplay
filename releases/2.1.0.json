@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "version": "2.1.0",
+  "branch": "release/2.1.0",
+  "mode": "manual-final-approval",
+  "requiredPlatforms": [
+    "mac",
+    "ios"
+  ],
+  "excludedPlatforms": [
+    "android"
+  ],
+  "candidate": null,
+  "superseded": [
+
+  ],
+  "platforms": {
+    "mac": {
+      "stage": "pending"
+    },
+    "ios": {
+      "stage": "pending"
+    },
+    "android": {
+      "stage": "pending"
+    }
+  },
+  "website": {
+    "stage": "pending"
+  },
+  "publication": {
+    "stage": "not-started"
+  },
+  "events": [
+    {
+      "at": "2026-11-09T22:16:26Z",
+      "event": "created"
+    }
+  ]
+}
