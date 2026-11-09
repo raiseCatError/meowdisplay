@@ -588,3 +588,116 @@ enum TransportProtocolInputsResolver {
         }
     }
 }
+
+/// What a QUIC tunnel can be dialed to (issue #219). `NWMultiplexGroup` needs
+/// a host and port: macOS 15 rejects a Bonjour service ("Endpoint Bonjour is
+/// of invalid type for multiplex group") and the Mac app ended right after
+/// pairing; newer macOS accepts one, which hid it. A service is resolved to its
+/// address first (`QUICServiceResolver`); any other kind is never dialed over QUIC.
+enum QUICDialEndpoint: Equatable {
+    case direct(NWEndpoint)
+    case resolveService(NWEndpoint)
+    case unsupported
+
+    init(_ endpoint: NWEndpoint) {
+        switch endpoint {
+        case .hostPort: self = .direct(endpoint)
+        case .service: self = .resolveService(endpoint)
+        default: self = .unsupported
+        }
+    }
+
+    /// Whether `NWMultiplexGroup(to:)` accepts `endpoint` on every supported macOS.
+    static func isMultiplexable(_ endpoint: NWEndpoint) -> Bool {
+        if case .hostPort = endpoint { return true }
+        return false
+    }
+}
+
+/// Resolves a Bonjour QUIC service to the address a connection to it uses, so
+/// the tunnel can be built for a host and port (#219). A plain UDP
+/// `NWConnection` to the service lets Network.framework resolve it and choose
+/// the path as it would for the tunnel (peer-to-peer allowed, the service's
+/// own interface kept); a UDP connection becomes ready without sending
+/// anything, so nothing reaches the receiver, and the tunnel's pinned mutual
+/// TLS still decides who answers. Not resolving in time is a reachability
+/// failure (Auto may fall back to secure TCP; explicit QUIC never does).
+///
+/// Confined to `queue`: create, start, cancel and the completion all run there.
+final class QUICServiceResolver: @unchecked Sendable {
+    struct Resolved: Equatable {
+        /// Always `.hostPort` (`QUICDialEndpoint.isMultiplexable`).
+        let endpoint: NWEndpoint
+        /// The service's own interface, when it named one; the tunnel keeps it.
+        let interface: NWInterface?
+    }
+
+    enum Outcome {
+        case resolved(Resolved)
+        case failed(QUICFailureClass, NWError?, String)
+    }
+
+    static let defaultTimeout: TimeInterval = 5
+
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+    private let timeout: TimeInterval
+    private let interface: NWInterface?
+    private var completion: ((Outcome) -> Void)?
+
+    init(service: NWEndpoint, queue: DispatchQueue, timeout: TimeInterval = defaultTimeout,
+         completion: @escaping (Outcome) -> Void) {
+        let params = NWParameters.udp
+        params.includePeerToPeer = true
+        var interface: NWInterface?
+        if case .service(_, _, _, let named) = service, let named {
+            params.requiredInterface = named
+            interface = named
+        }
+        self.connection = NWConnection(to: service, using: params)
+        self.queue = queue
+        self.timeout = timeout
+        self.interface = interface
+        self.completion = completion
+    }
+
+    func start() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        connection.stateUpdateHandler = { [weak self] state in self?.handle(state) }
+        connection.start(queue: queue)
+        let timeout = self.timeout
+        queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            self?.finish(.failed(.reachability, nil, "QUIC service not resolved within \(Int(timeout))s"))
+        }
+    }
+
+    /// Stops without reporting anything.
+    func cancel() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        completion = nil
+        connection.stateUpdateHandler = nil
+        connection.cancel()
+    }
+
+    private func handle(_ state: NWConnection.State) {
+        switch state {
+        case .ready:
+            guard let remote = connection.currentPath?.remoteEndpoint, QUICDialEndpoint.isMultiplexable(remote) else {
+                finish(.failed(.reachability, nil, "QUIC service resolved to no address"))
+                return
+            }
+            finish(.resolved(Resolved(endpoint: remote, interface: interface)))
+        case .failed(let error):
+            finish(.failed(QUICFailureClassifier.classify(error), error, "QUIC service resolution failed"))
+        default:
+            // `.waiting` (not advertised yet, no path): the timeout decides.
+            break
+        }
+    }
+
+    private func finish(_ outcome: Outcome) {
+        guard let completion else { return }
+        cancel()
+        completion(outcome)
+    }
+}
