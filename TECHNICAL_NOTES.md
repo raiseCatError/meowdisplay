@@ -138,7 +138,7 @@ documented general mechanism, referenced conceptually, not a specific
 quoted page.)
 
 An integrated remote-WoL relay/router solution for MeowDisplay is **future**
-work, not planned for the near term — see [README.md](README.md#roadmap).
+work, not planned for the near term — see [REMOTE_WAKE_ON_LAN.md](REMOTE_WAKE_ON_LAN.md#current-status).
 
 ## Reference implementations / related research
 
