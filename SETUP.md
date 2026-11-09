@@ -26,7 +26,8 @@ differences between receiver platforms.
 
 - **Xcode**: use the version pinned by `.xcode-version` for reproducible
   Mac/iOS builds. The Mac sender target supports macOS 14+, the standalone
-  Mac Receiver macOS 12+, and iPhone/iPad iOS/iPadOS 16.4+.
+  Mac Receiver macOS 12+, and iPhone/iPad iOS/iPadOS 16.4+. Tested versions
+  and known issues: [COMPATIBILITY.md](COMPATIBILITY.md#operating-systems-minimum-and-tested).
 - **Android source builds** need JDK 17 and Android SDK platform 36;
   they use Gradle in `AndroidReceiver/` instead of Xcode.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
