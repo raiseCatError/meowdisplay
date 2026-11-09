@@ -2258,8 +2258,8 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
     macOS shows its login window. Control is asked for again on the new connection.
   - any other word: not offered; the word is the Mac's reason (`controlBeforeLock`, `turnedOff`,
     `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView` (also sent in Extend),
-    `unavailable`). `turnedOff` is what every device gets until the Mac's owner turns on Allow Lock
-    Screen Control for it (off by default, SECURITY.md). Unknown
+    `unavailable`). `turnedOff`: the Mac's owner turned Allow Lock Screen Control off for this
+    device (it otherwise follows the input policy: on with Always Allow, SECURITY.md). Unknown
     words mean not offered. `unavailable` right after connecting can mean the Mac hasn't matched
     the connection to its device settings yet; a receiver that just switched modes for this waits
     for the next `macLockState` (or its own timeout).
