@@ -11,8 +11,8 @@ struct TailnetFamilies: Equatable, Sendable {
     static let none = TailnetFamilies(ipv4: false, ipv6: false, names: false)
 
     /// The Mac dialing an Android device (9001) after its knock over Tailscale IPv4: verified live
-    /// over LTE + Tailscale (handoff-2.0/COMPLETION-MATRIX.md, "Android Remote devices"). IPv6 and
-    /// MagicDNS names have not been verified on this path.
+    /// over LTE + Tailscale (docs/archive/2.0/handoff-2.0/COMPLETION-MATRIX.md, "Android Remote
+    /// devices"). IPv6 and MagicDNS names have not been verified on this path.
     static let android = TailnetFamilies(ipv4: true, ipv6: false, names: false)
 
     /// The Mac dialing a receiver that said `device` in its hello. iPhone, iPad and Mac receivers

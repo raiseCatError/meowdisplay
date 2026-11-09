@@ -11,8 +11,8 @@ data class TailnetFamilies(val ipv4: Boolean, val ipv6: Boolean, val names: Bool
 
         /**
          * Android knocking its Mac (9003) and the Mac dialing back (9001) over Tailscale IPv4: verified
-         * live over LTE + Tailscale (handoff-2.0/COMPLETION-MATRIX.md, "Android Remote devices").
-         * IPv6 and MagicDNS names have not been verified on this path.
+         * live over LTE + Tailscale (docs/archive/2.0/handoff-2.0/COMPLETION-MATRIX.md, "Android
+         * Remote devices"). IPv6 and MagicDNS names have not been verified on this path.
          */
         val ANDROID = TailnetFamilies(ipv4 = true, ipv6 = false, names = false)
     }

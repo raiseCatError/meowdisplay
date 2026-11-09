@@ -1,3 +1,5 @@
+> **Archived 2026-11-09 — historical, not maintained.** A decision that applied to the 2.0.0 release only. Current release rules: [RELEASE.md](../../../../RELEASE.md) and `.github/release-config.json`. [Archive index](../../README.md).
+
 # MeowDisplay 2.0.0: Android physical QA waiver
 
 **Status: WAIVED by the owner (2026-10-31). Not executed, not passed.**

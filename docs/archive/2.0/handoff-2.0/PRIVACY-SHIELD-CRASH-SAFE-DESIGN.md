@@ -1,3 +1,5 @@
+> **Archived 2026-11-09 — historical, not maintained.** The 2026-10-30 design note behind the crash-safe Privacy Shield prototype. Current: [SECURITY.md](../../../../SECURITY.md) (shipped behaviour) and [Prototypes/CrashSafeShield/ASSESSMENT.md](../../../../Prototypes/CrashSafeShield/ASSESSMENT.md) (prototype results and the owner's open decisions). [Archive index](../../README.md).
+
 <!-- Sanitized copy of the integration folder's DESIGN-2026-10-30-crash-safe-shield.md (2026-10-31). Local paths and personal names removed; the integration folder holds the original and evidence. -->
 
 # Crash-safe Privacy Shield: design note (2026-10-30)

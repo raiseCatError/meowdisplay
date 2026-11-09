@@ -1,3 +1,5 @@
+> **Archived 2026-11-09 — historical, not maintained.** 2.x requirement status as of the 2.0 handoff (2026-10-28 … 31). Current: [PARITY.md](../../../../PARITY.md), [CHANGELOG.md](../../../../CHANGELOG.md), [WINDOW_MODE.md](../../../../WINDOW_MODE.md). [Archive index](../../README.md).
+
 <!-- Sanitized copy of the integration folder's COMPLETION-MATRIX.md (2026-10-31). Local paths and personal names removed; the integration folder holds the original and evidence. -->
 
 # MeowDisplay 2.x requirement status (2026-10-28, completion pass)

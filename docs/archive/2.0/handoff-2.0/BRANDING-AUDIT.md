@@ -1,3 +1,5 @@
+> **Archived 2026-11-09 — historical, not maintained.** The 2.0 branding audit (2026-10-31). Current naming rules: [TERMINOLOGY.md](../../../../TERMINOLOGY.md). [Archive index](../../README.md).
+
 # MeowDisplay 2.0 branding audit
 
 Scope: case-insensitive search for opensidecar, opendisplay, oldsidecar, "open sidecar" and "open display" across Swift, Kotlin, xcstrings, strings, Info.plists, project.yml, Android res, HTML/TSX site sources, scripts and docs.

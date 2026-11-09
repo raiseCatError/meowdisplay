@@ -1,3 +1,5 @@
+> **Archived 2026-11-09 — historical, not maintained.** The 1.20.0 launch announcement (October 25, 2026), superseded by the 2.0.0 release. Current availability: [README.md](../../../README.md) and [CHANGELOG.md](../../../CHANGELOG.md). [Archive index](../README.md).
+
 # MeowDisplay is now available
 
 *October 25, 2026*
