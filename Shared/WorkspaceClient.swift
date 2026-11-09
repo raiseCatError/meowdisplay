@@ -59,6 +59,45 @@ struct WindowCloseNotice: Equatable, Sendable {
     }
 }
 
+/// The outcome of one Fill Window on Mac / Restore Previous Size on Mac, worded for the person who
+/// asked (shown briefly on the pane). These change the real Mac window, unlike the pane's own
+/// Fill/Show Whole Window, which only changes how this device draws it.
+struct WindowFrameNotice: Equatable, Sendable {
+    var tile: String
+    var windowID: UInt32
+    var op: WindowFrameOp
+    /// nil: no answer from the Mac in time.
+    var result: WindowFrameResult?
+
+    var isError: Bool { !(result?.succeeded ?? false) }
+
+    var message: String {
+        switch result {
+        case .filled: return String(localized: "The window now fills its screen on the Mac.")
+        case .limited: return String(localized: "Resized on the Mac as far as the app allows.")
+        case .alreadyFilled: return String(localized: "The window already fills its screen on the Mac.")
+        case .restored: return String(localized: "The window is back to its previous size on the Mac.")
+        case .nothingToRestore: return String(localized: "There’s no previous size to restore on the Mac.")
+        case .changed: return String(localized: "The window was moved or resized on the Mac since, so its previous size wasn’t restored.")
+        case .displayChanged: return String(localized: "The display the window was on isn’t connected now, so nothing was moved.")
+        case .stale: return String(localized: "That window isn’t available on the Mac any more.")
+        case .ambiguous: return String(localized: "The Mac couldn’t tell which window this is, so nothing was moved.")
+        case .notResizable: return String(localized: "This window can’t be resized on the Mac.")
+        case .fullScreen: return String(localized: "The window is in full screen on the Mac. Exit full screen there first.")
+        case .offscreen: return String(localized: "The window is minimized, hidden or on another Space on the Mac.")
+        case .stageStrip: return String(localized: "The window is in Stage Manager’s side strip. Show it on the Mac first.")
+        case .missionControl: return String(localized: "Mission Control is open on the Mac. Close it and try again.")
+        case .privacyShield: return String(localized: "The Mac is asking for its password to remove the Privacy Shield. Try again after that.")
+        case .control: return String(localized: "Resizing Mac windows needs control of the Mac. Use Request Control first.")
+        case .accessibility: return String(localized: "The Mac needs Accessibility permission for MeowDisplay to resize windows.")
+        case .failed:
+            return op == .fill ? String(localized: "The Mac couldn’t resize the window.")
+                : String(localized: "The Mac couldn’t restore the window’s previous size.")
+        case nil: return String(localized: "The Mac didn’t confirm resizing the window.")
+        }
+    }
+}
+
 struct CatalogAppItem: Equatable, Sendable { var bundleID: String; var name: String; var hasWindows: Bool }
 struct InstalledAppItem: Equatable, Sendable { var bundleID: String; var name: String }
 
@@ -103,6 +142,8 @@ struct RemoteTileItem: Equatable, Sendable {
     var inStageStrip = false
     /// The Mac accepted it as a floating pane (`layer: "float"`).
     var isFloat = false
+    /// The Mac can put this window back to its size before Fill Window on Mac (`restore`).
+    var restorable = false
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -125,12 +166,22 @@ struct WorkspaceStateMessage: Equatable, Sendable {
     var stageAddAvailable = false
     /// Mission Control is open on the Mac: macOS pauses window pictures until it closes.
     var missionControlOpen = false
+    /// Windows this receiver holds (`watch`) that closed on the Mac (PROTOCOL.md 6.10 `gone`).
+    var gone: [WorkspaceHeldWindow] = []
+}
+
+/// A Mac window as this receiver holds it: its id and the generation it was listed under.
+struct WorkspaceHeldWindow: Hashable, Sendable {
+    var window: UInt32
+    var generation: UInt64
 }
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
 
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
+    /// The Mac locked or unlocked its screen (`macLockState`).
+    case macLock(MacLockNotice)
     /// The Mac's Privacy Shield covers its own screens while this device is connected (welcome).
     case privacyShield(Bool)
     case mode(window: Bool)
@@ -141,11 +192,13 @@ enum WorkspaceEvent: Sendable {
     case displayThumbnail(displayID: UInt32, data: Data)
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
-    case launchResult(bundleID: String, ok: Bool)
+    case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
     /// Lock This Mac (PROTOCOL.md 6.16).
     case lockResult(LockMacResult)
+    /// Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10).
+    case frameResult(WindowFrameReply)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Unified Clipboard (PROTOCOL.md 6.15).
@@ -169,6 +222,8 @@ enum WorkspaceEvent: Sendable {
         func u32(_ o: [String: Any], _ k: String) -> UInt32? { (o[k] as? Int).flatMap { UInt32(exactly: $0) } }
         func u64(_ o: [String: Any], _ k: String) -> UInt64? { (o[k] as? Int).flatMap { UInt64(exactly: $0) } }
         switch type {
+        case MacLockWire.type:
+            return MacLockNotice(message: obj).map { .macLock($0) }
         case WireMessage.windowCatalog:
             let windows = (obj["windows"] as? [[String: Any]] ?? []).prefix(120).compactMap { w -> CatalogWindowItem? in
                 guard let id = u32(w, "id"), let bundle = str(w, "bundle") else { return nil }
@@ -202,7 +257,8 @@ enum WorkspaceEvent: Sendable {
                                       status: (t["state"] as? String).flatMap(RemoteTileStatus.init(rawValue:)) ?? .waiting,
                                       app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
                                       attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false,
-                                      isFloat: t["layer"] as? String == "float")
+                                      isFloat: t["layer"] as? String == "float",
+                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false)
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -216,7 +272,10 @@ enum WorkspaceEvent: Sendable {
                                                     u32(a, "window").flatMap { w in str(a, "result", 16).map { StageAddReply(window: w, result: $0) } }
                                                 },
                                                 stageAddAvailable: obj["stageAddAvailable"] as? Bool ?? false,
-                                                missionControlOpen: obj["missionControl"] as? String == "open"))
+                                                missionControlOpen: obj["missionControl"] as? String == "open",
+                                                gone: (obj["gone"] as? [[String: Any]] ?? []).prefix(128).compactMap { g in
+                                                    u32(g, "window").flatMap { w in u64(g, "gen").map { WorkspaceHeldWindow(window: w, generation: $0) } }
+                                                }))
         case WireMessage.windowThumbnail:
             guard let id = u32(obj, "id") else { return nil }
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
@@ -237,12 +296,14 @@ enum WorkspaceEvent: Sendable {
             return .appCatalog(revision: rev, apps: Array(apps))
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
-            return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false)
+            return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false, window: obj["window"] as? Bool)
         case WireMessage.windowCloseResult:
             guard let id = u32(obj, "window"), let r = str(obj, "result", 32).flatMap(WindowCloseResult.init(rawValue:)) else { return nil }
             return .closeResult(windowID: id, result: r)
         case LockMacWire.result:
             return str(obj, "result", 32).flatMap(LockMacResult.init(rawValue:)).map { .lockResult($0) }
+        case WindowFrameWire.result:
+            return WindowFrameReply.parse(obj).map { .frameResult($0) }
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case ClipboardWire.type:
@@ -315,7 +376,10 @@ enum WorkspaceRequests {
     }
 
     /// Opens an app on the Mac without activating it (needs control).
-    static func appLaunch(_ bundle: String) -> [String: Any] { ["type": WireMessage.appLaunch, "bundle": bundle] }
+    /// `reveal`: Show a Window on Mac (the Mac brings the app forward so it opens a window).
+    static func appLaunch(_ bundle: String, reveal: Bool = false) -> [String: Any] {
+        reveal ? ["type": WireMessage.appLaunch, "bundle": bundle, "reveal": true] : ["type": WireMessage.appLaunch, "bundle": bundle]
+    }
 
     /// Minimizes the real Mac window: only from its own explicit action.
     static func minimizeWindow(_ id: UInt32, generation: UInt64) -> [String: Any] {
@@ -330,7 +394,8 @@ enum WorkspaceRequests {
                           generation: (WorkspaceSource) -> UInt64?,
                           displayID: (WorkspaceSource) -> UInt32? = { _ in nil },
                           viewEpoch: (String) -> Int? = { _ in nil },
-                          floats: Bool = false) -> [String: Any] {
+                          floats: Bool = false, lifted: Set<String> = [],
+                          watch: [WorkspaceHeldWindow] = []) -> [String: Any] {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
@@ -349,11 +414,17 @@ enum WorkspaceRequests {
             }
             if let z = tile.zoom { t["zoom"] = z.wire }
             if let e = viewEpoch(id) { t["view"] = e }
-            if let z = floating.firstIndex(of: id) { t["layer"] = "float"; t["z"] = z }
+            if let z = floating.firstIndex(of: id) {
+                t["layer"] = "float"; t["z"] = z
+                // Drawn here under the finger for now: the Mac leaves it out (`floatLift`).
+                if lifted.contains(id) { t["lift"] = true }
+            }
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
         if let focus { m["focus"] = focus }
+        // Every window held here, shown or not (other tabs, tucked floats): the Mac says which closed.
+        if !watch.isEmpty { m["watch"] = watch.prefix(128).map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         return m
     }
 
@@ -435,15 +506,18 @@ struct WorkspaceDrag: Equatable {
         /// An app from Stage Peek's carousel, search or Launchpad: its window when it has one;
         /// several → the person picks; none → offered to open it (never just because a drag began).
         case app(MacAppItem)
-        /// A floating pane, shaken (or switched) into Pane placement: it docks where it's dropped.
+        /// A floating pane, circled (or switched) into Pane placement: it docks where it's dropped.
         case float(String)
     }
     var item: Item
     /// Global (screen) coordinates.
     var location: CGPoint
     /// Where a drop goes: into the panes (tab, split, swap) or floating at the finger. Switched
-    /// with a shake while holding, or the drag's Float/Dock control; Cancel keeps everything.
+    /// by circling while holding (`WorkspaceCircleGesture`), or the Float zone; Cancel keeps everything.
     var placement: WorkspacePlacement = .pane
+
+    /// A float being docked (circled into a card while it moved).
+    var isFloat: Bool { if case .float = item { return true } else { return false } }
 }
 
 /// The two ways a dragged window lands in one workspace (never a global mode).
@@ -454,6 +528,17 @@ enum WorkspacePlacement: String, CaseIterable, Sendable {
     case float
 }
 
+/// What tucked floats' edge handles give way to, in global (window) coordinates. Who wins,
+/// highest first: the system's edge bands (the top and bottom of `screen`), then `controls`,
+/// then the handles (`WorkspaceFloatGeometry.tuckHandles`).
+struct WorkspaceEdgeReservations: Equatable {
+    /// The screen the receiver fills; zero: unknown (only the safe area is kept clear).
+    var screen: CGRect = .zero
+    /// The fixed controls (the control tray, the function tray, the shortcut column and other
+    /// trays), folds, and Stage Peek's own edge handle.
+    var controls: [CGRect] = []
+}
+
 @MainActor
 final class WorkspaceModel: ObservableObject {
     @Published private(set) var available = false
@@ -461,11 +546,17 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var layout = WorkspaceLayout()
     @Published private(set) var stacked: [String] = []
     @Published private(set) var capacity = 1
-    @Published private(set) var remote: WorkspaceStateMessage?
+    @Published private(set) var remote: WorkspaceStateMessage? {
+        // Folded Mission Control notices last only while it stays open.
+        didSet { if remote?.missionControlOpen != true, !missionControlFolded.isEmpty { missionControlFolded = [] } }
+    }
     /// Shown for a few seconds after each connection: whether the Mac's Privacy Shield is on.
     @Published private(set) var privacyShieldNotice: Bool?
     private var privacyNoticeClear: DispatchWorkItem?
     @Published private(set) var catalog: WorkspaceCatalogMessage?
+    /// The Mac's screen is locked (or switched to another user): nothing of it is kept or shown
+    /// here until it unlocks (`macLockState`). The layout itself is kept.
+    @Published private(set) var macLocked = false
     @Published private(set) var missing: Set<String> = []
     @Published var overviewOpen = false
     @Published private(set) var replacingTile: String?
@@ -478,14 +569,25 @@ final class WorkspaceModel: ObservableObject {
     @Published var arranging = false
     @Published private(set) var hovered: String?
     @Published private(set) var thumbnails: [UInt32: CGImage] = [:]
+    /// When each tucked float's window was last asked for a still (`requestTuckedStills`).
+    private var tuckedStillAskedAt: [UInt32: Date] = [:]
     /// Stills the Mac could only answer with an older capture (minimized now, say).
     @Published private(set) var staleThumbnails: Set<UInt32> = []
     /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
     @Published private(set) var unavailableThumbnails: Set<UInt32> = []
     @Published private(set) var displayThumbnails: [UInt32: CGImage] = [:]
     @Published private(set) var icons: [String: CGImage] = [:]
+    /// Which icons to ask the Mac for, and when to ask again (once per connection, with backoff).
+    private var iconPlanner = AppIconRequestPlanner()
+    /// Icons in the order they came, for making room past `AppIconRequestPlanner.keep`.
+    private var iconArrival: [String] = []
+    private var iconRetry: DispatchWorkItem?
+    /// Admitted to this Mac: icon asks before that would be dropped by the Mac.
+    private var iconsConnected = false
     /// Every launchable Mac app (Finder first), from `appCatalog`.
     @Published private(set) var apps: [MacAppItem] = []
+    /// When to ask for `apps` again: on opening a browser, not on every refresh.
+    private var inventory = AppInventoryRequestPlanner()
     /// Apps opened from this device that haven't shown a window yet.
     @Published private(set) var launching: Set<String> = []
     @Published private(set) var launchFailed: String?
@@ -493,6 +595,20 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var canCloseWindows = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
+    /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
+    /// the finger while it moves or resizes and it's never on screen twice.
+    @Published private(set) var canLiftFloats = false
+    /// Floats this device draws itself right now (a finger moves or resizes them): sent with `lift`.
+    @Published private(set) var liftedFloats: Set<String> = []
+    /// Floats just let go of: still drawn here until the Mac's picture shows them where they
+    /// landed (its view echo, plus a moment for that frame to reach the screen), at most
+    /// `landingHold` seconds.
+    @Published private(set) var landingFloats: [String: Date] = [:]
+    static let landingHold: TimeInterval = 1.0
+    /// After the Mac says it composed the landed float: about the time its frame takes to arrive.
+    static let landingSettle: TimeInterval = 0.1
+    /// Floats a finger has started to move or resize, waiting for a still to be lifted with.
+    private var liftWanted: Set<String> = []
     /// This receiver has floating-pane chrome (iPhone and iPad). The Mac Receiver doesn't yet:
     /// it says `ws` 1 and never floats a pane.
     nonisolated static let floatsDrawnHere: Bool = {
@@ -514,6 +630,15 @@ final class WorkspaceModel: ObservableObject {
     /// What happened to the last Close Window (shown briefly over Stage Peek).
     @Published var closeNotice: WindowCloseNotice?
     private var closeRequest = 0
+    /// The Mac offers Fill Window on Mac / Restore Previous Size on Mac (`windowFrame`).
+    @Published private(set) var canResizeWindowsOnMac = false
+    /// What happened to the last Fill/Restore on Mac (shown on its pane for 8 s).
+    @Published private(set) var windowFrameNotice: WindowFrameNotice?
+    /// Panes whose Fill/Restore on Mac hasn't been answered yet.
+    @Published private(set) var windowFramePending: Set<String> = []
+    private var windowFrameRequest = 0
+    private var windowFrameAsked: [Int: (tile: String, windowID: UInt32, op: WindowFrameOp)] = [:]
+    private var windowFrameNoticeClear: DispatchWorkItem?
     /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
     @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
     /// Cards on screen now, most important first: their stills are asked for first.
@@ -545,12 +670,21 @@ final class WorkspaceModel: ObservableObject {
     /// The "Remove from Layout" drop zone (global), shown only while `canDropToRemove`.
     var removeZoneGlobal: CGRect = .zero
     /// While dragging in Pane placement: the Float zone beside Cancel (global). Releasing there
-    /// floats the window instead (the way that needs no shake).
+    /// floats the window instead (the way that needs no circling).
     var floatZoneGlobal: CGRect = .zero
-    /// Tucked floats' edge handles (global), so Stage Peek's edge strip keeps clear of them.
+    /// Where tucked floats' edge handles take touches (global): the dividers' holds above them
+    /// leave them free. Stage Peek doesn't dodge them any more: they keep clear of it
+    /// (`edgeReservationsGlobal`).
     @Published var floatHandlesGlobal: [CGRect] = []
-    /// The first-use tip about shaking a drag (shown once, ever, on this device).
-    @Published private(set) var shakeTipVisible = false
+    /// What tucked floats' edge handles keep clear of (global), set by the app next to where Stage
+    /// Peek learns what to avoid: the screen (its top and bottom belong to the system's own edge
+    /// gestures), then the fixed controls and Stage Peek's handle. Handles give way to all of it.
+    @Published var edgeReservationsGlobal = WorkspaceEdgeReservations()
+    /// The first-use tip about circling while dragging (shown once, ever, on this device).
+    @Published private(set) var placementTipVisible = false
+    /// How far circling while dragging has got toward switching Pane / Floating (0...1), for the
+    /// ring at the finger. 0 while it can't switch.
+    @Published private(set) var placementSwitchProgress = 0.0
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
@@ -565,6 +699,9 @@ final class WorkspaceModel: ObservableObject {
     var mirrorChoice: () -> MirrorDisplayEntry? = { nil }
     /// Whether this device extends the Mac now (outside Window view), as the Mac confirmed.
     var extending: () -> Bool = { false }
+    /// Seconds, for waits measured here (tests step it). Not `systemUptime`: a required-reason API
+    /// the iOS privacy manifest doesn't declare (the other planners here use the same clock).
+    var clock: () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
 
     /// A step that would start Window view from Extend, waiting for the person to confirm it.
     struct LeaveExtendRequest: Identifiable {
@@ -597,6 +734,9 @@ final class WorkspaceModel: ObservableObject {
     func cancelLeavingExtend() { leaveExtendRequest = nil }
 
     private let defaults: UserDefaults
+    /// Settings ▸ Controls ▸ Window Switcher ▸ Enable Floating Windows, as last read (this device only).
+    private var floatsAllowedHere = true
+    private var floatSettingObserver: NSObjectProtocol?
     private var saved = WorkspaceLayout()
     private var host: String?
     private var size = WorkspaceSize(width: 400, height: 800)
@@ -612,6 +752,13 @@ final class WorkspaceModel: ObservableObject {
     private var generations: [String: UInt64] = [:]
     private func generation(_ s: WorkspaceSource) -> UInt64? { generations["\(s.host)#\(s.windowID)"] }
     private func setGeneration(_ s: WorkspaceSource, _ g: UInt64) { generations["\(s.host)#\(s.windowID)"] = g }
+
+    /// Windows the Mac proved closed on this connection (`gone`), by `tabKey`: the generation that
+    /// closed. A window held under another generation (its id reused) is never touched.
+    private var closedOnMac: [String: UInt64] = [:]
+    /// Windows listed on this connection (`tabKey`): only those are watched for closing, so a
+    /// reconnect never acts on what an earlier connection knew.
+    private var listedThisConnection: Set<String> = []
     private static let railKey = "workspace.railEdge"
 
     init(defaults: UserDefaults = .standard) {
@@ -625,6 +772,17 @@ final class WorkspaceModel: ObservableObject {
         files.inputAllowed = { [weak self] in self?.inputAllowed() ?? false }
         files.macKey = { [weak self] in self?.host }
         menus.send = { [weak self] m in self?.send(m) ?? false }
+        floatsAllowedHere = Self.floatingWindowsEnabled(in: defaults)
+        // Settings writes the switch with @AppStorage; only a change of it acts.
+        floatSettingObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: defaults, queue: nil
+        ) { [weak self] _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.floatingWindowsSettingChanged() }
+            } else {
+                Task { @MainActor in self?.floatingWindowsSettingChanged() }
+            }
+        }
     }
 
     /// The focused pane's app menus (a bar under its label).
@@ -652,6 +810,13 @@ final class WorkspaceModel: ObservableObject {
         switch event {
         case .connected(let peer):
             if peer != host { load(for: peer) }
+            // A new connection: every app shown here gets its icon asked for again if it's missing
+            // (this device may have restarted while the Mac kept its session).
+            iconsConnected = true
+            iconPlanner.reset()
+            requestShownIcons()
+        case .macLock(let notice):
+            macLockChanged(locked: notice.isLocked)
         case .privacyShield(let on):
             privacyShieldNotice = on
             privacyNoticeClear?.cancel()
@@ -663,7 +828,9 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
+            canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
@@ -677,6 +844,13 @@ final class WorkspaceModel: ObservableObject {
             menus.applyResult(ok: ok, error: error)
         case .view(let tiles):
             composedViewEpochs.merge(tiles) { old, new in max(old, new) }
+            // A float let go of is drawn here until the Mac shows it where it landed.
+            for id in landingFloats.keys where tiles[id] != nil && viewComposed(id) {
+                let at = landingFloats[id]
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingSettle) { [weak self] in
+                    if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+                }
+            }
         case .backdrop(let tile, let window, let data, let stale):
             guard layout.tiles[tile]?.source?.windowID == window || window == 0,
                   let image = WorkspaceImageDecoder.image(data, maxSide: 1600) else { return }
@@ -684,6 +858,8 @@ final class WorkspaceModel: ObservableObject {
                 Log.info("workspace: backdrop \(tile) \(image.width)x\(image.height) after \(Int(Date().timeIntervalSince(asked) * 1000)) ms\(zoomGesture?.tile == tile ? " (mid-gesture)" : "")")
             }
             backdrops[tile] = WorkspaceBackdrop(windowID: window, image: image, stale: stale)
+            // A float picked up before its still arrived is lifted now.
+            if floatGesture == tile, liftWanted.contains(tile) { liftFloat(tile) }
         case .mode(let window):
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
@@ -706,6 +882,7 @@ final class WorkspaceModel: ObservableObject {
             if !duplicates.isEmpty {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
             }
+            if !s.gone.isEmpty { windowsClosedOnMac(s.gone) }
         case .thumbnail(let id, _, let data, let stale):
             let now = Date().timeIntervalSinceReferenceDate
             guard let data, let image = WorkspaceImageDecoder.image(data, maxSide: 560) else {
@@ -723,38 +900,106 @@ final class WorkspaceModel: ObservableObject {
                 thumbnails[oldest] = nil; thumbAge[oldest] = nil; planner.forget(oldest)
             }
         case .icon(let bundle, let data):
-            guard icons.count < 400, let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            guard let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            iconPlanner.received(bundle)
+            if icons[bundle] == nil, icons.count >= AppIconRequestPlanner.keep {
+                // Full: the oldest not shown in a pane or float makes room (asked again when it's wanted).
+                guard let old = AppIconRequestPlanner.evict(arrival: iconArrival, shown: Set(shownAppBundles)) else { return }
+                icons[old] = nil
+                iconArrival.removeAll { $0 == old }
+            }
             icons[bundle] = image
+            iconArrival.removeAll { $0 == bundle }
+            iconArrival.append(bundle)
         case .displayThumbnail(let id, let data):
             guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
             displayThumbnails[id] = image
         case .appCatalog(let rev, let list):
+            inventory.answered(now: clock())
             appRevision = rev
-            if let list { apps = WorkspaceSearch.carouselOrder(list) }
+            if let list {
+                apps = WorkspaceSearch.carouselOrder(list)
+                if let c = catalog, !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
+            }
             requestIcons()
-        case .launchResult(let bundle, let ok):
+        case .launchResult(let bundle, let ok, let window):
             if !ok { launching.remove(bundle); launchFailed = bundle }
+            if var o = appOpening, o.bundleID == bundle {
+                let step = o.launchAnswered(ok: ok, window: window, now: clock())
+                Log.info("pickerOpen: launch answered bundle=\(bundle) ok=\(ok) window=\(window.map(String.init) ?? "-")")
+                appOpening = o
+                performAppOpening(step)
+            }
             requestCatalog()
         case .closeResult(let id, let result):
             finishClose(id, result: result)
         case .lockResult(let result):
             lockMacStatus = .done(result)
+        case .frameResult(let reply):
+            finishWindowFrame(reply)
         case .disconnected:
             sendTask?.cancel()
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
-            launchpadOpen = false; launching = []; planner.reset()
+            launchpadOpen = false; launching = []; planner.reset(); inventory.reset()
+            if var o = appOpening {
+                let step = o.disconnected()
+                appOpening = o
+                performAppOpening(step)
+            }
+            iconsConnected = false; iconPlanner.reset(); iconRetry?.cancel(); iconRetry = nil
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
+            canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canLockMac = false; lockMacStatus = nil
+            canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
+            windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
+            lockFlowInputsChanged()
             files.setAvailable(false)
             menus.setAvailable(false)
             clipboard.setAvailable(false)
             // A new session's frames carry no echo of this one's views; stills are re-asked.
             composedViewEpochs = [:]; viewEpochs = [:]; viewSignatures = [:]; backdrops = [:]; backdropAskedAt = [:]
+            tuckedStillAskedAt = [:]
             zoomGesture = nil; zoomPreview = nil
             requestedFocus = nil; floatGestureStart = nil; drag = nil
+            floatMove = nil; dockingFloat = nil
+            closedOnMac = [:]; listedThisConnection = []   // a new connection proves closings again
+            macLocked = false
         }
+    }
+
+    /// Locked: every picture and name of the Mac's windows this device holds goes (stills, the
+    /// window list with its titles, backdrops), and anything in progress stops (a drag, Stage
+    /// Peek, the picker, an app drop's question): it can't carry on into, or show behind, the
+    /// locked screen. The layout is kept. Unlocked: the window list is asked for again, and
+    /// stills come back as they're asked for.
+    private func macLockChanged(locked: Bool) {
+        guard locked != macLocked else { return }
+        macLocked = locked
+        guard locked else {
+            if windowMode { requestCatalog() }
+            return
+        }
+        // Whatever was in progress ends as a cancel: a drag, a float being moved or docked (put
+        // back; the Mac draws it again), and an app opening (nothing is placed from an answer
+        // or listing that arrives after the unlock; a "which window" question and its titles go).
+        abandonDrag(reason: "macLocked")
+        cancelDrag()
+        if var o = appOpening {
+            let step = o.macLocked()
+            appOpening = o
+            performAppOpening(step)
+        }
+        appDrop = nil
+        stagePeekOpen = false; launchpadOpen = false
+        if overviewOpen { closeOverview() }
+        catalog = nil
+        thumbnails = [:]; thumbAge = [:]; displayThumbnails = [:]
+        staleThumbnails = []; unavailableThumbnails = []; planner.reset()
+        backdrops = [:]; backdropAskedAt = [:]
+        zoomGesture = nil; zoomPreview = nil
+        publish()
     }
 
     private func load(for peer: String) {
@@ -763,10 +1008,11 @@ final class WorkspaceModel: ObservableObject {
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
         savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
-        thumbnails = [:]; icons = [:]; thumbAge = [:]; displayThumbnails = [:]
+        thumbnails = [:]; icons = [:]; iconArrival = []; iconPlanner.reset(); thumbAge = [:]; displayThumbnails = [:]
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
-        apps = []; appRevision = nil; launching = []
-        generations = [:]
+        apps = []; appRevision = nil; launching = []; inventory.reset()
+        dismissAppOpening()
+        generations = [:]; closedOnMac = [:]; listedThisConnection = []
         publish()
     }
 
@@ -774,8 +1020,9 @@ final class WorkspaceModel: ObservableObject {
         Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
         if c.starting { return }
         catalog = c
-        defer { placePendingAppWindow() }
+        if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        if let host { listedThisConnection.formUnion(c.windows.map { WorkspaceSource(host: host, windowID: $0.id).tabKey }) }
         var missing = Set<String>()
         var rebased = saved
         for (id, tile) in saved.tiles {
@@ -789,13 +1036,21 @@ final class WorkspaceModel: ObservableObject {
             setGeneration(source, w.generation)
             if source.bundleID == nil { rebased = rebased.replacingSource(of: id, with: WorkspaceSource(host: source.host, windowID: source.windowID, bundleID: w.bundleID, follow: source.follow)) }
         }
+        // The other tabs too: every window held here can be watched for closing.
+        for tile in saved.tiles.values {
+            for s in tile.windows where s != tile.source && !s.isDisplay {
+                if let w = byID[s.windowID], s.bundleID == nil || s.bundleID == w.bundleID { setGeneration(s, w.generation) }
+            }
+        }
         if rebased != saved { saved = rebased; persist() }
         self.missing = missing
         // An app opened from here showed a window: it's no longer "opening".
         if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
+        requestTuckedStills()
         requestThumbnails()
+        advanceAppOpening()
     }
 
     private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
@@ -804,33 +1059,89 @@ final class WorkspaceModel: ObservableObject {
     private func requestThumbnails() {
         guard browsing, let c = catalog else { return }
         let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
-        let wantedIcons = Array(Set(c.windows.map(\.bundleID) + c.apps.map(\.bundleID)).filter { icons[$0] == nil }.prefix(48))
+        let wantedIcons = iconPlanner.plan(c.windows.map(\.bundleID) + c.apps.map(\.bundleID), has: { icons[$0] != nil },
+                                           now: Date().timeIntervalSinceReferenceDate)
         let displays = (stagePeekOpen || overviewOpen) ? c.displays.map(\.id) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
-        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays))
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+            iconPlanner.unsent(wantedIcons)
+        }
+        scheduleIconRetry()
     }
 
     /// Icons for the app carousel and Launchpad, a page at a time.
     func requestIcons(_ bundles: [String]? = nil) {
-        let wanted = (bundles ?? apps.prefix(64).map(\.bundleID)).filter { icons[$0] == nil }
-        guard browsing, !wanted.isEmpty else { return }
-        _ = send(WorkspaceRequests.thumbnails([], maxWidth: 320, icons: Array(wanted.prefix(48))))
+        askForIcons(bundles ?? apps.prefix(64).map(\.bundleID))
+    }
+
+    /// Every app shown in a pane, a tab or a float (its title's icon), Stage Peek or not.
+    private var shownAppBundles: [String] {
+        saved.tiles.keys.sorted().flatMap { saved.tiles[$0]?.windows ?? [] }
+            .filter { !$0.isDisplay }.compactMap { $0.bundleID ?? windowItem($0)?.bundleID }
+    }
+
+    /// The icons of the apps in panes and floats, when missing: asked for on connecting and as
+    /// the layout changes, not only while browsing.
+    private func requestShownIcons() {
+        guard iconsConnected, available else { return }
+        askForIcons(shownAppBundles)
+    }
+
+    /// Asks for the missing icons among `bundles` (each once per connection, then with backoff).
+    private func askForIcons(_ bundles: [String]) {
+        let wanted = iconPlanner.plan(bundles, has: { icons[$0] != nil }, now: Date().timeIntervalSinceReferenceDate)
+        guard !wanted.isEmpty else { return }
+        if !send(WorkspaceRequests.thumbnails([], maxWidth: 320, icons: wanted)) { iconPlanner.unsent(wanted) }
+        scheduleIconRetry()
+    }
+
+    /// One timer for every unanswered ask (the Mac may have dropped it, or not have the icon).
+    private func scheduleIconRetry() {
+        guard iconRetry == nil, let due = iconPlanner.nextRetry(has: { icons[$0] != nil }) else { return }
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.iconRetry = nil
+            self.askForIcons(self.iconPlanner.outstanding(has: { self.icons[$0] != nil }))
+            self.scheduleIconRetry()   // asks not due yet
+        }
+        iconRetry = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(due - Date().timeIntervalSinceReferenceDate, 0.5), execute: retry)
     }
 
     func requestApps() { _ = send(WorkspaceRequests.appCatalog(revision: apps.isEmpty ? nil : appRevision)) }
 
+    /// Windows, running apps and displays. Apps to open come from `appCatalog` (`requestApps`):
+    /// current Macs don't answer the listing's old `installed` flag.
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
 
     // MARK: Space
 
     func updateSpace(_ newSize: WorkspaceSize, hinge newHinge: WorkspaceHinge?) {
         guard newSize != size || newHinge != hinge else { return }
+        // Floats keep their size in points across a rotation or a window resize (their frames are
+        // shares of the picture, which would stretch a phone's float into a strip). Not an edit:
+        // no undo step. Not while a finger holds one.
+        if newSize != size, size.width > 0, size.height > 0, newSize.width > 0, newSize.height > 0,
+           !saved.floats.isEmpty, floatGesture == nil {
+            var carried = saved
+            for i in carried.floats.indices {
+                var f = WorkspaceFloatGeometry.carried(carried.floats[i].frame, from: size, to: newSize)
+                if let t = carried.floats[i].tuck {
+                    // A tucked float waits flush with its edge, where its strip is.
+                    f = WorkspaceFloatGeometry.tuckedFrame(f, edge: t.edge, along: t.offset, in: newSize)
+                    carried.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, t.edge)
+                }
+                carried.floats[i].frame = f
+            }
+            saved = carried
+        }
         size = newSize; hinge = newHinge
         publish(); scheduleSend()
     }
 
     private func publish() {
+        settleFloatsIfTurnedOff()
         let adapted = WorkspaceAdaptation.adapt(saved, to: size, hinge: hinge, active: remote?.active, floatsShown: canFloat || !windowMode)
         if let full = localFullscreen, adapted.visible.tiles[full] == nil { localFullscreen = nil }
         // Local fullscreen is presentation only: the saved tree is untouched.
@@ -840,6 +1151,8 @@ final class WorkspaceModel: ObservableObject {
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
         canRedo = history.canRedo
+        // A window just put in a pane or float (or a layout restored) shows its app's icon.
+        requestShownIcons()
     }
 
     // MARK: Editing
@@ -981,7 +1294,8 @@ final class WorkspaceModel: ObservableObject {
         for (id, tile) in layout.tiles {
             let r = frames.tiles[id]
             let z = tile.zoom ?? .identity
-            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)"
+            // Lifted or not is part of the view: a float let go of waits for the frame that draws it again.
+            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(id))"
             if viewSignatures[id] != sig {
                 viewSignatures[id] = sig
                 viewEpochs[id] = nextViewEpoch
@@ -1019,8 +1333,49 @@ final class WorkspaceModel: ObservableObject {
         _ = send(WorkspaceRequests.stageManager(on: false))
     }
 
-    /// Mission Control is open on the Mac (Window mode): every paused pane says so.
+    /// Mission Control is open on the Mac (Window mode).
     var missionControlOpen: Bool { remote?.missionControlOpen == true }
+
+    /// Mission Control holds this pane's or float's picture: a window (never a display: Full
+    /// Desktop keeps showing the Mac's screen, Mission Control and all) that the Mac reports
+    /// paused, waiting or retrying while it is open. Only these show its notice.
+    func missionControlPaused(_ id: String) -> Bool {
+        guard missionControlOpen, let source = layout.tiles[id]?.source, !source.isDisplay,
+              let status = tileState(id)?.status else { return false }
+        return [.paused, .waiting, .retrying].contains(status)
+    }
+
+    /// A paused tile's notice: in full, or folded by its × to a small status that brings it back.
+    enum MissionControlNotice: Equatable, Sendable { case full, folded }
+
+    func missionControlNotice(_ id: String) -> MissionControlNotice? {
+        guard missionControlPaused(id) else { return nil }
+        return missionControlFolded.contains(id) ? .folded : .full
+    }
+
+    /// Notices folded by their ×, until Mission Control closes (see `remote`).
+    @Published private(set) var missionControlFolded: Set<String> = []
+
+    /// The notice's ×: folds it on this device only. Nothing is sent; Mission Control stays open.
+    func foldMissionControlNotice(_ id: String) {
+        if missionControlPaused(id) { missionControlFolded.insert(id) }
+    }
+
+    /// The folded status tapped: the notice again.
+    func unfoldMissionControlNotice(_ id: String) { missionControlFolded.remove(id) }
+
+    /// Where a float's notice goes (screen points): centred on the float's visible part, about the
+    /// notice's size (compact; folded, just the status). nil when a float in front covers that spot:
+    /// it hides the notice as it hides the window.
+    nonisolated static func missionControlNoticeSpot(on float: CGRect, folded: Bool, within bounds: CGRect,
+                                                     inFront: [CGRect]) -> CGRect? {
+        let seen = float.intersection(bounds)
+        let visible = seen.isNull || seen.isEmpty ? float : seen
+        let size = folded ? CGSize(width: min(float.width, 190), height: 30)
+                          : CGSize(width: max(min(float.width - 12, 300), 140), height: 96)
+        let spot = CGRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2, width: size.width, height: size.height)
+        return inFront.contains { $0.intersects(spot) } ? nil : spot
+    }
 
     /// Exit Mission Control on the Mac (needs the Mac's grant; the Mac re-checks before Escape).
     func exitMissionControl() {
@@ -1028,13 +1383,36 @@ final class WorkspaceModel: ObservableObject {
         _ = send(WorkspaceRequests.exitMissionControl)
     }
 
-    /// The one pane that offers Exit Mission Control: the selected pane when macOS paused it,
-    /// otherwise the first paused pane (one button, not one per pane).
-    var missionControlActionPane: String? {
+    /// What a paused tile's notice (and its pane's menu and accessibility action) offers while
+    /// Mission Control is open on the Mac (nil when it isn't).
+    enum MissionControlAction: Equatable, Sendable {
+        /// This device has control: Exit Mission Control (the Mac re-checks before it presses Escape).
+        case exit
+        /// No control yet: the normal Request Control flow, then Exit.
+        case requestControl
+        /// Asked; the Mac's owner hasn't answered.
+        case awaitingApproval
+        /// The Mac takes no control requests from this device: say how to close it there.
+        case closeOnMac
+    }
+
+    var missionControlAction: MissionControlAction? {
         guard missionControlOpen else { return nil }
-        let paused = { (id: String) in [.paused, .waiting, .retrying].contains(self.tileState(id)?.status) }
-        if let active = remote?.active, paused(active) { return active }
-        return remote?.tiles.first { paused($0.id) }?.id
+        if canControlMac { return .exit }
+        switch controlState() {
+        case .requesting: return .awaitingApproval
+        case .requestsDisabled: return .closeOnMac
+        case .off, .notAllowed, .allowed: return .requestControl
+        }
+    }
+
+    /// The notice's button: Exit with control, else ask for control (never a blind Escape).
+    func performMissionControlAction() {
+        switch missionControlAction {
+        case .exit?: exitMissionControl()
+        case .requestControl?: requestControl()
+        case .awaitingApproval?, .closeOnMac?, nil: break
+        }
     }
 
     /// Turn Stage Manager on on the Mac (Settings; control).
@@ -1059,6 +1437,22 @@ final class WorkspaceModel: ObservableObject {
     /// Asks the Mac for control: the same request as Settings ▸ Input.
     var requestControl: () -> Void = {}
     var canControlMac: Bool { inputAllowed() && controlState() == .allowed }
+
+    /// What a question about opening an app can offer: open it now, ask the Mac for control and
+    /// open it once allowed, or neither (no live connection, or the Mac refuses requests). The
+    /// picker and the Stage Peek drop ask the same way. QA 9000033: the picker gated the request
+    /// on the view's input flag, which is false whenever control isn't held, so without control
+    /// its question had no button at all.
+    enum AppOpenOffer: Equatable { case open, requestControl, unavailable }
+
+    var appOpenOffer: AppOpenOffer {
+        guard inputAllowed() else { return .unavailable }
+        switch controlState() {
+        case .allowed: return .open
+        case .requestsDisabled: return .unavailable
+        default: return .requestControl
+        }
+    }
 
     /// A window macOS keeps paused (Stage Manager's strip): bring it forward on the Mac (control).
     /// Add to Current Stage: Stage Manager's own action on the strip item holding this pane's
@@ -1263,8 +1657,11 @@ final class WorkspaceModel: ObservableObject {
     /// lands on a float. Splits count the tree's panes only.
     func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
         let f = frames
-        if let hit = f.hitTest(p), f.isFloat(hit) {
-            if case .float? = drag?.item { return nil }
+        // A float being docked is drawn only as its card: what's under its old frame counts.
+        var docked: String?
+        if case .float(let id)? = drag?.item { docked = id }
+        if let hit = f.floats.last(where: { $0 != docked && f.tiles[$0]?.contains(p) == true }) {
+            if docked != nil { return nil }
             if case .pane(let id, _)? = drag?.item, id == hit { return nil }
             return f.tiles[hit].map { .replace(tile: hit, preview: $0) }
         }
@@ -1280,8 +1677,17 @@ final class WorkspaceModel: ObservableObject {
 
     private func edit(_ change: (WorkspaceLayout) -> WorkspaceLayout) {
         // Never an empty pane: a window that leaves a pane closes it up and the rest grow.
-        let next = change(arranged).compacted()
-        guard next != arranged else { return }
+        let changed = change(arranged).compacted()
+        guard changed != arranged else { return }
+        // A float tucked here only because the Mac can't draw floats isn't saved tucked by an
+        // unrelated change: it shows again on a Mac that can.
+        var next = changed
+        for i in next.floats.indices {
+            let id = next.floats[i].tile
+            if saved.float(id).map({ $0.tuck == nil }) == true, let shown = arranged.float(id)?.tuck, next.floats[i].tuck == shown {
+                next.floats[i].tuck = nil
+            }
+        }
         history.record(saved)
         var updated = next
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
@@ -1293,6 +1699,8 @@ final class WorkspaceModel: ObservableObject {
     func undo() {
         guard let previous = history.undo(current: saved) else { return }
         saved = previous
+        // A window that closed on the Mac doesn't come back with an older layout.
+        saved = removingClosed(from: saved)
         refreshMissing()
         persist(); publish(); scheduleSend()
     }
@@ -1300,6 +1708,7 @@ final class WorkspaceModel: ObservableObject {
     func redo() {
         guard let next = history.redo(current: saved) else { return }
         saved = next
+        saved = removingClosed(from: saved)
         refreshMissing()
         persist(); publish(); scheduleSend()
     }
@@ -1476,6 +1885,8 @@ final class WorkspaceModel: ObservableObject {
     /// Lock This Mac: the Mac shows macOS's lock screen (needs control; the Mac says what happened).
     func lockMac() {
         guard canLockMac, lockMacStatus != .locking else { return }
+        // Never asks the Mac to lock before control is confirmed granted.
+        guard canControlMac else { lockMacStatus = .done(.control); return }
         lockRequest += 1
         let req = lockRequest
         guard send(["type": LockMacWire.request, "req": req]) else { lockMacStatus = .done(.failed); return }
@@ -1488,6 +1899,59 @@ final class WorkspaceModel: ObservableObject {
 
     func clearLockMacStatus() { if lockMacStatus != .locking { lockMacStatus = nil } }
 
+    // MARK: Lock Mac flow (Request Control first when needed; see LockMacFlow)
+
+    @Published private(set) var lockFlow = LockMacFlow()
+    private var lockFlowTimeout: Task<Void, Never>?
+
+    private var lockFlowInputs: LockMacFlow.Inputs {
+        LockMacFlow.Inputs(canLock: canLockMac, connected: inputAllowed(),
+                           controlGranted: canControlMac, inputState: controlState())
+    }
+
+    /// Lock Mac was tapped: shows the confirmation (or why it can't). Sends nothing.
+    func beginLockMac() {
+        clearLockMacStatus()
+        lockFlow.begin(lockFlowInputs)
+        syncLockFlowTimeout()
+    }
+
+    func confirmLockMac() { applyLockEffects(lockFlow.confirm(lockFlowInputs)) }
+
+    /// Cancel, dismiss, or stop waiting: nothing is sent.
+    func cancelLockMac() {
+        lockFlow.cancel()
+        syncLockFlowTimeout()
+    }
+
+    /// Control state or the session changed (called by the host on either).
+    func lockFlowInputsChanged() { applyLockEffects(lockFlow.inputsChanged(lockFlowInputs)) }
+
+    private func applyLockEffects(_ effects: [LockMacFlow.Effect]) {
+        syncLockFlowTimeout()
+        for effect in effects {
+            switch effect {
+            case .requestControl: requestControl()
+            case .lock: lockMac()
+            }
+        }
+    }
+
+    private func syncLockFlowTimeout() {
+        if lockFlow.isAwaiting {
+            guard lockFlowTimeout == nil else { return }
+            lockFlowTimeout = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(LockMacFlow.timeout * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                self.lockFlowTimeout = nil
+                self.lockFlow.timedOut()
+            }
+        } else {
+            lockFlowTimeout?.cancel()
+            lockFlowTimeout = nil
+        }
+    }
+
     private func finishClose(_ id: UInt32, result: WindowCloseResult) {
         closingWindows.remove(id)
         let name = closeNames.removeValue(forKey: id) ?? catalog?.windows.first { $0.id == id }.map { $0.title.isEmpty ? $0.app : $0.title } ?? ""
@@ -1499,11 +1963,13 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// Opens an app on the Mac (explicit action; the Mac refuses it without control and never activates it).
-    func launch(_ bundle: String) {
-        guard inputAllowed() else { return }
+    /// False: nothing was sent.
+    @discardableResult
+    func launch(_ bundle: String, reveal: Bool = false) -> Bool {
+        guard inputAllowed() else { return false }
         launchFailed = nil
         launching.insert(bundle)
-        _ = send(WorkspaceRequests.appLaunch(bundle))
+        return send(WorkspaceRequests.appLaunch(bundle, reveal: reveal))
     }
 
     // MARK: Local fullscreen (receiver only)
@@ -1534,15 +2000,17 @@ final class WorkspaceModel: ObservableObject {
         d.placement = placement ?? initialPlacement(for: item)
         if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
         drag = d
-        shake.reset()
-        if canPlace(item, .float), !defaults.bool(forKey: Self.shakeTipKey) {
-            defaults.set(true, forKey: Self.shakeTipKey)   // never repeated, even if dismissed unseen
-            shakeTipVisible = true
+        circling.reset()
+        placementSwitchProgress = 0
+        // A new tip for the new gesture (people who saw the old shake tip see this one once too).
+        if canPlace(item, .float), !defaults.bool(forKey: Self.placementTipKey) {
+            defaults.set(true, forKey: Self.placementTipKey)   // never repeated, even if dismissed unseen
+            placementTipVisible = true
         }
     }
 
-    static let shakeTipKey = "workspace.shakeTipShown"
-    func dismissShakeTip() { shakeTipVisible = false }
+    static let placementTipKey = "workspace.circleTipShown"
+    func dismissPlacementTip() { placementTipVisible = false }
 
     /// The Float zone is offered while dragging in Pane placement something that can float, in Window view.
     var canDropToFloat: Bool {
@@ -1555,15 +2023,45 @@ final class WorkspaceModel: ObservableObject {
         canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
     }
 
-    /// Moves the drag; a shake while holding switches its placement (true when it switched).
+    /// Moves the drag; circling while holding (a circle and a bit, about a second) switches its
+    /// placement (true when it switched). Progress shows as a ring at the finger, only when it can switch.
     @discardableResult
     func moveDrag(to global: CGPoint, at time: TimeInterval = CACurrentMediaTime()) -> Bool {
-        guard drag != nil else { return false }
+        guard let d = drag else { return false }
         drag?.location = global
-        guard shake.add(x: Double(global.x), y: Double(global.y), at: time) else { return false }
+        let fired = circling.add(x: Double(global.x), y: Double(global.y), at: time)
+        let other: WorkspacePlacement = d.placement == .pane ? .float : .pane
+        let switchable = canPlace(d.item, other)
+        placementSwitchProgress = switchable ? circling.progress : 0
+        if placementSwitchProgress > 0 { fadeRingWhenQuiet() }
+        guard fired, switchable else { return false }
         return toggleDragPlacement()
     }
-    func cancelDrag() { drag = nil }
+    func cancelDrag() { drag = nil; placementSwitchProgress = 0 }
+
+    /// A drag (or a float move) whose finger is gone without an end: the view carrying its gesture
+    /// went away mid-gesture, the app left the foreground, or the screen turned. Undone as a
+    /// cancel, whatever was dragged, so no preview, card, drop target or hidden float is left
+    /// behind (owner, QA 9000024: an icon dragged from Stage Peek's search stayed frozen in
+    /// Floating placement). Nothing on the Mac changes.
+    func abandonDrag(reason: String) {
+        guard drag != nil || dockingFloat != nil || floatGesture != nil else { return }
+        Log.info("drag: abandoned (\(reason)) item=\(drag.map { String(describing: $0.item).prefix(40) } ?? "-") docking=\(dockingFloat ?? "-") float=\(floatGesture ?? "-")")
+        if let id = dockingFloat { cancelDockingFloat(id) }
+        if drag != nil { cancelDrag() }
+        if let id = floatGesture { endFloatGesture(id) }
+    }
+
+    /// No samples come while the finger rests: the ring goes once the circling has gone quiet.
+    private func fadeRingWhenQuiet() {
+        ringFade?.cancel()
+        let quiet = circling.quiet
+        ringFade = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64((quiet + 0.05) * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.circling.isQuiet(at: CACurrentMediaTime()) else { return }
+            self.placementSwitchProgress = 0
+        }
+    }
 
     /// The drop under the finger, in picture terms. Nil outside the picture and over the Cancel zone.
     /// In Mirror/Extend the desktop counts as one pane (a window can land beside it).
@@ -1593,10 +2091,14 @@ final class WorkspaceModel: ObservableObject {
 
     /// Remove from Layout is offered only while repositioning a whole pane that is already in the
     /// layout (its label, not one of its tabs), with another pane left: never for a window or app
-    /// from Stage Peek, a new pane or a tab. It removes the pane here only; the Mac window is untouched.
+    /// from Stage Peek, a new pane or a tab. A float being docked (circled into a card) is offered
+    /// Remove from This Device. Either removes it here only; the Mac window is untouched.
     var canDropToRemove: Bool {
-        guard windowMode, case .pane(let id, nil)? = drag?.item else { return false }
-        return canRemoveFromLayout(id)
+        guard windowMode else { return false }
+        switch drag?.item {
+        case .pane(let id, nil)?, .float(let id)?: return canRemoveFromLayout(id)
+        default: return false
+        }
     }
 
     /// Whether a pane may come off this device's layout (its menu and the drop
@@ -1618,6 +2120,7 @@ final class WorkspaceModel: ObservableObject {
     /// picture: nothing changes. Returns whether anything changed.
     @discardableResult
     func endDrag() -> Bool {
+        placementSwitchProgress = 0
         guard let d = drag else { return false }
         if d.placement == .float {
             drag = nil
@@ -1634,9 +2137,15 @@ final class WorkspaceModel: ObservableObject {
             removeTile(id)   // one undo step; never a request to close the window on the Mac
             return true
         }
+        if remove, case .float(let id) = d.item {
+            removeFloat(id)   // the float's own Remove from This Device: the Mac window stays open
+            return true
+        }
         guard let target else { return false }
         switch d.item {
         case .window(let w):
+            // Closed (or its id now names another window) while it was dragged: nothing to place.
+            if let c = catalog, !c.windows.contains(where: { $0.id == w.id && $0.generation == w.generation }) { return false }
             return place(w, on: target)
         case .pane(let id, let tab):
             if let tab, case .tab(let t, _) = target, t == id { return reorderTab(id, from: tab, at: d.location) }
@@ -1675,8 +2184,9 @@ final class WorkspaceModel: ObservableObject {
         var floatAt: WorkspacePoint? = nil
     }
     @Published var appDrop: AppDrop?
-    /// Opened from a drop: its first new window goes where it was dropped (for up to 20 s).
-    private var pendingAppPlacement: (bundle: String, target: WorkspaceWindowDrop, known: Set<UInt32>, until: Date)?
+    /// Bumped to ask Stage Peek to close (an app dropped from it is opening: its progress, and
+    /// then its window, show in the layout).
+    @Published private(set) var stagePeekCloseRequest = 0
 
     /// The window picked for an app drop.
     func completeAppDrop(_ d: AppDrop, with w: CatalogWindowItem) {
@@ -1685,23 +2195,180 @@ final class WorkspaceModel: ObservableObject {
         _ = place(w, on: d.target)
     }
 
-    /// Open the dropped app on the Mac (explicit; needs control), then place its first window.
-    func launchForAppDrop(_ d: AppDrop) {
+    /// Open the dropped app on the Mac (explicit), then put its new window where it was dropped.
+    /// The same opening as the picker's (`WorkspaceAppOpening`): with control it launches now;
+    /// without (or `requestingControl`) control is requested the usual way first. Stage Peek
+    /// closes so the layout, with the opening's progress, shows; nothing else changes.
+    func openAppForDrop(_ d: AppDrop, requestingControl: Bool = false) {
         appDrop = nil
-        guard inputAllowed() else { return }
-        pendingAppPlacement = (d.app.bundleID, d.target, Set((catalog?.windows ?? []).filter { $0.bundleID == d.app.bundleID }.map(\.id)),
-                               Date().addingTimeInterval(20))
-        launch(d.app.bundleID)
+        guard !d.app.bundleID.isEmpty, d.windows.isEmpty else { return }
+        let tile = d.target.tile
+        let drop = WorkspaceAppOpening.Drop(target: d.target, floatAt: d.floatAt, panes: paneOrder)
+        beginAppOpening(bundleID: d.app.bundleID, name: d.app.name, tile: tile, drop: drop, requestingControl: requestingControl)
+        stagePeekCloseRequest += 1
     }
+
+    /// The layout's panes in order (floats aside): what a split or empty-slot drop is relative to.
+    private var paneOrder: [String] { arranged.orderedTileIDs.filter { !arranged.isFloat($0) } }
 
     func cancelAppDrop() { appDrop = nil }
 
-    private func placePendingAppWindow() {
-        guard let p = pendingAppPlacement else { return }
-        if Date() > p.until { pendingAppPlacement = nil; return }
-        guard let w = catalog?.windows.first(where: { $0.bundleID == p.bundle && !p.known.contains($0.id) }) else { return }
-        pendingAppPlacement = nil
-        _ = place(w, on: p.target)
+    // MARK: Opening an app from the window picker (WorkspaceAppOpening)
+
+    /// An app opening from the picker into the tile it was opened for (nil: none). The picker
+    /// shows its progress, the choice among several new windows, and what went wrong.
+    @Published private(set) var appOpening: WorkspaceAppOpening?
+    /// Still opening after a few seconds: the picker says it's taking a while.
+    @Published private(set) var appOpeningSlow = false
+    /// Bumped whenever the picker shows a new question about the opening (a choice, a failure),
+    /// so a dialog dismissed without an answer stops only the question it showed.
+    private(set) var appOpeningRound = 0
+    private var appOpeningTask: Task<Void, Never>?
+
+    /// The session's control as the opening needs it (live session and the Mac's grant).
+    private var appOpeningControl: WorkspaceAppOpening.Control {
+        WorkspaceAppOpening.Control(live: inputAllowed(), state: controlState())
+    }
+
+    private func appOpeningTileUnchanged(_ o: WorkspaceAppOpening) -> Bool {
+        guard o.tileUnchanged(o.tile.flatMap { arranged.tiles[$0] }) else { return false }
+        // A drop on a split edge or an empty slot names a position: only while the panes are the same.
+        if let d = o.drop, d.floatAt == nil, d.target.tile == nil { return paneOrder == d.panes }
+        return true
+    }
+
+    /// The person confirmed opening `app` (the picker asked). With control the Mac is asked to
+    /// launch exactly that app now; without (or `requestingControl`: the picker offered Request
+    /// Control), control is requested the usual way and the app opens once the Mac allows it. The
+    /// picker shows it waiting; Cancel or closing the picker stops it.
+    func openAppFromPicker(_ app: WorkspacePickerSearch.AppToOpen, requestingControl: Bool = false) {
+        guard overviewOpen, !app.bundleID.isEmpty else { return }
+        beginAppOpening(bundleID: app.bundleID, name: app.name, tile: replacingTile, drop: nil, requestingControl: requestingControl)
+    }
+
+    private func beginAppOpening(bundleID: String, name: String, tile: String?, drop: WorkspaceAppOpening.Drop?, requestingControl: Bool,
+                                 reveal: Bool = false) {
+        dismissAppOpening()
+        let control = appOpeningControl
+        let (o, step) = WorkspaceAppOpening.start(bundleID: bundleID, name: name, tile: tile,
+                                                  tileSource: tile.flatMap { arranged.tiles[$0]?.source }, drop: drop, reveal: reveal,
+                                                  control: requestingControl && control == .allowed ? .off : control,
+                                                  windows: catalog?.windows ?? [], now: clock())
+        Log.info("pickerOpen: requested bundle=\(bundleID) tile=\(tile ?? "-") drop=\(drop != nil) control=\(control) request=\(requestingControl)")
+        appOpening = o
+        appOpeningSlow = false
+        appOpeningRound += 1
+        if o.phase == .awaitingControl, control != .requesting {
+            Log.info("pickerOpen: control requested bundle=\(bundleID)")
+            requestControl()
+        }
+        performAppOpening(step)
+        if appOpening?.isFinished == false { runAppOpeningTimer() }
+    }
+
+    /// One of several new windows, picked by the person.
+    func pickOpenedWindow(_ w: CatalogWindowItem) {
+        guard var o = appOpening else { return }
+        let step = o.pick(w.id, generation: w.generation, windows: catalog?.windows ?? [], tileUnchanged: appOpeningTileUnchanged(o))
+        appOpening = o
+        performAppOpening(step)
+    }
+
+    /// Try Again after a failure: the same app, for the same tile. `reveal`: Show a Window on Mac
+    /// (after no window came), which asks the Mac to bring the app forward.
+    func retryAppOpening(reveal: Bool = false) {
+        guard let o = appOpening, case .failed(let f) = o.phase, f.retryable else { return }
+        Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue) reveal=\(reveal)")
+        if let drop = o.drop {
+            beginAppOpening(bundleID: o.bundleID, name: o.name, tile: o.tile, drop: drop, requestingControl: false, reveal: reveal)
+            return
+        }
+        guard overviewOpen else { return }
+        beginAppOpening(bundleID: o.bundleID, name: o.name, tile: replacingTile, drop: nil, requestingControl: false, reveal: reveal)
+    }
+
+    /// Cancel, OK, or the picker closing: stop waiting; nothing is placed.
+    func dismissAppOpening() {
+        appOpeningTask?.cancel(); appOpeningTask = nil
+        guard let o = appOpening else { return }
+        if !o.isFinished { Log.info("pickerOpen: cancelled bundle=\(o.bundleID)") }
+        appOpening = nil
+        appOpeningSlow = false
+    }
+
+    /// A choice or failure dismissed without an answer: stops the opening if that is still the
+    /// question showing (an answer given meanwhile moved it on).
+    func dismissAppOpening(round: Int) {
+        guard round == appOpeningRound, let o = appOpening, !o.isWaiting else { return }
+        dismissAppOpening()
+    }
+
+    /// A new listing or a second passing: control granted, the app's window seen, or a wait over.
+    func advanceAppOpening() {
+        guard var o = appOpening, !o.isFinished else { return }
+        let seen = o.firstSeenAt != nil
+        let now = clock()
+        let step = o.advance(windows: catalog?.windows ?? [], now: now, control: appOpeningControl,
+                             tileUnchanged: appOpeningTileUnchanged(o))
+        if !seen, o.firstSeenAt != nil {
+            Log.info("pickerOpen: window seen bundle=\(o.bundleID) new=\(o.newWindows(catalog?.windows ?? []).map(\.id))")
+        }
+        if o != appOpening { appOpening = o }
+        let slow = o.isSlow(now: now)
+        if slow != appOpeningSlow { appOpeningSlow = slow }
+        performAppOpening(step)
+    }
+
+    private func performAppOpening(_ step: WorkspaceAppOpening.Step) {
+        guard var o = appOpening else { return }
+        switch step {
+        case .none:
+            break
+        case .launch:
+            Log.info("pickerOpen: launch sent bundle=\(o.bundleID) tile=\(o.tile ?? "-") known=\(o.known.count)")
+            if !launch(o.bundleID, reveal: o.reveal) {
+                let next = o.launchNotSent()
+                appOpening = o
+                performAppOpening(next)
+            }
+        case .place(let w):
+            Log.info("pickerOpen: placed bundle=\(o.bundleID) window=\(w.id) tile=\(o.tile ?? "-")")
+            appOpeningTask?.cancel(); appOpeningTask = nil
+            appOpening = nil
+            appOpeningSlow = false
+            if let drop = o.drop {
+                // Exactly as if this window had been dropped there.
+                if let at = drop.floatAt { openFloating(w, at: at) } else { _ = place(w, on: drop.target) }
+                stagePeekCloseRequest += 1
+                return
+            }
+            // Exactly as if the person had picked this window for that tile.
+            replacingTile = o.tile
+            choose(w, asNewTile: false)
+        case .choose(let windows):
+            Log.info("pickerOpen: several windows bundle=\(o.bundleID) windows=\(windows.map(\.id)) stale=\(o.pickWasStale)")
+            appOpeningRound += 1
+            appOpeningSlow = false
+        case .fail(let f):
+            Log.info("pickerOpen: failed bundle=\(o.bundleID) reason=\(f.rawValue)")
+            appOpeningTask?.cancel(); appOpeningTask = nil
+            appOpeningSlow = false
+            appOpeningRound += 1
+        }
+    }
+
+    /// While an opening waits: the window listing every second (the Mac answers at most twice a
+    /// second) until it ends, at most `controlTimeout` + `answerTimeout` + `windowTimeout`.
+    private func runAppOpeningTimer() {
+        appOpeningTask?.cancel()
+        appOpeningTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self, let o = self.appOpening, !o.isFinished else { break }
+                if o.phase == .launching || o.phase == .waitingForWindow { self.requestCatalog() }
+                self.advanceAppOpening()
+            }
+        }
     }
 
     /// A window dropped on a pane (or, outside Window mode, beside the desktop).
@@ -1730,6 +2397,79 @@ final class WorkspaceModel: ObservableObject {
         guard inputAllowed(), let source = layout.tiles[tile]?.source, let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.minimizeWindow(source.windowID, generation: gen))
     }
+
+    // MARK: Fill Window on Mac / Restore Previous Size on Mac
+
+    /// The items belong in this pane's menu (or a float's ⋯ menu): the Mac offers them and the
+    /// pane shows a Mac window in Window view. Whether they are enabled: `canControlMac`.
+    func offersWindowFrameOnMac(_ tile: String) -> Bool {
+        guard canResizeWindowsOnMac, windowMode, let source = layout.tiles[tile]?.source else { return false }
+        return !source.isDisplay
+    }
+
+    /// Restore Previous Size on Mac: the Mac says it can put this pane's window back.
+    func canRestoreOnMac(_ tile: String) -> Bool {
+        guard offersWindowFrameOnMac(tile), let source = layout.tiles[tile]?.source, let state = tileState(tile) else { return false }
+        return state.restorable && state.windowID == source.windowID
+    }
+
+    /// A Fill or Restore for this pane is waiting for the Mac's answer.
+    func isResizingOnMac(_ tile: String) -> Bool { windowFramePending.contains(tile) }
+
+    /// Fills the usable area of the window's display on the Mac (not full screen). Only from the
+    /// explicit menu item: nothing about arranging, zooming or floating panes here calls it.
+    func fillWindowOnMac(_ tile: String) { requestWindowFrame(.fill, tile: tile) }
+
+    /// Puts the Mac window back to the frame it had before Fill Window on Mac.
+    func restoreWindowOnMac(_ tile: String) { requestWindowFrame(.restore, tile: tile) }
+
+    func clearWindowFrameNotice() { windowFrameNoticeClear?.cancel(); windowFrameNotice = nil }
+
+    private func requestWindowFrame(_ op: WindowFrameOp, tile: String) {
+        guard offersWindowFrameOnMac(tile), let source = layout.tiles[tile]?.source,
+              let gen = generation(source) ?? tileState(tile).flatMap({ $0.windowID == source.windowID ? $0.generation : nil })
+        else { return }
+        // View Only: say why here instead of asking (the Mac would refuse it anyway).
+        guard canControlMac else {
+            showWindowFrameNotice(WindowFrameNotice(tile: tile, windowID: source.windowID, op: op, result: .control))
+            return
+        }
+        guard !windowFramePending.contains(tile) else { return }
+        windowFrameRequest += 1
+        let req = windowFrameRequest
+        guard send(WindowFrameWire.requestMessage(op, window: source.windowID, generation: gen, req: req)) else {
+            showWindowFrameNotice(WindowFrameNotice(tile: tile, windowID: source.windowID, op: op, result: nil))
+            return
+        }
+        windowFrameAsked[req] = (tile, source.windowID, op)
+        windowFramePending.insert(tile)
+        windowFrameNoticeClear?.cancel()
+        windowFrameNotice = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, let asked = self.windowFrameAsked.removeValue(forKey: req) else { return }
+            self.windowFramePending.remove(asked.tile)
+            self.showWindowFrameNotice(WindowFrameNotice(tile: asked.tile, windowID: asked.windowID, op: asked.op, result: nil))
+        }
+    }
+
+    private func finishWindowFrame(_ reply: WindowFrameReply) {
+        let key = reply.req.flatMap { windowFrameAsked[$0] != nil ? $0 : nil }
+            ?? windowFrameAsked.first { $0.value.windowID == reply.windowID && $0.value.op == reply.op }?.key
+        guard let key, let asked = windowFrameAsked.removeValue(forKey: key), asked.windowID == reply.windowID else { return }
+        windowFramePending.remove(asked.tile)
+        showWindowFrameNotice(WindowFrameNotice(tile: asked.tile, windowID: reply.windowID, op: reply.op, result: reply.result))
+    }
+
+    private func showWindowFrameNotice(_ notice: WindowFrameNotice) {
+        windowFrameNotice = notice
+        windowFrameNoticeClear?.cancel()
+        let clear = DispatchWorkItem { [weak self] in
+            guard let self, self.windowFrameNotice == notice else { return }
+            self.windowFrameNotice = nil
+        }
+        windowFrameNoticeClear = clear
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: clear)
+    }
     /// Makes `tile` the one typing goes to. `raise` false for anything that only arranges this
     /// device's view (moving, resizing, tucking, docking or zooming a window, fullscreen on this
     /// device): the Mac window then stays where it is, and comes forward only when a key or a
@@ -1749,8 +2489,14 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var floatGesture: String?
     /// The layout before the current float gesture, recorded as one undo step once it changes something.
     private var floatGestureStart: WorkspaceLayout?
-    /// Shake while dragging (pane label, Stage Peek window, float title).
-    var shake = WorkspaceShakeDetector()
+    /// Circling while dragging (pane label, Stage Peek window, float title).
+    var circling = WorkspaceCircleGesture()
+    private var ringFade: Task<Void, Never>?
+    /// The float a finger is moving by its title or grabber: circling switches it into docking.
+    private(set) var floatMove: WorkspaceFloatMove?
+    /// The float being docked: folded into a card under the finger (a `.float` drag), drawn
+    /// nowhere else, here or on the Mac, until it's dropped, cancelled or circled back.
+    @Published private(set) var dockingFloat: String?
 
     /// The hardware pointer at a normalized canvas point: hover only, never focus.
     func hover(at p: CGPoint?) {
@@ -1761,12 +2507,18 @@ final class WorkspaceModel: ObservableObject {
     // MARK: Overview, rail
 
     func openOverview(replacing tile: String? = nil) {
+        dismissAppOpening()   // an app opening for another tile stops here
         replacingTile = tile
         overviewOpen = true
         startRefreshing()
     }
 
-    func closeOverview() { overviewOpen = false; replacingTile = nil }
+    /// Closing the picker (Done, or a window chosen) also stops an app opening from it: nothing
+    /// is placed later behind the person's back.
+    func closeOverview() {
+        dismissAppOpening()
+        overviewOpen = false; replacingTile = nil
+    }
 
     /// The tile a switcher (Stage Peek) replaces: the active tile, the only
     /// one, else the first tile still waiting for a window, else the last.
@@ -1807,17 +2559,23 @@ final class WorkspaceModel: ObservableObject {
     private func startRefreshing() {
         refreshTask?.cancel()
         requestCatalog()
-        requestApps()
+        askForApps(opening: true)
         refreshTask = Task { [weak self] in
-            var tick = 0
             while let self, self.browsing {
                 try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen ? 3_000_000_000 : 5_000_000_000)
                 guard !Task.isCancelled, self.browsing else { break }
                 self.requestCatalog()
-                tick += 1
-                if tick % 5 == 0 { self.requestApps() }
+                self.askForApps(opening: false)
             }
         }
+    }
+
+    /// The Mac's app list: asked when a browser opens (with this device's revision, so an
+    /// unchanged list is a short `same` answer); a tick only repeats an unanswered ask.
+    private func askForApps(opening: Bool) {
+        let now = clock()
+        guard opening ? inventory.opened(now: now) : inventory.tick(now: now) else { return }
+        requestApps()
     }
 
     // MARK: Sending
@@ -1858,7 +2616,67 @@ final class WorkspaceModel: ObservableObject {
                                              host: host, focus: focusNow, generation: generation,
                                              displayID: { [weak self] in self?.display(for: $0)?.id },
                                              viewEpoch: { [weak self] in self?.viewEpochs[$0] },
-                                             floats: canFloat))
+                                             floats: canFloat, lifted: canLiftFloats ? liftedFloats.filter { sendable.isFloat($0) } : [],
+                                             watch: heldWindows(host: host)))
+    }
+
+    /// Every Mac window held here (shown, another tab, a float tucked or hidden) under the generation
+    /// it was listed with. Windows not yet listed on this connection, whole displays and panes that
+    /// follow an app aren't watched: nothing is taken out without the Mac's proof.
+    private func heldWindows(host: String) -> [WorkspaceHeldWindow] {
+        var seen = Set<String>()
+        return saved.allTileIDs.flatMap { saved.tiles[$0]?.windows ?? [] }.compactMap { s in
+            guard s.host == host, !s.isDisplay, s.follow == .window, listedThisConnection.contains(s.tabKey),
+                  let g = generation(s), seen.insert(s.tabKey).inserted else { return nil }
+            return WorkspaceHeldWindow(window: s.windowID, generation: g)
+        }
+    }
+
+    /// The Mac proved these windows closed (`gone`): a floating pane holding one goes (tucked too),
+    /// a tab goes and its pane shows the next, and a pane whose last window closed stays empty with
+    /// Choose Window and Remove Pane. Only windows held under exactly that generation; anything
+    /// in progress on a pane that goes or empties stops (a drag, a dock, a pinch). Not an edit the
+    /// person made, so not undoable (the window is gone).
+    private func windowsClosedOnMac(_ gone: [WorkspaceHeldWindow]) {
+        guard let host else { return }
+        var added = false
+        for g in gone {
+            let s = WorkspaceSource(host: host, windowID: g.window)
+            guard listedThisConnection.contains(s.tabKey), generation(s) == g.generation,
+                  closedOnMac[s.tabKey] != g.generation else { continue }
+            closedOnMac[s.tabKey] = g.generation
+            added = true
+        }
+        guard added else { return }
+        let result = saved.removingClosedWindows(isClosedOnMac)
+        guard result.layout != saved else { return }
+        let touched = result.removed.union(result.emptied)
+        Log.info("workspace: windows closed on the Mac: floats removed=\(result.removed.sorted()) panes emptied=\(result.emptied.sorted())")
+        if touched.contains(where: { floatGesture == $0 || dockingFloat == $0 }) { abandonDrag(reason: "window closed on the Mac") }
+        if let item = drag?.item {
+            switch item {
+            case .pane(let id, _) where touched.contains(id) || result.layout.tiles[id]?.windows != saved.tiles[id]?.windows:
+                abandonDrag(reason: "window closed on the Mac")
+            case .float(let id) where touched.contains(id):
+                abandonDrag(reason: "window closed on the Mac")
+            default: break
+            }
+        }
+        if let z = zoomGesture, touched.contains(z.tile) { zoomGesture = nil; zoomPreview = nil }
+        for id in result.removed { backdrops[id] = nil; liftedFloats.remove(id); liftWanted.remove(id) }
+        saved = result.layout
+        refreshMissing()
+        persist(); publish(); scheduleSend(immediately: true)
+        advanceAppOpening()
+    }
+
+    private func isClosedOnMac(_ s: WorkspaceSource) -> Bool {
+        guard let g = closedOnMac[s.tabKey] else { return false }
+        return generation(s) == g
+    }
+
+    private func removingClosed(from layout: WorkspaceLayout) -> WorkspaceLayout {
+        closedOnMac.isEmpty ? layout : layout.removingClosedWindows(isClosedOnMac).layout
     }
 
     private func persist() {
@@ -1879,37 +2697,95 @@ extension WorkspaceModel {
     /// Existing windows are never rearranged by it.
     static let defaultPlacementKey = "workspace.defaultPlacement"
     var defaultPlacement: WorkspacePlacement {
-        get { defaults.string(forKey: Self.defaultPlacementKey).flatMap(WorkspacePlacement.init(rawValue:)) ?? .pane }
+        // With Floating Windows off: Pane, the saved choice kept for when it's back on.
+        get { floatsAllowedHere ? defaults.string(forKey: Self.defaultPlacementKey).flatMap(WorkspacePlacement.init(rawValue:)) ?? .pane : .pane }
         set { defaults.set(newValue.rawValue, forKey: Self.defaultPlacementKey); objectWillChange.send() }
     }
 
+    /// Settings ▸ Controls ▸ Window Switcher ▸ Enable Floating Windows. On unless turned off on this
+    /// device (existing installs too). Receiver-local: never sent, the Mac's features unchanged.
+    nonisolated static let floatingWindowsKey = "workspace.floatingWindowsEnabled"
+    nonisolated static func floatingWindowsEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: floatingWindowsKey) as? Bool ?? true
+    }
+
+    var floatingWindowsEnabled: Bool {
+        get { floatsAllowedHere }
+        set { defaults.set(newValue, forKey: Self.floatingWindowsKey); floatingWindowsSettingChanged() }
+    }
+
+    /// Any write to this device's defaults lands here; only a change of the switch acts.
+    func floatingWindowsSettingChanged() {
+        let allowed = Self.floatingWindowsEnabled(in: defaults)
+        guard allowed != floatsAllowedHere else { return }
+        floatsAllowedHere = allowed
+        objectWillChange.send()
+        if !allowed, drag?.placement == .float { drag?.placement = .pane }
+        publish(); scheduleSend()
+    }
+
+    /// Floating Windows off: every float joins the layout as Add to Layout does it, a new pane
+    /// while there's room, else a tab of the focused (or last) pane. Tucked ones too, so nothing
+    /// waits at an edge. Each keeps its tile, window, capture and view; only the float frames go.
+    /// Turning the switch back on leaves the layout as it is. Runs on every publish, so a layout
+    /// loaded, restored or undone with floats settles the same way.
+    private func settleFloatsIfTurnedOff() {
+        guard !floatsAllowedHere, !saved.floats.isEmpty else { return }
+        floatGesture = nil; floatGestureStart = nil
+        let landscape = size.width >= size.height
+        let room = WorkspaceGeometry.capacity(for: size, hinge: hinge)
+        var next = saved
+        var tabTarget = lastFocusedPane.flatMap { arranged.orderedTileIDs.contains($0) ? $0 : nil } ?? arranged.orderedTileIDs.last
+        for id in saved.floats.map(\.tile) {   // back to front: the frontmost ends up the shown tab
+            if next.paneCount < room || tabTarget.map({ next.orderedTileIDs.contains($0) }) != true {
+                next = next.dockingAsPane(id, landscape: landscape)
+            } else if let target = tabTarget {
+                let docked = next.dockingAsTab(id, into: target)
+                if docked.isFloat(id) {
+                    next = next.dockingAsPane(id, landscape: landscape)
+                } else {
+                    next = docked
+                    tabTarget = id   // the merged pane takes the float's id
+                }
+            }
+        }
+        saved = next.compacted()
+        refreshMissing(); persist()
+    }
+
     /// Floating panes can be shown now (the Mac draws them).
-    var canFloatPanes: Bool { canFloat }
+    var canFloatPanes: Bool { canFloat && floatsAllowedHere }
 
     /// The pane's window can float: the Mac draws floats, and the tree keeps at least one pane
     /// (a tab of a pane always can, its pane stays).
     func canFloat(pane id: String, tab: Int? = nil) -> Bool {
-        guard canFloat, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
+        guard canFloat, floatsAllowedHere, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
         if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
         return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
     }
 
     /// The window's width / height as the pane draws it (turned a quarter: swapped).
     func windowAspect(_ id: String) -> Double? {
-        guard let tile = layout.tiles[id], let s = tile.source, let w = windowItem(s), w.width > 0, w.height > 0 else { return nil }
-        let a = Double(w.width) / Double(w.height)
-        return tile.rotation.isQuarterTurn ? 1 / a : a
+        guard let tile = layout.tiles[id], let source = windowSize(tile) else { return nil }
+        // As drawn: a turned window's box (any angle).
+        let r = TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: 1, height: 1), source: source,
+                                     rotation: tile.rotation, fit: .fit).rotatedSourceSize
+        return r.width > 0 && r.height > 0 ? r.width / r.height : nil
     }
 
+    /// Where a new float opens: where it was dropped, else the next place in the cascade that no
+    /// shown float sits on (a phone shows several, like an iPad).
     private func newFloatFrame(aspect: Double?, at center: WorkspacePoint?, in space: WorkspaceSize? = nil) -> WorkspaceRect {
-        WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, index: center == nil ? layout.visibleFloatIDs.count : 0, center: center)
+        if let center { return WorkspaceFloatGeometry.defaultFrame(aspect: aspect, in: space ?? size, center: center) }
+        let shown = space == nil ? layout.floats.filter { $0.tuck == nil }.map(\.frame) : []
+        return WorkspaceFloatGeometry.openingFrame(aspect: aspect, in: space ?? size, avoiding: shown)
     }
 
     /// A window can open floating from here: in Window view, or over the mirrored desktop (Window
     /// view then starts with that desktop as the pane underneath, as when a window is dropped
     /// onto it; the person isn't asked). Never from Extend: leaving Extend removes this device's
     /// extended display, and macOS moves the windows on it, which a float must never cause.
-    var canOpenFloats: Bool { canFloat && (windowMode || (mirroring() && desktopDisplay != nil)) }
+    var canOpenFloats: Bool { canFloat && floatsAllowedHere && (windowMode || (mirroring() && desktopDisplay != nil)) }
 
     // MARK: Opening, floating, docking
 
@@ -1952,7 +2828,6 @@ extension WorkspaceModel {
         let id = "w\(nextTile)"; nextTile += 1
         let frame = newFloatFrame(aspect: aspect, at: center)
         edit { $0.addingFloat(WorkspaceTile(id: id, source: source), frame: frame) }
-        if compactSpace { tuckOthers(than: id) }
         focus(id, raise: false)
     }
 
@@ -1974,7 +2849,6 @@ extension WorkspaceModel {
             if localFullscreen == id { localFullscreen = nil }
             edit { $0.floatingPane(id, frame: frame) }
         }
-        if compactSpace { tuckOthers(than: floated) }
         focus(floated, raise: false)
     }
 
@@ -2012,9 +2886,57 @@ extension WorkspaceModel {
         guard layout.isFloat(id) else { return }
         floatGesture = id
         floatGestureStart = saved
+        if dockingFloat == nil { floatMove = WorkspaceFloatMove(id, in: saved) }   // before it's raised
         raiseFloat(id)
         if active != id { focus(id, raise: false) }   // arranging only: the Mac window stays put
-        requestBackdrop(id)
+        // A fresh still to draw under the finger (the one kept may be a while old).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        requestBackdrop(id, refresh: age > 1)
+    }
+
+    /// The finger started moving or resizing float `id`: from now this device draws it (its last
+    /// still, in its own view) and the Mac leaves it out, so it's never drawn twice: once under
+    /// the finger and once, a moment behind, by the Mac. Needs `floatLift` and a recent still;
+    /// without them the Mac keeps drawing it, as before.
+    func liftFloat(_ id: String) {
+        guard layout.isFloat(id) else { return }
+        liftWanted.insert(id)
+        guard canLiftFloats, !liftedFloats.contains(id), hasFreshStill(id) else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
+    }
+    /// A still older than this isn't drawn in place of the live window.
+    static let liftStillMaxAge: TimeInterval = 6
+
+    private func hasFreshStill(_ id: String) -> Bool {
+        backdrop(id).map { Date().timeIntervalSince($0.receivedAt) < Self.liftStillMaxAge } ?? false
+    }
+
+    /// Let go (or the gesture ended): the Mac draws it again where it is;
+    /// this device keeps drawing it until the Mac's frame with it is out (or `landingHold` passes).
+    /// The caller sends the layout (the lift's end changes the float's view epoch).
+    func landFloat(_ id: String) {
+        liftWanted.remove(id)
+        guard liftedFloats.remove(id) != nil else { return }
+        let at = Date()
+        landingFloats[id] = at
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingHold) { [weak self] in
+            if let self, self.landingFloats[id] == at { self.landingFloats[id] = nil }
+        }
+    }
+
+    /// Whether this device draws float `id` itself now (lifted, or landing).
+    func drawsFloatHere(_ id: String) -> Bool {
+        liftedFloats.contains(id) || landingFloats[id] != nil
+    }
+
+    /// Float `id`'s view (Fit or Fill, zoom, rotation) at `width` x `height` points, placed as the
+    /// Mac composes it: what this device draws while it holds the float.
+    func floatContentTransform(_ id: String, width: Double, height: Double) -> TileContentTransform? {
+        guard let tile = layout.tiles[id], let source = windowSize(tile), width > 0, height > 0 else { return nil }
+        return TileContentTransform(tile: WorkspaceRect(x: 0, y: 0, width: width, height: height), source: source,
+                                    rotation: tile.rotation, fit: effectiveFit(id), zoom: tile.zoom ?? .identity)
     }
 
     /// The float's frame while the finger moves (kept usable; the Mac follows at most ~30 times a second).
@@ -2031,6 +2953,8 @@ extension WorkspaceModel {
         if let frame { updateFloatFrame(id, frame) }
         floatGesture = nil
         floatGestureStart = nil
+        if floatMove?.id == id, dockingFloat != id { floatMove = nil }
+        landFloat(id)
         persist(); publish(); sendNow()
     }
 
@@ -2059,6 +2983,13 @@ extension WorkspaceModel {
         edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
     }
 
+    /// Size > Match Window: the float takes the window's shape as drawn (same area and centre),
+    /// so Fit shows the whole window with no bars. The view (zoom, rotation) is kept.
+    func matchWindowShape(_ id: String) {
+        guard let f = layout.float(id), let a = windowAspect(id), size.width > 0 else { return }
+        edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.matched(f.frame, aspect: a, in: size)) }
+    }
+
     /// Accessibility Move Left / Right / Up / Down: a tenth of the picture per step.
     func nudgeFloat(_ id: String, dx: Double, dy: Double) {
         guard let f = layout.float(id) else { return }
@@ -2067,28 +2998,162 @@ extension WorkspaceModel {
         edit { $0.settingFloatFrame(id, WorkspaceFloatGeometry.clamped(r, in: size)) }
     }
 
+    // MARK: Docking by circling while it moves
+
+    /// One finger position of float `id`'s move by its title or grabber (global points, `time` in
+    /// seconds). Circling switches between moving it and docking it into the panes
+    /// (`WorkspaceFloatMove`); a shake, a zig-zag or an ordinary move never does. While it docks
+    /// the finger moves the drag. Returns the switch it made, if any (one haptic each).
+    @discardableResult
+    func moveFloatFinger(_ id: String, to global: CGPoint, at time: TimeInterval) -> WorkspaceFloatMove.Switch? {
+        guard var move = floatMove, move.id == id, layout.isFloat(id) else { return nil }
+        let step = move.add(x: Double(global.x), y: Double(global.y), at: time)
+        floatMove = move
+        switch step {
+        case .dock?: startDocking(move, at: global)
+        case .float?: resumeMoving(id)
+        case nil: break
+        }
+        if dockingFloat == id, dragsFloat(id) { moveDrag(to: global) }
+        return step
+    }
+
+    /// Circling while moving it: the float folds into a card under the finger and the pane drop
+    /// targets show, as for a pane drag. It goes back to where the move began, and it's lifted
+    /// even without a recent still: the Mac leaves it out of its picture and input, and nothing
+    /// here draws it, so the card is the only thing shown for it.
+    private func startDocking(_ move: WorkspaceFloatMove, at global: CGPoint) {
+        let id = move.id
+        dockingFloat = id
+        saved = saved.settingFloatFrame(id, move.frame)
+        liftWanted.insert(id)
+        if canLiftFloats { liftedFloats.insert(id); landingFloats[id] = nil }
+        publish(); sendNow()
+        beginDrag(.float(id), at: global)
+    }
+
+    /// Circling again while it docks: the card opens back into the float under the finger, which
+    /// moves on as before (drawn here from its still; without a recent one the Mac draws it again).
+    private func resumeMoving(_ id: String) {
+        dockingFloat = nil
+        if dragsFloat(id) { cancelDrag() }
+        if liftedFloats.contains(id), !hasFreshStill(id) { liftedFloats.remove(id); sendNow() }
+    }
+
+    /// The finger let go of float `id` while it docks. On a pane target it docks there as a pane
+    /// drag would (a tab, a new pane or a split; never replacing a window); on Remove from This
+    /// Device it's removed here only (the Mac window stays open). Anywhere else (Cancel, outside
+    /// the picture) it's put back as it was (frame, size, view, place among the floats) and the
+    /// Mac draws it again. A dock or a removal is one undo step, a cancel none. True when the
+    /// layout changed.
+    @discardableResult
+    func endDockingFloat(_ id: String) -> Bool {
+        guard dockingFloat == id, let move = floatMove, move.id == id else { return false }
+        putBack(move)
+        let changed = dragsFloat(id) ? endDrag() : false
+        finishDocking(id)
+        return changed
+    }
+
+    /// The system cancelled the move while it docks (a call, Control Center): put back as it was.
+    func cancelDockingFloat(_ id: String) {
+        guard dockingFloat == id, let move = floatMove, move.id == id else { return }
+        if dragsFloat(id) { cancelDrag() }
+        putBack(move)
+        finishDocking(id)
+    }
+
+    private func dragsFloat(_ id: String) -> Bool {
+        if case .float(let f)? = drag?.item { return f == id }
+        return false
+    }
+
+    /// The float as the finger found it, and no undo step left for a move that came to nothing.
+    private func putBack(_ move: WorkspaceFloatMove) {
+        saved = move.restoring(saved)
+        history.forget(saved)
+        publish()
+    }
+
+    private func finishDocking(_ id: String) {
+        dockingFloat = nil
+        floatMove = nil
+        if saved.isFloat(id) {
+            endFloatGesture(id)   // the Mac draws it again; this device until its frame is out
+        } else {
+            // Docked or removed: no float left to land.
+            liftedFloats.remove(id); liftWanted.remove(id); landingFloats[id] = nil
+            floatGesture = nil; floatGestureStart = nil
+            persist(); publish(); sendNow()
+        }
+    }
+
     // MARK: Tucking
 
-    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched.
-    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double) {
-        guard layout.isFloat(id) else { return }
-        edit { $0.tuckingFloat(id, edge: edge, offset: offset) }
+    /// Hidden at an edge. Its capture stops while hidden; the Mac window is untouched. It waits
+    /// at its own size flush with that edge where its strip is (`frame`, the view's place for it;
+    /// nil: flush with the picture's edge at `offset`), so pulling it back out is a straight
+    /// slide back to that place.
+    func tuckFloat(_ id: String, edge: WorkspaceEdge, offset: Double, frame: WorkspaceRect? = nil) {
+        guard let f = layout.float(id) else { return }
+        // A fresh still for its strip at the edge, asked for while it's still sent (the Mac
+        // answers from the capture that stops with the tuck).
+        let age = backdrop(id).map { Date().timeIntervalSince($0.receivedAt) } ?? .infinity
+        if age > 2 { requestBackdrop(id, refresh: true) }
+        let waiting = frame ?? WorkspaceFloatGeometry.tuckedFrame(f.frame, edge: edge, along: offset, in: size)
+        edit { $0.tuckingFloat(id, edge: edge, offset: WorkspaceFloatMotion.along(waiting, edge), frame: waiting) }
         refocus(after: id)
     }
 
-    /// Back where it was, in front and focused. On a compact screen the float shown before
-    /// tucks in its place (one shows at a time there).
-    func untuckFloat(_ id: String) {
+    /// A tucked float isn't captured, so one without a still of its own (after a reconnect, which
+    /// drops the stills) gets its window's thumbnail instead, as Stage Peek asks for them (read
+    /// only): its strip then shows the window itself, not only its icon. Asked again only after a
+    /// few seconds.
+    private func requestTuckedStills() {
+        guard windowMode, let c = catalog else { return }
+        let now = Date()
+        let ids = saved.floats.filter { $0.tuck != nil && backdrop($0.tile) == nil }
+            .compactMap { saved.tiles[$0.tile]?.source }
+            .filter { s in !s.isDisplay && thumbnails[s.windowID] == nil && c.windows.contains { $0.id == s.windowID } }
+            .map(\.windowID)
+            .filter { id in tuckedStillAskedAt[id].map { now.timeIntervalSince($0) > 5 } ?? true }
+        guard !ids.isEmpty else { return }
+        for id in ids { tuckedStillAskedAt[id] = now }
+        _ = send(WorkspaceRequests.thumbnails(ids, maxWidth: 560, icons: []))
+    }
+
+    /// A tucked float comes back with a slide drawn on this device: it's shown again now (so its
+    /// capture starts during the slide) but lifted where the Mac can lift floats, so the Mac
+    /// leaves it out until it has landed (`endFloatGesture`) and it's never on screen twice.
+    /// `frame`: where it comes back to (nil: where it waited). Its still may be old: it's only
+    /// drawn for the moment of the slide.
+    func beginRestoringFloat(_ id: String, frame: WorkspaceRect? = nil) {
         guard layout.isFloat(id) || saved.isFloat(id) else { return }
-        edit { $0.untuckingFloat(id) }
-        if compactSpace { tuckOthers(than: id) }
+        untuckFloat(id, frame: frame)
+        guard canLiftFloats, saved.float(id)?.tuck == nil, !liftedFloats.contains(id) else { return }
+        liftedFloats.insert(id)
+        landingFloats[id] = nil
+        sendNow()
+    }
+
+    /// Back where it waited (or at `frame`), in front and focused. The other floats stay as they
+    /// are, on a phone too.
+    func untuckFloat(_ id: String, frame: WorkspaceRect? = nil) {
+        guard layout.isFloat(id) || saved.isFloat(id) else { return }
+        edit { $0.untuckingFloat(id, frame: frame) }
         focus(id, raise: false)
     }
 
-    /// A tab dragged along its edge (no undo step; tucked floats aren't sent).
+    /// A strip slid along its edge (no undo step; tucked floats aren't sent): the float waits
+    /// there now, as far from the edge as before, and comes back out there.
     func moveTuckTab(_ id: String, offset: Double) {
-        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), saved.floats[i].tuck != nil else { return }
-        saved.floats[i].tuck?.offset = min(max(offset.isFinite ? offset : 0.5, 0), 1)
+        guard let i = saved.floats.firstIndex(where: { $0.tile == id }), let tuck = saved.floats[i].tuck else { return }
+        var f = saved.floats[i].frame
+        let along = offset.isFinite ? min(max(offset, 0), 1) : 0.5
+        if tuck.edge.axis == .horizontal { f.y = along - f.height / 2 } else { f.x = along - f.width / 2 }
+        f = WorkspaceFloatGeometry.clamped(f, in: size)
+        saved.floats[i].frame = f
+        saved.floats[i].tuck?.offset = WorkspaceFloatMotion.along(f, tuck.edge)
         persist(); publish()
     }
 
@@ -2098,17 +3163,6 @@ extension WorkspaceModel {
         if localFullscreen == id { localFullscreen = nil }
         edit { $0.removing(id) }
         refocus(after: id)
-    }
-
-    private var compactSpace: Bool { WorkspaceFloatGeometry.visibleLimit(for: size) <= 1 }
-
-    private func tuckOthers(than id: String) {
-        let others = saved.visibleFloatIDs.filter { $0 != id }
-        guard !others.isEmpty else { return }
-        var next = saved
-        for (i, o) in others.enumerated() { next = next.tuckingFloat(o, edge: .right, offset: min(0.3 + Double(i) * 0.12, 0.85)) }
-        saved = next
-        persist(); publish(); scheduleSend()
     }
 
     /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,
@@ -2143,7 +3197,7 @@ extension WorkspaceModel {
         }
     }
 
-    /// Switches the drag between Pane and Floating placement (a shake, or the drag's control).
+    /// Switches the drag between Pane and Floating placement (circling, or the drag's control).
     /// True when it switched.
     @discardableResult
     func toggleDragPlacement() -> Bool {

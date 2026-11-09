@@ -427,6 +427,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     @State private var arrowHold = ArrowKeyHold()
     @State private var arrowRepeatTask: Task<Void, Never>?
     @State private var heldArrowLayout: ArrowKeysLayout?
+    /// The keypad's own ⇧ ⌥ ⌘, apart from the tray's chord. Cleared whenever
+    /// the keypad closes and on every input reset.
+    @State private var keypadModifiers = ArrowKeypadModifiers()
     @GestureState private var keypadFinger: CGPoint?
     @GestureState private var arrowButtonDrag: CGSize?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -566,12 +569,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             if !enabled { store.setMoveViewActive(false) }
         }
         .onChange(of: store.preferences.activeControlProfile) { _ in
-            releaseArrowKey()
+            resetArrowKeypad()
             apply(interaction.resetAll())
             store.resetAutoHide()
         }
         .onChange(of: store.preferences.activeFunctionTrayProfile) { _ in
-            releaseArrowKey()
+            resetArrowKeypad()
             apply(interaction.resetAll())
             store.resetAutoHide()
         }
@@ -591,8 +594,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // Arrow keys: a held key is released, and the keypad closes, whenever
         // input may stop reaching the Mac or the controls change shape.
         .onChange(of: store.arrowKeypadOpen) { open in
-            if !open { releaseArrowKey() }
+            if !open { resetArrowKeypad() }
         }
+        // An older Mac adds the tray's held modifiers to every key: the
+        // keypad's own are dropped while the tray holds any (see also
+        // `interaction.activeChord` below).
+        .onChange(of: receiver.macSupportsExactKeyModifiers) { _ in reconcileKeypadModifiers() }
         .onChange(of: store.preferences.allowInput) { allowed in
             if !allowed { closeArrowKeys() }
         }
@@ -619,7 +626,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             store.resetAutoHide()
         }
         .onChange(of: store.preferences.activeCustomLayoutID) { _ in apply(interaction.resetAll()) }
-        .onChange(of: interaction.activeChord) { store.projectChord($0.modifiers) }
+        .onChange(of: interaction.activeChord) {
+            store.projectChord($0.modifiers)
+            reconcileKeypadModifiers()
+        }
         // A touch the system took never reaches `onEnded`. On a normal lift
         // `onEnded` has already cleared `gestureActive` by the time this
         // runs; the hop to the next turn of the run loop makes sure of it.
@@ -772,15 +782,15 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // Arrow keys (#179): placed after everything else, around it,
         // the calculator's button and open panel included. The calculator
         // never moves for them, so the two can't push each other around.
-        let computedArrows: ArrowKeysLayout? = arrowKeysShown ? ControlTrayGeometry.arrowKeysLayout(
+        // The keypad's ⇧ ⌥ ⌘ strip is placed with the T as one block.
+        let computedArrows: ArrowKeysLayout? = arrowKeysShown ? ControlTrayGeometry.arrowKeysLayoutWithModifiers(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
             portrait: portrait,
             side: store.preferences.arrowKeysSide,
             toggleSize: CGSize(width: Metrics.trayItem + Metrics.touchSlack,
                                height: Metrics.trayItem + Metrics.touchSlack),
-            keypadSize: store.arrowKeypadOpen
-                ? ArrowKeypadGeometry.size(key: Metrics.arrowKey, gap: Metrics.arrowGap) : nil,
+            keypadOpen: store.arrowKeypadOpen, key: Metrics.arrowKey, gap: Metrics.arrowGap,
             mainTrayFrame: renderedMainTrayFrame,
             obstacles: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? [])
                 + (calculatorButton.map { [$0] } ?? []) + calculatorPanelFrames,
@@ -860,6 +870,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .animation(.snappy(duration: 0.24), value: arrows.toggle)
                 if let keypad = arrows.keypad {
                     arrowKeypad(frame: keypad, frozen: computedArrows)
+                        .transition(reduceMotion ? .opacity
+                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
+                }
+                if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
+                    arrowKeypadModifierStrip(frame: strip, placement: placement)
                         .transition(reduceMotion ? .opacity
                                     : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
                 }
@@ -1347,11 +1362,20 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                                                       keyboardAvailable: keyboardAvailable)
     }
 
-    /// The chord the tray holds (latched or held) rides along on every arrow
-    /// message, as with the software keyboard. The Mac already holds those
-    /// modifiers down; naming them again is harmless and lets Demo show ⇧→.
+    /// The collapsed button's swipe and its named actions: the chord the
+    /// tray holds (latched or held) rides along, as with the software
+    /// keyboard. The Mac already holds those modifiers down; naming them
+    /// again is harmless and lets Demo show ⇧→. Keypad keys never use this:
+    /// they carry only the keypad's own ⇧ ⌥ ⌘ (`keypadModifiers`).
     private var arrowModifiers: [String] {
         SoftwareKeyboardChordPolicy.modifiers([], chord: interaction.activeChord.modifiers)
+    }
+
+    /// The keypad's ⇧ ⌥ ⌘ can be used: always on a Mac that takes exact
+    /// modifiers, and on an older one only while the tray holds none.
+    private var keypadModifiersAvailable: Bool {
+        ArrowKeypadModifiers.isAvailable(macSupportsExactModifiers: receiver.macSupportsExactKeyModifiers,
+                                         trayChord: interaction.activeChord.modifiers)
     }
 
     /// A tap opens or closes the keypad; a swipe sends one arrow press; the
@@ -1438,7 +1462,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     private func arrowKey(_ direction: ArrowKeyDirection, pressed: Bool) -> some View {
-        Image(systemName: direction.symbol)
+        // VoiceOver hears which of the keypad's own modifiers the key adds.
+        let modifiers = keypadModifiersAvailable
+            ? ArrowKeypadModifiers.keys.filter(keypadModifiers.active.contains).map(\.title) : []
+        return Image(systemName: direction.symbol)
             .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(pressed ? Color.black : Color.white)
             .frame(width: Metrics.arrowKey, height: Metrics.arrowKey)
@@ -1447,9 +1474,64 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .animation(.snappy(duration: 0.1), value: pressed)
             .accessibilityElement()
             .accessibilityLabel(direction.title)
+            .accessibilityValue(Text(modifiers.joined(separator: ", ")))
             .accessibilityInputLabels([direction.title])
             .accessibilityIdentifier("arrowKey.\(direction.rawValue)")
-            .trayButtonAccessibility { pressArrowOnce(direction) }
+            .trayButtonAccessibility { pressKeypadArrowOnce(direction) }
+    }
+
+    /// The keypad's own ⇧ ⌥ ⌘: a column beside the T or a row under it.
+    /// Capsules, unlike the round tray keys, and lit while they apply.
+    private func arrowKeypadModifierStrip(frame: CGRect, placement: ArrowKeypadModifierPlacement) -> some View {
+        let keys = ArrowKeypadGeometry.modifierKeyFrames(in: CGRect(origin: .zero, size: frame.size),
+                                                         placement: placement,
+                                                         key: Metrics.arrowKey, gap: Metrics.arrowGap)
+        let between = ArrowKeypadGeometry.modifierGap(placement, key: Metrics.arrowKey, gap: Metrics.arrowGap)
+        let available = keypadModifiersAvailable
+        return ZStack(alignment: .topLeading) {
+            ForEach(ArrowKeypadModifiers.keys) { modifier in
+                let key = keys[modifier] ?? .zero
+                ArrowKeypadModifierKey(
+                    modifier: modifier, size: key.size,
+                    hitSize: CGSize(width: key.width + between, height: key.height + between),
+                    latched: keypadModifiers.latched.contains(modifier),
+                    touched: keypadModifiers.touched[modifier] != nil,
+                    available: available, reduceMotion: reduceMotion,
+                    onTouchDown: { keypadModifierTouched(modifier) },
+                    onLift: { keypadModifierLifted(modifier) },
+                    onCancel: { keypadModifiers.cancelTouch(modifier) },
+                    onToggle: { toggleKeypadModifier(modifier) })
+                    .position(x: key.midX, y: key.midY)
+            }
+        }
+        .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+        .position(x: frame.midX, y: frame.midY)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("Arrow Key Modifiers",
+                                 comment: "The arrow keypad's own Shift, Option and Command keys."))
+        .accessibilityIdentifier("arrowKeypadModifiers")
+    }
+
+    private func keypadModifierTouched(_ modifier: ControlModifier) {
+        guard keypadModifiersAvailable else { return }
+        haptics.prepareForModifier()
+        store.beginAutoHideActivity()
+        keypadModifiers.touchDown(modifier)
+    }
+
+    private func keypadModifierLifted(_ modifier: ControlModifier) {
+        if keypadModifiers.lift(modifier) { haptics.play(.latch) }
+    }
+
+    /// VoiceOver, Voice Control and Switch Control: a tap toggles the latch.
+    private func toggleKeypadModifier(_ modifier: ControlModifier) {
+        guard keypadModifiersAvailable, keypadModifiers.toggle(modifier) else { return }
+        haptics.play(.latch)
+    }
+
+    /// The tray's chord changed or the Mac told us what it supports.
+    private func reconcileKeypadModifiers() {
+        keypadModifiers.reconcile(available: keypadModifiersAvailable)
     }
 
     private func finishArrowButton(_ outcome: ArrowButtonGesture.Outcome) {
@@ -1466,7 +1548,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         haptics.play(.expandCollapse)
     }
 
-    /// One whole press: a swipe on the button, or an assistive action.
+    /// One whole press: a swipe on the collapsed button, or one of its named
+    /// assistive actions. Carries the tray's chord, as before.
     private func pressArrowOnce(_ direction: ArrowKeyDirection) {
         guard store.preferences.allowInput else { return }
         apply(interaction.promotePressedModifier())
@@ -1474,16 +1557,27 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         haptics.play(.selection)
     }
 
+    /// An assistive tap on a keypad key: one whole press with the keypad's
+    /// own modifiers, never the tray's.
+    private func pressKeypadArrowOnce(_ direction: ArrowKeyDirection) {
+        guard store.preferences.allowInput else { return }
+        let modifiers = keypadModifiers.keyDown(available: keypadModifiersAvailable)
+        receiver.sendKeyboardPress(usage: direction.usage, modifiers: ArrowKeypadModifiers.wireNames(modifiers),
+                                   exactModifiers: true)
+        haptics.play(.selection)
+    }
+
     /// The finger on the keypad is now over `direction`, or over no key.
+    /// A key going down takes the keypad's modifiers as they are now; its
+    /// repeats and its up keep them (`ArrowKeyHold`).
     private func arrowFinger(on direction: ArrowKeyDirection?) {
         guard direction == nil || store.preferences.allowInput else { return releaseArrowKey() }
-        let events = arrowHold.move(to: direction, now: CACurrentMediaTime())
+        guard direction != arrowHold.held else { return }
+        let modifiers = direction == nil ? [] : keypadModifiers.keyDown(available: keypadModifiersAvailable)
+        let events = arrowHold.move(to: direction, now: CACurrentMediaTime(), modifiers: modifiers)
         guard !events.isEmpty else { return }
         if events.contains(where: { if case .down = $0 { return true } else { return false } }) {
             store.beginAutoHideActivity()
-            // A modifier still in its first moments of a press is held first,
-            // so the arrow goes out with it.
-            apply(interaction.promotePressedModifier())
             // One tick per key, never one per repeat.
             haptics.play(.selection)
         }
@@ -1517,25 +1611,36 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         heldArrowLayout = nil
     }
 
-    private func closeArrowKeys() {
+    /// A held key goes up and the keypad's own modifiers clear. Nothing of
+    /// theirs is held on the Mac (they ride on each key), so nothing else
+    /// needs releasing.
+    private func resetArrowKeypad() {
         releaseArrowKey()
+        keypadModifiers.clear()
+    }
+
+    private func closeArrowKeys() {
+        resetArrowKeypad()
         store.setArrowKeypadOpen(false)
     }
 
     /// Key down and repeats need input to reach the Mac; a key up is never
-    /// held back.
+    /// held back. Each carries the keypad modifiers its key went down with,
+    /// marked exact so the Mac doesn't add the tray's.
     private func sendArrowEvents(_ events: [ArrowKeyEvent]) {
-        let modifiers = arrowModifiers
         for event in events {
             switch event {
-            case .down(let direction):
+            case .down(let direction, let modifiers):
                 guard store.preferences.allowInput else { continue }
-                receiver.sendKeyboardDown(usage: direction.usage, modifiers: modifiers, isRepeat: false)
-            case .repeat(let direction):
+                receiver.sendKeyboardDown(usage: direction.usage, modifiers: ArrowKeypadModifiers.wireNames(modifiers),
+                                          isRepeat: false, exactModifiers: true)
+            case .repeat(let direction, let modifiers):
                 guard store.preferences.allowInput else { continue }
-                receiver.sendKeyboardDown(usage: direction.usage, modifiers: modifiers, isRepeat: true)
-            case .up(let direction):
-                receiver.sendKeyboardUp(usage: direction.usage, modifiers: modifiers)
+                receiver.sendKeyboardDown(usage: direction.usage, modifiers: ArrowKeypadModifiers.wireNames(modifiers),
+                                          isRepeat: true, exactModifiers: true)
+            case .up(let direction, let modifiers):
+                receiver.sendKeyboardUp(usage: direction.usage, modifiers: ArrowKeypadModifiers.wireNames(modifiers),
+                                        exactModifiers: true)
             }
         }
     }
@@ -1711,6 +1816,25 @@ extension ReceiverControlOverlay {
             return (action, CGRect(x: paletteFrame.minX + padding + CGFloat(column) * (key + gap),
                                    y: paletteFrame.minY + padding + CGFloat(row) * (key + gap), width: key, height: key))
         }
+        // Arrow keys (#179): the bar item is its own button, above the bar's
+        // gesture layer; the keypad and its ⇧ ⌥ ⌘ open above it or beside
+        // the bar. On a fold they stay on the arrow key's own half.
+        let barArrows: (computed: ArrowKeysLayout, shown: ArrowKeysLayout)? = items.firstIndex(of: .arrowKeys).map { arrowIndex in
+            let cell = cells[arrowIndex]
+            let centre = CGPoint(x: cell.midX, y: cell.midY)
+            let arrowBar = bars.first { $0.contains(centre) } ?? bars[0]
+            let safe = safeInsets.safeRect(in: containerSize)
+            let piece = ControlFoldGeometry.pieces(of: safe, divisions: divisions).first { $0.contains(centre) } ?? safe
+            let computed = store.arrowKeypadOpen
+                ? ControlTrayGeometry.keyboardBarArrowKeysLayout(
+                    safe: piece, bar: arrowBar, item: cell, key: Metrics.arrowKey, gap: Metrics.arrowGap,
+                    palette: paletteChord == nil ? nil : paletteFrame)
+                : ArrowKeysLayout(toggle: cell, keypad: nil)
+            return (computed, heldArrowLayout ?? computed)
+        }
+        // Everything this presentation draws over the picture, for Stage Peek
+        // and the video-off surface: the bar, and the keypad while it is open.
+        let occupied = bars + (barArrows?.shown.occupied ?? [])
         ZStack(alignment: .topLeading) {
             ForEach(Array(bars.enumerated()), id: \.offset) { _, bar in
                 ControlTray()
@@ -1744,25 +1868,16 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: bars + (paletteChord == nil ? [] : [paletteFrame])))
                 .gesture(controlGesture())
-            // Arrow keys (#179): the bar item is its own button, above the
-            // bar's gesture layer; the keypad opens above it or beside the bar.
-            if let arrowIndex = items.firstIndex(of: .arrowKeys) {
-                let cell = cells[arrowIndex]
-                let centre = CGPoint(x: cell.midX, y: cell.midY)
-                let arrowBar = bars.first { $0.contains(centre) } ?? bars[0]
-                // On a fold the keypad stays on the arrow key's own half.
-                let safe = safeInsets.safeRect(in: containerSize)
-                let piece = ControlFoldGeometry.pieces(of: safe, divisions: divisions).first { $0.contains(centre) } ?? safe
-                let computed = ArrowKeysLayout(
-                    toggle: cell,
-                    keypad: store.arrowKeypadOpen ? ControlTrayGeometry.keyboardBarKeypadFrame(
-                        safe: piece, bar: arrowBar, item: cell,
-                        keypadSize: ArrowKeypadGeometry.size(key: Metrics.arrowKey, gap: Metrics.arrowGap),
-                        palette: paletteChord == nil ? nil : paletteFrame) : nil)
-                let arrows = heldArrowLayout ?? computed
+            if let barArrows {
+                let arrows = barArrows.shown
                 arrowKeysButton(frame: arrows.toggle, onBar: true)
                 if let keypad = arrows.keypad {
-                    arrowKeypad(frame: keypad, frozen: computed)
+                    arrowKeypad(frame: keypad, frozen: barArrows.computed)
+                        .transition(reduceMotion ? .opacity
+                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
+                }
+                if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
+                    arrowKeypadModifierStrip(frame: strip, placement: placement)
                         .transition(reduceMotion ? .opacity
                                     : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
                 }
@@ -1772,7 +1887,8 @@ extension ReceiverControlOverlay {
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
         .animation(reduceMotion ? .easeInOut(duration: 0.12) : .snappy(duration: 0.2), value: store.arrowKeypadOpen)
         .onPreferenceChange(ControlFramePreference.self) { frames = $0 }
-        .onAppear { onOccupiedFramesChange(bars) }
+        .onAppear { onOccupiedFramesChange(occupied) }
+        .onChange(of: occupied) { onOccupiedFramesChange($0) }
     }
 
     @ViewBuilder
@@ -2558,6 +2674,88 @@ struct PadChip: View {
             .overlay(Circle().strokeBorder(.white.opacity(selected ? 0.5 : (onRail ? 0.08 : 0.16)),
                                            lineWidth: 0.75))
             .shadow(color: .black.opacity(onRail ? 0 : 0.22), radius: 3, y: 1)
+    }
+}
+
+/// One of the arrow keypad's own modifiers (`ArrowKeypadModifiers`). A
+/// capsule, so it never reads as one of the round tray modifiers, lit while
+/// it applies to the arrows. Touching it applies it at once; the lift
+/// toggles its latch unless an arrow went down meanwhile (a hold), and a
+/// lift off the key or a touch the system took changes nothing.
+private struct ArrowKeypadModifierKey: View {
+    let modifier: ControlModifier
+    let size: CGSize
+    /// The touch area: the key plus half the gap to each neighbour.
+    let hitSize: CGSize
+    let latched: Bool
+    let touched: Bool
+    /// False on an older Mac while a tray modifier is on: dimmed, and its
+    /// touches do nothing.
+    let available: Bool
+    let reduceMotion: Bool
+    let onTouchDown: () -> Void
+    let onLift: () -> Void
+    let onCancel: () -> Void
+    let onToggle: () -> Void
+
+    @GestureState private var down = false
+
+    var body: some View {
+        let on = available && (latched || touched)
+        Text(modifier.symbol)
+            .font(.system(size: size.height * 0.56, weight: .semibold))
+            .foregroundStyle(on ? Color.black : Color.white)
+            .frame(width: size.width, height: size.height)
+            .background(
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                    .opacity(on ? 0.9 : 0.45)
+                    .overlay(Capsule().fill(on ? Color.white.opacity(0.86) : Color.white.opacity(0.07)))
+                    .overlay(Capsule().strokeBorder(.white.opacity(on ? 0.6 : 0.28), lineWidth: on ? 1 : 0.5))
+                    .shadow(color: .black.opacity(0.28), radius: 5, y: 1))
+            .scaleEffect(touched && !reduceMotion ? 0.94 : 1)
+            .animation(.snappy(duration: 0.1), value: on)
+            .opacity(available ? 1 : 0.38)
+            .frame(width: hitSize.width, height: hitSize.height)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .updating($down) { _, state, _ in state = true }
+                .onEnded { value in
+                    // Lifting off the key cancels, like a button.
+                    if CGRect(origin: .zero, size: hitSize).insetBy(dx: -12, dy: -12).contains(value.location) {
+                        onLift()
+                    } else {
+                        onCancel()
+                    }
+                })
+            // `@GestureState` resets on a cancelled touch too, where `onEnded`
+            // never runs. The hop lets a normal lift's `onEnded` go first; it
+            // leaves nothing for this cancel to undo.
+            .onChange(of: down) { isDown in
+                if isDown {
+                    onTouchDown()
+                } else {
+                    DispatchQueue.main.async { onCancel() }
+                }
+            }
+            // Unavailable keys still take their touches (the callbacks ignore
+            // them), so a tap on a dimmed key never lands on the Mac.
+            .accessibilityElement()
+            .accessibilityLabel(Text("\(modifier.title) for Arrows",
+                                     comment: "The arrow keypad's own modifier key, e.g. Shift for Arrows. It applies to the arrow keys only."))
+            .accessibilityInputLabels([String(localized: "\(modifier.title) for Arrows",
+                                              comment: "The arrow keypad's own modifier key, e.g. Shift for Arrows. It applies to the arrow keys only."),
+                                       String(localized: "Arrow \(modifier.title)",
+                                              comment: "Short spoken name for the arrow keypad's own modifier key, e.g. Arrow Shift.")])
+            .accessibilityValue(available ? (on ? Text("On") : Text("Off"))
+                                          : Text("Unavailable"))
+            .accessibilityHint(available
+                ? Text("Only the arrow keys use it.", comment: "Hint for the arrow keypad's own Shift, Option and Command.")
+                : Text("Unavailable while a tray modifier is on. Update MeowDisplay on the Mac to use both.",
+                       comment: "Hint for an arrow keypad modifier on a Mac too old to keep it apart from the tray's modifiers."))
+            .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { if available { onToggle() } }
+            .accessibilityIdentifier("arrowKeypadModifier.\(modifier.rawValue)")
     }
 }
 

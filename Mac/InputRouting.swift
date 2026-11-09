@@ -359,6 +359,20 @@ enum KeyboardTextFlags {
     static let committed: CGEventFlags = []
 }
 
+/// The flags a `keyboard` `press`/`down`/`up` posts with. By default the
+/// message's own modifiers plus every modifier the receiver holds down with
+/// `modifierDown` (the Mac Receiver sends Shift as a held modifier and relies
+/// on that union). A message marked `exactModifiers` (welcome feature
+/// `exactKeyModifiers`) gets exactly its own: the arrow keypad's ⇧ ⌥ ⌘ never
+/// pick up the tray's latch. Only flag composition changes; every input gate
+/// runs exactly as before.
+enum KeyEventFlags {
+    static func compose(named names: [String], held: CGEventFlags, exact: Bool) -> CGEventFlags {
+        let own = KeyModifier.flags(named: names)
+        return exact ? own : own.union(held)
+    }
+}
+
 /// The same invariant as `KeyboardTextFlags`, applied to every synthetic
 /// mouse event `InputInjector` posts (touch taps, scroll, pointer moves,
 /// and pointer down/up): a left-unset `.flags` field doesn't mean "no
@@ -407,26 +421,44 @@ enum KeyboardTextPlanner {
 /// it can be exercised directly by tests without touching real input.
 struct HeldKeyTracker {
     private(set) var held: Set<HIDKeyUsage> = []
+    /// The flags a key sent down with exact modifiers posts with until it is
+    /// released: its repeats, its up and a cancellation all reuse them, so
+    /// nothing held or released meanwhile can change that key. Keys without
+    /// an entry follow `KeyEventFlags.compose` per message, as always.
+    private(set) var exactFlags: [HIDKeyUsage: CGEventFlags] = [:]
 
     /// Returns true if this down should be posted, i.e. the key wasn't
-    /// already held (a duplicate down is ignored).
+    /// already held (a duplicate down is ignored, and keeps the flags the
+    /// key went down with).
     @discardableResult
-    mutating func down(_ usage: HIDKeyUsage) -> Bool {
-        held.insert(usage).inserted
+    mutating func down(_ usage: HIDKeyUsage, exactFlags flags: CGEventFlags? = nil) -> Bool {
+        guard held.insert(usage).inserted else { return false }
+        exactFlags[usage] = flags
+        return true
     }
 
     /// Returns true if this up should be posted, i.e. the key was actually
     /// held (a spurious up is ignored).
     @discardableResult
     mutating func up(_ usage: HIDKeyUsage) -> Bool {
-        held.remove(usage) != nil
+        exactFlags[usage] = nil
+        return held.remove(usage) != nil
     }
 
     /// Every currently held key, clearing tracked state — used to release
     /// everything on cancellation.
     mutating func releaseAll() -> Set<HIDKeyUsage> {
-        defer { held.removeAll() }
+        defer {
+            held.removeAll()
+            exactFlags.removeAll()
+        }
         return held
+    }
+
+    /// The flags a held key went down with exact modifiers, or nil when it
+    /// follows the held modifiers (or isn't held).
+    func exactFlags(for usage: HIDKeyUsage) -> CGEventFlags? {
+        exactFlags[usage]
     }
 
     /// A `down` marked `repeat` (a receiving Mac's own key repeat) posts an

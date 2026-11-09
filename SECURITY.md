@@ -89,6 +89,9 @@ screens cannot pass this check unnoticed. See
   pairing again.
 - No account, email, or personal identifier is required or collected to use
   MeowDisplay.
+- Stage Manager bookkeeping is kept in the Mac app's preferences: whether
+  MeowDisplay still owes turning Stage Manager back on, the format and the
+  Dock settings its two shortcuts were made with, and the last change.
 
 ## Sessions, input and revocation
 
@@ -110,11 +113,27 @@ other end. It does not by itself admit a session:
   Allow Input master switch, an admitted session, and a grant for the
   current connection. Grants never carry over to a new connection; the
   receiver asks again.
+- **Changing a Mac window needs the same grant.** Minimize, Close, and Fill
+  Window on Mac / Restore Previous Size on Mac act on one listed window only
+  (its id, app and session identity) and need control. Fill and Restore are
+  checked again right before the Mac acts (without side effects), refuse an
+  ambiguous match instead of guessing, set only that window's position and
+  size through Accessibility (never full screen, the app's menus or keys),
+  and are verified before the device is told they worked.
 - **Forget and Block revoke.** They withdraw approval prompts still waiting
   for that device, end connections that are waiting to take over the
   session, and drop remembered acceptances; answering a prompt afterwards
   does nothing. Forget also removes the pin, so a stale in-memory copy of the
   trust store can't bring it back.
+- **Stage Manager changes only through the owner's shortcuts.** The Mac
+  runs only the two shortcuts the owner added (by exact name; MeowDisplay
+  never imports silently, edits or deletes shortcuts). A device needs control
+  and a confirmation on the device to turn Stage Manager off; switching it
+  for Window mode is the owner's opt-in setting on the Mac, limited to 4
+  automatic changes in 10 minutes. Shortcuts whose Dock settings no longer
+  match the Mac's are never run automatically or for a device. Every change
+  and its result are shown in the Mac's Settings. The owner's own Shortcuts
+  automations for Stage Manager run on each change.
 - **Automatic reconnection never becomes a user request.** Remote Access
   recovery tells the Mac it is automatic, so it can never raise an approval
   prompt; only an explicit Connect can. Discovery metadata (Bonjour names
@@ -240,7 +259,7 @@ Settings ▸ System. Each connected device is told whether it's on.
   unlocked, paired Apple Watch). MeowDisplay never sees the password. While
   macOS asks, nothing a device sends changes the Mac: MeowDisplay handles
   only liveness and connection messages and drops everything else (input,
-  window actions, menus, app launches, Lock Mac, files, clipboard, window
+  window actions and resizing, menus, app launches, Lock Mac, files, clipboard, window
   lists and thumbnails), and only lets go of keys or buttons a device was
   holding. Devices keep the last picture from before the prompt (no new
   frame is sent until it closes), so they don't see it.
@@ -265,6 +284,136 @@ Settings ▸ System. Each connected device is told whether it's on.
   cover at once with no lock. A separate process that would keep the Mac
   covered in that case is a prototype under assessment, not shipped. The
   Privacy Shield is a viewing shield for people near the Mac, not a lock.
+
+## When the Mac is locked
+
+While macOS shows its lock screen, while another user is switched in, or whenever MeowDisplay
+can't read the login session, no device gets anything of the Mac and nothing a device sends
+reaches it. Unknown counts as locked, never as unlocked.
+
+- **One gate.** The Mac reads its lock state from macOS's lock and unlock notifications, login
+  session switches, display sleep and wake, and the window server's session dictionary (twice a
+  second while a device is connected). A lock notice locks at once; unlocking needs a session read
+  that says so (`Mac/MacLockPrivacy.swift`). Every media frame, content message, window capture
+  and injected event checks the same gate.
+- **Nothing leaves.** No picture, sound, window frames, cursor, window list or titles, stills,
+  app icons, app list, Stage Peek or picker content, Remote Finder listings, pane menus, text
+  caret or clipboard. Frames captured or queued just before the lock are dropped too. Devices are
+  told the Mac is locked and that video is off, so even an older receiver drops its last
+  picture. The iOS and Android receivers cover everything with an opaque "locked" screen,
+  forget the stills, backdrops, window names and app lists they held, close Stage Peek and the
+  window pickers, and ignore any content message that still arrives. The layout is kept, but
+  after the unlock content comes back only from fresh messages from the Mac, never from a cache.
+  Android treats `macLockState` like iOS (anything but a clear `unlocked`, including a state it
+  doesn't know, counts as locked) and offers no Show Lock Screen or remote unlock.
+- **Nothing gets in.** Keys, buttons, touches and drags the device was holding are released at
+  the lock; everything sent afterwards is dropped until the Mac unlocks, so nothing reaches the
+  lock screen or a window behind it. A device set to Ask is refused without a prompt (nobody
+  could answer one behind the lock screen); Never Allow stays refused; Always Allow keeps or gets
+  its grant, but input still waits for the unlock. The one exception is below.
+- **No password of MeowDisplay's own.** MeowDisplay never asks for, shows a field for, checks,
+  stores or logs the Mac's login password, and doesn't imitate the macOS login screen. A trusted
+  device can operate macOS's own lock screen (below); macOS does the authenticating.
+- **Limits.** The state comes from public macOS signals and the session dictionary. If macOS
+  reports the session unlocked while showing something else, MeowDisplay follows macOS. The
+  Privacy Shield above is a separate viewing shield for people near the Mac.
+
+## Lock screen control
+
+A device this Mac already trusts with input can show macOS's own lock screen while the Mac is
+locked and type the login password there, so the owner can unlock from the iPad. MeowDisplay
+relays the picture and the keys; macOS's login window checks the password. Code:
+`Mac/LockScreenControl.swift`, enforced in `MacSender` and again in `InputInjector`.
+
+- **Who.** All of these, checked on the Mac at every step, not by the receiver: the session is
+  admitted (paired, pinned key, current connection); Allow Input is on; this login session is on
+  the console and macOS says it is locked (not another user switched in, not unknown); the
+  device's input policy isn't Never Allow; its **Allow Lock Screen Control** switch isn't turned off; and
+  this connection has control, either because the device is set to Always Allow Requests (its
+  request is granted without a prompt, as in the section above) or because the owner granted
+  control on this connection before the Mac locked. A device set to Ask without that grant is
+  view-only and stays so: nothing is asked or granted behind the lock screen. All of it is checked
+  again for every input event while the view is on, not only when a setting changes.
+- **One connection.** The view belongs to the connection that asked for it. A reconnect or path
+  change ends it; the new connection starts without it (even with its grant back) and must ask
+  again. Its frames, pointer and input all require that connection, its grant and the lock.
+- **The switch.** Device settings ▸ Input Authorization ▸ Allow Lock Screen Control, per device.
+  It isn't a second grant: it follows the device's input policy and can only narrow it. **On with
+  Always Allow Requests** (2.1 product decision): a device the owner already trusts with
+  persistent control can also operate the real lock screen, with no extra step or prompt. That
+  includes devices set to Always Allow before 2.1: the switch never shipped in a release, so they
+  have nothing stored and follow their policy (no migration prompt, nothing rewritten, the input
+  policy untouched). With Ask, only a grant a person gave before the lock carries over (see "Ask
+  devices"); with Never Allow, or Allow Input off, never. Turning it off is stored as an explicit
+  restriction for that device (also one recorded by a pre-release build) and overrides Always
+  Allow until the owner turns it back on; turning it off ends a view at once; turning it back on
+  is refused while any device controls the Mac, like Always Allow. Forget clears it with the
+  device's trust, so a re-paired device starts at Ask with no control.
+- **Only on request, only fresh.** Nothing is shown until the device asks (`lockScreenRequest`).
+  A connection can start the view at most once every 5 seconds (a quicker request gets the
+  current state), and each view wakes the display once. Then the Mac drops any frame it held,
+  wakes the display, and sends only frames encoded after
+  the request, starting with a keyframe, so no picture from before the lock can go out. Sound,
+  windows, listings, Files, Clipboard, menus and the text caret stay off. The pointer's position
+  and shape go only to the device showing it, only while it is shown. Window view and Extend
+  can't show it (Mirror only: Extend's display has no login window); an Always Allow device, or
+  an Ask device with a pre-lock grant (see "Ask devices"), is told to switch, any other Ask device
+  isn't offered it. After the unlock, or a failed or refused attempt, it goes back to its view.
+- **Only what a password needs.** Pointer moves, left clicks and touches; character keys with
+  Shift or Option (Caps Lock rides along); Space, Return and Delete; printable text up to 128
+  characters. Never Tab, the arrows, Escape or Forward Delete (they only move focus to the login
+  window's other controls), Command or Control, function, media, navigation or input-source keys,
+  right-click, scrolling, Pencil, gestures, shortcuts, menus, macros or window actions. Releases
+  always go through so nothing stays held. A left click can still press the login window's own
+  buttons (Switch User, Sleep, Restart, Shut Down, accessibility): macOS handles those as at its
+  own screen; at worst that puts the Mac to sleep or shuts it down (a denial of service), and
+  another account's login switches users, which ends the view.
+- **On the iPad.** The lock screen has its own keyboard: a bare key input (iOS `UIKeyInput`, not
+  a text document), so iOS has nothing to predict from, fill or replace: no QuickType bar, no
+  AutoFill (no password suggestions), no text replacement, no learning. It also asks for secure
+  entry (no dictation, nothing cached) and no autocorrect, spelling, capitals or smart
+  punctuation. It keeps no text, and its strip shows a fixed label, never the characters or how
+  many (also not to VoiceOver). It closes when the view ends; the ordinary keyboard isn't used
+  on the lock screen. A hardware keyboard types directly (its keys are tagged the same way).
+- **Ask devices.** An Ask device can use the lock screen only with control a person granted it
+  before the Mac locked. In Window view or Extend that grant is on a connection that can't show
+  the lock screen; switching to Mirror makes a new one, so the Mac (only the Mac, never the
+  device) keeps a one-time ticket: issued only from that live grant, bound to the device's pinned
+  key, this lock (any unlock, user switch or relock voids it) and this login session on the
+  console, valid 10 seconds, spent by the first control request on the new connection. It never
+  makes a grant that didn't exist, never applies to Never Allow, and never changes the device's
+  setting. Without a pre-lock grant, nothing is asked or granted behind the lock: the device says
+  to unlock at the Mac.
+- **Meant for the lock screen, or not at all.** Each view gets a number the Mac never reuses.
+  While the device sees the Mac locked it tags every input message (keys, touches, clicks,
+  scrolls, Pencil, gestures, window and menu actions, a hardware keyboard or pointer), with the
+  view's number while it shows one. The Mac delivers tagged input only to the live view it names,
+  on that connection, and only touches, clicks and the login window's keys; untagged input only
+  when no view is live. So input still in flight when the Mac unlocks (or after a hide, a new
+  view, a reconnect, a revoke, or from another device) is refused, never typed, clicked or
+  scrolled into the app in front, and desktop input never reaches the lock screen. Scroll, Pencil,
+  proximity and gestures never act while a view is live or when tagged, so one begun on the lock
+  screen can't continue on the desktop. Every refused keystroke and click is reported to that
+  device by count and reason (never content), and it says so; refused moves are just dropped.
+- **Held input stays in its episode.** Keys, modifiers and buttons belong to the episode (the
+  desktop, or one view) that pressed them. The Mac releases them when the view starts or ends and,
+  under the injector's own lock, before anything of another episode acts, so a modifier or drag
+  never carries across an unlock or into the lock screen; a release from another episode releases
+  nothing. The device ends every touch, drag, scroll and its momentum, Pencil stroke and gesture
+  in progress, and stops delayed actions, whenever its tag changes. Ordinary input after an
+  unlock isn't held back.
+- **Ends by itself.** On unlock (normal input and content resume for that session; the receiver
+  is told to reset its input), on another
+  user switching in or the state turning unknown, on revoke, Never Allow, the switch off, Allow
+  Input off, a disconnect, or two minutes without input. Held keys and buttons are released.
+- **Nothing kept.** Typed characters are passed to macOS and not logged, stored or inspected
+  beyond the key filter above; debug logging of keys is off while locked (on the Mac, and on the
+  device whenever it sees the Mac locked). The Mac logs that input was refused and why at most
+  once per view (and once between views), never how many keys or clicks, or when.
+- **Limits.** The Mac can't tell what macOS draws on its lock screen; it relies on macOS's own
+  lock state and the login window. Anyone holding a trusted device that has control can try
+  passwords on the lock screen, under macOS's own rate limits, as they could at the Mac's
+  keyboard. Turn the switch off for devices that shouldn't.
 
 ## What this doesn't claim
 

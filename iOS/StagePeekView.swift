@@ -29,7 +29,10 @@ struct StagePeekOverlay: View {
     let frame: CGRect
     /// The safe part of `frame`, in overlay coordinates.
     let safe: CGRect
-    /// Controls and hinges the strip must stay clear of, in overlay coordinates.
+    /// Controls and hinges the strip must stay clear of, in overlay coordinates. Tucked floats'
+    /// handles aren't among them: they keep clear of the strip (`StagePeekLayout.strip` with these
+    /// same inputs is what the app reserves for it), never the other way round, so the two never
+    /// chase each other along the edge.
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
     var naturalScrolling = true
@@ -123,7 +126,9 @@ struct StagePeekOverlay: View {
                 }
                 if machine.expansion > 0.001 {
                     gallery
-                        .opacity(model.drag != nil ? 0 : machine.expansion)
+                        // A card dragged from here (search results too) carries the finger's
+                        // gesture: barely there, never 0 or removed, so the drag keeps its view.
+                        .opacity(model.drag != nil ? 0.001 : machine.expansion)
                         .allowsHitTesting(machine.expanded)
                 }
                 toolbar(cards: cards)
@@ -133,7 +138,7 @@ struct StagePeekOverlay: View {
                     closeToast(notice)
                 }
                 topControls
-                    .opacity(model.drag != nil ? 0 : 1)
+                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
                     .transition(.opacity)
             }
             if launchpad {
@@ -146,7 +151,9 @@ struct StagePeekOverlay: View {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
                 // (Window mode: the pane view draws them. Drawing them here too showed two
                 // "Drop Here to Cancel" zones, owner report 2026-10-31.)
-                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
+                // Its chip below the Dynamic Island, its bar above the Home indicator and the controls.
+                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size),
+                                     safeArea: safe, controls: avoiding).zIndex(55)
             }
             if let d = model.drag, case .window(let w) = d.item {
                 // The card under the finger while the peek steps aside to show the panes.
@@ -162,7 +169,7 @@ struct StagePeekOverlay: View {
                     .zIndex(60)
             }
             if !machine.ids.isEmpty, !model.overviewOpen, !launchpad,
-               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding + floatHandles) {
+               let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
                 stripView(strip, cards: cards)
             }
         }
@@ -181,6 +188,12 @@ struct StagePeekOverlay: View {
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.
         .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
+        // An app dropped from here is opening: its progress, then its window, show in the layout.
+        .onChange(of: model.stagePeekCloseRequest) { _ in
+            searchFocused = false
+            launchpad = false
+            if machine.isVisible { animate { cancelAll() } }
+        }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
         .onChange(of: model.currentWindowID) { _ in syncItems() }
@@ -361,15 +374,14 @@ struct StagePeekOverlay: View {
                 .foregroundStyle(.white)
             } else if let thumbnail {
                 Image(decorative: thumbnail, scale: 1).resizable().scaledToFill()
-            } else if let icon {
-                Image(decorative: icon, scale: 1).resizable().frame(width: 44, height: 44)
+            } else if let window {
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 44)
             } else {
                 Image(systemName: "macwindow").font(.title2).foregroundStyle(Color.white.opacity(0.6))
             }
-            if let icon, thumbnail != nil {
+            if let window, thumbnail != nil {
                 // The app's icon at the card's bottom-left, like Stage Manager.
-                Image(decorative: icon, scale: 1).resizable()
-                    .frame(width: roomy ? 30 : 24, height: roomy ? 30 : 24)
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: roomy ? 30 : 24)
                     .shadow(color: .black.opacity(0.5), radius: 3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
@@ -619,7 +631,7 @@ struct StagePeekOverlay: View {
         let icon = window.flatMap { model.icons[$0.bundleID] }
         let width = min(200, safe.width - 24)
         return HStack(spacing: 8) {
-            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
+            if let window { WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 22) }
             VStack(alignment: .leading, spacing: 1) {
                 Text(window?.app ?? String(localized: "Full Desktop")).font(.footnote.weight(.semibold)).lineLimit(1)
                 if window == nil {
@@ -699,11 +711,6 @@ struct StagePeekOverlay: View {
     }
 
     private func toolbarX(_ column: CGFloat) -> CGFloat { min(max(column, safe.minX + 130), safe.maxX - 130) }
-
-    /// Tucked floating windows' edge handles here: the hold strip keeps clear of them.
-    private var floatHandles: [CGRect] {
-        model.floatHandlesGlobal.map { $0.offsetBy(dx: -overlayOrigin.x, dy: -overlayOrigin.y) }
-    }
 
     /// Bottom of the stack's column, lifted above any control under it (the
     /// settings button, a tray): found on iPhone, where they collided.

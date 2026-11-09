@@ -44,8 +44,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // run; the menu item drives manual "Check for Updates…". Held for the
     // app's lifetime here so every window (menu bar + control window) shares
     // one updater instance.
-    let updater = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    let updater: SPUStandardUpdaterController
+
+    override init() {
+        // Settle the presentation before Sparkle starts: on a first launch Sparkle writes the
+        // flag `AppPresentationStore` reads as "MeowDisplay ran on this Mac before".
+        _ = AppPresentationStore.resolve()
+        updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        super.init()
+    }
 
     /// `kill`/`killall` (SIGTERM) while the Privacy Shield covers the screens locks this Mac's
     /// screen before exiting, like a normal Quit. SIGKILL and a crash can't be caught: then the
@@ -397,11 +404,10 @@ final class DeviceSession: ObservableObject, Identifiable {
 final class SenderController: ObservableObject {
     static let shared = SenderController()
 
-    @Published var presentation = AppPresentation(
-        rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "") ?? .menuBar {
+    @Published var presentation = AppPresentationStore.resolve() {
         didSet {
             guard presentation != oldValue else { return }
-            UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
+            UserDefaults.standard.set(presentation.rawValue, forKey: AppPresentationStore.key)
             applyActivationPolicy()
             // Live switch: create/destroy the single status item right here,
             // rather than only reading the setting at launch — this is the
@@ -590,6 +596,7 @@ final class SenderController: ObservableObject {
     @Published var sessions: [DeviceSession] = [] {
         // Clipboard grants and transfers end with their session.
         didSet {
+            macLockMonitor?.setPolling(!sessions.isEmpty)
             ClipboardHub.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.shared.retain(sessionIDs: Set(sessions.map(\.id)))
             PrivacyShield.releaseRemoteInput = { [weak self] in
@@ -1106,8 +1113,9 @@ final class SenderController: ObservableObject {
     }
 
     init() {
-        // Window mode turned Stage Manager off and the app didn't get to turn it back on.
-        StageManagerSwitch.inBackground { StageManagerSwitch.restoreIfTurnedOffByUs() }
+        // Window mode turned Stage Manager off and the app didn't get to turn it back on: it comes
+        // back on after the grace period (unless a device starts Window mode again first).
+        StageManagerController.shared.appLaunched()
         _ = TrustStore.shared.ownIdentity()
         ClipboardHub.shared.anySessionHasEffectiveInput = { [weak self] in self?.anySessionHasEffectiveInput ?? true }
         pairingPrompt.ownerAuthenticator = LocalOwnerAuthenticator()
@@ -1116,6 +1124,7 @@ final class SenderController: ObservableObject {
         if keepMacAvailableRequested { keepMacAvailableActive = keepAssertionEnable() }
         startObservingPhysicalDisplayAvailability()
         observeLoginSessionSwitching()
+        observeMacLock()
         pairingObservation = pairingPrompt.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -1274,6 +1283,29 @@ final class SenderController: ObservableObject {
                                  (NSWorkspace.sessionDidResignActiveNotification, false)].map { name, onConsole in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.loginSessionConsoleChanged(onConsole: onConsole) }
+            }
+        }
+    }
+
+    /// Lock screen privacy (`MacLockMonitor`): every session hears each change at once.
+    private var macLockMonitor: MacLockMonitor?
+
+    private func observeMacLock() {
+        let monitor = MacLockMonitor { [weak self] state in self?.macLockChanged(state) }
+        monitor.start()
+        monitor.setPolling(!sessions.isEmpty)
+        macLockMonitor = monitor
+    }
+
+    private func macLockChanged(_ state: MacScreenPrivacy) {
+        for session in sessions {
+            session.sender.macPrivacyChanged(state)
+            // A Request Control prompt nobody can answer behind the lock screen is retired (no
+            // Not Now cooldown), and its receiver hears no at once; it can ask after the unlock.
+            if !state.allowsContent, session.inputControlRequest.isPending {
+                session.inputControlRequest.invalidatePending()
+                inputControlPrompt.cancelForEndedSession(id: session.id)
+                session.sender.denySessionInput(state: .notAllowed)
             }
         }
     }
@@ -2877,6 +2909,11 @@ final class SenderController: ObservableObject {
         }
         sender.onDisplayModeRequest = { [weak self, weak session] requestedMode in
             guard let self, let session, self.owns(session) else { return }
+            // Locked, switching to Mirror for the lock screen: an Ask device's pre-lock control
+            // goes with it, once (`LockScreenGrantHandoffs`).
+            if requestedMode == .mirror, session.displayAssignment.mode != .mirror {
+                self.issueLockScreenHandoff(for: session)
+            }
             // This receiver's own Mirror/Extend control: this device only.
             self.requestMode(CaptureMode(requestedMode), for: session)
         }
@@ -2972,6 +3009,7 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            self.pushLockScreenPermit(to: session)
             // The MEOW application handshake just completed on this live
             // connection — this, not Bonjour or a merely-open socket, is
             // what makes the device an Active Display.
@@ -3698,7 +3736,70 @@ final class SenderController: ObservableObject {
         let applied = ReceiverInputAuthorizationStore.setPolicy(
             policy, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
         objectWillChange.send()
+        if applied {
+            lockScreenHandoffs.revoke(peerID: peerID)
+            pushLockScreenPermit(peerID: peerID)
+        }
         return applied
+    }
+
+    /// Allow Lock Screen Control for one device (SECURITY.md "Lock screen control"). Turning it on
+    /// is refused while any session has effective input, like widening to Always Allow; turning it
+    /// off is always applied and ends that device's lock screen view at once.
+    @discardableResult
+    func setLockScreenControlAllowed(_ allowed: Bool, peerID: String) -> Bool {
+        let applied = ReceiverInputAuthorizationStore.setLockScreenControlAllowed(
+            allowed, peerID: peerID, anySessionHasEffectiveInput: anySessionHasEffectiveInput)
+        objectWillChange.send()
+        if applied {
+            if !allowed { lockScreenHandoffs.revoke(peerID: peerID) }
+            pushLockScreenPermit(peerID: peerID)
+        }
+        return applied
+    }
+
+    func lockScreenControlAllowed(peerID: String) -> Bool {
+        ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID)
+    }
+
+    /// Each live session of this device learns its input policy and Allow Lock Screen Control.
+    private func pushLockScreenPermit(peerID: String) {
+        for session in sessions where session.deviceID == peerID { pushLockScreenPermit(to: session) }
+    }
+
+    private func pushLockScreenPermit(to session: DeviceSession) {
+        guard let peerID = session.deviceID else { return }
+        session.sender.setLockScreenPermit(policy: ReceiverInputAuthorizationStore.policy(peerID: peerID),
+                                           allowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID),
+                                           handoff: lockScreenHandoffs.isValid(lockScreenHandoffCheck(peerID: peerID)))
+    }
+
+    // MARK: Lock screen control: an Ask device's pre-lock control across the switch to Mirror
+
+    /// Mac-internal, single-use, ≤10 s, bound to the device's pinned key and this lock episode
+    /// (`LockScreenGrantHandoffs`). Never on the wire.
+    private var lockScreenHandoffs = LockScreenGrantHandoffs()
+
+    /// The device as its pin says now, and this Mac's lock state now.
+    private func lockScreenHandoffCheck(peerID: String) -> LockScreenGrantHandoffs.Check {
+        LockScreenGrantHandoffs.Check(peerID: peerID, pinnedKey: TrustStore.shared.pin(peerID: peerID),
+                                      lockEpisode: MacPrivacyGate.shared.lockEpisode,
+                                      privacy: MacPrivacyGate.shared.state,
+                                      onConsole: LoginSessionConsole.shared.isOnConsole,
+                                      now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// The device asked to switch this session to Mirror. Issued only for an Ask device whose
+    /// identity this connection proved, while locked, with Allow Lock Screen Control on and a live
+    /// grant a person gave before the lock; otherwise any old ticket is dropped.
+    private func issueLockScreenHandoff(for session: DeviceSession) {
+        guard let peerID = session.deviceID else { return }
+        let issued = lockScreenHandoffs.issue(
+            lockScreenHandoffCheck(peerID: peerID),
+            policy: ReceiverInputAuthorizationStore.policy(peerID: peerID),
+            lockScreenControlAllowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID),
+            sessionGranted: session.sender.hasSessionInputGrant)
+        if issued { Log.info("lockScreen: control handoff issued for the switch to Mirror") }
     }
 
     /// Mac owner manually revokes an active session's control grant from
@@ -3864,12 +3965,27 @@ final class SenderController: ObservableObject {
     /// `MacSender.grantSessionInput(generation:)`).
     func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64) {
         guard let peerID = session.deviceID else { return }
+        let policy = ReceiverInputAuthorizationStore.policy(peerID: peerID)
+        let screenLocked = !MacPrivacyGate.shared.allowsInput
+        let onConsole = LoginSessionConsole.shared.isOnConsole
+        // An Ask device's first request on the new Mirror connection spends its handoff ticket,
+        // granted or not; re-checked here against the pin, the lock episode and the console.
+        var handoff = false
+        if screenLocked, policy == .ask, allowInput, onConsole,
+           lockScreenHandoffs.tickets[peerID] != nil {
+            handoff = lockScreenHandoffs.redeem(lockScreenHandoffCheck(peerID: peerID))
+                && ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: peerID)
+            Log.info("lockScreen: control handoff \(handoff ? "redeemed" : "refused")")
+            pushLockScreenPermit(to: session)   // spent: no longer offered as `needsControl`
+        }
         // Mac-wide master off (the owner already said no globally) or this
         // login session switched out: never surface a prompt for a request
         // that can't succeed (`InputControlRequestRoute`).
         switch InputControlRequestRoute.route(masterEnabled: allowInput,
-                                              onConsole: LoginSessionConsole.shared.isOnConsole,
-                                              policy: ReceiverInputAuthorizationStore.policy(peerID: peerID)) {
+                                              onConsole: onConsole,
+                                              screenLocked: screenLocked,
+                                              lockScreenHandoff: handoff,
+                                              policy: policy) {
         case .deny(let state):
             session.sender.denySessionInput(state: state)
         case .grant:

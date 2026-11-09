@@ -219,6 +219,18 @@ final class ReceiverUISink: Sendable {
         target?.applyInputResetBump()
     }
 
+    func publishFreshFrameSinceVideoReset(_ fresh: Bool) {
+        target?.applyFreshFrameSinceVideoReset(fresh)
+    }
+
+    func publishMacLock(_ notice: MacLockNotice) {
+        target?.applyMacLockUpdate(notice)
+    }
+
+    func publishLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
+        target?.applyLockScreenInputRefusal(refusal)
+    }
+
     func publishAllowInputStateChange(_ state: SessionInputWireState) {
         target?.applyAllowInputStateChangeUpdate(state)
     }

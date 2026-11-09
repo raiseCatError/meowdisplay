@@ -75,6 +75,10 @@ struct ReceiverScreen: View {
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     // M4: the native keyboard responder is focused only while this is true.
     @State private var keyboardActive = false
+    /// Which keyboard `keyboardActive` opened: the lock screen's (true) or the ordinary one. Fixed
+    /// when it opens, so ownership never passes from one to the other while it stays open (the
+    /// lock screen ending must not hand the ordinary keyboard a moment of focus).
+    @State private var keyboardForLockScreen = false
     /// "Switch to Window view?" answered (either way) for this launch.
     @State private var windowPromptAnswered = false
     /// Mirror or Extend, whichever showed last: where "View Full Screen" returns from Window mode.
@@ -128,6 +132,13 @@ struct ReceiverScreen: View {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
 
+    /// The keyboard's place for the controls and the Mac: what the surface reported, only while
+    /// this keyboard is open and that surface is shown (`SoftwareKeyboardPresence`).
+    private var shownKeyboardRect: CGRect? {
+        SoftwareKeyboardPresence.visibleRect(reported: keyboardVisibleRect, keyboardActive: keyboardActive,
+                                             surfaceShown: showsReceiverSurface)
+    }
+
     private var route: ReceiverPresentationRoute {
         .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface, presentation: model.presentation)
     }
@@ -157,8 +168,26 @@ struct ReceiverScreen: View {
 
     /// A connected session on screen: the Settings control's hold opens Session Actions.
     private var sessionActionsAvailable: Bool {
-        ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
-                                               sessionOnScreen: route == .receiver)
+        !lockScreenShowing && ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
+                                                                    sessionOnScreen: route == .receiver)
+    }
+
+    /// The Mac's own lock screen is up on this device and playing: only the picture and a small
+    /// banner show. Until video is on, the locked cover stays (`MacLockedCoverPolicy`).
+    private var lockScreenShowing: Bool {
+        MacLockedCoverPolicy.showsLockScreen(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                             videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
+    }
+
+    /// The opaque locked cover is up, including through Show Lock Screen's switch to Full Desktop,
+    /// and over the Mac's lock screen whenever the app isn't active (app switcher snapshot,
+    /// Control Center, a call), so no picture of it (its password dots) is kept or shown there.
+    private var macLockedCoverShowing: Bool {
+        if scenePhase != .active, model.receiver.macLock != nil { return true }
+        return MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                        videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
     }
 
     private var sessionActionsAnimation: Animation {
@@ -185,6 +214,11 @@ struct ReceiverScreen: View {
         UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
 
+    private func endLockMacFlow() {
+        model.workspace.cancelLockMac()
+        model.workspace.clearLockMacStatus()
+    }
+
     private func chooseSessionAction(_ action: ReceiverSessionAction) {
         var next = sessionActions
         guard let outcome = next.choose(action) else { return }
@@ -198,6 +232,8 @@ struct ReceiverScreen: View {
             } else if reopenKeyboard, keyboardAvailable, inputReachesMac {
                 keyboardActive = true
             }
+        case .lockMac:
+            model.workspace.beginLockMac()
         case .disconnect:
             // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
             model.receiver.disconnect()
@@ -264,6 +300,24 @@ struct ReceiverScreen: View {
             voiceOverRunning: voiceOverEnabled) ? .all : []
     }
 
+    /// What tucked floating windows' edge handles give way to, in global coordinates: the
+    /// screen (the system's own edge gestures start at its top and bottom), the controls
+    /// (control tray, function tray, shortcut column, keypads, calculator), folds, and Stage
+    /// Peek's edge handle, placed from the very values Stage Peek places it with. Stage Peek
+    /// itself doesn't dodge the handles, so neither chases the other along an edge.
+    private func workspaceEdgeReservations(geo: GeometryProxy, canvas: CGRect, peekSafe: CGRect, peekAvoiding: [CGRect],
+                                           reservedRegions: [ControlReservedRegion]) -> WorkspaceEdgeReservations {
+        let origin = geo.frame(in: .global).origin
+        var controls = occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions)
+        if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
+           let strip = StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding) {
+            controls.append(strip.offsetBy(dx: canvas.minX, dy: canvas.minY))
+        }
+        return WorkspaceEdgeReservations(
+            screen: CGRect(origin: origin, size: geo.size),
+            controls: controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) })
+    }
+
     /// Where Window view's chrome goes, in screen coordinates (issue #92).
     /// `drawn` is where the picture actually is: with the on-screen keyboard
     /// up, the video slides (and with Zoom While Typing, scales) to keep the
@@ -300,7 +354,8 @@ struct ReceiverScreen: View {
             rendersThroughDisplayLayer: !metalRenderer,
             receiverSurfaceShown: showsReceiverSurface,
             sessionPhase: model.receiver.session.phase,
-            videoEnabled: model.receiver.videoEnabled,
+            // Nothing goes to Picture in Picture while the Mac is locked (its lock screen included).
+            videoEnabled: model.receiver.videoEnabled && model.receiver.macLock == nil,
             sessionOnHome: model.presentation.keepsSessionOnHome)
     }
 
@@ -425,6 +480,8 @@ struct ReceiverScreen: View {
                                    receiver: model.receiver,
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
+                                   lockScreenShowing: lockScreenShowing,
+                                   freshFrame: model.receiver.freshFrameSinceVideoReset,
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
@@ -520,8 +577,10 @@ struct ReceiverScreen: View {
                         }
                         .allowsHitTesting(false)   // never block touch input
                     }
+                    // The ordinary keyboard never types on the Mac's lock screen: that has its own.
                     RemoteKeyboardInputView(
-                        isActive: $keyboardActive,
+                        isActive: Binding(get: { keyboardActive && !keyboardForLockScreen && !lockScreenShowing },
+                                          set: { keyboardActive = $0 }),
                         onCommitText: { commitKeyboardText($0) },
                         onSpecialPress: { usage in
                             model.receiver.sendKeyboardPress(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
@@ -541,15 +600,46 @@ struct ReceiverScreen: View {
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    // The Mac's lock screen: a bare key input (no predictions, AutoFill or echo),
+                    // its keys tagged for the lock screen, no chord modifiers.
+                    LockScreenKeyInputView(
+                        isActive: keyboardActive && keyboardForLockScreen && lockScreenShowing,
+                        onText: { model.receiver.sendKeyboardText($0) },
+                        onReturn: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue)) },
+                        onDelete: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardDeleteOrBackspace.rawValue)) },
+                        onRequestDismiss: { keyboardActive = false })
+                    .frame(width: 1, height: 1)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+                    if !lockScreenShowing {
                     // Window mode: tile chrome and the window rail over the picture,
                     // under the MeowDisplay controls (which stay on top).
                     let picture = workspacePicture(canvas: canvas)
+                    // Stage Peek's safe area and what it keeps clear of (overlay coordinates): the
+                    // same values place its edge handle and reserve it from tucked floats' handles.
+                    let peekSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
+                                          width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
+                                          height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
+                        .intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                    let peekAvoiding = (occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                        .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
+                    let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
+                                                                     peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
+                    // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
+                    // too) and a docked keyboard (its visible rect is in the canvas's coordinates).
+                    let keyboardCover = shownKeyboardRect.map { visible -> CGRect in
+                        let top = canvas.minY + visible.maxY
+                        return CGRect(x: canvas.minX, y: top, width: canvas.width, height: max(0, geo.size.height - top))
+                    }
                     WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
                                         layoutPicture: picture.layout, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                        controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
                                         onSettings: { showSettings = true },
                                         onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
+                        .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
+                        .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)
@@ -560,7 +650,7 @@ struct ReceiverScreen: View {
                         keyboardActive: $keyboardActive,
                         showSettings: $showSettings,
                         keyboardAvailable: keyboardAvailable,
-                        keyboardVisibleRect: keyboardVisibleRect,
+                        keyboardVisibleRect: shownKeyboardRect,
                         containerSize: geo.size,
                         safeInsets: effectiveSafeInsets,
                         notchSide: physicalNotchSide,
@@ -580,7 +670,7 @@ struct ReceiverScreen: View {
                         } : nil
                         let promptCentre = clearOfFolds(
                             CGPoint(x: paneAnchor?.x ?? canvas.midX,
-                                    y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
+                                    y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76),
                             size: CGSize(width: 260, height: 44), container: geo.size,
                             regions: reservedRegions)
@@ -606,17 +696,12 @@ struct ReceiverScreen: View {
                         // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
                         // Opening, browsing, searching and expanding never change the mode; only
                         // tapping a window switches (to Window mode, with that window).
-                        let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
-                                                width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
-                                                height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
                         StagePeekOverlay(
                             model: model.workspace,
                             edge: controlStore.preferences.stagePeekEdge,
                             frame: canvas,
-                            safe: screenSafe.intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY),
-                            avoiding: (occupiedControlFrames
-                                       + ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                            safe: peekSafe,
+                            avoiding: peekAvoiding,
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             dock: controlStore.preferences.stagePeekDock,
@@ -643,6 +728,7 @@ struct ReceiverScreen: View {
                                        onMirror: { model.receiver.requestDisplayMode(.mirror) },
                                        onExtend: { model.receiver.requestDisplayMode(.extend) },
                                        safeInsets: effectiveSafeInsets.edgeInsets)
+                    }
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
                                        keyboardActive: $keyboardActive,
@@ -685,8 +771,10 @@ struct ReceiverScreen: View {
                 let host = model.workspace.hostName
                 SessionActionsOverlay(
                     macName: host.isEmpty ? String(localized: "your Mac") : host,
+                    workspace: model.workspace,
                     actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
-                                                                  presentation: model.presentation),
+                                                                  presentation: model.presentation,
+                                                                  canLockMac: model.workspace.canLockMac),
                     onAction: { chooseSessionAction($0) },
                     onCancel: { dismissSessionActions() })
                 .transition(.opacity)
@@ -703,6 +791,12 @@ struct ReceiverScreen: View {
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
         .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }
+        // Lock Mac: closing or opening the overlay, or leaving Settings, ends any wait and clears an old result.
+        .onChange(of: sessionActions.isPresented) { _ in endLockMacFlow() }
+        .onChange(of: showSettings) { shown in if !shown { endLockMacFlow() } }
+        // The Mac's answer to Request Control, or the session going away, moves the Lock Mac flow on.
+        .onChange(of: controlStore.sessionInputState) { _ in model.workspace.lockFlowInputsChanged() }
+        .onChange(of: model.receiver.session.allowsLiveInput) { _ in model.workspace.lockFlowInputsChanged() }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()
@@ -771,6 +865,32 @@ struct ReceiverScreen: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .modifier(WorkspaceDragGuard(model: model.workspace))
+        // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
+        .overlay {
+            if macLockedCoverShowing {
+                MacLockedCover(notice: MacLockedCoverPolicy.coverNotice(model.receiver.macLock),
+                               macName: model.workspace.hostName,
+                               lockFlow: model.lockScreenFlow,
+                               onShowLockScreen: { model.showLockScreen() },
+                               onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
+                               onDisconnect: { model.receiver.disconnect() })
+                    .transition(.opacity)
+            }
+        }
+        // The Mac said its own lock screen is up here: the picture shows (fresh frames), plus this.
+        .overlay(alignment: .top) {
+            if lockScreenShowing {
+                LockScreenBanner(keyboardAvailable: keyboardAvailable && inputReachesMac,
+                                 onKeyboard: { if keyboardAvailable, inputReachesMac { keyboardActive.toggle() } },
+                                 onHide: { keyboardActive = false; model.hideLockScreen() })
+                    .padding(.top, 8)
+                    .transition(slideTransition(from: .top))
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
+        // Leaving the app: the cover is there at once (no fade), before iOS takes its snapshot.
+        .animation(scenePhase == .active ? .easeOut(duration: 0.15) : nil, value: macLockedCoverShowing)
         .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {
@@ -784,6 +904,37 @@ struct ReceiverScreen: View {
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
         }
+        // The lock screen going away (Hide, or the Mac unlocking) closes the keyboard it opened.
+        .onChange(of: lockScreenShowing) { showing in
+            // Either way the open keyboard closes: the ordinary one never types on the lock
+            // screen, and the lock screen's never types on the desktop.
+            keyboardActive = false
+            _ = showing
+        }
+        .onChange(of: keyboardActive) { active in
+            keyboardForLockScreen = active && lockScreenShowing
+        }
+        // The Mac locked: whatever keyboard was open closes (the cover is up).
+        .onChange(of: model.receiver.macLock != nil) { locked in
+            if locked { keyboardActive = false }
+        }
+        // Keystrokes the Mac refused (typed for the lock screen after it unlocked, for example):
+        // said in one line, never silently lost.
+        .overlay(alignment: .top) {
+            if let notice = model.lockScreenInputNotice {
+                Label(notice, systemImage: "keyboard.badge.exclamationmark")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 60)
+                    .transition(slideTransition(from: .top))
+                    .accessibilityAddTraits(.isStaticText)
+                    .accessibilityIdentifier("lockScreenInputNotice")
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.lockScreenInputNotice)
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
         .fullScreenCover(item: Binding(get: { requiredUpdate }, set: { _ in })) { update in
@@ -841,7 +992,11 @@ struct ReceiverScreen: View {
                 model.sceneDidActivate()
                 // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
                 model.workspace.clipboard.checkLocal(automatic: true)
-            case .background: model.sceneDidBackground()
+            case .background:
+                // The Mac's lock screen isn't left live behind the app: it ends (the cover is
+                // already up while inactive), and the Mac sends no more of its frames.
+                if lockScreenShowing || model.lockScreenFlow.isShowing { model.hideLockScreen() }
+                model.sceneDidBackground()
             default: break
             }
             // M4: never hold the keyboard responder while backgrounded.
@@ -866,8 +1021,13 @@ struct ReceiverScreen: View {
         // Caret-following Zoom While Typing: the Mac reads the focused text
         // caret only while the keyboard is up (a Mac that predates it never
         // gets this message).
-        .onChange(of: keyboardVisibleRect != nil) { open in
+        .onChange(of: shownKeyboardRect != nil) { open in
             model.receiver.sendKeyboardState(open: open)
+        }
+        // A closed keyboard leaves no place behind, even if the surface that reported it was
+        // rebuilt meanwhile and couldn't say it closed (unlocking from the lock screen).
+        .onChange(of: keyboardActive) { active in
+            if !active { keyboardVisibleRect = nil }
         }
         // Resume reopens the keyboard that was open when Home was chosen.
         .onChange(of: model.presentation.surfaceInteractive) { interactive in
@@ -2297,6 +2457,98 @@ final class ReceiverModel: ObservableObject {
     private var started = false
     private var cancellables = Set<AnyCancellable>()
 
+    // MARK: Show Lock Screen (PROTOCOL.md 6.19)
+    // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
+    // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
+    @Published private(set) var lockScreenFlow = LockScreenFlow() {
+        didSet { syncLockScreenInputTag() }
+    }
+    /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
+    private var lockScreenReturnsToExtend = false
+    /// Going back to Extend waits for video (the receiver can't ask for Extend while the locked
+    /// Mac says video is off): retried once it's on.
+    private var lockScreenExtendReturnPending = false
+    /// The Mac Show Lock Screen started on. Another Mac on the connection stops the flow (fail
+    /// closed): nothing is asked of, or switched on, a Mac the user didn't start it with.
+    private var lockScreenMacID: String?
+    /// "N keystrokes weren't sent: …" (`lockScreenInputRefused`), shown briefly.
+    @Published private(set) var lockScreenInputNotice: String?
+    private var lockScreenRefusalTotal: (refusal: LockScreenInputRefusal, at: Date)?
+    private var lockScreenNoticeGeneration = 0
+
+    func showLockScreen() {
+        lockScreenMacID = receiver.connectedMacPeerID
+        perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
+    }
+
+    func hideLockScreen() {
+        perform(lockScreenFlow.hide(now: Date()))
+    }
+
+    private func lockScreenInputsChanged() {
+        if receiver.connected, let current = receiver.connectedMacPeerID, lockScreenFlow.phase != .idle {
+            if let started = lockScreenMacID, started != current {
+                Log.info("lockScreen: another Mac on the connection — stopped")
+                lockScreenFlow.abandon()
+                lockScreenReturnsToExtend = false
+                lockScreenExtendReturnPending = false
+                lockScreenMacID = nil
+                return
+            }
+            if lockScreenMacID == nil { lockScreenMacID = current }
+        }
+        perform(lockScreenFlow.update(notice: receiver.macLock, connected: receiver.connected, now: Date()))
+        if lockScreenExtendReturnPending, receiver.connected, receiver.videoEnabled, receiver.macLock == nil {
+            lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+        }
+        syncLockScreenInputTag()
+    }
+
+    /// Input leaves tagged with the lock screen view exactly while this device shows it (asked
+    /// here, and the Mac says `active` with that view's number): the Mac then takes it on that
+    /// view only, never on the desktop or another view. While the Mac is locked otherwise, the
+    /// receiver tags it without a view (never delivered).
+    private func syncLockScreenInputTag() {
+        let shown = (receiver.macLock?.showsMacLockScreen ?? false) && lockScreenFlow.isShowing
+        receiver.setLockScreenInputView(shown ? receiver.macLock?.lockScreenView : nil)
+    }
+
+    private func lockScreenInputRefused(_ refusal: LockScreenInputRefusal) {
+        let now = Date()
+        var total = refusal
+        if let last = lockScreenRefusalTotal, now.timeIntervalSince(last.at) < 3 { total = last.refusal.adding(refusal) }
+        lockScreenRefusalTotal = (total, now)
+        lockScreenInputNotice = total.notice
+        lockScreenNoticeGeneration &+= 1
+        let generation = lockScreenNoticeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.lockScreenNoticeGeneration == generation else { return }
+            self.lockScreenInputNotice = nil
+        }
+    }
+
+    private func perform(_ action: LockScreenAction) {
+        switch action {
+        case .none: break
+        case .requestControl: receiver.requestAllowInput(true)
+        case .switchToFullDesktop:
+            // Mirror: the main display, where macOS shows its login window (Extend's display
+            // would show only its wallpaper).
+            lockScreenReturnsToExtend = !workspace.windowMode && receiver.confirmedDisplayMode == .extend
+            if !receiver.requestDisplayMode(.mirror) { lockScreenFlow.couldNotPerform() }
+        case .show(let show): receiver.requestLockScreen(show: show)
+        case .returnToWindowView:
+            // Back to where Show Lock Screen started: Window view, or Extend (after an unlock, or
+            // after a failed or refused attempt). Never on another Mac (`lockScreenInputsChanged`).
+            if lockScreenReturnsToExtend {
+                lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+            } else {
+                _ = receiver.requestWindowMode()
+            }
+            lockScreenReturnsToExtend = false
+        }
+    }
+
     init() {
         // maximumFramesPerSecond reports this specific screen's real
         // hardware ceiling (60 on a standard panel, up to 120 on ProMotion)
@@ -2343,6 +2595,33 @@ final class ReceiverModel: ObservableObject {
             guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
             return state.displays.first { $0.uuid == chosen }
         }
+        receiver.$macLock
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$videoEnabled
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$lockScreenInputRefusal
+            .compactMap { $0?.refusal }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] refusal in self?.lockScreenInputRefused(refusal) }
+            .store(in: &cancellables)
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Waiting: time out. Failed while switching: an unlock still takes it back.
+                if self.lockScreenFlow.isWaiting || self.lockScreenFlow.returnToWindowView { self.lockScreenInputsChanged() }
+            }
+            .store(in: &cancellables)
         receiver.$connected
             .removeDuplicates()
             .filter { !$0 }
@@ -2583,6 +2862,9 @@ struct VideoLayerView: UIViewRepresentable {
     /// last touch when the keyboard opens if true; pans (never zooms) if
     /// false. Either way the typing area still ends up visible.
     let zoomWhileTyping: Bool
+    var lockScreenShowing = false
+    /// `StreamReceiver.freshFrameSinceVideoReset`: false clears the Metal renderer's last picture.
+    var freshFrame = true
     /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
     /// reacts to keyboard-frame notifications while this is true, so a
     /// keyboard opened for an unrelated text field elsewhere in the app
@@ -2664,6 +2946,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.observeLockScreenInputBoundary(receiver)
         view.threeFingerHoldEnabled = threeFingerHoldEnabled
         view.onThreeFingerHold = onThreeFingerHold
         view.onHardwarePointer = onHardwarePointer
@@ -2816,6 +3099,8 @@ struct VideoLayerView: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
+        uiView.setLockScreenShowing(lockScreenShowing)
+        if !freshFrame { uiView.metalRenderer?.clear() }
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
@@ -2866,6 +3151,17 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+        private var lockScreenInputBoundary: AnyCancellable?
+
+        /// A new lock episode (PROTOCOL.md 6.19): every touch, drag, scroll and its momentum,
+        /// Pencil stroke, gesture and held hardware key or button ends here, synchronously, while
+        /// the old tag still applies, so nothing started on the lock screen goes on on the desktop
+        /// after an unlock (or the other way round).
+        func observeLockScreenInputBoundary(_ receiver: StreamReceiver) {
+            lockScreenInputBoundary = receiver.lockScreenInputBoundary.sink { [weak self] in
+                self?.clearInputStateForPause()
+            }
+        }
 
         // MARK: Window mode and hardware pointer/keyboard (HID-B)
 
@@ -3060,10 +3356,15 @@ struct VideoLayerView: UIViewRepresentable {
         private var keyboardVisibleRect: CGRect? {
             didSet {
                 // A closed keyboard forgets the caret: the next session starts
-                // from the Mac's first reading, not a stale one.
+                // from the Mac's first reading, not a stale one. It also drops
+                // the typing reveal, so the picture returns to exactly the
+                // zoom and pan the user had.
                 if keyboardVisibleRect == nil {
-                    textCaret = nil
+                    typingFocus.keyboardClosed()
                     lastCaretBase = nil
+                    typingReveal = .zero
+                } else {
+                    typingRevealNeedsUpdate = true
                 }
             }
         }
@@ -3102,12 +3403,24 @@ struct VideoLayerView: UIViewRepresentable {
         // simply never call the note*Anchor* methods below).
         private var lastAnchor: CGPoint?
         // The Mac's focused text caret, normalized to the remote display
-        // (`textCaret` wire message). While known it replaces the touch anchor
-        // as the typing focus, on both axes; `lastCaretBase` is the picture
-        // placement it produced, so it only moves once the caret leaves the
-        // comfortable inner region (`RemoteViewportCalculator.keyboardOpen`).
-        private var textCaret: CGRect?
+        // (`textCaret` wire message), and which of it or the last touch steers
+        // the view (`TypingFocus`). While it steers, the caret replaces the
+        // touch anchor on both axes; `lastCaretBase` is the picture placement
+        // it produced, so it only moves once the caret leaves the comfortable
+        // inner region (`RemoteViewportCalculator.keyboardOpen`).
+        private var typingFocus = TypingFocus()
         private var lastCaretBase: CGRect?
+        // With the keyboard open over a picture the user zoomed or panned by
+        // hand: how far it is moved so the typing location shows above the
+        // keyboard (`RemoteViewportCalculator.typingRevealOffset`). Added on
+        // top of `manualZoom`, never folded into it, and zero again once the
+        // keyboard closes. Recomputed only when the typing location, the
+        // keyboard or the view's size changes — never while a pinch or Move
+        // View gesture is under way, so it can't pull the picture from under
+        // the fingers.
+        private var typingReveal = CGVector.zero
+        private var typingRevealNeedsUpdate = false
+        private var typingRevealBoundsSize = CGSize.zero
         // True only while layoutSubviews is running inside the UIView.animate
         // block a keyboard-frame change (or a live preference toggle) drives
         // — lets the content layer's geometry inherit that animation instead
@@ -3252,7 +3565,7 @@ struct VideoLayerView: UIViewRepresentable {
             let points = navigationTouches.values
                 .sorted { ObjectIdentifier($0).hashValue < ObjectIdentifier($1).hashValue }
                 .map { $0.location(in: self) }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             var next = navigationSession.update(points: points, current: manualZoom, base: base,
                                                 allowsZoom: true,
                                                 allowsRotation: rotateTarget == .viewport)
@@ -3667,16 +3980,36 @@ struct VideoLayerView: UIViewRepresentable {
         /// The Mac's text caret changed (nil: none known). Re-targets the
         /// open keyboard's viewport with the same short ease as an anchor change.
         func setTextCaret(_ caret: CGRect?) {
-            guard caret != textCaret else { return }
+            retargetTyping { $0.caretReported(caret) }
+        }
+
+        /// Applies a change to the typing focus and, with the keyboard open,
+        /// eases the picture to it. Most caret moves stay inside the
+        /// comfortable region and leave the picture where it is: only a real
+        /// change animates.
+        private func retargetTyping(_ change: (inout TypingFocus) -> Void) {
+            var next = typingFocus
+            change(&next)
+            guard next != typingFocus else { return }
             guard keyboardVisibleRect != nil else {
-                textCaret = caret
+                typingFocus = next
                 return
             }
-            // Most caret moves stay inside the comfortable region and leave
-            // the picture where it is: only animate a real change.
-            let before = unzoomedBaseTransform().displayedRect
-            textCaret = caret
-            guard unzoomedBaseTransform().displayedRect != before else { return }
+            let before = presentationBase().displayedRect
+            typingFocus = next
+            typingRevealNeedsUpdate = true
+            guard presentationBase().displayedRect != before else { return }
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        /// The Mac's own lock screen is what this surface shows: with the keyboard open, all of it
+        /// is fitted above the keyboard (`RemoteViewportCalculator.lockScreenKeyboardOpen`).
+        private var lockScreenShowing = false
+
+        func setLockScreenShowing(_ showing: Bool) {
+            guard showing != lockScreenShowing else { return }
+            lockScreenShowing = showing
+            guard keyboardVisibleRect != nil else { return }   // only matters while open
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3684,6 +4017,7 @@ struct VideoLayerView: UIViewRepresentable {
             guard enabled != zoomWhileTypingEnabled else { return }
             zoomWhileTypingEnabled = enabled
             guard keyboardVisibleRect != nil else { return }   // only matters while open
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3855,7 +4189,9 @@ struct VideoLayerView: UIViewRepresentable {
         /// visibly changing yet.
         private func setAnchor(_ normalized: CGPoint) {
             lastAnchor = normalized
+            typingFocus.touched()
             guard keyboardVisibleRect != nil else { return }
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3965,7 +4301,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func updateCurrentTransform() {
-            let base = unzoomedBaseTransform()
+            let base = presentationBase()
             currentTransform = VideoInteractionPolicy.viewportTransform(
                 base: base, state: manualZoom, videoEnabled: videoEnabled)
             keyboardPictureTarget = keyboardVisibleRect != nil && videoEnabled && base.isValid
@@ -4021,11 +4357,55 @@ struct VideoLayerView: UIViewRepresentable {
                 transform: layer.affineTransform(), remoteCrop: currentTransform.remoteCrop) ?? currentTransform
         }
 
+        /// `unzoomedBaseTransform` moved by `typingReveal`: what manual zoom
+        /// is composed on, in `updateCurrentTransform` and in the pinch and
+        /// Move View gestures alike, so a touch maps to where the picture is
+        /// drawn. Moving the base moves the zoomed picture by the same amount
+        /// (manual zoom's clamp depends only on the base's size).
+        private func presentationBase() -> RemoteViewportTransform {
+            let base = unzoomedBaseTransform()
+            guard base.isValid, let keyboardVisibleRect, videoEnabled, !lockScreenShowing,
+                  workspacePinch == nil, !manualZoom.isIdentity else {
+                // Nothing to reveal: the keyboard-open base already shows the
+                // typing location. A zoom the user pinches in from here is
+                // theirs until the typing location or the keyboard changes.
+                typingReveal = .zero
+                typingRevealNeedsUpdate = false
+                return base
+            }
+            if bounds.size != typingRevealBoundsSize {
+                typingRevealBoundsSize = bounds.size
+                typingRevealNeedsUpdate = true
+            }
+            if typingRevealNeedsUpdate, !manualViewportGestureActive {
+                typingRevealNeedsUpdate = false
+                if let focus = typingFocusRect {
+                    typingReveal = RemoteViewportCalculator.typingRevealOffset(
+                        of: RemoteViewportCalculator.applyManualZoom(to: base, state: manualZoom),
+                        focus: focus, visibleRect: keyboardVisibleRect, current: typingReveal)
+                }
+            }
+            return base.offsetBy(typingReveal)
+        }
+
+        /// The typing location for `typingReveal`: the caret that steers, or
+        /// the last touch as a point.
+        private var typingFocusRect: CGRect? {
+            if let caret = typingFocus.steeringCaret { return caret }
+            return lastAnchor.map { CGRect(origin: $0, size: .zero) }
+        }
+
+        /// A pinch or Move View gesture is moving the picture right now.
+        private var manualViewportGestureActive: Bool {
+            if navigationSession.touchCount > 0 { return true }
+            guard let recognizer = twoFingerRecognizer, recognizer.intent == .viewportZoomPan else { return false }
+            return recognizer.state == .began || recognizer.state == .changed
+        }
+
         /// The normal or keyboard-adjusted presentation, *before* manual
-        /// zoom/pan — the fixed reference frame both `updateCurrentTransform`
-        /// and the live pinch/pan gesture (`manualZoomGestureBase`) compose
-        /// on top of, so there is exactly one place that decides between
-        /// `.normal`/`.keyboardOpen`.
+        /// zoom/pan and the typing reveal — the fixed reference frame
+        /// `presentationBase` moves, so there is exactly one place that
+        /// decides between `.normal`/`.keyboardOpen`.
         private func unzoomedBaseTransform() -> RemoteViewportTransform {
             guard let video = receiver?.videoSize, video != .zero,
                   bounds.width > 0, bounds.height > 0 else {
@@ -4063,13 +4443,18 @@ struct VideoLayerView: UIViewRepresentable {
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
                     displayedRect: rect)
             }
+            if let keyboardVisibleRect, lockScreenShowing {
+                lastCaretBase = nil
+                return RemoteViewportCalculator.lockScreenKeyboardOpen(
+                    viewBounds: bounds, remoteAspectSize: video, visibleRect: keyboardVisibleRect)
+            }
             if let keyboardVisibleRect {
                 let base = RemoteViewportCalculator.keyboardOpen(
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
                     zoomEnabled: zoomWhileTypingEnabled,
-                    caret: textCaret, previous: lastCaretBase)
-                lastCaretBase = textCaret == nil ? nil : base.displayedRect
+                    caret: typingFocus.steeringCaret, previous: lastCaretBase)
+                lastCaretBase = typingFocus.steeringCaret == nil ? nil : base.displayedRect
                 return base
             }
             lastCaretBase = nil
@@ -4488,7 +4873,7 @@ struct VideoLayerView: UIViewRepresentable {
             twoFingerActive = false
             cancelPointerAndLegacyTouchState()   // also cancels any remote-scroll momentum — see its doc
             manualZoomGestureStart = manualZoom
-            manualZoomGestureBase = unzoomedBaseTransform().displayedRect
+            manualZoomGestureBase = presentationBase().displayedRect
             engagedSnapQuarter = nil
         }
 
@@ -4686,11 +5071,12 @@ struct VideoLayerView: UIViewRepresentable {
                 return
             }
             guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
                 current: manualZoom, memory: manualZoomMemory, base: base) else { return }
             manualZoom = toggled.current
             manualZoomMemory = toggled.memory
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 

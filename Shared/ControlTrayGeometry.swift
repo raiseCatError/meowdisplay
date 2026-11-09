@@ -748,3 +748,126 @@ extension ControlTrayGeometry {
         return max(minimum, min(preferred, (room / CGFloat(count)).rounded(.down)))
     }
 }
+
+/// Where Window view's own overlays sit around the screen's unsafe edges (the notch, the Dynamic
+/// Island, the status bar, the Home indicator), pane titles and the receiver's controls: the drag
+/// HUD (the placement chip and the first-use circling tip at the top, the drop bar at the bottom),
+/// Arrange's bar and floats' title pills. One coordinate space, in points; `safe` nil: all of the
+/// picture is safe. Each overlay moves only where it would actually collide, never by a blanket
+/// margin, and none of them adds a touch area.
+enum WorkspaceOverlayPlacement {
+    /// Kept between an overlay and a safe edge, a title or a control.
+    static let gap: CGFloat = 8
+    /// The chip's top below the picture's top where nothing unsafe is in the way (centre 34, as before).
+    static let chipTop: CGFloat = 19
+    /// The drop bar's centre above the picture's bottom where nothing is in the way (as before).
+    static let dropBarLift: CGFloat = 64
+    /// A pane's label strip: the labels (26) and the strip's padding.
+    static let paneTitleHeight: CGFloat = 40
+
+    /// The part of `picture` inside the safe area (the picture itself when they don't meet).
+    static func usable(picture: CGRect, safe: CGRect?) -> CGRect {
+        guard let safe else { return picture }
+        let r = picture.intersection(safe)
+        return r.isNull || r.isEmpty ? picture : r
+    }
+
+    /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below
+    /// the notch, the Dynamic Island and the status bar. Where it would cover a pane's title or a
+    /// float's title pill it slides beside them along that row, or steps down below them.
+    static func chip(size: CGSize, picture: CGRect, safe: CGRect?, avoiding titles: [CGRect]) -> CGRect {
+        let area = usable(picture: picture, safe: safe)
+        return highestClear(size: size, in: area, top: max(picture.minY + chipTop, area.minY + gap), avoiding: titles)
+    }
+
+    /// The first-use circling tip: from the top of the safe area down, clear of the chip (where
+    /// it is drawn), pane titles and floats' title pills.
+    static func tip(size: CGSize, picture: CGRect, safe: CGRect?, chip: CGRect?, avoiding titles: [CGRect]) -> CGRect {
+        let area = usable(picture: picture, safe: safe)
+        return highestClear(size: size, in: area, top: area.minY + gap, avoiding: titles + (chip.map { [$0] } ?? []))
+    }
+
+    /// A bar centred along the bottom (the drop bar, Arrange's bar): its centre at `preferredMidY`
+    /// when that is clear, always inside the safe part of the picture (so above the Home
+    /// indicator), and above any control it would cover (the tray, its gear, the Function Tray,
+    /// the arrow keypad, the keyboard and its bar).
+    static func bottomBar(size: CGSize, preferredMidY: CGFloat, picture: CGRect, safe: CGRect?,
+                          avoiding controls: [CGRect]) -> CGRect {
+        let area = usable(picture: picture, safe: safe)
+        let w = min(size.width, area.width), h = size.height
+        let x = min(max(picture.midX - w / 2, area.minX), area.maxX - w)
+        var y = min(preferredMidY - h / 2, area.maxY - gap - h)
+        let controls = controls.filter { !$0.isNull && !$0.isEmpty }
+        for _ in 0...controls.count {
+            let bar = CGRect(x: x, y: y, width: w, height: h)
+            // Only what it can get above (a fold running the whole height is not); with nothing
+            // left to clear, it stays as low as it got.
+            let tops = controls.filter { near($0, bar) }.map(\.minY).filter { $0 - gap - h >= area.minY + gap }
+            guard let top = tops.min(), top - gap - h < y else { break }
+            y = top - gap - h
+        }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// A float's title pill (its largest extent, `WorkspaceFloatLayering.pillBounds`), centred on
+    /// the float's top edge. While the float rests partly under the notch, the Dynamic Island or
+    /// the status bar (or a landscape side's), the pill moves inward just enough to be in the safe
+    /// area, never off the float; the float itself stays where it is. Past the picture's top or
+    /// side (gliding into or out of an edge) it keeps the place it has at that edge and moves
+    /// with the float, instead of sliding along it.
+    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect) -> CGRect {
+        // Placed as on the same float just inside the picture, then moved back with it.
+        let dx = max(picture.minX - content.minX, 0) + min(picture.maxX - content.maxX, 0)
+        let dy = max(picture.minY - content.minY, 0)
+        let inside = content.offsetBy(dx: dx, dy: dy)
+        var c = CGPoint(x: inside.midX, y: inside.minY)
+        if let safe {
+            let hw = size.width / 2, hh = size.height / 2
+            if c.y - hh < safe.minY { c.y = min(safe.minY + hh, max(inside.minY, inside.maxY - hh)) }
+            if c.x - hw < safe.minX { c.x = min(safe.minX + hw, inside.maxX) }
+            if c.x + hw > safe.maxX { c.x = max(safe.maxX - hw, inside.minX) }
+        }
+        return CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+    }
+
+    /// The centre of a float's grabber (a 28 pt tall touch area under the window): just below it,
+    /// or inside its bottom edge where below would reach the Home indicator (the safe area's
+    /// bottom) or the picture's bottom. Past the picture's bottom (gliding into or out of that
+    /// edge) it keeps the place it has at the edge and moves with the float.
+    static func grabberMidY(content: CGRect, picture: CGRect, safe: CGRect?) -> CGFloat {
+        let bottom = min(picture.maxY, safe?.maxY ?? .infinity)
+        let lift = max(content.maxY - picture.maxY, 0)
+        let c = content.offsetBy(dx: 0, dy: -lift)
+        let y = c.maxY + 12 <= bottom - 4 ? c.maxY + 10 : max(min(c.maxY - 10, bottom - 14), c.minY + 14)
+        return y + lift
+    }
+
+    /// Closer than `gap` (a hair of tolerance: exactly `gap` away doesn't count).
+    private static func near(_ a: CGRect, _ b: CGRect) -> Bool {
+        a.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5)).intersects(b)
+    }
+
+    /// The highest spot for a `size` box in `area` from `top` down: centred when that is clear,
+    /// else the clear spot nearest the centre along that row; a row with none steps down past
+    /// what is in it. Nothing clear before the bottom: centred at `top`.
+    private static func highestClear(size: CGSize, in area: CGRect, top: CGFloat, avoiding obstacles: [CGRect]) -> CGRect {
+        let obstacles = obstacles.filter { !$0.isNull && !$0.isEmpty }
+        let w = min(size.width, area.width), h = size.height
+        let centred = area.midX - w / 2
+        let lo = min(area.minX + gap, centred), hi = max(area.maxX - gap - w, centred)
+        var y = top
+        for _ in 0...obstacles.count {
+            guard y + h <= area.maxY - gap else { break }
+            let row = obstacles.filter { $0.minY - gap < y + h && $0.maxY + gap > y }
+            let xs = [centred] + row.flatMap { [$0.maxX + gap, $0.minX - gap - w] }
+            let clear = xs.filter { $0 >= lo - 0.5 && $0 <= hi + 0.5 }
+                .filter { x in !row.contains { near($0, CGRect(x: x, y: y, width: w, height: h)) } }
+            if let x = clear.min(by: { abs($0 - centred) < abs($1 - centred) }) {
+                return CGRect(x: x, y: y, width: w, height: h)
+            }
+            guard let below = row.map(\.maxY).max().map({ $0 + gap }), below > y else { break }
+            y = below
+        }
+        return CGRect(x: centred, y: top, width: w, height: h)
+    }
+}

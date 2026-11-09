@@ -70,13 +70,15 @@ final class FloatingWindowsDemoTests: XCTestCase {
         XCTAssertTrue(waitUntil(handle, "exists == false"))
         attach(app, "05-restored")
 
-        // Resize from the lower-left grip: the float gets smaller and keeps the window's shape.
+        // Resize from the lower-left grip: width and height follow the finger on their own (a
+        // viewport onto the window: its view scales, never stretched).
         let start = float.frame
         let corner = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: start.minX - 6, dy: start.maxY + 6))
-        corner.press(forDuration: 0.05, thenDragTo: corner.withOffset(CGVector(dx: 90, dy: -56)), withVelocity: 300, thenHoldForDuration: 0.2)
-        XCTAssertTrue(waitFor { float.frame.width < start.width - 40 }, "smaller: \(float.frame) from \(start)")
+        corner.press(forDuration: 0.05, thenDragTo: corner.withOffset(CGVector(dx: 90, dy: 0)), withVelocity: 300, thenHoldForDuration: 0.2)
+        XCTAssertTrue(waitFor { float.frame.width < start.width - 40 }, "narrower: \(float.frame) from \(start)")
         let resized = float.frame
-        XCTAssertEqual(resized.width / resized.height, start.width / start.height, accuracy: 0.05, "same shape")
+        XCTAssertEqual(resized.height, start.height, accuracy: 4, "only the width changed")
+        XCTAssertEqual(resized.maxX, start.maxX, accuracy: 4, "the opposite corner stays put")
         attach(app, "06-resized")
 
         // Options → Add to Layout: back into the arrangement as a pane; nothing floats.

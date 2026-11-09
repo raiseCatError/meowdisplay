@@ -53,6 +53,74 @@ struct ThumbnailScheduler: Equatable {
     mutating func forget(_ id: UInt32) { cache[id] = nil; pending.removeAll { $0 == id } }
 }
 
+/// Which asked-for app icons to send (tested). The receiver asks only for icons it lacks, so an
+/// ask is answered once per connection; asked again later (the receiver restarted while this
+/// session stayed, or the icon was lost on the way) it's sent again, at most every `resendAfter`.
+/// An app the Mac has no icon for is tried again only after `unavailableRetry`.
+struct AppIconSendLedger: Equatable {
+    static let resendAfter: TimeInterval = 10
+    static let unavailableRetry: TimeInterval = 60
+    static let batch = 48
+
+    private(set) var attemptedAt: [String: TimeInterval] = [:]
+    private(set) var unavailable: Set<String> = []
+
+    /// The bundles to look up and send now (at most `batch` of the ask, in order).
+    mutating func admit(_ bundles: [String], now: TimeInterval) -> [String] {
+        var out: [String] = []
+        for b in bundles.prefix(Self.batch) where !b.isEmpty && !out.contains(b) {
+            if let at = attemptedAt[b], now - at < (unavailable.contains(b) ? Self.unavailableRetry : Self.resendAfter) { continue }
+            attemptedAt[b] = now
+            out.append(b)
+        }
+        return out
+    }
+
+    mutating func noIcon(_ bundle: String) { unavailable.insert(bundle) }
+    mutating func sent(_ bundle: String) { unavailable.remove(bundle) }
+    /// A new admitted connection (or a resume): whatever the receiver asks for next is sent.
+    mutating func reset() { self = AppIconSendLedger() }
+}
+
+/// Whether to open an app a receiver asked for (`appLaunch`, tested): a bundle id, and the
+/// session's control when the message arrived. Control is asked again right before the app opens
+/// (`AppCatalog.launch`), and only an app the Mac lists or runs is ever opened. `reveal` (the
+/// person's Show a Window on Mac) opens it brought forward; otherwise it opens in the background.
+enum AppLaunchGate {
+    enum Decision: Equatable { case launch(String, reveal: Bool), refuse(String) }
+
+    static func decide(_ obj: [String: Any], inputGranted: Bool) -> Decision {
+        guard let bundle = obj["bundle"] as? String, !bundle.isEmpty, bundle.count <= 255 else { return .refuse("bundle") }
+        guard inputGranted else { return .refuse("control") }
+        return .launch(bundle, reveal: obj["reveal"] as? Bool == true)
+    }
+}
+
+/// What an `appLaunch` did. `window`: false when the app was already running without an on-screen
+/// window and the background open didn't give it one (it won't: macOS sends an app its reopen
+/// only when it's brought forward, measured 2026-11-09 with Ghostty); nil when unknown.
+struct AppLaunchOutcome: Equatable, Sendable {
+    var ok: Bool
+    var window: Bool? = nil
+}
+
+/// On-screen normal windows of an app, from a `CGWindowListCopyWindowInfo` listing.
+enum AppWindowPresence {
+    static func normalWindowCount(_ list: [[String: Any]], pid: Int32) -> Int {
+        list.filter { info in
+            guard (info[kCGWindowOwnerPID as String] as? Int32) == pid, (info[kCGWindowLayer as String] as? Int) == 0,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: dict) else { return false }
+            return frame.width >= 40 && frame.height >= 30
+        }.count
+    }
+
+    static func onScreenNormalWindowCount(pid: Int32) -> Int {
+        normalWindowCount((CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]) ?? [], pid: pid)
+    }
+}
+
 /// One Mac display a tile (or Stage Peek's Displays row) can show.
 struct DisplayCatalogEntry: Equatable, Sendable {
     var displayID: UInt32
@@ -79,6 +147,9 @@ final class WindowBrowserService: @unchecked Sendable {
     private var displays: [DisplayCatalogEntry] = []
     private var scDisplays: [UInt32: SCDisplay] = [:]
     private var refreshInFlight = false
+    /// When the listing in flight started, and whether its slowness was logged (diagnostics).
+    private var refreshStartedAt: TimeInterval = 0
+    private var slowRefreshLogged = false
     private var refreshQueuedCatalog: Bool?
     private var lastCatalogRequestAt: TimeInterval = 0
     private var active = true
@@ -89,7 +160,7 @@ final class WindowBrowserService: @unchecked Sendable {
     private var inFlight = 0
     private static let maxConcurrentStills = 2
     private var lastAppRevisionSent: Int?
-    private var iconsSent = Set<String>()
+    private var icons = AppIconSendLedger()
 
     /// A message for the receiver (the sender gates it on admission).
     var sendMessage: (([String: Any]) -> Void)?
@@ -100,11 +171,26 @@ final class WindowBrowserService: @unchecked Sendable {
     var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
     /// Integration tests only.
     var includeOwnProcessForTesting = false
+    /// Opens an app (without activating it unless `reveal`), asking `stillAllowed` right before.
+    /// Unit tests replace it, so they never open a real app.
+    var launchApp: (_ bundle: String, _ reveal: Bool, _ stillAllowed: @escaping @Sendable () -> Bool,
+                    _ done: @escaping @Sendable (AppLaunchOutcome) -> Void) -> Void = { bundle, reveal, stillAllowed, done in
+        AppCatalog.shared.launch(bundle, reveal: reveal, stillAllowed: stillAllowed, completion: done)
+    }
+    /// A new listing shortly after a launch, so the app's window reaches the receiver (tests turn it off).
+    var refreshesAfterLaunch = true
 
     init(hostID: String) { self.hostID = hostID }
 
-    /// Paused, Video Off or not admitted: no listings or stills leave the Mac.
-    func setActive(_ value: Bool) { queue.async { [self] in active = value } }
+    /// Paused, Video Off or not admitted: no listings or stills leave the Mac. Active again (a new
+    /// admitted connection, or a resume): icons are answered afresh, since the receiver may have
+    /// restarted and lost them while this session stayed.
+    func setActive(_ value: Bool) {
+        queue.async { [self] in
+            if value, !active { icons.reset() }
+            active = value
+        }
+    }
 
     func stop() {
         queue.async { [self] in
@@ -128,7 +214,10 @@ final class WindowBrowserService: @unchecked Sendable {
 
     // MARK: Messages (admitted session only; MacSender gates)
 
-    func handle(type: String, message obj: [String: Any], inputGranted: Bool) {
+    /// `controlStillAllowed`: the session's control asked again (side-effect free) right before an
+    /// app opens.
+    func handle(type: String, message obj: [String: Any], inputGranted: Bool,
+                controlStillAllowed: @escaping @Sendable () -> Bool = { false }) {
         queue.async { [self] in
             guard active, !stopped else { return }
             switch type {
@@ -142,8 +231,8 @@ final class WindowBrowserService: @unchecked Sendable {
                 let width = min(max(obj["max"] as? Int ?? 240, 64), 640)
                 requestStills(Array(ids.prefix(48)), width: width)
                 if let bundles = obj["icons"] as? [String] {
-                    let fresh = bundles.prefix(48).filter { iconsSent.insert($0).inserted }   // each icon once per session
-                    if !fresh.isEmpty { sendIcons(Array(fresh)) }
+                    let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
+                    if !fresh.isEmpty { sendIcons(fresh) }
                 }
                 if let ds = obj["displays"] as? [Int] { sendDisplayStills(ds.compactMap { UInt32(exactly: $0) }.prefix(8), width: width) }
             case WireMessage.appCatalogRequest:
@@ -152,12 +241,25 @@ final class WindowBrowserService: @unchecked Sendable {
                     self?.queue.async { self?.sendAppCatalog(apps, revision: revision, receiverHas: rev) }
                 }
             case WireMessage.appLaunch:
-                // Changing the Mac needs control. Opens without activating: no focus steal.
-                guard inputGranted, let bundle = obj["bundle"] as? String else { return }
-                AppCatalog.shared.launch(bundle) { [weak self] ok in
-                    self?.queue.async {
-                        self?.sendMessage?(["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok])
-                        self?.queue.asyncAfter(deadline: .now() + 0.8) { self?.refresh(sendCatalog: true) }
+                // Changing the Mac needs control (asked again right before opening). Exactly the
+                // app asked for, opened without activating: no focus steal, no window moved.
+                switch AppLaunchGate.decide(obj, inputGranted: inputGranted) {
+                case .refuse(let why):
+                    Log.info("workspace: appLaunch refused (\(why))")
+                case .launch(let bundle, let reveal):
+                    Log.info("workspace: appLaunch \(bundle) opening\(reveal ? " brought forward (Show a Window on Mac)" : "")")
+                    launchApp(bundle, reveal, controlStillAllowed) { [weak self] outcome in
+                        self?.queue.async {
+                            guard let self, !self.stopped else { return }
+                            let ok = outcome.ok
+                            Log.info("workspace: appLaunch \(bundle) ok=\(ok) window=\(outcome.window.map(String.init) ?? "-")")
+                            var reply: [String: Any] = ["type": WireMessage.appLaunchResult, "bundle": bundle, "ok": ok]
+                            if let window = outcome.window { reply["window"] = window }
+                            self.sendMessage?(reply)
+                            if self.refreshesAfterLaunch {
+                                self.queue.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refresh(sendCatalog: true) }
+                            }
+                        }
                     }
                 }
             case WireMessage.windowClose:
@@ -201,8 +303,17 @@ final class WindowBrowserService: @unchecked Sendable {
     func refresh(sendCatalog: Bool) {
         queue.async { [self] in
             guard !stopped else { return }
-            guard !refreshInFlight else { refreshQueuedCatalog = (refreshQueuedCatalog ?? false) || sendCatalog; return }
+            guard !refreshInFlight else {
+                refreshQueuedCatalog = (refreshQueuedCatalog ?? false) || sendCatalog
+                let waited = ProcessInfo.processInfo.systemUptime - refreshStartedAt
+                if waited > 3, !slowRefreshLogged {
+                    slowRefreshLogged = true
+                    Log.info("workspace: window listing still running after \(Int(waited)) s; newer listings wait")
+                }
+                return
+            }
             refreshInFlight = true
+            refreshStartedAt = ProcessInfo.processInfo.systemUptime
             let ledgerIn = ledgerLock.withLock { ledger }
             let includeOwn = includeOwnProcessForTesting
             Task { [weak self] in
@@ -211,6 +322,10 @@ final class WindowBrowserService: @unchecked Sendable {
                 self?.queue.async {
                     guard let self else { return }
                     self.refreshInFlight = false
+                    if self.slowRefreshLogged {
+                        self.slowRefreshLogged = false
+                        Log.info("workspace: window listing finished after \(Int(ProcessInfo.processInfo.systemUptime - self.refreshStartedAt)) s")
+                    }
                     if let queued = self.refreshQueuedCatalog { self.refreshQueuedCatalog = nil; self.refresh(sendCatalog: queued) }
                     if let content { self.updateDisplays(content.displays) }
                     guard let (snap, ledgerOut) = built else {
@@ -395,10 +510,17 @@ final class WindowBrowserService: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             for bundle in bundles {
                 guard AppCatalog.shared.isKnown(bundle) || NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil,
-                      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { continue }
-                guard let png = Self.png(NSWorkspace.shared.icon(forFile: url.path), side: 96) else { continue }
+                      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle),
+                      let png = Self.png(NSWorkspace.shared.icon(forFile: url.path), side: 96) else {
+                    self?.queue.async { self?.icons.noIcon(bundle) }
+                    continue
+                }
                 let msg: [String: Any] = ["type": WireMessage.appIcon, "bundle": bundle, "png": png.base64EncodedString()]
-                self?.queue.async { if self?.active == true { self?.sendMessage?(msg) } }
+                self?.queue.async {
+                    guard let self, self.active else { return }
+                    self.icons.sent(bundle)
+                    self.sendMessage?(msg)
+                }
             }
         }
     }
@@ -566,21 +688,39 @@ final class AppCatalog: @unchecked Sendable {
         for w in toCall { w(list, rev) }
     }
 
-    /// Opens an app the Mac listed, WITHOUT activating it (no focus steal). Already
-    /// running: a reopen, which makes most apps show a window.
-    func launch(_ bundle: String, completion: @escaping @Sendable (Bool) -> Void) {
+    /// How long after a background open of an app that was running without a window to look for one.
+    static let windowCheckDelay: TimeInterval = 1.5
+
+    /// Opens an app the Mac listed, WITHOUT activating it (no focus steal), unless `reveal`: the
+    /// person's Show a Window on Mac, which brings it forward (macOS then sends it a reopen, so an
+    /// app running without a window opens one). `stillAllowed` (the session's control) is asked
+    /// right before opening; false: nothing opens. An app that was running with no on-screen
+    /// window and still has none `windowCheckDelay` after a background open is reported
+    /// `window: false` (Ghostty, 2026-11-09: the background open succeeds and shows nothing).
+    func launch(_ bundle: String, reveal: Bool = false, stillAllowed: @escaping @Sendable () -> Bool = { true },
+                completion: @escaping @Sendable (AppLaunchOutcome) -> Void) {
         let path: String? = lock.withLock { entries[bundle]?.path }
         DispatchQueue.main.async {
+            guard stillAllowed() else {
+                Log.info("workspace: launch \(bundle) not opened: control ended")
+                completion(AppLaunchOutcome(ok: false)); return
+            }
             let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first
             guard let url = path.map(URL.init(fileURLWithPath:)) ?? (runningApp != nil ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) : nil) else {
-                completion(false); return
+                completion(AppLaunchOutcome(ok: false)); return
             }
+            let windowless = runningApp.map { AppWindowPresence.onScreenNormalWindowCount(pid: $0.processIdentifier) == 0 } ?? false
             let config = NSWorkspace.OpenConfiguration()
-            config.activates = false
+            config.activates = reveal
             config.addsToRecentItems = false
             NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
                 if let error { Log.info("workspace: launch \(bundle) failed \(error.localizedDescription)") }
-                completion(app != nil && error == nil)
+                guard let app, error == nil else { return completion(AppLaunchOutcome(ok: false)) }
+                guard windowless, !reveal else { return completion(AppLaunchOutcome(ok: true)) }
+                let pid = app.processIdentifier
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.windowCheckDelay) {
+                    completion(AppLaunchOutcome(ok: true, window: AppWindowPresence.onScreenNormalWindowCount(pid: pid) > 0))
+                }
             }
         }
     }

@@ -869,6 +869,7 @@ private struct ControlSettingsPage: View {
     @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @AppStorage(WorkspaceModel.defaultPlacementKey) private var defaultPlacement = WorkspacePlacement.pane.rawValue
+    @AppStorage(WorkspaceModel.floatingWindowsKey) private var floatingWindowsEnabled = true
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -964,10 +965,22 @@ private struct ControlSettingsPage: View {
                 }
                 Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
                     .accessibilityIdentifier("bringStripWindowsForward")
-                Picker("Default Window Placement", selection: $defaultPlacement) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Enable Floating Windows", isOn: $floatingWindowsEnabled)
+                        .accessibilityIdentifier("enableFloatingWindowsToggle")
+                    SettingNote(floatingWindowsEnabled
+                                ? "Windows can float over the layout in Window view."
+                                : "Windows open as panes or tabs. Windows that were floating are now in the layout.")
+                }
+                .settingsAnchor("enableFloatingWindows")
+                // Off: shows Pane, which is used; the saved choice comes back when it's on again.
+                Picker("Default Window Placement", selection: Binding(
+                    get: { floatingWindowsEnabled ? defaultPlacement : WorkspacePlacement.pane.rawValue },
+                    set: { defaultPlacement = $0 })) {
                     Text("Pane").tag(WorkspacePlacement.pane.rawValue)
                     Text("Floating").tag(WorkspacePlacement.float.rawValue)
                 }
+                .disabled(!floatingWindowsEnabled)
                 .settingsAnchor("defaultWindowPlacement")
                 .accessibilityIdentifier("defaultWindowPlacementPicker")
             } header: {
@@ -980,7 +993,7 @@ private struct ControlSettingsPage: View {
                                  ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
                                  : String(localized: "Normal uses the whole edge.")) : "")
                      + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")
-                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, shake it to switch between the two, or release it on Float."))
+                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, draw a circle with it (about a second) to switch between the two, or release it on Float."))
             }
             Section {
                 Picker("Control Profile", selection: Binding(
@@ -1748,41 +1761,32 @@ extension StageManagerSection {
 }
 
 /// Lock This Mac: macOS's own lock screen on the Mac, so its login password is needed to go on.
-/// Needs control; shows what the Mac reports, never assumes it worked.
+/// Needs control: without it, the confirmation offers Request Control & Lock Mac, which locks
+/// only after the Mac allows control (`LockMacFlow`). Shows what the Mac reports, never assumes it worked.
 private struct LockMacSection: View {
     @ObservedObject var workspace: WorkspaceModel
-    @State private var confirming = false
 
     var body: some View {
         if workspace.canLockMac {
             Section {
                 Button(workspace.lockMacStatus == .locking ? String(localized: "Locking…") : String(localized: "Lock Mac")) {
-                    workspace.clearLockMacStatus()
-                    confirming = true
+                    workspace.beginLockMac()
                 }
-                .disabled(workspace.lockMacStatus == .locking)
+                .disabled(workspace.lockMacBusy)
                 .accessibilityIdentifier("lockMac")
-                if case .done(let result)? = workspace.lockMacStatus {
-                    Text(Self.text(result)).font(.footnote).foregroundStyle(result == .locked ? .primary : .secondary)
+                if workspace.lockFlow.isAwaiting {
+                    Button("Stop Waiting") { workspace.cancelLockMac() }
+                        .accessibilityHint("Stops waiting for the Mac. Nothing is locked.")
+                }
+                if let line = workspace.lockMacStatusLine {
+                    Text(line).font(.footnote)
+                        .foregroundStyle(workspace.lockMacStatus == .done(.locked) ? .primary : .secondary)
+                        .accessibilityIdentifier("lockMacStatus")
                 }
             } footer: {
-                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Needs control of the Mac.")
+                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Without control of the Mac, you're offered Request Control first.")
             }
-            .confirmationDialog("Lock the Mac?", isPresented: $confirming, titleVisibility: .visible) {
-                Button("Lock Mac") { workspace.lockMac() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Anyone at the Mac will need its login password.")
-            }
-        }
-    }
-
-    static func text(_ result: LockMacResult) -> String {
-        switch result {
-        case .locked: String(localized: "The Mac is locked.")
-        case .control: String(localized: "Locking needs control of the Mac. Request Control first.")
-        case .accessibility: String(localized: "The Mac can't lock: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac.")
-        case .failed: String(localized: "The Mac didn't lock. Its Lock Screen shortcut (Control-Command-Q) may be changed or off.")
+            .lockMacConfirmation(workspace)
         }
     }
 }

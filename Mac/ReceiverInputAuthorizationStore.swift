@@ -70,11 +70,66 @@ enum ReceiverInputAuthorizationStore {
     }
 
     /// Always permitted regardless of any session's effective input — see
-    /// the type's security invariant above.
+    /// the type's security invariant above. Also clears the device's Lock
+    /// Screen Control restriction, so Forget leaves nothing behind (a re-paired
+    /// identity starts at Ask, with no control at all).
     static func removePolicy(peerID: String, defaults: UserDefaults = .standard) {
         var policies = load(defaults: defaults)
         policies.removeValue(forKey: peerID)
         save(policies, defaults: defaults)
+        var lockScreen = lockScreenValues(defaults)
+        if lockScreen.removeValue(forKey: peerID) != nil { defaults.set(lockScreen, forKey: lockScreenKey) }
+    }
+
+    // MARK: Lock Screen Control (SECURITY.md "Lock screen control")
+
+    /// Derived from the input policy, not a second grant: a device that may control this Mac may
+    /// also operate its lock screen (`LockScreenEligibility` still requires the policy and grant:
+    /// Always Allow, or Ask with control granted before the lock; never Never Allow), unless the
+    /// owner turned Lock Screen Control off for that device. That explicit "off" is the only thing
+    /// stored (`false`); nothing stored means it follows the input policy.
+    ///
+    /// Migration (2.1): this key never shipped in a release, so every device from 2.0 has nothing
+    /// stored and its Always Allow carries lock screen control with no new step or prompt. In
+    /// pre-release QA builds both values were written only by the owner's own toggle (opt-in
+    /// days): a stored `false` stays an explicit restriction; a stored `true` means the same as
+    /// nothing stored and is dropped on the next write. Removed by Forget.
+    private static let lockScreenKey = "receiverLockScreenControl.v1"
+
+    private static func lockScreenValues(_ defaults: UserDefaults) -> [String: Bool] {
+        defaults.dictionary(forKey: lockScreenKey) as? [String: Bool] ?? [:]
+    }
+
+    /// The owner turned Lock Screen Control off for this device.
+    static func lockScreenControlRestricted(peerID: String, defaults: UserDefaults = .standard) -> Bool {
+        lockScreenValues(defaults)[peerID] == false
+    }
+
+    /// Not restricted: lock screen control follows the device's input policy.
+    static func lockScreenControlAllowed(peerID: String, defaults: UserDefaults = .standard) -> Bool {
+        !lockScreenControlRestricted(peerID: peerID, defaults: defaults)
+    }
+
+    /// Turning it off is always permitted and stored as an explicit restriction. Lifting a
+    /// restriction widens what a device may do, so it's refused while any session has effective
+    /// input (the same invariant as `.alwaysAllow`); with no restriction it changes nothing.
+    @discardableResult
+    static func setLockScreenControlAllowed(_ allowed: Bool, peerID: String, anySessionHasEffectiveInput: Bool,
+                                            defaults: UserDefaults = .standard) -> Bool {
+        var values = lockScreenValues(defaults)
+        if allowed {
+            guard values[peerID] == false else {
+                // Already follows the policy; drop a legacy explicit `true`.
+                if values.removeValue(forKey: peerID) != nil { defaults.set(values, forKey: lockScreenKey) }
+                return true
+            }
+            guard !anySessionHasEffectiveInput else { return false }
+            values.removeValue(forKey: peerID)
+        } else {
+            values[peerID] = false
+        }
+        defaults.set(values, forKey: lockScreenKey)
+        return true
     }
 
     static func allPolicies(defaults: UserDefaults = .standard) -> [String: PeerInputRequestPolicy] {

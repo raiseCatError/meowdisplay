@@ -76,10 +76,7 @@ final class MenuBarPresenceController: NSObject {
         // A distinct, monochrome/template status icon — never the full-color
         // app logo — per the menu-bar status-item convention. Template mode
         // lets AppKit render it correctly in both light and dark menu bars.
-        let name = controller.hasActiveDisplay ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle"
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "MeowDisplay")
-        image?.isTemplate = true
-        statusItem?.button?.image = image
+        statusItem?.button?.image = MenuBarIcon.image(active: controller.hasActiveDisplay)
     }
 
     @objc private func togglePopover(_ sender: Any?) {

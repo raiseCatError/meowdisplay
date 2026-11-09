@@ -283,6 +283,7 @@ targets:
       - Mac/WindowWorkspaceEngine.swift
       - Mac/StageManagerSwitch.swift
       - Mac/StageManagerShortcutInstaller.swift
+      - Mac/StageManagerController.swift
       - Shared/KnownDeviceCleanup.swift
       - Shared/ScreenAwakePolicy.swift
       - Mac/StageStripAccess.swift
@@ -296,10 +297,15 @@ targets:
       - Mac/RemoteFilesAuthorization.swift
       - Mac/AppMenuReader.swift
       - Mac/WindowCloser.swift
+      - Mac/WindowFrameSetter.swift
       - Mac/ClipboardHub.swift
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
+      - Mac/MacLockPrivacy.swift
+      - Shared/MacLockWire.swift
+      - Shared/LockScreenFlow.swift
+      - Mac/LockScreenControl.swift
       - Mac/DisplayCaptureSettings.swift
       - Mac/StreamingRestartLedger.swift
       - Mac/ShareableContentBroker.swift
@@ -316,6 +322,7 @@ targets:
       - Shared/ReceiverPictureInPicture.swift
       - Shared/ReceiverSessionPresentation.swift
       - Shared/ReceiverSessionActions.swift
+      - Shared/LockMacFlow.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift
       - Shared/ReceiverFramePipeline.swift
@@ -335,6 +342,8 @@ targets:
       - Shared/ControlChunks.swift
       - Shared/AppMenu.swift
       - Shared/WorkspaceBrowse.swift
+      - Shared/WorkspaceAppOpening.swift
+      - Shared/PaneLabelInteraction.swift
       - Shared/ReceiverVideoTelemetry.swift
       - Shared/ReceiverPresentationTimingState.swift
       - Shared/ReceiverUISink.swift
@@ -365,6 +374,7 @@ targets:
       - Shared/CursorPresentationPacer.swift
       - Shared/KeyboardEditPlanner.swift
       - Shared/TypedTextEcho.swift
+      - Shared/LockScreenKeyboard.swift
       - Shared/TextCaretWire.swift
       - Shared/ControlProfile.swift
       - Shared/StagePeek.swift

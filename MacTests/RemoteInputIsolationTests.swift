@@ -33,6 +33,12 @@ final class RemoteInputIsolationTests: XCTestCase {
             record(isRepeat ? "repeat \(usage)" : "down \(usage)")
         }
         func sendKeyboardUp(usage: Int, modifiers: [String]) { record("up \(usage)") }
+        var macSupportsExactKeyModifiers: Bool { true }
+        func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool) { record("press \(usage)") }
+        func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
+            record(isRepeat ? "repeat \(usage)" : "down \(usage)")
+        }
+        func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) { record("up \(usage)") }
         func sendModifier(_ modifier: ControlModifier, down: Bool) { record("modifier \(modifier.rawValue) \(down)") }
         func sendGesture(name: String) { record("gesture \(name)") }
 

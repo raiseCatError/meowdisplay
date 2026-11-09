@@ -47,6 +47,14 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     var isFloat = false
     /// Back (0) to front among the floats.
     var z = 0
+    /// A float the receiver is drawing itself under the finger (moving or resizing it,
+    /// `lift: true`): left out of the picture and of input, its capture kept running, so it
+    /// comes back without a restart where it is let go.
+    var isLifted = false
+    /// A floating pane drawn in the picture now (not lifted).
+    var isDrawnFloat: Bool { isFloat && !isLifted }
+    /// On the canvas now: every tiled pane, and the floats that aren't lifted.
+    var isOnCanvas: Bool { !isLifted }
 }
 
 enum WorkspaceRequestValidator {
@@ -96,6 +104,7 @@ enum WorkspaceRequestValidator {
                   rect.height * canvasPixels.height >= minimumTilePixels.height else { rejected[id] = "tooSmall"; continue }
             let isFloat = allowFloats && (item["layer"] as? String) == "float"
             let z = isFloat ? min(max(item["z"] as? Int ?? 0, 0), maxTiles * 2) : 0
+            let lifted = isFloat && (item["lift"] as? Bool) == true
             if !isFloat, accepted.contains(where: { !$0.isFloat && ($0.rect.intersection(rect)?.area ?? 0) > 1e-6 }) {
                 rejected[id] = "overlap"
                 continue
@@ -122,7 +131,7 @@ enum WorkspaceRequestValidator {
                 accepted.append(WorkspaceTileAssignment(
                     tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
                     rotation: rotation, fit: fit, zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation,
-                    displayID: displayID, isFloat: isFloat, z: z))
+                    displayID: displayID, isFloat: isFloat, z: z, isLifted: lifted))
                 continue
             }
             guard let windowNumber = (item["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
@@ -146,7 +155,7 @@ enum WorkspaceRequestValidator {
             accepted.append(WorkspaceTileAssignment(
                 tileID: id, rect: rect, windowID: entry.windowID, windowGeneration: entry.generation, pid: entry.pid,
                 bundleID: entry.bundleID, follow: follow, rotation: rotation, fit: fit,
-                zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation, isFloat: isFloat, z: z))
+                zoom: zoom, viewEpoch: epoch, assignmentGeneration: generation, isFloat: isFloat, z: z, isLifted: lifted))
         }
         return Result(assignments: paintOrder(accepted), rejected: rejected)
     }
@@ -198,6 +207,18 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     var canvas: CGSize = .zero
     /// Live window frames in global points, by window id.
     var windowFrames: [UInt32: CGRect] = [:]
+    /// What each window's capture shows, when it is more than the window: its rectangle relative
+    /// to the window's top-left, in points (`WindowCaptureExtent`). A window with a sheet hanging
+    /// past its edge is captured with the sheet, so the picture is larger than the window; the
+    /// pane draws that picture and maps input through this same rectangle, never the window's.
+    var contentExtents: [UInt32: CGRect] = [:]
+
+    /// The global rectangle a window's pane shows: its capture's extent, or the window itself.
+    func drawnFrame(_ id: UInt32) -> CGRect? {
+        guard let frame = windowFrames[id] else { return nil }
+        guard let e = contentExtents[id] else { return frame }
+        return e.offsetBy(dx: frame.minX, dy: frame.minY)
+    }
     private(set) var activeTile: String?
     private(set) var hoveredTile: String?
     private(set) var boundTile: String?
@@ -212,7 +233,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     static let paneCursorLimit = 64
 
     func transform(for a: WorkspaceTileAssignment) -> TileContentTransform? {
-        guard let frame = windowFrames[a.windowID], frame.width > 0, frame.height > 0 else { return nil }
+        guard let frame = drawnFrame(a.windowID), frame.width > 0, frame.height > 0 else { return nil }
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         return TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
                                     rotation: a.rotation, fit: a.fit, zoom: a.zoom)
@@ -221,17 +242,17 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     /// The pane under `p`: the frontmost float that contains it, else the tiled pane (which
     /// never overlap). A pane a float covers can't be reached through the float.
     func tile(at p: WorkspacePoint) -> WorkspaceTileAssignment? {
-        if let float = assignments.last(where: { $0.isFloat && $0.rect.contains(p) }) { return float }
+        if let float = assignments.last(where: { $0.isDrawnFloat && $0.rect.contains(p) }) { return float }
         return assignments.first { !$0.isFloat && $0.rect.contains(p) }
     }
 
     /// Front to back: floats (frontmost first), then the tiled panes.
     private var frontToBack: [WorkspaceTileAssignment] {
-        assignments.filter(\.isFloat).reversed() + assignments.filter { !$0.isFloat }
+        assignments.filter(\.isDrawnFloat).reversed() + assignments.filter { !$0.isFloat }
     }
 
     private func global(_ a: WorkspaceTileAssignment, _ p: WorkspacePoint, clamped: Bool) -> CGPoint? {
-        guard let t = transform(for: a), let frame = windowFrames[a.windowID] else { return nil }
+        guard let t = transform(for: a), let frame = drawnFrame(a.windowID) else { return nil }
         let q = WorkspacePoint(x: p.x * canvas.width, y: p.y * canvas.height)
         guard let s = clamped ? t.clampedSourcePoint(fromCanvas: q) : t.sourcePoint(fromCanvas: q) else { return nil }
         return CGPoint(x: frame.minX + s.x, y: frame.minY + s.y)
@@ -420,12 +441,12 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
         guard canvas.width > 0, canvas.height > 0 else { return nil }
         for a in frontToBack {
-            guard let frame = windowFrames[a.windowID], frame.contains(g), let t = transform(for: a) else { continue }
+            guard let frame = drawnFrame(a.windowID), frame.contains(g), let t = transform(for: a) else { continue }
             let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
             guard let visible = t.visibleRect, visible.contains(q) else { continue }
             // Where a float covers this pane, the cursor isn't drawn over the float.
             let n = WorkspacePoint(x: q.x / canvas.width, y: q.y / canvas.height)
-            if assignments.contains(where: \.isFloat), tile(at: n)?.tileID != a.tileID { continue }
+            if assignments.contains(where: \.isDrawnFloat), tile(at: n)?.tileID != a.tileID { continue }
             return (n.x, n.y, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
         }
         return nil
@@ -442,7 +463,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         let centre = CGPoint(x: g.midX, y: g.midY)
         let candidates = keyboardTarget.map { [$0] } ?? frontToBack
         for a in candidates {
-            guard let frame = windowFrames[a.windowID], frame.contains(centre), let t = transform(for: a) else { continue }
+            guard let frame = drawnFrame(a.windowID), frame.contains(centre), let t = transform(for: a) else { continue }
             let corners = [CGPoint(x: g.minX, y: g.minY), CGPoint(x: g.maxX, y: g.minY),
                            CGPoint(x: g.minX, y: g.maxY), CGPoint(x: g.maxX, y: g.maxY)].map {
                 t.canvasPoint(fromSource: WorkspacePoint(x: $0.x - frame.minX, y: $0.y - frame.minY))
@@ -452,7 +473,7 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
             guard let visible = t.visibleRect,
                   visible.contains(WorkspacePoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)) else { continue }
             // A caret a float covers isn't followed (the receiver keeps following its last touch).
-            if assignments.contains(where: \.isFloat),
+            if assignments.contains(where: \.isDrawnFloat),
                tile(at: WorkspacePoint(x: (minX + maxX) / 2 / canvas.width, y: (minY + maxY) / 2 / canvas.height))?.tileID != a.tileID { continue }
             return CGRect(x: minX / canvas.width, y: minY / canvas.height,
                           width: (maxX - minX) / canvas.width, height: (maxY - minY) / canvas.height)
@@ -500,6 +521,13 @@ enum WorkspaceKeyboardGate {
                                   matches: (CGRect, CGRect) -> Bool) -> UInt32? {
         if let own = frames[active], matches(own, focusedFrame) { return active }
         return frames.first { matches($0.value, focusedFrame) }?.key ?? (isChild ? nil : 0)
+    }
+
+    /// The Mac's focused window is one of the active window's own sheets (an Open or Save panel
+    /// attached to it): it counts as the window's child, so typing (Escape, Return, a file name)
+    /// goes to it. Chrome's Open sheet isn't reported with a dialog subrole (QA 9000037).
+    static func focusIsOwnSheet(focusedFrame: CGRect, sheetFrames: [CGRect], matches: (CGRect, CGRect) -> Bool) -> Bool {
+        sheetFrames.contains { matches($0, focusedFrame) }
     }
 
     static func decide(active: WorkspaceTileAssignment?, frontmostPID: Int32?, focusedWindowID: UInt32?,
@@ -558,9 +586,10 @@ enum WorkspaceCaptureBudget {
         return isFloat ? max(shared, min(streamFPS, floatFloorFPS)) : shared
     }
 
-    /// How much of each tiled pane the floats hide (floats: 0).
+    /// How much of each tiled pane the floats hide (floats: 0). A lifted float hides nothing:
+    /// the panes under it are on screen while the receiver moves it.
     static func coverage(_ assignments: [WorkspaceTileAssignment]) -> [String: Double] {
-        let floats = assignments.filter(\.isFloat).map(\.rect)
+        let floats = assignments.filter(\.isDrawnFloat).map(\.rect)
         guard !floats.isEmpty else { return [:] }
         var out: [String: Double] = [:]
         for a in assignments where !a.isFloat { out[a.tileID] = WorkspaceOcclusion.coveredFraction(of: a.rect, by: floats) }
@@ -698,6 +727,43 @@ enum WorkspaceCaptureSizing {
     }
 }
 
+// MARK: - Capture extent
+
+/// What a single-window capture shows, relative to its window. Measured on macOS 27 (QA 9000026,
+/// probe 2026-11-09): `SCContentFilter(desktopIndependentWindow:)` captures the window *with its
+/// child windows*. A sheet that hangs past the window's bottom makes the content the union
+/// (a 1000x332 window with an 880x448 sheet: content 1000x480), and a capture of the sheet window
+/// alone returns the whole parent-and-sheet tree, not the sheet. Drawing that content into the
+/// window's (or the sheet's) frame squashed and shifted the picture while input used the real
+/// geometry: taps missed Cancel, and taps beside the drawn chooser landed in it.
+enum WindowCaptureExtent {
+    /// Points of slack between a capture's content size and a frame (rounding, a sheet animating).
+    static let tolerance: CGFloat = 2
+
+    /// The capture's rectangle relative to `window`'s top-left, or nil when it is the window
+    /// itself (or can't be explained: then the window, as before). `content`: the capture's
+    /// content size in points (`contentRect` / `contentScale`); `children`: global frames of the
+    /// window's own sheets.
+    static func extent(window: CGRect, children: [CGRect], content: CGSize?) -> CGRect? {
+        guard let c = content, c.width > 0, c.height > 0, window.width > 0, window.height > 0,
+              !matches(c, window.size) else { return nil }
+        let tree = children.reduce(window) { $0.union($1) }
+        guard tree != window, matches(c, tree.size) else { return nil }
+        return tree.offsetBy(dx: -window.minX, dy: -window.minY)
+    }
+
+    /// A sheet's own capture shows only the sheet (older systems): it may be drawn over its window.
+    /// When it shows the whole tree (macOS 27), the window's capture already has the sheet in place.
+    static func isSheetOnly(sheet: CGSize, content: CGSize?) -> Bool {
+        guard let c = content else { return false }
+        return matches(c, sheet)
+    }
+
+    static func matches(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+}
+
 // MARK: - Covered windows
 
 /// Whether input at a point may go to a tiled window: nothing else may be over it there, so a
@@ -722,6 +788,8 @@ enum WorkspaceInputCover {
         /// Global, top-left origin.
         var bounds: CGRect
         var alpha: Double
+        /// The owning process (`kCGWindowOwnerPID`), -1 when unknown (never a file-panel companion).
+        var pid: Int32 = -1
     }
 
     enum Verdict: Equatable {
@@ -742,23 +810,91 @@ enum WorkspaceInputCover {
     ///   - displays: the active displays' bounds (global, top-left origin).
     ///   - hitTest: the window a mouse-down at `point` would hit, nil when unknown. Asked only
     ///     when every window over the point is a display-wide surface.
+    ///   - isFilePanelService: whether a process is the system Open/Save panel service
+    ///     (see `filePanelCompanions`). Defaults to never.
     static func verdict(target: UInt32, targetFrame: CGRect?, at point: CGPoint, above: [Window],
-                        ownSheets: Set<UInt32>, displays: [CGRect], hitTest: () -> UInt32?) -> Verdict {
+                        ownSheets: Set<UInt32>, displays: [CGRect],
+                        isFilePanelService: (Int32) -> Bool = { _ in false },
+                        hitTest: () -> UInt32?) -> Verdict {
+        let partOfTarget = ownSheets.union(filePanelCompanions(
+            target: target, targetFrame: targetFrame, above: above, ownSheets: ownSheets,
+            isFilePanelService: isFilePanelService))
         let covering = above.filter {
-            !ownSheets.contains($0.id) && $0.alpha > 0.01 && $0.owner != "Window Server" && $0.bounds.contains(point)
+            !partOfTarget.contains($0.id) && $0.alpha > 0.01 && $0.owner != "Window Server" && $0.bounds.contains(point)
         }
         if let cover = covering.first(where: { !isDisplayWideSurface($0, at: point, displays: displays) }) {
             return .covered(by: cover.id, cache: cover.bounds)
         }
-        guard targetFrame?.contains(point) == true else { return .outside }
+        // On the target: its own frame, or one of its own sheets (or Open/Save panel companions)
+        // listed over it, which may hang past the window's edge.
+        let onPart = above.contains { partOfTarget.contains($0.id) && $0.alpha > 0.01 && $0.bounds.contains(point) }
+        guard targetFrame?.contains(point) == true || (targetFrame != nil && onPart) else { return .outside }
         let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
         guard !covering.isEmpty else { return .clear }
         // Only display-wide surfaces are over the point: the window server knows where they
         // take clicks. Cached small, as it changes across the surface (the Dock strip).
-        guard let hit = hitTest(), hit == target || ownSheets.contains(hit) else {
+        guard let hit = hitTest(), hit == target || partOfTarget.contains(hit) else {
             return .covered(by: covering.first?.id, cache: around)
         }
         return .clear
+    }
+
+    /// How far a panel-service window's frame may be from its panel's, in points.
+    static let companionTolerance: CGFloat = 1
+
+    /// Windows of the system Open/Save panel service that are part of the target.
+    ///
+    /// An Open/Save panel (`NSOpenPanel`/`NSSavePanel`, a browser's upload chooser) is two windows
+    /// (RESEARCH_TEMPORARY_DIALOGS.md): the app's own panel window, and directly over it at the
+    /// same frame a window of `com.apple.appkit.xpc.openAndSavePanelService`, which draws the file
+    /// browser and takes its presses. The app's panel window is either the target itself (the
+    /// panel shown in a pane or float) or one of the target's own sheets (an untitled panel sheet
+    /// drawn in its window's pane, as Chrome's upload chooser is). Without this every press in the
+    /// panel was refused as covered (QA 9000025: the chooser showed, nothing in it could be clicked).
+    ///
+    /// A service window is part of the target only when all of these hold; anything else over the
+    /// target (other apps, another app's panel, menus, system prompts) still covers it:
+    /// - in window-server order it is *directly* above the target or one of the target's own
+    ///   sheets, nothing in between (`above` is front to back),
+    /// - its frame is that window's frame (within `companionTolerance`),
+    /// - it is a visible, normal-layer window with a number,
+    /// - its process is the system panel service (`isFilePanelService`: the sealed executable and
+    ///   Apple's signature, never a name).
+    static func filePanelCompanions(target: UInt32, targetFrame: CGRect?, above: [Window], ownSheets: Set<UInt32>,
+                                    isFilePanelService: (Int32) -> Bool) -> Set<UInt32> {
+        var result: Set<UInt32> = []
+        for (i, w) in above.enumerated() where w.id != 0 && w.pid > 0 && w.layer == 0 && w.alpha > 0.01 {
+            // The window right under `w`: the next one listed, or the target under them all.
+            let under: (id: UInt32, frame: CGRect?) = i + 1 < above.count ? (above[i + 1].id, above[i + 1].bounds)
+                                                                          : (target, targetFrame)
+            guard under.id == target || ownSheets.contains(under.id), let frame = under.frame,
+                  sameFrame(w.bounds, frame), isFilePanelService(w.pid) else { continue }
+            result.insert(w.id)
+        }
+        return result
+    }
+
+    static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+        let t = companionTolerance
+        return abs(a.minX - b.minX) <= t && abs(a.minY - b.minY) <= t
+            && abs(a.width - b.width) <= t && abs(a.height - b.height) <= t
+    }
+
+    /// The panel service's executable on the sealed system volume (macOS 27: `Versions/C`).
+    static let filePanelServiceExecutablePrefix = "/System/Library/Frameworks/AppKit.framework/Versions/"
+    static let filePanelServiceExecutableSuffix =
+        "/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelService"
+    /// The code requirement its signature must meet: Apple's own, for that identifier.
+    static let filePanelServiceRequirement = "anchor apple and identifier \"com.apple.appkit.xpc.openAndSavePanelService\""
+
+    /// Whether an executable path is the system Open/Save panel service: exactly AppKit's copy
+    /// under /System/Library (one version component, no `..`). Not anything else under /System:
+    /// `/System/Volumes/Data` is the writable data volume.
+    static func isFilePanelServicePath(_ path: String) -> Bool {
+        guard path.hasPrefix(filePanelServiceExecutablePrefix), path.hasSuffix(filePanelServiceExecutableSuffix),
+              path.count > filePanelServiceExecutablePrefix.count + filePanelServiceExecutableSuffix.count else { return false }
+        let version = path.dropFirst(filePanelServiceExecutablePrefix.count).dropLast(filePanelServiceExecutableSuffix.count)
+        return !version.contains("/") && version != "." && version != ".."
     }
 
     /// One `CGWindowListCopyWindowInfo` entry. Nil only without bounds (nothing to place it by).
@@ -770,7 +906,8 @@ enum WorkspaceInputCover {
         return Window(id: (info[kCGWindowNumber as String] as? UInt32) ?? 0,
                       owner: info[kCGWindowOwnerName as String] as? String ?? "",
                       layer: info[kCGWindowLayer as String] as? Int ?? 0, bounds: bounds,
-                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1)
+                      alpha: (info[kCGWindowAlpha as String] as? Double) ?? 1,
+                      pid: (info[kCGWindowOwnerPID as String] as? Int32) ?? -1)
     }
 
     /// `point` (global, top-left origin) in Cocoa's global coordinates, which the window

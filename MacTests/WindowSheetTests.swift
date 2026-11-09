@@ -39,6 +39,106 @@ final class WindowSheetTests: XCTestCase {
         XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, sheet, front, back]), [2: [4, 3]], "front-most first")
     }
 
+    // MARK: Titled sheets (an Open or Save panel shown as a sheet), QA 9000025
+
+    /// Measured on macOS 27 (probe, 2026-11-09): a 900x632 window at (300,248) and its Open sheet
+    /// 880x448 at (310,340), titled "Open" even when the panel's title is set empty.
+    private let window = WindowSheetMatcherWindow.make(18024, CGRect(x: 300, y: 248, width: 900, height: 632), "Upload probe")
+    private let openSheet = WindowSheetMatcherWindow.make(18026, CGRect(x: 310, y: 340, width: 880, height: 448), "Open")
+
+    func testASmallWindowOfTheAppBetweenASheetAndItsWindowDoesNotPartThem() {
+        // Measured live (QA 9000028, macOS 27): an Open sheet 18396 over its window 18371, with a
+        // 66 x 20 window of the same app (18392, at the window's top-left) between them. The sheet
+        // went unmatched and every press on the chooser was refused as covered by it.
+        let window = w(18371, CGRect(x: 160, y: 198, width: 1100, height: 762), title: "Chooser Target")
+        let strip = w(18392, CGRect(x: 166, y: 204, width: 66, height: 20))
+        let sheet = w(18396, CGRect(x: 270, y: 355, width: 880, height: 448), title: "Open")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, strip, window], confirmsTitled: { _, _ in true }),
+                       [18371: [18396]])
+        // A window of the app in between that overlaps the sheet still parts them.
+        let inspector = w(18393, CGRect(x: 300, y: 400, width: 400, height: 300), title: "Inspector")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, inspector, window], confirmsTitled: { _, _ in true }), [:])
+        // Another app's window in between never mattered.
+        let other = w(18394, pid: 99, CGRect(x: 300, y: 400, width: 400, height: 300))
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, other, window], confirmsTitled: { _, _ in true }),
+                       [18371: [18396]])
+    }
+
+    func testASheetScreenCaptureKitDoesNotListIsStillItsWindows() {
+        // QA 9000030: the third Open sheet in a row was matched but missing from ScreenCaptureKit's
+        // listing, so it was dropped and presses on it were refused as covered.
+        let window = w(18474, CGRect(x: 160, y: 198, width: 1100, height: 762), title: "Chooser Target")
+        let sheet = w(18509, CGRect(x: 270, y: 355, width: 880, height: 448))
+        let matched = WindowSheetMatcher.sheets(frontToBack: [sheet, window])
+        XCTAssertEqual(matched, [18474: [18509]])
+        let unlisted = WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [18474], scFrames: [:], order: [sheet, window])
+        XCTAssertEqual(unlisted[18474]?.map(\.id), [18509])
+        XCTAssertEqual(unlisted[18474]?.first?.frame, sheet.frame)
+        XCTAssertEqual(unlisted[18474]?.first?.fromCapture, false)
+        let listed = WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [18474],
+                                                              scFrames: [18509: CGRect(x: 270, y: 355, width: 880, height: 448)],
+                                                              order: [sheet, window])
+        XCTAssertEqual(listed[18474]?.first?.fromCapture, true)
+        // A window that isn't listed keeps no sheets.
+        XCTAssertTrue(WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [], scFrames: [:], order: [sheet, window]).isEmpty)
+    }
+
+    func testTheLiveListingFindsASheetTheCatalogMissed() {
+        // QA 9000032: listing 0.4 s old, target listed, no sheets; the live list above the target:
+        // two Window Server dots, the menu bar, the Open sheet and a 66 x 20 window of the app.
+        typealias C = WorkspaceInputCover.Window
+        let target = CGRect(x: 160, y: 198, width: 1100, height: 762)
+        let sheet = C(id: 18589, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 270, y: 355, width: 880, height: 448), alpha: 1, pid: 57)
+        let strip = C(id: 18588, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 166, y: 204, width: 66, height: 20), alpha: 1, pid: 57)
+        let menuBar = C(id: 9280, owner: "Window Server", layer: 24, bounds: CGRect(x: 0, y: 0, width: 1920, height: 30), alpha: 1, pid: 443)
+        XCTAssertEqual(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [menuBar, sheet, strip]).map(\.id),
+                       [18589])
+        // Another app's window of the same shape, an off-centre one, or one behind a window of the
+        // app that overlaps it: never.
+        var other = sheet; other.pid = 99
+        var offCentre = sheet; offCentre.bounds.origin.x += 40
+        let inspector = C(id: 18590, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 300, y: 400, width: 300, height: 200), alpha: 1, pid: 57)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [other]).isEmpty)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [offCentre]).isEmpty)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [sheet, inspector]).isEmpty)
+        // Invisible: never.
+        var clear = sheet; clear.alpha = 0
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [clear]).isEmpty)
+    }
+
+    func testATitledSheetIsASheetOnlyWhenTheAppConfirmsIt() {
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]), [:], "unconfirmed: an ordinary window")
+        var asked: [(UInt32, UInt32)] = []
+        let confirmed = WindowSheetMatcher.sheets(frontToBack: [openSheet, window]) { s, p in asked.append((s.id, p.id)); return true }
+        XCTAssertEqual(confirmed, [18024: [18026]])
+        XCTAssertEqual(asked.map(\.0), [18026])
+        XCTAssertEqual(asked.map(\.1), [18024], "asked about the window it sits on")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]) { _, _ in false }, [:])
+    }
+
+    func testOnlyTitledWindowsOfSheetShapeOnTheirWindowAreEverAskedAbout() {
+        var asked = 0
+        let confirm: (WindowSheetMatcher.Window, WindowSheetMatcher.Window) -> Bool = { _, _ in asked += 1; return true }
+        let untitled = WindowSheetMatcherWindow.make(5, CGRect(x: 310, y: 340, width: 880, height: 448), "")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitled, window], confirmsTitled: confirm), [18024: [5]])
+        let offCentre = WindowSheetMatcherWindow.make(6, CGRect(x: 320, y: 340, width: 600, height: 300), "Open")
+        let otherApp = WindowSheetMatcher.Window(id: 7, pid: 99, frame: openSheet.frame, title: "Open", layer: 0)
+        let floating = WindowSheetMatcher.Window(id: 8, pid: 10, frame: openSheet.frame, title: "Open", layer: 3)
+        let tiny = WindowSheetMatcherWindow.make(9, CGRect(x: 740, y: 340, width: 20, height: 20), "Open")
+        for c in [offCentre, otherApp, floating, tiny] {
+            XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [c, window], confirmsTitled: confirm), [:], "window \(c.id)")
+        }
+        XCTAssertEqual(asked, 0)
+    }
+
+    func testAnAlertOnAConfirmedSaveSheetBelongsToTheSameWindow() {
+        let save = WindowSheetMatcherWindow.make(11, CGRect(x: 565, y: 473, width: 370, height: 182), "Save")
+        let alert = WindowSheetMatcherWindow.make(12, CGRect(x: 600, y: 500, width: 300, height: 120), "")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, save, window]) { _, _ in true }, [18024: [12, 11]])
+        // Unconfirmed Save sheet: the alert is its sheet, but neither belongs to the window.
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [alert, save, window]), [11: [12]])
+    }
+
     func testTheCompositorDrawsTheSheetWhereItSitsOnTheWindow() throws {
         let compositor = try XCTUnwrap(WorkspaceCompositor())
         compositor.resize(to: CGSize(width: 800, height: 600))
@@ -77,5 +177,45 @@ final class WindowSheetTests: XCTestCase {
         let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
         let p = base + y * CVPixelBufferGetBytesPerRow(buffer) + x * 4
         return (Double(p[0]), Double(p[1]), Double(p[2]))
+    }
+
+    /// Chrome's real Open panel, measured on the iPad QA run (9000036, macOS 27, Chrome 156): Chrome
+    /// opens it at the size last used, wider than its 1100-wide window, and macOS moves the window
+    /// to make room. Every press on it was refused as covered by it.
+    func testAnOpenSheetWiderThanItsWindowCountsOnlyWhenTheAppConfirmsIt() {
+        let window = w(19493, CGRect(x: 248, y: 87, width: 1100, height: 762), title: "QA page")
+        let sheet = w(19509, CGRect(x: 0, y: 170, width: 1596, height: 910), title: "Open")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, window], confirmsTitled: { _, _ in true }),
+                       [19493: [19509]])
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, window]), [:], "not without Accessibility")
+        // Untitled and wider: shape alone isn't enough either.
+        let untitledWide = w(19510, CGRect(x: 0, y: 170, width: 1596, height: 910))
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitledWide, window]), [:])
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitledWide, window], confirmsTitled: { _, _ in true }),
+                       [19493: [19510]])
+        // Still centred and starting inside the window: off-centre or above it, never.
+        let offCentre = w(19511, CGRect(x: 40, y: 170, width: 1596, height: 910), title: "Open")
+        let above = w(19512, CGRect(x: 0, y: 60, width: 1596, height: 910), title: "Open")
+        for c in [offCentre, above] {
+            XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [c, window], confirmsTitled: { _, _ in true }), [:], "window \(c.id)")
+        }
+        // The live listing offers it as a candidate (the caller has the app confirm it).
+        let live = WorkspaceInputCover.Window(id: 19509, owner: "Google Chrome", layer: 0, bounds: sheet.frame, alpha: 1, pid: 10)
+        XCTAssertEqual(WindowSheetMatcher.liveCandidates(targetPID: 10, targetFrame: window.frame, aboveFrontToBack: [live]).map(\.id),
+                       [19509])
+        // Its capture is the union, and a press on the part left of the window goes to it.
+        XCTAssertEqual(WindowCaptureExtent.extent(window: window.frame, children: [sheet.frame], content: CGSize(width: 1596, height: 993)),
+                       CGRect(x: -248, y: 0, width: 1596, height: 993))
+        XCTAssertEqual(WorkspaceInputCover.verdict(target: 19493, targetFrame: window.frame, at: CGPoint(x: 120, y: 1040), above: [live],
+                                                   ownSheets: [19509], displays: [], hitTest: { nil }), .clear)
+        XCTAssertEqual(WorkspaceInputCover.verdict(target: 19493, targetFrame: window.frame, at: CGPoint(x: 120, y: 1040), above: [live],
+                                                   ownSheets: [], displays: [], hitTest: { nil }),
+                       .covered(by: 19509, cache: sheet.frame), "unconfirmed: still covered, as before")
+    }
+}
+
+private enum WindowSheetMatcherWindow {
+    static func make(_ id: UInt32, _ frame: CGRect, _ title: String) -> WindowSheetMatcher.Window {
+        WindowSheetMatcher.Window(id: id, pid: 10, frame: frame, title: title, layer: 0)
     }
 }

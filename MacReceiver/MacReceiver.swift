@@ -605,6 +605,7 @@ final class ReceiverVideoView: NSView {
 
     private let workspace: WorkspaceModel
     private var workspaceObserver: AnyCancellable?
+    private var lockCoverObserver: AnyCancellable?
 
     init(receiver: StreamReceiver, input: ReceiverInputController, workspace: WorkspaceModel) {
         self.receiver = receiver
@@ -664,6 +665,20 @@ final class ReceiverVideoView: NSView {
         workspaceView.frame = bounds
         workspaceView.autoresizingMask = [.width, .height]
         addSubview(workspaceView)
+        // Over everything while the Mac is locked or switched to another user: the Mac sends no
+        // picture meanwhile, and this says why instead of leaving the window blank. It takes every
+        // click then, so nothing reaches the picture or the Window mode chrome under it.
+        let lockCover = LockCoverHostingView(rootView: ReceiverMacLockedCover(receiver: receiver))
+        lockCover.isCovering = { [weak receiver] in receiver?.macLock != nil }
+        lockCover.frame = bounds
+        lockCover.autoresizingMask = [.width, .height]
+        addSubview(lockCover)
+        lockCoverObserver = receiver.$macLock.map { $0 != nil }.removeDuplicates().receive(on: DispatchQueue.main)
+            .sink { [weak self, weak lockCover] _ in
+                guard let self else { return }
+                self.window?.invalidateCursorRects(for: self)
+                if let lockCover { self.window?.invalidateCursorRects(for: lockCover) }
+            }
         // One pointer: in Window mode it's this Mac's own (hover over another
         // tile stays local), so the streamed cursor isn't drawn as well.
         workspaceObserver = workspace.$windowMode.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] on in
@@ -856,6 +871,72 @@ private final class OverlayHostingView: NSHostingView<ReceiverPerfOverlay> {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: blankCursor)
+    }
+}
+
+// MARK: - Mac locked
+
+/// What the window shows while the Mac is locked (`macLockState`). It never asks for the Mac's
+/// password: unlocking happens at the Mac.
+struct ReceiverMacLockedCover: View {
+    @ObservedObject var receiver: StreamReceiver
+
+    var body: some View {
+        if let notice = receiver.macLock {
+            ZStack {
+                Color.black
+                VStack(spacing: 12) {
+                    Image(systemName: notice.state == .switchedOut ? "person.2.fill" : "lock.fill")
+                        .font(.system(size: 40, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(Self.title(notice.state))
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(Self.detail(notice.state))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: 460)
+                .padding(32)
+                .accessibilityElement(children: .combine)
+            }
+            .environment(\.colorScheme, .dark)
+        }
+    }
+
+    static func title(_ state: MacScreenPrivacy) -> String {
+        state == .switchedOut ? String(localized: "The Mac is in use by another user")
+                              : String(localized: "The Mac is locked")
+    }
+
+    static func detail(_ state: MacScreenPrivacy) -> String {
+        switch state {
+        case .switchedOut: return String(localized: "Switch back to your account on the Mac to continue.")
+        case .unknown: return String(localized: "MeowDisplay can’t confirm the Mac is unlocked, so nothing is shown. Unlock it at the Mac to continue.")
+        default: return String(localized: "Unlock it at the Mac to continue.")
+        }
+    }
+}
+
+/// Hosts the locked cover: it takes clicks, scrolls and the pointer only while it covers.
+private final class LockCoverHostingView: NSHostingView<ReceiverMacLockedCover> {
+    var isCovering: () -> Bool = { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isCovering() ? super.hitTest(point) ?? self : nil
+    }
+
+    required init(rootView: ReceiverMacLockedCover) {
+        super.init(rootView: rootView)
+    }
+
+    @MainActor required dynamic init?(coder: NSCoder) {
+        fatalError("not used")
+    }
+
+    override func resetCursorRects() {
+        if isCovering() { addCursorRect(bounds, cursor: .arrow) }
     }
 }
 
