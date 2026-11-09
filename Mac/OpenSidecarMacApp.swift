@@ -44,8 +44,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // run; the menu item drives manual "Check for Updates…". Held for the
     // app's lifetime here so every window (menu bar + control window) shares
     // one updater instance.
-    let updater = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    let updater: SPUStandardUpdaterController
+
+    override init() {
+        // Settle the presentation before Sparkle starts: on a first launch Sparkle writes the
+        // flag `AppPresentationStore` reads as "MeowDisplay ran on this Mac before".
+        _ = AppPresentationStore.resolve()
+        updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        super.init()
+    }
 
     /// `kill`/`killall` (SIGTERM) while the Privacy Shield covers the screens locks this Mac's
     /// screen before exiting, like a normal Quit. SIGKILL and a crash can't be caught: then the
@@ -397,11 +404,10 @@ final class DeviceSession: ObservableObject, Identifiable {
 final class SenderController: ObservableObject {
     static let shared = SenderController()
 
-    @Published var presentation = AppPresentation(
-        rawValue: UserDefaults.standard.string(forKey: "presentation") ?? "") ?? .menuBar {
+    @Published var presentation = AppPresentationStore.resolve() {
         didSet {
             guard presentation != oldValue else { return }
-            UserDefaults.standard.set(presentation.rawValue, forKey: "presentation")
+            UserDefaults.standard.set(presentation.rawValue, forKey: AppPresentationStore.key)
             applyActivationPolicy()
             // Live switch: create/destroy the single status item right here,
             // rather than only reading the setting at launch — this is the
