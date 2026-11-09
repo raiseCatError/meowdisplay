@@ -2268,7 +2268,9 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
 - Receiver → Mac: `{"type":"lockScreenRequest","show":true|false}`. The Mac answers with
   `macLockState`. `show:true` when allowed: `lockScreen:"active"`, then `videoState` with
   `enabled:true` and fresh frames of the lock screen (a keyframe first; nothing from before the
-  request), and `cursor`/`cursorImg` again, for this device only, while it lasts. `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
+  request), and `cursor`/`cursorImg` again, for this device only, while it lasts. With `active`
+  the Mac sends `"lockScreenView":V`: this view's number, a positive integer it never reuses (any
+  connection, any device). Macs before it send none. `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
 - While `active`, the Mac accepts only `touch`, pointer `move`/`moveRelative`, `down`/`up` with the
   left button, and `keyboard` `press`/`down`/`up` of character keys, Space, Return and Delete
   (not Tab, the arrows, Escape or Forward Delete) with only `shift`, `option` or `capsLock` in `modifiers`,
@@ -2279,23 +2281,37 @@ Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
   without input, or on unlock. On unlock `macLockState` says `unlocked`, `inputReset` follows, and
   the session continues as before; a receiver that switched modes to show the lock screen switches
   back (also when the attempt failed or was refused after the switch).
-- Receivers add `"lockScreen":true` to every `keyboard`, `touch` and `pointer` message they send
-  while they show the lock screen (its keyboard, touches and clicks, or a hardware keyboard or
-  pointer then). The Mac delivers tagged input only while this connection's view is live; tagged
-  input arriving after it ended (an unlock in between, a hide, a reconnect, or a device that never
-  had it) never reaches the desktop. Untagged input while the view is live is refused too.
-  Untagged input otherwise is ordinary input (no hold after an unlock).
+- Lock episodes. While a receiver sees the Mac locked (any `macLockState` but `unlocked`, until it
+  hears `unlocked` or the connection ends) it adds `"lockScreen":true` to every input message it
+  sends: `touch`, `pointer`, `keyboard` (`cancel` too), `scroll`, `pencil`, `proximity`,
+  `gesture`, `nativeAppGesture`, `smartTouchProbe`, `windowAction`, `workspaceFocus`,
+  `menuPress`, `appLaunch`, `windowClose`; while it shows view V (it asked on this connection and
+  the Mac said `active` with V) also `"lockScreenView":V`. Whenever its tag changes it first ends
+  everything in progress (touches, drags, scroll momentum, Pencil strokes, gestures, held keys,
+  with the old tag) and sends `keyboard` `cancel`. Older receivers send no tag; nothing changes
+  for them. The Mac:
+  - delivers tagged input only to the live view V names on this connection (any other number, a
+    bare `true`, a boolean, string or non-positive V: not delivered), and untagged input only when
+    no view is live on this connection (while locked otherwise, the privacy gate drops it as
+    before). Tagged input arriving after the view ended (an unlock in between, a hide, a new view,
+    a reconnect, a revoke) never reaches the desktop or another view. Untagged input otherwise is
+    ordinary input (no hold after an unlock).
+  - on a live view takes only what the login window needs (above): `scroll`, `pencil`,
+    `proximity`, `gesture`, `nativeAppGesture`, `smartTouchProbe` (answered `false`), `windowAction`,
+    `workspaceFocus`, `menuPress`, `appLaunch` and `windowClose` never act while a view is live and
+    never act tagged, ends and cancels included (nothing of theirs was pressed).
   - Keystrokes (`keyboard` `press`/`down`, one each; `text`, one per character) and presses
     (`touch` `began`, `pointer` `down`, one click each) that are refused are reported to that
-    receiver: `{"type":"lockScreenInputRefused","count":N,"clicks":C,"reason":R}`, R `unlocked`,
-    `notShown` or `untagged`. Receivers say so in one line ("1 click wasn't sent: the Mac
-    unlocked").
-  - Moves (`touch` `moved`, `pointer` `move`/`moveRelative`) that can't go are dropped without a
-    report.
+    receiver: `{"type":"lockScreenInputRefused","count":N,"clicks":C,"reason":R}`, R `unlocked`
+    (tagged, the Mac is unlocked now), `notShown` (tagged for no view live on this connection) or
+    `untagged`. Receivers say so in one line ("1 click wasn't sent: the Mac unlocked").
+  - Moves (`touch` `moved`, `pointer` `move`/`moveRelative`, an unknown action) and the other
+    families that can't go are dropped without a report.
   - Releases (`keyboard` `up`/`modifierUp`/`cancel`, `touch` `ended`/`cancelled`, `pointer` `up`)
-    always go: the Mac releases only what it pressed, so a release whose press was refused posts
-    nothing, and a press posted on the lock screen is released when the view ends or by its own
-    release, never left held.
+    always go, and release only what their own episode (the desktop, or that view) pressed: held
+    keys, modifiers and buttons are released when a view starts or ends and before anything of
+    another episode acts, so nothing is left held, nothing crosses an unlock, and a release from
+    another episode releases nothing.
 - An Ask device in Window view or Extend whose control a person granted on that connection before
   the lock is offered `needsFullDesktop`: when it asks to switch to Mirror the Mac keeps a
   one-time, Mac-internal ticket (never on the wire) bound to the device's pinned key, this lock

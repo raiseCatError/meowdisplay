@@ -817,10 +817,16 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var freshFrameSinceVideoReset = true
     /// `queue`: the next presented frame flips `freshFrameSinceVideoReset` back on.
     private var awaitingFreshFrame = false
-    /// This device shows the Mac's lock screen (6.19): every `keyboard`, `touch` and `pointer`
-    /// message it sends carries `"lockScreen":true`, so the Mac delivers it only to a live lock
-    /// screen view and never to the desktop after an unlock. Set by the app from what it shows.
-    @MainActor var lockScreenInputTagged = false
+    /// What this device's input is tagged with (PROTOCOL.md 6.19): while it sees the Mac locked,
+    /// every input message carries `"lockScreen":true`, and, while it shows lock screen view V,
+    /// `"lockScreenView":V`; the Mac delivers it only to that live view, never to the desktop after
+    /// an unlock. `locked` follows `macLock` at once; the view is set by the app from what it shows
+    /// (`setLockScreenInputView`).
+    @MainActor private(set) var lockScreenInputTag = LockScreenInputTagState()
+    /// Fires on the main actor, before the tag changes (so releases sent from it still carry the
+    /// old one): every touch, drag, scroll (and its momentum), Pencil stroke and gesture in
+    /// progress ends here, so none started in one lock episode continues in the next.
+    let lockScreenInputBoundary = PassthroughSubject<Void, Never>()
     /// The Mac's latest report of keystrokes it didn't deliver (`lockScreenInputRefused`), with a
     /// counter so the same report twice still reads as news.
     @MainActor @Published private(set) var lockScreenInputRefusal: (refusal: LockScreenInputRefusal, sequence: Int)?
@@ -3382,12 +3388,29 @@ final class StreamReceiver: ObservableObject {
         sendTaggedInput(["type": "keyboard", "action": "text", "text": text])
     }
 
-    /// Every `keyboard`, `touch` and `pointer` message leaves through here: tagged while this
-    /// device shows the lock screen.
+    /// `keyboard`, `touch` and `pointer` messages. Tagging happens in `sendUIControl`, for every
+    /// input family alike (`LockScreenInputTagState`).
     @MainActor private func sendTaggedInput(_ message: [String: Any]) {
-        var message = message
-        if lockScreenInputTagged { message[LockScreenWire.inputTag] = true }
         sendUIControl(message)
+    }
+
+    /// The lock screen view this device shows (the Mac's number for it, from `macLockState`), or
+    /// nil. Ignored while the Mac isn't locked.
+    @MainActor func setLockScreenInputView(_ view: Int?) {
+        var next = lockScreenInputTag
+        next.view = next.locked ? view : nil
+        setLockScreenInputTag(next)
+    }
+
+    /// A new lock episode for this device's input: everything in progress ends first (with the old
+    /// tag), held keys and buttons are released, and delayed actions (one-tap actions, the tray's
+    /// latches) stop, so nothing begun in one episode goes on in the next.
+    @MainActor private func setLockScreenInputTag(_ next: LockScreenInputTagState) {
+        guard next != lockScreenInputTag else { return }
+        lockScreenInputBoundary.send()
+        if connected { sendCancelActiveInput() }
+        lockScreenInputTag = next
+        controlResetGeneration &+= 1
     }
 
     /// Tells the Mac whether the on-screen keyboard is open so it can follow
@@ -3408,7 +3431,9 @@ final class StreamReceiver: ObservableObject {
         // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
         // value) — this file also compiles into the macOS receiver, which
         // has no UIKit, so the literal is used instead of that enum.
-        if usage == 42 {
+        // Never while this device sees the Mac locked: nothing typed for, or near, its lock
+        // screen is logged (not even that a Delete went).
+        if usage == 42, lockScreenInputTag.tag == nil {
             Log.info("keyboardDebug: specialPress sent usage=\(usage)")
         }
         #endif
@@ -3857,9 +3882,10 @@ final class StreamReceiver: ObservableObject {
         return true
     }
 
+    /// Every input message is tagged here, whatever sends it (`LockScreenInputTag.messageTypes`).
     @MainActor
     private func sendUIControl(_ message: [String: Any]) {
-        sendControl(message, on: sendTargetBox.current()?.connection)
+        sendControl(lockScreenInputTag.tagged(message), on: sendTargetBox.current()?.connection)
     }
 
     // MARK: - Socket read + length-prefixed deframing + Annex B parse
@@ -6053,6 +6079,7 @@ final class StreamReceiver: ObservableObject {
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
             self.macLock = nil
+            self.setLockScreenInputTag(LockScreenInputTagState())
         }
     }
 
@@ -6179,6 +6206,11 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
         macLock = notice.isLocked ? notice : nil
+        // Tagged from the moment this device knows the Mac is locked, untagged from the moment it
+        // knows it's unlocked; a view the Mac no longer calls active ends here too.
+        setLockScreenInputTag(LockScreenInputTagState(
+            locked: notice.isLocked,
+            view: notice.lockScreenView == lockScreenInputTag.view ? lockScreenInputTag.view : nil))
     }
 
     @MainActor func applyMirrorUnavailableClear() {

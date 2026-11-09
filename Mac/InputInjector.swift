@@ -43,8 +43,15 @@ final class InputInjector {
     /// The lock state input waits on (tests set their own; the app keeps `.shared` current).
     var privacyGate: MacPrivacyGate = .shared
     /// On while this connection's receiver shows the Mac's lock screen (`MacSender`): then, while
-    /// locked, only what the login window needs gets in (`LockScreenInputFilter`).
+    /// locked, only what the login window needs gets in (`LockScreenInputFilter`), and only input
+    /// `MacSender` hands over as that view's own (`perform(for:_:)`).
     var lockScreenGate: LockScreenInputGate?
+    /// The episode the event being handled was made in (`perform(for:_:)`); the desktop unless
+    /// `MacSender` says otherwise. Under `inputLock`.
+    private var eventEpisode: InputEpisode = .desktop
+    /// The episode whatever is held now (keys, modifiers, buttons, the pen) was pressed in. Under
+    /// `inputLock`. Nil: nothing allowed since the last release of everything.
+    private var heldEpisode: InputEpisode?
     private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
     // This session's ephemeral input grant (per-device-session milestone) —
@@ -130,6 +137,19 @@ final class InputInjector {
         self.eventSink = eventSink
     }
 
+    /// Runs `body` (one or more `handle…` calls) as input made in `episode`: it acts only while the
+    /// Mac is in that episode (the unlocked desktop, or that lock screen view live). Checked under
+    /// the input lock, so an unlock or a new view landing between `MacSender`'s own check and the
+    /// post can't turn input meant for one into input for the other.
+    func perform(for episode: InputEpisode, _ body: () -> Void) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        let outer = eventEpisode
+        eventEpisode = episode
+        defer { eventEpisode = outer }
+        body()
+    }
+
     /// Release every synthetic contact when capture is paused, torn down,
     /// or input is disabled while a gesture is active.
     func cancelActiveInput() {
@@ -199,6 +219,7 @@ final class InputInjector {
         for modifier in heldModifiers.releaseAll() {
             postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
         }
+        heldEpisode = nil
     }
 
     static func ensureAccessibilityPermission() -> Bool {
@@ -410,6 +431,8 @@ final class InputInjector {
         // Window mode: the release always ends the workspace's drag binding,
         // even when its press was refused (nothing was pressed on the Mac).
         let mapped = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
+        // Only the episode that pressed it releases it (an unlock in between released it already).
+        guard releaseIsAllowed() else { return }
         guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
         let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
         let point = mapped ?? currentCursor()
@@ -503,7 +526,7 @@ final class InputInjector {
     func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String]) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard heldKeys.up(usage) else { return }
+        guard releaseIsAllowed(), heldKeys.up(usage) else { return }
         postKeyEvent(keyCode: usage.keyCode, keyDown: false,
                      flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
     }
@@ -561,15 +584,42 @@ final class InputInjector {
             cancelActiveInputLocked()
             return false
         }
-        if privacyGate.allowsInput { return true }
         // Locked (or can't tell): nothing reaches the lock screen or a window behind it, whatever
         // the grant (`MacPrivacyGate`), except, while this receiver shows the lock screen and the
-        // Mac says it's locked, what the login window needs.
-        guard lockScreenGate?.isActive == true, privacyGate.state == .locked else {
+        // Mac says it's locked, that view's own input, and only what the login window needs.
+        guard let episode = currentEpisode() else {
             cancelActiveInputLocked()
             return false
         }
-        return LockScreenInputFilter.allows(event)
+        releaseHeldInputFromAnotherEpisode(episode)
+        // Made in another episode (typed for a lock screen view that has ended, or desktop input
+        // while a view is live): never acts here.
+        guard eventEpisode == episode else { return false }
+        if case .lockScreen = episode, !LockScreenInputFilter.allows(event) { return false }
+        heldEpisode = episode
+        return true
+    }
+
+    /// The episode the Mac is in now: the desktop (unlocked), the live lock screen view (locked,
+    /// this receiver showing it), or none (locked otherwise: nothing goes).
+    private func currentEpisode() -> InputEpisode? {
+        if privacyGate.allowsInput { return .desktop }
+        guard privacyGate.state == .locked, let view = lockScreenGate?.view else { return nil }
+        return .lockScreen(view: view)
+    }
+
+    /// Held input pressed in one episode is released before anything of another acts: a key, a
+    /// modifier or a drag from the lock screen never carries over into the unlocked desktop, and
+    /// none from the desktop into the lock screen. Releases go with click count 0 where it has one.
+    private func releaseHeldInputFromAnotherEpisode(_ episode: InputEpisode?) {
+        if let held = heldEpisode, held != episode { cancelActiveInputLocked() }
+    }
+
+    /// Releases (key up, button up): only the episode that pressed it releases it, and only while
+    /// the Mac is still in that episode; otherwise the episode change has released it already.
+    private func releaseIsAllowed() -> Bool {
+        releaseHeldInputFromAnotherEpisode(currentEpisode())
+        return heldEpisode != nil && heldEpisode == eventEpisode
     }
 
     func handlePencil(phase: String, x: Double, y: Double,
