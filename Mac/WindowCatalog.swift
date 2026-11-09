@@ -261,9 +261,16 @@ enum WindowSheetMatcher {
     static func sheets(frontToBack: [Window], confirmsTitled: (Window, Window) -> Bool = { _, _ in false }) -> [UInt32: [UInt32]] {
         var parentOf: [UInt32: UInt32] = [:]
         for (i, w) in frontToBack.enumerated() where isSheetSized(w) {
-            // Its window: the next window of the same app below it that it sits on.
-            guard let parent = frontToBack[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.id != w.id }),
-                  sits(w.frame, on: parent.frame), isUntitled(w) || confirmsTitled(w, parent) else { continue }
+            // Its window: the first window of the same app below it that it sits on. A window of the
+            // app in between that doesn't overlap it (a tooltip, a title-bar strip: QA 9000028 had a
+            // 66 x 20 one between an Open sheet and its window) doesn't part them; one that overlaps
+            // it does, as before.
+            var parent: Window?
+            for c in frontToBack[(i + 1)...] where c.pid == w.pid && c.layer == 0 && c.id != w.id {
+                if sits(w.frame, on: c.frame) { parent = c; break }
+                if c.frame.intersects(w.frame) { break }
+            }
+            guard let parent, isUntitled(w) || confirmsTitled(w, parent) else { continue }
             parentOf[w.id] = parent.id
         }
         // A sheet on a sheet (an alert over a Save panel) belongs to the same window. Front-most first.
