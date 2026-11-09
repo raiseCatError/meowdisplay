@@ -87,7 +87,7 @@ final class LockScreenFlowTests: XCTestCase {
         var refused = LockScreenFlow()
         _ = refused.begin(notice: locked(.needsFullDesktop), now: t0)
         _ = refused.update(notice: locked(.unavailable("turnedOff"), remoteUnlock: false), connected: true, now: t0)
-        XCTAssertEqual(refused.phase, .failed("Lock Screen Control is off for this device on the Mac."))
+        XCTAssertEqual(refused.phase, .failed("Lock Screen Control is turned off for this device on the Mac."))
     }
 
     /// Timed out after switching: back to the previous view at once, still locked, once.
@@ -243,7 +243,7 @@ final class LockScreenFlowTests: XCTestCase {
     func testTurnedOffWhileShowingFailsWithoutRetrying() {
         var flow = shown()
         XCTAssertEqual(flow.update(notice: locked(.unavailable("turnedOff"), remoteUnlock: false), connected: true, now: t0), .none)
-        XCTAssertEqual(flow.phase, .failed("Lock Screen Control is off for this device on the Mac."))
+        XCTAssertEqual(flow.phase, .failed("Lock Screen Control is turned off for this device on the Mac."))
         XCTAssertEqual(flow.update(notice: locked(.available), connected: true, now: t0), .none, "no automatic retry")
     }
 
@@ -378,11 +378,11 @@ final class LockScreenFlowTests: XCTestCase {
         func text(_ offer: LockScreenOffer, remoteUnlock: Bool? = nil) -> String? {
             MacLockedCoverPolicy.offerText(locked(offer, remoteUnlock: remoteUnlock ?? offer.offered))
         }
-        XCTAssertEqual(text(.needsControl), "Asks this Mac for control first, then shows its lock screen here.")
+        XCTAssertEqual(text(.needsControl), text(.available), "control comes back without a prompt: no separate Request Control step")
         XCTAssertTrue(text(.needsFullDesktop)?.hasPrefix("Switches to Full Desktop first") == true)
         XCTAssertTrue(text(.available)?.hasPrefix("Shows the Mac’s own lock screen here") == true)
         XCTAssertNil(text(.active))
-        XCTAssertTrue(text(.unavailable("turnedOff"))?.hasPrefix("Lock Screen Control is off for this device.") == true)
+        XCTAssertTrue(text(.unavailable("turnedOff"))?.hasPrefix("Lock Screen Control is turned off for this device") == true)
         XCTAssertTrue(text(.unavailable("controlBeforeLock"))?.contains("didn’t have control before the Mac locked") == true)
         XCTAssertTrue(text(.unavailable("windowView"))?.hasPrefix("This view can’t show the lock screen") == true)
         XCTAssertEqual(text(.unavailable("neverAllow")), "This device is set to Never Allow control on the Mac.")

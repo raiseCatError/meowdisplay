@@ -229,7 +229,7 @@ struct LockScreenFlow: Equatable, Sendable {
         waitingSince = nil
         switch reason {
         case "turnedOff"?:
-            phase = .failed(String(localized: "Lock Screen Control is off for this device on the Mac."))
+            phase = .failed(String(localized: "Lock Screen Control is turned off for this device on the Mac."))
         case "controlBeforeLock"?:
             phase = .failed(String(localized: "Control wasn't allowed before the Mac locked."))
         default:
@@ -284,13 +284,15 @@ enum MacLockedCoverPolicy {
         case .available:
             return String(localized: "Shows the Mac’s own lock screen here, so you can type its password.")
         case .needsControl:
-            return String(localized: "Asks this Mac for control first, then shows its lock screen here.")
+            // Only an Always Allow device, or an Ask device's pre-lock control carried over by the
+            // Mac: control comes back without a prompt, so it reads as one step.
+            return String(localized: "Shows the Mac’s own lock screen here, so you can type its password.")
         case .needsFullDesktop:
             return String(localized: "Switches to Full Desktop first, then shows the Mac’s lock screen here. Your view comes back once it’s unlocked.")
         case .unavailable(let why):
             switch why {
             case "turnedOff"?:
-                return String(localized: "Lock Screen Control is off for this device. It can be turned on in this device’s settings on the Mac.")
+                return String(localized: "Lock Screen Control is turned off for this device in its settings on the Mac. Unlock it at the Mac.")
             case "controlBeforeLock"?:
                 return String(localized: "This device didn’t have control before the Mac locked, and nobody can allow it while it’s locked. Unlock it at the Mac.")
             case "windowView"?:

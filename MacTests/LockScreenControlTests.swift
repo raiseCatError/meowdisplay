@@ -372,45 +372,98 @@ final class LockScreenControlTests: XCTestCase {
         return defaults
     }
 
-    /// Remote unlock is opt-in: off for every device until the owner turns it on for it.
-    func testTheSwitchIsOffByDefault() {
+    /// Effective permission as the Mac decides it: the store's switch through `LockScreenEligibility`,
+    /// with this connection's grant and the lock, for one device's stored values.
+    private func effective(_ id: String, _ d: UserDefaults, granted: Bool = true, masterInput: Bool = true,
+                           handoff: Bool = false) -> LockScreenDenial? {
+        var i = inputs(policy: ReceiverInputAuthorizationStore.policy(peerID: id, defaults: d), granted: granted,
+                       allowed: ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d),
+                       handoff: handoff)
+        i.masterInput = masterInput
+        return LockScreenEligibility.denial(i)
+    }
+
+    /// 2.1: Always Allow carries lock screen control. Nothing stored follows the input policy.
+    func testAlwaysAllowCarriesLockScreenControlWithNothingStored() {
         let d = isolatedDefaults()
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "never-set", defaults: d), "off by default")
-        // A device trusted with input (even Always Allow) still has it off until turned on.
+        XCTAssertTrue(ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: "always",
+                                                                anySessionHasEffectiveInput: false, defaults: d))
+        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "always", defaults: d))
+        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlRestricted(peerID: "always", defaults: d))
+        XCTAssertNil(effective("always", d), "Always Allow with this connection's grant: allowed")
+        XCTAssertEqual(effective("always", d, granted: false), .needsControl,
+                       "Always Allow without a grant yet: granted on request without a prompt")
+        XCTAssertNil(d.dictionary(forKey: "receiverLockScreenControl.v1"), "nothing is written to make it so")
+    }
+
+    /// Existing 2.0 devices: the input policy store as 2.0 left it, no lock screen key at all.
+    func testExisting20AlwaysAllowDevicesMigrateSilently() {
+        let d = isolatedDefaults()
+        d.set(["paired-always": "alwaysAllow", "paired-never": "neverAllow"], forKey: "receiverInputAuthorization.v2")
+        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: "paired-always", defaults: d), .alwaysAllow)
+        XCTAssertNil(effective("paired-always", d), "Always Allow from 2.0: lock screen control with no new step")
+        XCTAssertEqual(effective("paired-never", d), .neverAllow, "Never Allow from 2.0 stays denied")
+        XCTAssertEqual(effective("paired-ask", d, granted: false), .controlBeforeLock,
+                       "Ask (nothing stored) without a pre-lock grant: nothing while locked")
+        XCTAssertEqual(effective("discovered-only", d, granted: false), .controlBeforeLock,
+                       "a merely discovered or newly paired device gets no persistent control")
+        // Reading migrates nothing and widens no input policy.
+        XCTAssertNil(d.dictionary(forKey: "receiverLockScreenControl.v1"))
+        XCTAssertEqual(d.dictionary(forKey: "receiverInputAuthorization.v2") as? [String: String],
+                       ["paired-always": "alwaysAllow", "paired-never": "neverAllow"])
+    }
+
+    /// Pre-release QA builds stored the owner's own toggle: an explicit off stays a restriction.
+    func testAnExplicitOffFromBeforeStaysAndOverridesAlwaysAllow() {
+        let d = isolatedDefaults()
+        d.set(["qa-off": "alwaysAllow", "qa-on": "alwaysAllow"], forKey: "receiverInputAuthorization.v2")
+        d.set(["qa-off": false, "qa-on": true], forKey: "receiverLockScreenControl.v1")
+        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlRestricted(peerID: "qa-off", defaults: d))
+        XCTAssertEqual(effective("qa-off", d), .turnedOff, "an identifiable explicit denial is kept")
+        XCTAssertNil(effective("qa-on", d), "a stored on means the same as nothing stored")
+    }
+
+    func testAskAndNeverAllowAndAllowInputOff() {
+        let d = isolatedDefaults()
+        XCTAssertNil(effective("ask", d), "Ask with control granted on this connection before the lock")
+        XCTAssertEqual(effective("ask", d, granted: false), .controlBeforeLock, "no control merely because it's locked")
+        XCTAssertEqual(effective("ask", d, granted: false, handoff: true), .needsControl,
+                       "Ask: the Mac's one-time handoff of a pre-lock grant")
+        _ = ReceiverInputAuthorizationStore.setPolicy(.neverAllow, peerID: "never", anySessionHasEffectiveInput: false, defaults: d)
+        XCTAssertEqual(effective("never", d), .neverAllow)
+        XCTAssertEqual(effective("never", d, handoff: true), .neverAllow)
         _ = ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: "always", anySessionHasEffectiveInput: false, defaults: d)
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "always", defaults: d))
-        // What a device's stored value says stays as stored: an explicit off stays off, an explicit
-        // on stays on.
-        d.set(["off-before": false, "on-explicit": true], forKey: "receiverLockScreenControl.v1")
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "off-before", defaults: d))
-        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "on-explicit", defaults: d))
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: "never-set", defaults: d))
+        XCTAssertEqual(effective("always", d, masterInput: false), .inputOff, "Allow Input off: nothing, lock screen included")
     }
 
     func testTheSwitchOnlyNarrowsAndForgetClearsIt() {
         let d = isolatedDefaults()
         let id = "lock-screen-peer"
-        XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: false, defaults: d),
-                      "turned on by the owner")
-        XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
+        _ = ReceiverInputAuthorizationStore.setPolicy(.alwaysAllow, peerID: id, anySessionHasEffectiveInput: false, defaults: d)
         XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(false, peerID: id, anySessionHasEffectiveInput: true, defaults: d),
-                      "turning it off always works")
+                      "turning it off always works, also while a device controls this Mac")
         XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
+        XCTAssertEqual(effective(id, d), .turnedOff, "the explicit restriction overrides Always Allow")
         XCTAssertFalse(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: true, defaults: d),
-                       "turning it on is refused while a device controls this Mac")
+                       "lifting it is refused while a device controls this Mac")
         XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
         XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: false, defaults: d))
         XCTAssertTrue(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
-        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: id, defaults: d), .ask, "no input policy is written or widened")
+        XCTAssertNil((d.dictionary(forKey: "receiverLockScreenControl.v1") as? [String: Bool])?[id], "on is not stored")
+        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: id, defaults: d), .alwaysAllow, "no input policy is written or widened")
+
+        // With no restriction, "on" changes nothing, even while a device controls this Mac.
+        XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: "other", anySessionHasEffectiveInput: true, defaults: d))
+        // A legacy explicit `true` is dropped on write.
+        d.set([id: true], forKey: "receiverLockScreenControl.v1")
+        XCTAssertTrue(ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: true, defaults: d))
+        XCTAssertNil((d.dictionary(forKey: "receiverLockScreenControl.v1") as? [String: Bool])?[id])
 
         ReceiverInputAuthorizationStore.setLockScreenControlAllowed(false, peerID: id, anySessionHasEffectiveInput: false, defaults: d)
         ReceiverInputAuthorizationStore.removePolicy(peerID: id, defaults: d)
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d), "Forget leaves nothing behind: off")
-        XCTAssertNil((d.dictionary(forKey: "receiverLockScreenControl.v1") as? [String: Bool])?[id])
-        // Forget after it was turned on: back to the default, off.
-        ReceiverInputAuthorizationStore.setLockScreenControlAllowed(true, peerID: id, anySessionHasEffectiveInput: false, defaults: d)
-        ReceiverInputAuthorizationStore.removePolicy(peerID: id, defaults: d)
-        XCTAssertFalse(ReceiverInputAuthorizationStore.lockScreenControlAllowed(peerID: id, defaults: d))
+        XCTAssertNil((d.dictionary(forKey: "receiverLockScreenControl.v1") as? [String: Bool])?[id], "Forget leaves nothing behind")
+        XCTAssertEqual(ReceiverInputAuthorizationStore.policy(peerID: id, defaults: d), .ask)
+        XCTAssertEqual(effective(id, d, granted: false), .controlBeforeLock, "a forgotten, re-paired device starts with no control")
     }
 
     // MARK: Wire

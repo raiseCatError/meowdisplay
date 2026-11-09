@@ -305,7 +305,7 @@ relays the picture and the keys; macOS's login window checks the password. Code:
 - **Who.** All of these, checked on the Mac at every step, not by the receiver: the session is
   admitted (paired, pinned key, current connection); Allow Input is on; this login session is on
   the console and macOS says it is locked (not another user switched in, not unknown); the
-  device's input policy isn't Never Allow; its **Allow Lock Screen Control** switch is on; and
+  device's input policy isn't Never Allow; its **Allow Lock Screen Control** switch isn't turned off; and
   this connection has control, either because the device is set to Always Allow Requests (its
   request is granted without a prompt, as in the section above) or because the owner granted
   control on this connection before the Mac locked. A device set to Ask without that grant is
@@ -314,13 +314,18 @@ relays the picture and the keys; macOS's login window checks the password. Code:
 - **One connection.** The view belongs to the connection that asked for it. A reconnect or path
   change ends it; the new connection starts without it (even with its grant back) and must ask
   again. Its frames, pointer and input all require that connection, its grant and the lock.
-- **The switch.** Device settings ▸ Input Authorization ▸ Allow Lock Screen Control, per device,
-  stored next to the input policy it narrows (no second trust list), cleared by Forget. **Off by
-  default (opt-in):** remote unlock stays disabled for every device, including devices paired
-  before this switch existed, until the owner turns it on for that device; only an explicit "on"
-  enables it, and it only matters for devices that could control the Mac anyway. Turning it off
-  ends a view at once; turning it on is refused while any device controls the Mac, like Always
-  Allow.
+- **The switch.** Device settings ▸ Input Authorization ▸ Allow Lock Screen Control, per device.
+  It isn't a second grant: it follows the device's input policy and can only narrow it. **On with
+  Always Allow Requests** (2.1 product decision): a device the owner already trusts with
+  persistent control can also operate the real lock screen, with no extra step or prompt. That
+  includes devices set to Always Allow before 2.1: the switch never shipped in a release, so they
+  have nothing stored and follow their policy (no migration prompt, nothing rewritten, the input
+  policy untouched). With Ask, only a grant a person gave before the lock carries over (see "Ask
+  devices"); with Never Allow, or Allow Input off, never. Turning it off is stored as an explicit
+  restriction for that device (also one recorded by a pre-release build) and overrides Always
+  Allow until the owner turns it back on; turning it off ends a view at once; turning it back on
+  is refused while any device controls the Mac, like Always Allow. Forget clears it with the
+  device's trust, so a re-paired device starts at Ask with no control.
 - **Only on request, only fresh.** Nothing is shown until the device asks (`lockScreenRequest`).
   A connection can start the view at most once every 5 seconds (a quicker request gets the
   current state), and each view wakes the display once. Then the Mac drops any frame it held,

@@ -19,7 +19,7 @@ enum LockScreenDenial: String, Equatable, Sendable, CaseIterable {
     case notLocked
     /// This device is set to Never Allow input.
     case neverAllow
-    /// Allow Lock Screen Control is off for this device.
+    /// The owner turned Allow Lock Screen Control off for this device (an explicit restriction).
     case turnedOff
     /// Always Allow device without a grant on this connection yet: a control request is granted
     /// without a prompt, then the lock screen can be shown.
@@ -35,7 +35,8 @@ enum LockScreenDenial: String, Equatable, Sendable, CaseIterable {
 /// Who may operate the lock screen: a device the Mac's owner already trusts with input, on the
 /// login session it is connected to, with this Mac's switches on. Never widens anything:
 /// - Never Allow, Allow Input off, another user on the console, not admitted: no.
-/// - Allow Lock Screen Control off for the device: no.
+/// - Allow Lock Screen Control turned off for the device (an explicit restriction): no. Otherwise
+///   it follows the input policy (`ReceiverInputAuthorizationStore`), so Always Allow includes it.
 /// - Always Allow: yes, with this connection's grant (granted on request without a prompt).
 /// - Ask: only with control granted on this connection before the Mac locked (requests while
 ///   locked are refused, `InputControlRequestRoute`): no silent elevation.
