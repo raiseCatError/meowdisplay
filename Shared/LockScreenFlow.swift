@@ -254,15 +254,21 @@ enum MacLockedCoverPolicy {
     /// The Mac's lock screen picture shows (with its banner): the Mac says `active` for this
     /// device, this device asked for it (`flow.isShowing`), and video is on. Never without the
     /// Mac saying so.
-    static func showsLockScreen(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool) -> Bool {
-        (notice?.showsMacLockScreen ?? false) && flow.isShowing && videoEnabled
+    /// `freshFrame`: a frame that arrived after the last video reset is on its way to the screen
+    /// (`StreamReceiver.freshFrameSinceVideoReset`); until then the cover stays, so a renderer's
+    /// last picture from before the lock can never show through.
+    static func showsLockScreen(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool, freshFrame: Bool) -> Bool {
+        (notice?.showsMacLockScreen ?? false) && flow.isShowing && videoEnabled && freshFrame
     }
 
     /// The cover is up: the Mac is locked and its lock screen isn't playing here yet, or the flow
     /// is between steps with nothing said by the Mac (the drop and reconnect of the switch to Full
     /// Desktop, which clears `macLock`).
-    static func showsCover(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool) -> Bool {
-        if let notice { return notice.isLocked && !showsLockScreen(notice: notice, flow: flow, videoEnabled: videoEnabled) }
+    static func showsCover(notice: MacLockNotice?, flow: LockScreenFlow, videoEnabled: Bool, freshFrame: Bool) -> Bool {
+        if let notice {
+            return notice.isLocked
+                && !showsLockScreen(notice: notice, flow: flow, videoEnabled: videoEnabled, freshFrame: freshFrame)
+        }
         return flow.isWaiting
     }
 

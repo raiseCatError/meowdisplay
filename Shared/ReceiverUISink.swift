@@ -219,6 +219,10 @@ final class ReceiverUISink: Sendable {
         target?.applyInputResetBump()
     }
 
+    func publishFreshFrameSinceVideoReset(_ fresh: Bool) {
+        target?.applyFreshFrameSinceVideoReset(fresh)
+    }
+
     func publishMacLock(_ notice: MacLockNotice) {
         target?.applyMacLockUpdate(notice)
     }

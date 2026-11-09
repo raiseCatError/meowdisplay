@@ -188,8 +188,8 @@ final class LockScreenFlowTests: XCTestCase {
         var flow = LockScreenFlow()
         XCTAssertEqual(flow.update(notice: locked(.active), connected: true, now: t0), .show(false))
         XCTAssertEqual(flow.phase, .idle)
-        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: flow, videoEnabled: true))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: flow, videoEnabled: true, freshFrame: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true, freshFrame: true))
 
         // Shown, then the connection drops and comes back saying `active`: not resumed.
         var again = shown()
@@ -333,22 +333,33 @@ final class LockScreenFlowTests: XCTestCase {
 
     /// The cover stays up until the Mac says `active` AND video is on: no flash of the video-off
     /// surface between the two.
+    /// Audit S2: a renderer's last picture (the pre-lock desktop) never shows: the cover waits for a
+    /// frame that arrived after the video reset.
+    func testTheCoverWaitsForAFreshFrame() {
+        let showing = shown()
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: true, freshFrame: false))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: true, freshFrame: false))
+        XCTAssertTrue(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: LockScreenFlow(), videoEnabled: true, freshFrame: false),
+                       "unlocked: the fresh-frame wait never covers the desktop")
+    }
+
     func testTheCoverGivesWayOnlyToActiveWithVideoOn() {
         let idle = LockScreenFlow()
         let showing = shown()
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: false))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: true),
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: false, freshFrame: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: idle, videoEnabled: true, freshFrame: true),
                       "locked and not shown: covered even if video were on")
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: false),
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: false, freshFrame: true),
                       "active, video not on yet: still covered")
-        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: true))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: idle, videoEnabled: true), "not asked here")
-        XCTAssertTrue(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: true))
-        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: false))
-        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, state: .switchedOut), flow: showing, videoEnabled: true))
-        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: idle, videoEnabled: true), "unlocked, nothing going on")
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: idle, videoEnabled: true, freshFrame: true), "not asked here")
+        XCTAssertTrue(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active), flow: showing, videoEnabled: false, freshFrame: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsLockScreen(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, remoteUnlock: false), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active, state: .switchedOut), flow: showing, videoEnabled: true, freshFrame: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: idle, videoEnabled: true, freshFrame: true), "unlocked, nothing going on")
     }
 
     /// The switch to Full Desktop drops the connection (`macLock` goes nil): the cover stays, with
@@ -357,20 +368,20 @@ final class LockScreenFlowTests: XCTestCase {
         var flow = LockScreenFlow()
         XCTAssertEqual(flow.begin(notice: locked(.needsFullDesktop), now: t0), .switchToFullDesktop)
         _ = flow.update(notice: nil, connected: false, now: t0)
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true), "dropped mid-switch")
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true, freshFrame: true), "dropped mid-switch")
         _ = flow.update(notice: nil, connected: true, now: t0)
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true), "reconnected, nothing said yet")
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true, freshFrame: true), "reconnected, nothing said yet")
         XCTAssertEqual(MacLockedCoverPolicy.coverNotice(nil), MacLockNotice(state: .locked), "drawn as locked, nothing offered")
         XCTAssertEqual(flow.update(notice: locked(.needsControl), connected: true, now: t0), .requestControl)
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.needsControl), flow: flow, videoEnabled: false))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.needsControl), flow: flow, videoEnabled: false, freshFrame: true))
         XCTAssertEqual(flow.update(notice: locked(.available), connected: true, now: t0), .show(true))
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: flow, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.available), flow: flow, videoEnabled: true, freshFrame: true))
         _ = flow.update(notice: locked(.active), connected: true, now: t0)
-        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: false))
-        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true))
+        XCTAssertTrue(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: false, freshFrame: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: locked(.active), flow: flow, videoEnabled: true, freshFrame: true))
         // Any other drop ends the flow: no cover without a lock.
         _ = flow.update(notice: nil, connected: false, now: t0)
-        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true))
+        XCTAssertFalse(MacLockedCoverPolicy.showsCover(notice: nil, flow: flow, videoEnabled: true, freshFrame: true))
     }
 
     /// Before the tap, the cover says what Show Lock Screen will do; when it isn't offered, why.

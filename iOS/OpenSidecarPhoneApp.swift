@@ -75,6 +75,10 @@ struct ReceiverScreen: View {
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     // M4: the native keyboard responder is focused only while this is true.
     @State private var keyboardActive = false
+    /// Which keyboard `keyboardActive` opened: the lock screen's (true) or the ordinary one. Fixed
+    /// when it opens, so ownership never passes from one to the other while it stays open (the
+    /// lock screen ending must not hand the ordinary keyboard a moment of focus).
+    @State private var keyboardForLockScreen = false
     /// "Switch to Window view?" answered (either way) for this launch.
     @State private var windowPromptAnswered = false
     /// Mirror or Extend, whichever showed last: where "View Full Screen" returns from Window mode.
@@ -172,13 +176,18 @@ struct ReceiverScreen: View {
     /// banner show. Until video is on, the locked cover stays (`MacLockedCoverPolicy`).
     private var lockScreenShowing: Bool {
         MacLockedCoverPolicy.showsLockScreen(notice: model.receiver.macLock, flow: model.lockScreenFlow,
-                                             videoEnabled: model.receiver.videoEnabled)
+                                             videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
     }
 
-    /// The opaque locked cover is up, including through Show Lock Screen's switch to Full Desktop.
+    /// The opaque locked cover is up, including through Show Lock Screen's switch to Full Desktop,
+    /// and over the Mac's lock screen whenever the app isn't active (app switcher snapshot,
+    /// Control Center, a call), so no picture of it (its password dots) is kept or shown there.
     private var macLockedCoverShowing: Bool {
-        MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
-                                        videoEnabled: model.receiver.videoEnabled)
+        if scenePhase != .active, model.receiver.macLock != nil { return true }
+        return MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                        videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
     }
 
     private var sessionActionsAnimation: Animation {
@@ -320,7 +329,8 @@ struct ReceiverScreen: View {
             rendersThroughDisplayLayer: !metalRenderer,
             receiverSurfaceShown: showsReceiverSurface,
             sessionPhase: model.receiver.session.phase,
-            videoEnabled: model.receiver.videoEnabled,
+            // Nothing goes to Picture in Picture while the Mac is locked (its lock screen included).
+            videoEnabled: model.receiver.videoEnabled && model.receiver.macLock == nil,
             sessionOnHome: model.presentation.keepsSessionOnHome)
     }
 
@@ -446,6 +456,7 @@ struct ReceiverScreen: View {
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
                                    lockScreenShowing: lockScreenShowing,
+                                   freshFrame: model.receiver.freshFrameSinceVideoReset,
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
@@ -543,7 +554,7 @@ struct ReceiverScreen: View {
                     }
                     // The ordinary keyboard never types on the Mac's lock screen: that has its own.
                     RemoteKeyboardInputView(
-                        isActive: Binding(get: { keyboardActive && !lockScreenShowing },
+                        isActive: Binding(get: { keyboardActive && !keyboardForLockScreen && !lockScreenShowing },
                                           set: { keyboardActive = $0 }),
                         onCommitText: { commitKeyboardText($0) },
                         onSpecialPress: { usage in
@@ -567,7 +578,7 @@ struct ReceiverScreen: View {
                     // The Mac's lock screen: a bare key input (no predictions, AutoFill or echo),
                     // its keys tagged for the lock screen, no chord modifiers.
                     LockScreenKeyInputView(
-                        isActive: keyboardActive && lockScreenShowing,
+                        isActive: keyboardActive && keyboardForLockScreen && lockScreenShowing,
                         onText: { model.receiver.sendKeyboardText($0) },
                         onReturn: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue)) },
                         onDelete: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardDeleteOrBackspace.rawValue)) },
@@ -830,7 +841,8 @@ struct ReceiverScreen: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
-        .animation(.easeOut(duration: 0.15), value: macLockedCoverShowing)
+        // Leaving the app: the cover is there at once (no fade), before iOS takes its snapshot.
+        .animation(scenePhase == .active ? .easeOut(duration: 0.15) : nil, value: macLockedCoverShowing)
         .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {
@@ -850,6 +862,9 @@ struct ReceiverScreen: View {
             // screen, and the lock screen's never types on the desktop.
             keyboardActive = false
             _ = showing
+        }
+        .onChange(of: keyboardActive) { active in
+            keyboardForLockScreen = active && lockScreenShowing
         }
         // The Mac locked: whatever keyboard was open closes (the cover is up).
         .onChange(of: model.receiver.macLock != nil) { locked in
@@ -929,7 +944,11 @@ struct ReceiverScreen: View {
                 model.sceneDidActivate()
                 // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
                 model.workspace.clipboard.checkLocal(automatic: true)
-            case .background: model.sceneDidBackground()
+            case .background:
+                // The Mac's lock screen isn't left live behind the app: it ends (the cover is
+                // already up while inactive), and the Mac sends no more of its frames.
+                if lockScreenShowing || model.lockScreenFlow.isShowing { model.hideLockScreen() }
+                model.sceneDidBackground()
             default: break
             }
             // M4: never hold the keyboard responder while backgrounded.
@@ -2792,6 +2811,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// false. Either way the typing area still ends up visible.
     let zoomWhileTyping: Bool
     var lockScreenShowing = false
+    /// `StreamReceiver.freshFrameSinceVideoReset`: false clears the Metal renderer's last picture.
+    var freshFrame = true
     /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
     /// reacts to keyboard-frame notifications while this is true, so a
     /// keyboard opened for an unrelated text field elsewhere in the app
@@ -3026,6 +3047,7 @@ struct VideoLayerView: UIViewRepresentable {
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
         uiView.setLockScreenShowing(lockScreenShowing)
+        if !freshFrame { uiView.metalRenderer?.clear() }
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)

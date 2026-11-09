@@ -811,6 +811,12 @@ final class StreamReceiver: ObservableObject {
     /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
     /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
     @MainActor @Published private(set) var macLock: MacLockNotice?
+    /// A frame that arrived after the last video reset (lock, video off/on, codec change) has been
+    /// handed to presentation. The Mac's lock screen (6.19) shows only once this is true, so no
+    /// picture from before the reset (the pre-lock desktop) can show, whichever renderer is on.
+    @MainActor @Published private(set) var freshFrameSinceVideoReset = true
+    /// `queue`: the next presented frame flips `freshFrameSinceVideoReset` back on.
+    private var awaitingFreshFrame = false
     /// This device shows the Mac's lock screen (6.19): every `keyboard`, `touch` and `pointer`
     /// message it sends carries `"lockScreen":true`, so the Mac delivers it only to a live lock
     /// screen view and never to the desktop after an unlock. Set by the app from what it shows.
@@ -3563,6 +3569,9 @@ final class StreamReceiver: ObservableObject {
     private func resetDecoderForVideoStateChange() {
         presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
+        awaitingFreshFrame = true
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishFreshFrameSinceVideoReset(false) }
     }
 
     /// HEVC milestone: a codec change (Auto re-deciding, an explicit
@@ -4508,10 +4517,18 @@ final class StreamReceiver: ObservableObject {
         // presentation delay, not a sleep on the network/decode path. The
         // delay is constant across frames, so arrival order is preserved.
         let videoDelayMs = AVSyncOffset.videoDelayMs(for: avSyncPreference.get())
-        if videoDelayMs > 0 {
-            queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: present)
-        } else {
+        let firstSinceReset = awaitingFreshFrame
+        awaitingFreshFrame = false
+        let uiSink = self.uiSink
+        let presentAndNote: @Sendable () -> Void = {
             present()
+            // After the frame is queued for display: the main-actor hop lands after it.
+            if firstSinceReset { DispatchQueue.main.async { uiSink.publishFreshFrameSinceVideoReset(true) } }
+        }
+        if videoDelayMs > 0 {
+            queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: presentAndNote)
+        } else {
+            presentAndNote()
         }
 
         // Per-frame timing for the performance overlay.
@@ -6154,6 +6171,10 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
         lockScreenInputRefusal = (refusal, (lockScreenInputRefusal?.sequence ?? 0) &+ 1)
+    }
+
+    @MainActor func applyFreshFrameSinceVideoReset(_ fresh: Bool) {
+        if freshFrameSinceVideoReset != fresh { freshFrameSinceVideoReset = fresh }
     }
 
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
