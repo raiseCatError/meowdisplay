@@ -83,6 +83,29 @@ final class WindowSheetTests: XCTestCase {
         XCTAssertTrue(WindowCatalogBuilder.attachedSheetFrames(sheets: matched, listed: [], scFrames: [:], order: [sheet, window]).isEmpty)
     }
 
+    func testTheLiveListingFindsASheetTheCatalogMissed() {
+        // QA 9000032: listing 0.4 s old, target listed, no sheets; the live list above the target:
+        // two Window Server dots, the menu bar, the Open sheet and a 66 x 20 window of the app.
+        typealias C = WorkspaceInputCover.Window
+        let target = CGRect(x: 160, y: 198, width: 1100, height: 762)
+        let sheet = C(id: 18589, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 270, y: 355, width: 880, height: 448), alpha: 1, pid: 57)
+        let strip = C(id: 18588, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 166, y: 204, width: 66, height: 20), alpha: 1, pid: 57)
+        let menuBar = C(id: 9280, owner: "Window Server", layer: 24, bounds: CGRect(x: 0, y: 0, width: 1920, height: 30), alpha: 1, pid: 443)
+        XCTAssertEqual(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [menuBar, sheet, strip]).map(\.id),
+                       [18589])
+        // Another app's window of the same shape, an off-centre one, or one behind a window of the
+        // app that overlaps it: never.
+        var other = sheet; other.pid = 99
+        var offCentre = sheet; offCentre.bounds.origin.x += 40
+        let inspector = C(id: 18590, owner: "Chooser Target", layer: 0, bounds: CGRect(x: 300, y: 400, width: 300, height: 200), alpha: 1, pid: 57)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [other]).isEmpty)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [offCentre]).isEmpty)
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [sheet, inspector]).isEmpty)
+        // Invisible: never.
+        var clear = sheet; clear.alpha = 0
+        XCTAssertTrue(WindowSheetMatcher.liveCandidates(targetPID: 57, targetFrame: target, aboveFrontToBack: [clear]).isEmpty)
+    }
+
     func testATitledSheetIsASheetOnlyWhenTheAppConfirmsIt() {
         XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]), [:], "unconfirmed: an ordinary window")
         var asked: [(UInt32, UInt32)] = []

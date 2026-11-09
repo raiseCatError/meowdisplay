@@ -1628,7 +1628,19 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let displays = Self.activeDisplayBounds()
         var asked: UInt32??
         let targetFrame = Self.currentFrame(windowID)
-        let ownSheets = sheetCovers[windowID] ?? []
+        var ownSheets = sheetCovers[windowID] ?? []
+        // A sheet already on screen that the latest listing doesn't have yet: the live listing
+        // above the target finds it by shape and the app must confirm it (always, titled or not).
+        if let targetFrame, let pid = targeting.assignments.first(where: { $0.windowID == windowID })?.pid {
+            for c in WindowSheetMatcher.liveCandidates(targetPID: pid, targetFrame: targetFrame, aboveFrontToBack: above)
+            where !ownSheets.contains(c.id) && c.bounds.contains(point)
+                && SheetConfirmation.confirms(pid: pid, sheet: c.id, sheetFrame: c.bounds, window: windowID, windowFrame: targetFrame) {
+                ownSheets.insert(c.id)
+                if loggedCovers.insert("live-sheet#\(c.id)").inserted {
+                    Log.info("workspace: sheet \(c.id) of \(windowID) confirmed from the live window list (not in the latest listing)")
+                }
+            }
+        }
         var panelServiceAsked = false
         let verdict = WorkspaceInputCover.verdict(
             target: windowID, targetFrame: targetFrame, at: point, above: above,
