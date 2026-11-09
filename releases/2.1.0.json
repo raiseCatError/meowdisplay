@@ -20,8 +20,10 @@
   ],
   "platforms": {
     "mac": {
-      "stage": "pending",
-      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
+      "stage": "failed",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "blockers": "Mac pipeline skipped (run 42710323487)",
+      "updatedAt": "2026-11-09T22:19:00Z"
     },
     "ios": {
       "stage": "pending",
@@ -48,6 +50,13 @@
       "event": "candidate",
       "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
       "runId": 42710323487
+    },
+    {
+      "at": "2026-11-09T22:19:00Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "pending",
+      "to": "failed"
     }
   ]
 }
