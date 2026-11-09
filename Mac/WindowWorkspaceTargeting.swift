@@ -523,6 +523,13 @@ enum WorkspaceKeyboardGate {
         return frames.first { matches($0.value, focusedFrame) }?.key ?? (isChild ? nil : 0)
     }
 
+    /// The Mac's focused window is one of the active window's own sheets (an Open or Save panel
+    /// attached to it): it counts as the window's child, so typing (Escape, Return, a file name)
+    /// goes to it. Chrome's Open sheet isn't reported with a dialog subrole (QA 9000037).
+    static func focusIsOwnSheet(focusedFrame: CGRect, sheetFrames: [CGRect], matches: (CGRect, CGRect) -> Bool) -> Bool {
+        sheetFrames.contains { matches($0, focusedFrame) }
+    }
+
     static func decide(active: WorkspaceTileAssignment?, frontmostPID: Int32?, focusedWindowID: UInt32?,
                        focusedWindowIsChild: Bool) -> Decision {
         guard let active else { return .noActiveTile }
