@@ -26,7 +26,7 @@
       "updatedAt": "2026-11-09T22:19:00Z"
     },
     "ios": {
-      "stage": "signed",
+      "stage": "uploaded",
       "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
       "build": 1,
       "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
@@ -34,7 +34,7 @@
       "blockers": [
 
       ],
-      "updatedAt": "2026-11-09T22:26:00Z"
+      "updatedAt": "2026-11-09T22:26:02Z"
     },
     "android": {
       "stage": "pending",
@@ -78,6 +78,13 @@
       "platform": "ios",
       "from": "built",
       "to": "signed"
+    },
+    {
+      "at": "2026-11-09T22:26:02Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "signed",
+      "to": "uploaded"
     }
   ]
 }
