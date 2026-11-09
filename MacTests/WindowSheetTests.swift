@@ -178,6 +178,40 @@ final class WindowSheetTests: XCTestCase {
         let p = base + y * CVPixelBufferGetBytesPerRow(buffer) + x * 4
         return (Double(p[0]), Double(p[1]), Double(p[2]))
     }
+
+    /// Chrome's real Open panel, measured on the iPad QA run (9000036, macOS 27, Chrome 156): Chrome
+    /// opens it at the size last used, wider than its 1100-wide window, and macOS moves the window
+    /// to make room. Every press on it was refused as covered by it.
+    func testAnOpenSheetWiderThanItsWindowCountsOnlyWhenTheAppConfirmsIt() {
+        let window = w(19493, CGRect(x: 248, y: 87, width: 1100, height: 762), title: "QA page")
+        let sheet = w(19509, CGRect(x: 0, y: 170, width: 1596, height: 910), title: "Open")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, window], confirmsTitled: { _, _ in true }),
+                       [19493: [19509]])
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, window]), [:], "not without Accessibility")
+        // Untitled and wider: shape alone isn't enough either.
+        let untitledWide = w(19510, CGRect(x: 0, y: 170, width: 1596, height: 910))
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitledWide, window]), [:])
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [untitledWide, window], confirmsTitled: { _, _ in true }),
+                       [19493: [19510]])
+        // Still centred and starting inside the window: off-centre or above it, never.
+        let offCentre = w(19511, CGRect(x: 40, y: 170, width: 1596, height: 910), title: "Open")
+        let above = w(19512, CGRect(x: 0, y: 60, width: 1596, height: 910), title: "Open")
+        for c in [offCentre, above] {
+            XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [c, window], confirmsTitled: { _, _ in true }), [:], "window \(c.id)")
+        }
+        // The live listing offers it as a candidate (the caller has the app confirm it).
+        let live = WorkspaceInputCover.Window(id: 19509, owner: "Google Chrome", layer: 0, bounds: sheet.frame, alpha: 1, pid: 10)
+        XCTAssertEqual(WindowSheetMatcher.liveCandidates(targetPID: 10, targetFrame: window.frame, aboveFrontToBack: [live]).map(\.id),
+                       [19509])
+        // Its capture is the union, and a press on the part left of the window goes to it.
+        XCTAssertEqual(WindowCaptureExtent.extent(window: window.frame, children: [sheet.frame], content: CGSize(width: 1596, height: 993)),
+                       CGRect(x: -248, y: 0, width: 1596, height: 993))
+        XCTAssertEqual(WorkspaceInputCover.verdict(target: 19493, targetFrame: window.frame, at: CGPoint(x: 120, y: 1040), above: [live],
+                                                   ownSheets: [19509], displays: [], hitTest: { nil }), .clear)
+        XCTAssertEqual(WorkspaceInputCover.verdict(target: 19493, targetFrame: window.frame, at: CGPoint(x: 120, y: 1040), above: [live],
+                                                   ownSheets: [], displays: [], hitTest: { nil }),
+                       .covered(by: 19509, cache: sheet.frame), "unconfirmed: still covered, as before")
+    }
 }
 
 private enum WindowSheetMatcherWindow {

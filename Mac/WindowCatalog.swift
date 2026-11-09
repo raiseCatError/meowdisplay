@@ -187,7 +187,8 @@ struct WindowCatalogSnapshot: @unchecked Sendable {
 /// same app, ordered above its window and horizontally centred on it, starting inside it
 /// (attached under the title bar, or centred as on macOS 26 and later). Untitled, that shape is
 /// enough. Titled (an Open or Save panel shown as a sheet: "Open", "Save"), the app itself must
-/// confirm it through Accessibility (`confirmsTitled`); otherwise it is an ordinary window.
+/// confirm it through Accessibility (`confirmsTitled`); otherwise it is an ordinary window. So
+/// must a sheet wider than its window (titled or not).
 /// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510), and a
 /// single-window capture of its window includes it (child windows), so a titled Open sheet
 /// showed in its window's pane while presses on it were refused as covered (QA 9000025).
@@ -213,10 +214,15 @@ enum WindowSheetMatcher {
             // it does, as before.
             var parent: Window?
             for c in frontToBack[(i + 1)...] where c.pid == w.pid && c.layer == 0 && c.id != w.id {
-                if sits(w.frame, on: c.frame) { parent = c; break }
+                if sits(w.frame, on: c.frame, allowWider: true) { parent = c; break }
                 if c.frame.intersects(w.frame) { break }
             }
-            guard let parent, isUntitled(w) || confirmsTitled(w, parent) else { continue }
+            // Shape alone is enough only for an untitled sheet no wider than its window. A titled
+            // one, or one wider than its window (Chrome opens its Open panel at the size last used,
+            // and macOS moves the window to make room: a 1596-wide sheet on a 1100-wide window,
+            // QA 9000036), counts only when the app confirms it through Accessibility.
+            guard let parent,
+                  (isUntitled(w) && sits(w.frame, on: parent.frame)) || confirmsTitled(w, parent) else { continue }
             parentOf[w.id] = parent.id
         }
         // A sheet on a sheet (an alert over a Save panel) belongs to the same window. Front-most first.
@@ -241,7 +247,8 @@ enum WindowSheetMatcher {
         var accepted: [WorkspaceInputCover.Window] = []
         var blockers: [CGRect] = []
         for w in aboveFrontToBack.reversed() where w.pid == targetPID && w.layer == 0 && w.alpha > 0.01 {
-            let shaped = w.bounds.width >= 40 && w.bounds.height >= 30 && sits(w.bounds, on: targetFrame)
+            // Wider than the window too: the caller always has the app confirm each one.
+            let shaped = w.bounds.width >= 40 && w.bounds.height >= 30 && sits(w.bounds, on: targetFrame, allowWider: true)
             if shaped, !blockers.contains(where: { $0.intersects(w.bounds) }) { accepted.append(w) } else { blockers.append(w.bounds) }
         }
         return accepted
@@ -253,8 +260,10 @@ enum WindowSheetMatcher {
 
     static func isUntitled(_ w: Window) -> Bool { (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
 
-    static func sits(_ sheet: CGRect, on window: CGRect) -> Bool {
-        abs(sheet.midX - window.midX) <= 3 && sheet.width < window.width + 1
+    /// Centred on the window and starting inside it, below its top. `allowWider`: the sheet may be
+    /// wider than the window (only ever with the app's confirmation, see `sheets`).
+    static func sits(_ sheet: CGRect, on window: CGRect, allowWider: Bool = false) -> Bool {
+        abs(sheet.midX - window.midX) <= 3 && (allowWider || sheet.width < window.width + 1)
             && sheet.minY > window.minY && sheet.minY < window.maxY - 20
     }
 }
