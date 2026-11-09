@@ -200,13 +200,49 @@ enum LockScreenCursorPolicy {
     }
 }
 
-/// The lock screen view's on/off, read by the injector for every event on any thread.
+/// The live lock screen view, if any (its number), read by the injector for every event on any
+/// thread.
 final class LockScreenInputGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var on = false
+    private var live: Int?
 
-    var isActive: Bool { lock.withLock { on } }
-    func set(_ value: Bool) { lock.withLock { on = value } }
+    var isActive: Bool { lock.withLock { live != nil } }
+    var view: Int? { lock.withLock { live } }
+    func set(view: Int?) { lock.withLock { live = view } }
+}
+
+/// Lock screen views are numbered, never reusing a number in this process (any connection, any
+/// device): input tagged for one view can't be taken for another. Never 0 and never 1, so no
+/// boolean or bare marker ever names a view.
+enum LockScreenViewNumbers {
+    private final class Counter: @unchecked Sendable {
+        let lock = NSLock()
+        var last = Int.random(in: 1_000...1_000_000)
+    }
+
+    private static let counter = Counter()
+
+    static func next() -> Int {
+        counter.lock.withLock {
+            counter.last = counter.last >= Int(Int32.max) ? 1_000 : counter.last + 1
+            return counter.last
+        }
+    }
+}
+
+/// Whom `InputInjector` lets an event act for: the unlocked desktop, or one lock screen view.
+/// Held keys, modifiers and buttons belong to the episode that pressed them; when the Mac moves to
+/// another episode (unlock, a new view, a lock) they are released before anything else goes, and
+/// a release from another episode releases nothing.
+enum InputEpisode: Equatable, Sendable {
+    case desktop
+    case lockScreen(view: Int)
+
+    /// What a message's tag says it was made in (an untagged message: the desktop). A tag that
+    /// names no view names one that never exists.
+    init(tag: LockScreenInputTag?) {
+        self = tag.map { .lockScreen(view: $0.view ?? 0) } ?? .desktop
+    }
 }
 
 enum LockScreenSessionPolicy {
@@ -296,19 +332,19 @@ struct LockScreenGrantHandoffs: Sendable {
     mutating func revoke(peerID: String) { tickets.removeValue(forKey: peerID) }
 }
 
-/// Keyboard input the receiver sends while it shows the lock screen carries `"lockScreen":true`
-/// (PROTOCOL.md 6.19). The Mac delivers it only while that connection's view is live; after the
-/// view ended (an unlock in between, a hide, a reconnect) it never reaches the desktop, and the
-/// receiver is told how many keystrokes didn't go (`lockScreenInputRefused`). Untagged keyboard
-/// input while the view is live is refused and reported too; untagged input otherwise is ordinary
-/// input (while locked without the view, the privacy gate drops it as before). Releases always go.
-/// Touches and clicks follow the same rule: a press is refused and reported as a click, a move is
-/// dropped quietly (`pointerDecision`).
+/// Lock episode tags (PROTOCOL.md 6.19). Input the receiver sends while it sees the Mac locked
+/// carries `"lockScreen":true`, plus `"lockScreenView":V` while it shows view V
+/// (`LockScreenInputTag`). The Mac delivers tagged input only to the live view it names, on this
+/// connection; untagged input only when no view is live. A press or keystroke that can't go is
+/// refused and reported (`lockScreenInputRefused`); a move is dropped quietly; a release always
+/// reaches the injector, which releases only what its own episode pressed (`InputEpisode`).
+/// Everything that isn't touch, pointer or keyboard (scroll, Pencil, proximity, gestures, Smart
+/// Touch, window and menu actions) never goes while a view is live and never goes tagged.
 enum LockScreenTaggedInput {
     enum Refusal: String, Equatable, Sendable {
         /// Tagged, but the Mac is unlocked now.
         case unlocked
-        /// Tagged, but this connection isn't showing the lock screen.
+        /// Tagged, but not for a view live on this connection (none, hidden, ended, or another).
         case notShown
         /// Not tagged while the lock screen is shown: not typed for it.
         case untagged
@@ -316,10 +352,28 @@ enum LockScreenTaggedInput {
 
     static let releaseActions: Set<String> = ["up", "modifierUp", "cancel"]
 
-    static func refusal(action: String, tagged: Bool, viewLive: Bool, unlocked: Bool) -> Refusal? {
+    /// The tag rule for anything that starts or continues input. `liveView`: the view live on
+    /// this connection now (nil: none).
+    static func admission(tag: LockScreenInputTag?, liveView: Int?, unlocked: Bool) -> Refusal? {
+        if let tag {
+            if let liveView, tag.view == liveView { return nil }
+            return unlocked ? .unlocked : .notShown
+        }
+        return liveView == nil ? nil : .untagged
+    }
+
+    /// `keyboard` messages: releases always go (to the injector, which decides what they release).
+    static func refusal(action: String, tag: LockScreenInputTag?, liveView: Int?, unlocked: Bool) -> Refusal? {
         guard !releaseActions.contains(action) else { return nil }
-        if tagged { return viewLive ? nil : (unlocked ? .unlocked : .notShown) }
-        return viewLive ? .untagged : nil
+        return admission(tag: tag, liveView: liveView, unlocked: unlocked)
+    }
+
+    /// Scroll, Pencil, proximity, gestures, Smart Touch, window and menu actions
+    /// (`LockScreenInputTag.otherTypes`): never with a tag (made while the device saw the Mac
+    /// locked, whenever it arrives: ends and cancels too, which then have nothing of theirs to
+    /// end), never while a view is live. Otherwise on to the usual gates.
+    static func otherInputAdmits(tag: LockScreenInputTag?, liveView: Int?) -> Bool {
+        tag == nil && liveView == nil
     }
 
     /// What a `touch` or `pointer` message is, for the tag rule.
@@ -352,17 +406,16 @@ enum LockScreenTaggedInput {
     }
 
     /// Presses and moves follow the keyboard's rule; releases always go (the injector releases
-    /// only what it pressed, so a release whose press was refused posts nothing).
-    static func pointerDecision(_ kind: PointerKind, tagged: Bool, viewLive: Bool, unlocked: Bool) -> PointerDecision {
+    /// only what its episode pressed, so a release whose press was refused posts nothing). An
+    /// unknown action from a newer peer is checked like a press, but never reported.
+    static func pointerDecision(_ kind: PointerKind, tag: LockScreenInputTag?, liveView: Int?, unlocked: Bool) -> PointerDecision {
         switch kind {
-        case .release, .other:
+        case .release:
             return .deliver
         case .press:
-            if tagged { return viewLive ? .deliver : .refuse(unlocked ? .unlocked : .notShown) }
-            return viewLive ? .refuse(.untagged) : .deliver
-        case .move:
-            if tagged { return viewLive ? .deliver : .drop }
-            return viewLive ? .drop : .deliver
+            return admission(tag: tag, liveView: liveView, unlocked: unlocked).map { .refuse($0) } ?? .deliver
+        case .move, .other:
+            return admission(tag: tag, liveView: liveView, unlocked: unlocked) == nil ? .deliver : .drop
         }
     }
 

@@ -2434,12 +2434,16 @@ final class ReceiverModel: ObservableObject {
         if lockScreenExtendReturnPending, receiver.connected, receiver.videoEnabled, receiver.macLock == nil {
             lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
         }
+        syncLockScreenInputTag()
     }
 
-    /// Keys leave tagged for the lock screen exactly while this device shows it (asked here, and
-    /// the Mac says `active`): the Mac then never types them on the desktop.
+    /// Input leaves tagged with the lock screen view exactly while this device shows it (asked
+    /// here, and the Mac says `active` with that view's number): the Mac then takes it on that
+    /// view only, never on the desktop or another view. While the Mac is locked otherwise, the
+    /// receiver tags it without a view (never delivered).
     private func syncLockScreenInputTag() {
-        receiver.lockScreenInputTagged = (receiver.macLock?.showsMacLockScreen ?? false) && lockScreenFlow.isShowing
+        let shown = (receiver.macLock?.showsMacLockScreen ?? false) && lockScreenFlow.isShowing
+        receiver.setLockScreenInputView(shown ? receiver.macLock?.lockScreenView : nil)
     }
 
     private func lockScreenInputRefused(_ refusal: LockScreenInputRefusal) {
@@ -2873,6 +2877,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.observeLockScreenInputBoundary(receiver)
         view.threeFingerHoldEnabled = threeFingerHoldEnabled
         view.onThreeFingerHold = onThreeFingerHold
         view.onHardwarePointer = onHardwarePointer
@@ -3076,6 +3081,17 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+        private var lockScreenInputBoundary: AnyCancellable?
+
+        /// A new lock episode (PROTOCOL.md 6.19): every touch, drag, scroll and its momentum,
+        /// Pencil stroke, gesture and held hardware key or button ends here, synchronously, while
+        /// the old tag still applies, so nothing started on the lock screen goes on on the desktop
+        /// after an unlock (or the other way round).
+        func observeLockScreenInputBoundary(_ receiver: StreamReceiver) {
+            lockScreenInputBoundary = receiver.lockScreenInputBoundary.sink { [weak self] in
+                self?.clearInputStateForPause()
+            }
+        }
 
         // MARK: Window mode and hardware pointer/keyboard (HID-B)
 

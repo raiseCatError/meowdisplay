@@ -11,9 +11,15 @@ enum MacLockWire {
     static let type = "macLockState"
     static let welcomeFeature = "macLockState"
 
-    static func message(_ state: MacScreenPrivacy, lockScreen: LockScreenOffer = .unavailable(nil)) -> [String: Any] {
+    /// `view`: the lock screen view this device shows (`lockScreen` `active` only); its input
+    /// carries it back (`LockScreenInputTag`).
+    static func message(_ state: MacScreenPrivacy, lockScreen: LockScreenOffer = .unavailable(nil),
+                        view: Int? = nil) -> [String: Any] {
         var m: [String: Any] = ["type": type, "state": state.rawValue, "remoteUnlock": lockScreen.offered]
-        if state != .unlocked { m["lockScreen"] = lockScreen.wire }
+        if state != .unlocked {
+            m["lockScreen"] = lockScreen.wire
+            if lockScreen == .active, let view, view > 0 { m[LockScreenWire.viewKey] = view }
+        }
         return m
     }
 }
@@ -28,9 +34,13 @@ enum LockScreenWire {
 
     static func request(show: Bool) -> [String: Any] { ["type": request, "show": show] }
 
-    /// Receiver -> Mac, on `keyboard`, `touch` and `pointer` messages sent while this device shows
-    /// the lock screen: `"lockScreen":true`. Additive: a Mac that doesn't know it ignores it.
+    /// Receiver -> Mac, on every input message (`LockScreenInputTag.messageTypes`) sent while this
+    /// device sees the Mac locked: `"lockScreen":true`, plus `"lockScreenView":V` while it shows
+    /// view V. Additive: a Mac that doesn't know them ignores them.
     static let inputTag = "lockScreen"
+    /// Mac -> receiver in `macLockState` (with `lockScreen` `active`), and receiver -> Mac on
+    /// tagged input: the lock screen view the input is for. A positive integer, never reused.
+    static let viewKey = "lockScreenView"
 
     /// Mac -> receiver: `{"type":"lockScreenInputRefused","count":N,"clicks":C,"reason":R}`: N
     /// keystrokes and C clicks (presses) weren't delivered. R: `unlocked` (meant for the lock
@@ -40,6 +50,73 @@ enum LockScreenWire {
 
     static func inputRefused(count: Int, clicks: Int = 0, reason: String) -> [String: Any] {
         ["type": inputRefused, "count": count, "clicks": clicks, "reason": reason]
+    }
+}
+
+/// Which lock episode a piece of input was made in (PROTOCOL.md 6.19). The receiver tags every
+/// input message it sends while it sees the Mac locked; the Mac delivers tagged input only to the
+/// live lock screen view it names, and untagged input only when no view is live. Anything else is
+/// refused, so input typed or pressed for the lock screen never operates the desktop after an
+/// unlock, and desktop input never reaches the lock screen.
+struct LockScreenInputTag: Equatable, Sendable {
+    /// The lock screen view this input was made in. Nil: the device saw the Mac locked without
+    /// showing its lock screen (or an older receiver's bare tag): never delivered.
+    var view: Int?
+
+    init(view: Int?) {
+        self.view = view.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// Nil: untagged. Any `lockScreen` or `lockScreenView` field tags the message, whatever its
+    /// value (fail closed: a malformed tag is a tag that names no view).
+    init?(message: [String: Any]) {
+        let marker = message[LockScreenWire.inputTag]
+        let view = message[LockScreenWire.viewKey]
+        guard marker != nil || view != nil else { return nil }
+        self.init(view: Self.positiveInteger(view))
+    }
+
+    func apply(to message: inout [String: Any]) {
+        message[LockScreenWire.inputTag] = true
+        if let view { message[LockScreenWire.viewKey] = view }
+    }
+
+    /// A JSON integer, never a boolean (`true` would otherwise read as 1).
+    static func positiveInteger(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let int = Int(exactly: number.doubleValue), int > 0 else { return nil }
+        return int
+    }
+
+    /// Every message type that operates the Mac. The receiver tags each of them; the Mac checks
+    /// each against the tag rule.
+    static let messageTypes: Set<String> = lockScreenTypes.union(otherTypes)
+    /// What the lock screen can take at all (`LockScreenInputFilter`).
+    static let lockScreenTypes: Set<String> = ["touch", "pointer", "keyboard"]
+    /// Never on the lock screen: refused while a view is live, and dropped whenever tagged.
+    static let otherTypes: Set<String> = [
+        "scroll", "pencil", "proximity", "gesture",
+        WireMessage.nativeAppGesture, WireMessage.smartTouchProbe,
+        WireMessage.windowAction, WireMessage.workspaceFocus, WireMessage.menuPress,
+        WireMessage.appLaunch, WireMessage.windowClose,
+    ]
+}
+
+/// The receiver's side: what its input is tagged with now. `locked`: the Mac said it's locked
+/// (any state but `unlocked`); `view`: the lock screen view this device shows.
+struct LockScreenInputTagState: Equatable, Sendable {
+    var locked = false
+    var view: Int?
+
+    /// Nil: untagged (the Mac isn't locked as far as this device knows).
+    var tag: LockScreenInputTag? { locked ? LockScreenInputTag(view: view) : nil }
+
+    func tagged(_ message: [String: Any]) -> [String: Any] {
+        guard let tag, let type = message["type"] as? String,
+              LockScreenInputTag.messageTypes.contains(type) else { return message }
+        var message = message
+        tag.apply(to: &message)
+        return message
     }
 }
 
@@ -165,13 +242,18 @@ struct MacLockNotice: Equatable, Sendable {
     /// Whether this device may show the Mac's lock screen (now or after `lockScreen`'s step).
     var remoteUnlock: Bool
     var lockScreen: LockScreenOffer
+    /// The lock screen view this device shows (`active` only), for its input's tag. Nil from a
+    /// Mac that doesn't number views.
+    var lockScreenView: Int?
 
     var isLocked: Bool { !state.allowsContent }
 
-    init(state: MacScreenPrivacy, remoteUnlock: Bool = false, lockScreen: LockScreenOffer? = nil) {
+    init(state: MacScreenPrivacy, remoteUnlock: Bool = false, lockScreen: LockScreenOffer? = nil,
+         lockScreenView: Int? = nil) {
         self.state = state
         self.remoteUnlock = remoteUnlock
         self.lockScreen = lockScreen ?? (remoteUnlock ? .available : .unavailable(nil))
+        self.lockScreenView = self.lockScreen == .active ? lockScreenView.flatMap { $0 > 0 ? $0 : nil } : nil
     }
 
     /// Nil for anything malformed. An unknown future state counts as locked.
@@ -180,5 +262,6 @@ struct MacLockNotice: Equatable, Sendable {
         state = MacScreenPrivacy(rawValue: String(raw.prefix(32))) ?? .unknown
         remoteUnlock = message["remoteUnlock"] as? Bool ?? false
         lockScreen = LockScreenOffer(wire: message["lockScreen"] as? String, offered: remoteUnlock)
+        lockScreenView = lockScreen == .active ? LockScreenInputTag.positiveInteger(message[LockScreenWire.viewKey]) : nil
     }
 }
