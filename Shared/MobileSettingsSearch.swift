@@ -141,6 +141,7 @@ enum MobileSettingsSearchIndex {
         .init("autoHide", String(localized: "Auto-hide Control Trays"), .controls, keywords: ["auto hide", "fade"]),
         .init("holdResponse", String(localized: "Hold Response"), .controls, keywords: ["hold", "long press", "delay", "palette", "shortcuts", "modifier", "timing", "fast", "deliberate"]),
         .init("windowSwitcher", String(localized: "Window Switcher"), .controls, keywords: ["stage peek", "rail", "windows", "switch window", "edge", "window mode"]),
+        .init("enableFloatingWindows", String(localized: "Enable Floating Windows"), .controls, keywords: ["floating", "float", "floating window", "disable floating", "turn off floating", "window view"]),
         .init("defaultWindowPlacement", String(localized: "Default Window Placement"), .controls, keywords: ["floating", "float", "floating window", "pane", "dock", "circle", "window view", "placement"]),
         .init("trayPlacement", String(localized: "Landscape Tray Side"), .controls, keywords: ["left", "right", "function tray position", "avoid notch"], availability: .phoneOnly),
         .init("arrowKeys", String(localized: "Show Arrow Keys"), .controls, keywords: ["arrows", "arrow keys", "cursor keys", "up", "down", "left", "right", "keypad"], availability: .phoneOnly),
