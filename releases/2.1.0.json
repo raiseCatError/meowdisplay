@@ -26,8 +26,15 @@
       "updatedAt": "2026-11-09T22:19:00Z"
     },
     "ios": {
-      "stage": "pending",
-      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
+      "stage": "built",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "build": 1,
+      "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
+      "runId": 42710323487,
+      "blockers": [
+
+      ],
+      "updatedAt": "2026-11-09T22:25:57Z"
     },
     "android": {
       "stage": "pending",
@@ -57,6 +64,13 @@
       "platform": "mac",
       "from": "pending",
       "to": "failed"
+    },
+    {
+      "at": "2026-11-09T22:25:57Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "pending",
+      "to": "built"
     }
   ]
 }
