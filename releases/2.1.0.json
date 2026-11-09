@@ -50,8 +50,15 @@
       "sha": "94c796fc34fd699776764d67d2f26013909a308e"
     },
     "ios": {
-      "stage": "pending",
-      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
+      "stage": "built",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "build": 2,
+      "ipaSha256": "2bd9382b0298cf5d184d9d18ddec6e0358385d446d0b34d6326c409e88af4269",
+      "runId": 42720735729,
+      "blockers": [
+
+      ],
+      "updatedAt": "2026-11-09T23:39:23Z"
     },
     "android": {
       "stage": "pending",
@@ -108,6 +115,13 @@
       "event": "candidate",
       "sha": "94c796fc34fd699776764d67d2f26013909a308e",
       "runId": 42720735729
+    },
+    {
+      "at": "2026-11-09T23:39:23Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "pending",
+      "to": "built"
     }
   ]
 }
