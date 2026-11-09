@@ -88,6 +88,15 @@ struct RemoteViewportTransform: Equatable {
             && displayedRect.width > 0 && displayedRect.height > 0
     }
 
+    /// The same presentation moved by `offset` (view points). Input mapping
+    /// moves with it, since both come from `displayedRect`.
+    func offsetBy(_ offset: CGVector) -> RemoteViewportTransform {
+        guard offset != .zero, isValid else { return self }
+        return RemoteViewportTransform(remoteCrop: remoteCrop,
+                                       displayedRect: displayedRect.offsetBy(dx: offset.dx, dy: offset.dy),
+                                       rotationRadians: rotationRadians)
+    }
+
     /// Normalized remote-space point -> host-view-local point. Used to draw
     /// the cursor sprite and to test where the anchor would land.
     func viewPoint(forRemote p: CGPoint) -> CGPoint {
@@ -208,6 +217,27 @@ enum RemoteViewportCalculator {
     /// `comfortMarginFraction` so ordinary typing never pans per character.
     static let caretInnerMarginFraction: CGFloat = 0.25
 
+    /// The least room kept between the typing location (a caret's centre)
+    /// and the keyboard's top edge: this fraction of the keyboard-free height, at least
+    /// `minimumKeyboardGap` points and at most a quarter of that height.
+    /// Where the picture's own bottom edge would leave less (a caret on the
+    /// Mac's last line, a chat box at the bottom of the screen), the picture
+    /// moves up past that edge rather than leave the caret on the keyboard.
+    static let keyboardGapFraction: CGFloat = 0.08
+    static let minimumKeyboardGap: CGFloat = 16
+
+    /// A caret taller than this fraction of the display is not steered by its
+    /// full height (an app reported a whole field or paragraph).
+    static let maximumCaretHeightFraction: CGFloat = 0.25
+
+    static func keyboardGap(visibleHeight: CGFloat) -> CGFloat {
+        guard visibleHeight > 0, visibleHeight.isFinite else { return 0 }
+        return min(max(visibleHeight * keyboardGapFraction, minimumKeyboardGap), visibleHeight / 4)
+    }
+
+    /// Whether `caret` can steer the view: finite and centred on the display.
+    static func isUsableCaret(_ caret: CGRect?) -> Bool { usableCaretPoint(caret) != nil }
+
     /// The ordinary, keyboard-hidden presentation: the whole remote display
     /// aspect-fit into `viewBounds`.
     static func normal(viewBounds: CGRect, remoteAspectSize: CGSize) -> RemoteViewportTransform {
@@ -288,9 +318,10 @@ enum RemoteViewportCalculator {
         let scaleFactor = zoomEnabled
             ? requiredScale * magnification(viewBounds: viewBounds, visibleRect: visibleRect, maxZoom: maxZoom)
             : requiredScale
-        if let caretPoint {
+        if let caretPoint, let caret {
+            let caretHeight = min(max(caret.height, 0), maximumCaretHeightFraction)
             return caretTransform(base: base.displayedRect, visibleRect: visibleRect, caret: caretPoint,
-                                  scaleFactor: scaleFactor, previous: previous)
+                                  caretHeight: caretHeight, scaleFactor: scaleFactor, previous: previous)
                 ?? fitFull(into: visibleRect, remoteAspectSize: remoteAspectSize)
         }
         return verticalTransform(base: base.displayedRect, visibleRect: visibleRect,
@@ -377,8 +408,11 @@ enum RemoteViewportCalculator {
         let originX = base.midX - width / 2
         var rect = CGRect(x: originX, y: base.midY - height / 2, width: width, height: height)
         let unpannedAnchorY = rect.minY + anchorY * rect.height
-        let panY = clampedPan(point: unpannedAnchorY, contentMin: rect.minY, contentMax: rect.maxY,
-                              visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY)
+        let panY = clearingKeyboard(
+            clampedPan(point: unpannedAnchorY, contentMin: rect.minY, contentMax: rect.maxY,
+                       visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY),
+            top: unpannedAnchorY, bottom: unpannedAnchorY,
+            visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY)
         rect = rect.offsetBy(dx: 0, dy: panY)
         guard rect.width > 0, rect.height > 0 else { return nil }
         return RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: rect)
@@ -432,6 +466,50 @@ enum RemoteViewportCalculator {
         return min(max(pan, lowerBound), upperBound)
     }
 
+    /// `pan` (vertical), raised just enough that the typing location's
+    /// bottom (`bottom`, before panning) keeps `keyboardGap` above
+    /// `visibleMax`, the keyboard's top edge — never so far that its top
+    /// (`top`) leaves the visible area. Unlike the content clamp, this may
+    /// show blank space below the picture: a caret on the Mac's bottom line
+    /// otherwise sits on the keyboard.
+    private static func clearingKeyboard(_ pan: CGFloat, top: CGFloat, bottom: CGFloat,
+                                         visibleMin: CGFloat, visibleMax: CGFloat) -> CGFloat {
+        let most = visibleMax - keyboardGap(visibleHeight: visibleMax - visibleMin) - bottom
+        guard pan > most else { return pan }
+        return max(most, visibleMin - top)
+    }
+
+    /// How far to move a picture the user zoomed or panned by hand so the
+    /// typing location (`focus`: the caret, or a zero-size touch point,
+    /// normalized) is in view above the keyboard. The user's own zoom and pan
+    /// are never changed: the caller adds this offset only while the keyboard
+    /// is open, so closing it returns exactly the view the user had.
+    ///
+    /// `current` stands while the location is still in view with room to
+    /// spare (`keyboardGap` from each edge), so typing doesn't move the
+    /// picture per character; then no offset at all when the user's own view
+    /// already shows it; otherwise the location is centred in `visibleRect`.
+    /// `.zero` for an unusable transform, rect or focus.
+    static func typingRevealOffset(of transform: RemoteViewportTransform, focus: CGRect,
+                                   visibleRect: CGRect, current: CGVector) -> CGVector {
+        guard transform.isValid, visibleRect.width > 0, visibleRect.height > 0,
+              let point = usableCaretPoint(focus) else { return .zero }
+        let at = transform.viewPoint(forRemote: point)
+        guard at.x.isFinite, at.y.isFinite else { return .zero }
+        let halfHeight = min(max(focus.height, 0), maximumCaretHeightFraction)
+            * transform.displayedRect.height / transform.remoteCrop.height / 2
+        let gapX = keyboardGap(visibleHeight: visibleRect.width)
+        let gapY = keyboardGap(visibleHeight: visibleRect.height)
+        func inView(_ offset: CGVector) -> Bool {
+            let x = at.x + offset.dx, y = at.y + offset.dy
+            return x >= visibleRect.minX + gapX && x <= visibleRect.maxX - gapX
+                && y - halfHeight >= visibleRect.minY + gapY && y + halfHeight <= visibleRect.maxY - gapY
+        }
+        if current.dx.isFinite, current.dy.isFinite, inView(current) { return current }
+        if inView(.zero) { return .zero }
+        return CGVector(dx: visibleRect.midX - at.x, dy: visibleRect.midY - at.y)
+    }
+
     /// The centre of a normalized caret rect when it is a usable steering
     /// point: finite and on the display. Everything else answers `nil` so the
     /// caller falls back to the touch anchor.
@@ -454,8 +532,10 @@ enum RemoteViewportCalculator {
     /// inner region (`caretInnerMarginFraction`), and re-centers on the
     /// caret once it leaves — a pan of a few points per character would read
     /// as the picture shaking. Both are clamped so no blank space opens up
-    /// beyond the picture's own edges.
-    private static func caretTransform(base: CGRect, visibleRect: CGRect, caret: CGPoint,
+    /// beyond the picture's own edges, except that the caret's centre
+    /// always keeps `keyboardGap` above the keyboard (`clearingKeyboard`),
+    /// without pushing its top (`caretHeight`, normalized) out of view.
+    private static func caretTransform(base: CGRect, visibleRect: CGRect, caret: CGPoint, caretHeight: CGFloat,
                                        scaleFactor: CGFloat, previous: CGRect?) -> RemoteViewportTransform? {
         guard scaleFactor.isFinite, scaleFactor > 0 else { return nil }
         let width = base.width * scaleFactor
@@ -471,9 +551,16 @@ enum RemoteViewportCalculator {
         let panX = caretPan(point: unpanned.minX + caret.x * width, contentMin: unpanned.minX, contentMax: unpanned.maxX,
                             visibleMin: visibleRect.minX, visibleMax: visibleRect.maxX,
                             previous: previousPan?.x, pansOnlyWhenWider: true)
-        let panY = caretPan(point: unpanned.minY + caret.y * height, contentMin: unpanned.minY, contentMax: unpanned.maxY,
-                            visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY,
-                            previous: previousPan?.y, pansOnlyWhenWider: false)
+        let caretY = unpanned.minY + caret.y * height
+        // The gap is measured from the caret's centre, like every other
+        // decision here; half a caret is always smaller than the gap.
+        let halfCaret = min(caretHeight * height / 2, keyboardGap(visibleHeight: visibleRect.height))
+        let panY = clearingKeyboard(
+            caretPan(point: caretY, contentMin: unpanned.minY, contentMax: unpanned.maxY,
+                     visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY,
+                     previous: previousPan?.y, pansOnlyWhenWider: false),
+            top: caretY - halfCaret, bottom: caretY,
+            visibleMin: visibleRect.minY, visibleMax: visibleRect.maxY)
         let rect = unpanned.offsetBy(dx: panX, dy: panY)
         guard rect.width > 0, rect.height > 0 else { return nil }
         return RemoteViewportTransform(remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1), displayedRect: rect)
@@ -554,6 +641,45 @@ enum RemoteViewportCalculator {
         return CGRect(x: bounds.minX + (bounds.width - size.width) / 2,
                       y: bounds.minY + (bounds.height - size.height) / 2,
                       width: size.width, height: size.height)
+    }
+}
+
+/// What Zoom While Typing steers by while the keyboard is open: the Mac's text
+/// caret, or the last touch on the picture.
+///
+/// A caret report wins over the touch. A "no caret" report (an app that has
+/// none, a field macOS can't read, a momentary miss) keeps the last caret the
+/// Mac did report — it is still the best known typing location — until the
+/// user touches the picture again, which then wins until the next caret
+/// report. Nothing here is authoritative about where typing goes: it only
+/// decides where the picture looks. Closing the keyboard forgets the caret.
+struct TypingFocus: Equatable {
+    /// The last usable caret the Mac reported (normalized), live or not.
+    private(set) var caret: CGRect?
+    /// The Mac's latest report was that caret (not "no caret").
+    private(set) var caretIsLive = false
+    private var touchedSinceCaret = false
+
+    /// A `textCaret` report: a usable rect, or nil for "no caret known".
+    mutating func caretReported(_ rect: CGRect?) {
+        guard let rect, RemoteViewportCalculator.isUsableCaret(rect) else {
+            caretIsLive = false
+            return
+        }
+        caret = rect
+        caretIsLive = true
+        touchedSinceCaret = false
+    }
+
+    /// A touch on the picture (the typing anchor moved).
+    mutating func touched() { touchedSinceCaret = true }
+
+    mutating func keyboardClosed() { self = TypingFocus() }
+
+    /// The caret to steer by; nil steers by the touch anchor.
+    var steeringCaret: CGRect? {
+        guard let caret else { return nil }
+        return caretIsLive || !touchedSinceCaret ? caret : nil
     }
 }
 

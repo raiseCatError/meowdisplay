@@ -3425,6 +3425,11 @@ final class StreamReceiver: ObservableObject {
     /// only to a Mac that advertised `textCaret`; a close is sent whenever
     /// connected, so the Mac never keeps reading for a keyboard that is gone.
     @MainActor func sendKeyboardState(open: Bool) {
+        // Each keyboard session starts from the Mac's first reading, as the
+        // view does: a caret kept from the last one would make that reading
+        // (the same caret, when it hasn't moved) look unchanged and drop it,
+        // leaving the view to follow an old touch instead.
+        textCaret = nil
         guard macSupportsTextCaret, open ? displayState == .running : connected else { return }
         sendUIControl(TextCaretWire.keyboardStateMessage(open: open))
     }
