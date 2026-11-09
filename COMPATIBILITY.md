@@ -48,7 +48,7 @@ This document is the companion policy for *evolving* it.
 
 - **CI, every pull request:** the Mac app, MeowDisplay Receiver and the
   iOS app are built and the Mac tests run on GitHub's hosted macOS runner,
-  currently macOS 27 with Xcode 27.1 (`xcode-27` image). The iPhone Duo UI
+  currently macOS 27.0.1 (26A434) with Xcode 27.1 (`xcode-27-arm64` image). The iPhone Duo UI
   tests run in an iOS 27 simulator, and the Android tests on the JVM. CI
   doesn't run on older macOS or iOS versions.
 - **Physical devices, 2.1 release QA:** a Mac on macOS 27.0 sending to an
@@ -71,12 +71,12 @@ with your macOS or iOS version.
   pairing, the Mac sets up QUIC from the iPhone's Bonjour service, and macOS 15
   rejects that ("Endpoint Bonjour is of invalid type for multiplex group");
   macOS 27 accepts it, which is why our testing didn't catch it. Mac 2.1
-  includes a fix ([#226](https://github.com/raiseCatError/meowdisplay/pull/226)):
+  includes a proposed fix ([#226](https://github.com/raiseCatError/meowdisplay/pull/226)):
   the service is resolved to an address first, and if that doesn't work, Auto
-  uses the secure TCP connection instead. The fix is tested on macOS 27 only
-  and **not yet confirmed on macOS 15**. The reporter saw the same failure
-  over Tailscale; that route dials an address directly, so this cause doesn't
-  explain it, and it's still being looked into.
+  uses the secure TCP connection instead. It's tested on macOS 27 only and
+  **not yet verified on a Mac running macOS 15**. The reporter saw the same
+  failure over Tailscale; that route dials an address directly, so this cause
+  doesn't explain it, and the Tailscale failure remains unexplained.
 
 ---
 
