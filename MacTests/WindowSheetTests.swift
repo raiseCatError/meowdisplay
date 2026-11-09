@@ -46,6 +46,24 @@ final class WindowSheetTests: XCTestCase {
     private let window = WindowSheetMatcherWindow.make(18024, CGRect(x: 300, y: 248, width: 900, height: 632), "Upload probe")
     private let openSheet = WindowSheetMatcherWindow.make(18026, CGRect(x: 310, y: 340, width: 880, height: 448), "Open")
 
+    func testASmallWindowOfTheAppBetweenASheetAndItsWindowDoesNotPartThem() {
+        // Measured live (QA 9000028, macOS 27): an Open sheet 18396 over its window 18371, with a
+        // 66 x 20 window of the same app (18392, at the window's top-left) between them. The sheet
+        // went unmatched and every press on the chooser was refused as covered by it.
+        let window = w(18371, CGRect(x: 160, y: 198, width: 1100, height: 762), title: "Chooser Target")
+        let strip = w(18392, CGRect(x: 166, y: 204, width: 66, height: 20))
+        let sheet = w(18396, CGRect(x: 270, y: 355, width: 880, height: 448), title: "Open")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, strip, window], confirmsTitled: { _, _ in true }),
+                       [18371: [18396]])
+        // A window of the app in between that overlaps the sheet still parts them.
+        let inspector = w(18393, CGRect(x: 300, y: 400, width: 400, height: 300), title: "Inspector")
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, inspector, window], confirmsTitled: { _, _ in true }), [:])
+        // Another app's window in between never mattered.
+        let other = w(18394, pid: 99, CGRect(x: 300, y: 400, width: 400, height: 300))
+        XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [sheet, other, window], confirmsTitled: { _, _ in true }),
+                       [18371: [18396]])
+    }
+
     func testATitledSheetIsASheetOnlyWhenTheAppConfirmsIt() {
         XCTAssertEqual(WindowSheetMatcher.sheets(frontToBack: [openSheet, window]), [:], "unconfirmed: an ordinary window")
         var asked: [(UInt32, UInt32)] = []
