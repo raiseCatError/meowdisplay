@@ -23,11 +23,10 @@ is available through closed testing.
 <sub>Mac 2.0.0 stable, shares and receives (macOS 14+) · [Mac Receiver 2.0.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) (macOS 12+) · iPhone/iPad 2.0.0 on the App Store · Android 2.0 in Google Play closed testing, not yet public · [All downloads](https://meowdisplay.app/downloads)</sub>
 
 <p align="center">
-<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Window-View-Two-Panes.png"><img src="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Window-View-Two-Panes.png" alt="MeowDisplay 2.0 Window view on iPhone, with Safari and TextEdit in two side-by-side panes" width="760"></a>
+<a href="https://meowdisplay.app/press-kit/Graphics/MeowDisplay-Hero-Transparent.png"><img src="https://meowdisplay.app/press-kit/Previews/Graphics/MeowDisplay-Hero-Transparent.webp" alt="MeowDisplay 2.0 Mac app with connected devices, beside an iPhone showing Safari and TextEdit in two Window view panes" width="690"></a>
 
-<sub>Window view on a physical iPhone 14 Pro Max: Safari and TextEdit side by side · <a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Window-View-Two-Panes.png">Open full-resolution screenshot</a></sub>
+<sub>The released Mac app and iPhone Window view, shown in the 2.0 press-kit composition · <a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Window-View-Two-Panes.png">See the original iPhone screen</a></sub>
 </p>
-
 
 </div>
 
@@ -91,18 +90,14 @@ a phone. The main changes are:
 The iPhone and iPad apps also provide a Text Bar and Zoom While Typing, which
 keeps the active line enlarged on the receiver.
 
-### 2.0 screenshots
+### MeowDisplay 2.0 in use
 
 <p align="center">
-<a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.png"><img src="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.png" alt="MeowDisplay 2.0 Window view on iPad, showing Safari and two TextEdit documents in a three-pane layout" width="680"></a>
+<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Window-View-Two-Panes.png"><img src="https://meowdisplay.app/press-kit/Previews/Mockups/iPhone/MeowDisplay-Mockup-iPhone-Window-View.webp" alt="iPhone 14 Pro Max frame with MeowDisplay Window view displaying Safari and TextEdit in two panes" width="260"></a>
+<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Stage-Peek.png"><img src="https://meowdisplay.app/press-kit/Previews/Mockups/iPhone/MeowDisplay-Mockup-iPhone-Stage-Peek.webp" alt="iPhone 14 Pro Max frame showing Stage Peek with app search and Full Desktop" width="260"></a>
+<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Control-Tray.png"><img src="https://meowdisplay.app/press-kit/Previews/Mockups/iPhone/MeowDisplay-Mockup-iPhone-Control-Tray.webp" alt="iPhone 14 Pro Max frame showing on-screen Command, Option, Control, Shift, Escape, Tab and keyboard controls" width="260"></a>
 
-<sub>Window view on an iPad (9th generation): three panes · <a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.png">Open full-resolution screenshot</a></sub>
-</p>
-
-<p align="center">
-<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Stage-Peek.png"><img src="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Stage-Peek.png" alt="Stage Peek on iPhone showing a searchable app strip and a Full Desktop card over the Mac screen" width="680"></a>
-
-<sub>Stage Peek on iPhone: find a Mac window or return to Full Desktop · <a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Stage-Peek.png">Open full-resolution screenshot</a></sub>
+<sub>Window view · Stage Peek · Control Tray. These press-kit mockups frame the real 2.0 iPhone screenshots. Select one to inspect the original, unframed interface.</sub>
 </p>
 
 ## At a glance
@@ -143,9 +138,10 @@ your own network route for Remote Access. See the
 ## Display: Mirror & Extend
 
 <p align="center">
-<a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Extend.png"><img src="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Extend.png" alt="MeowDisplay 2.0 Extend on iPad, showing a separate Mac virtual desktop with its own menu bar and Safari window" width="680"></a>
+<img src="assets/readme/website/mac-mirror.webp" alt="MeowDisplay 2.0 Mac Displays settings with Mirror selected and an existing BenQ display available" width="340">
+<img src="assets/readme/website/mac-extend.webp" alt="MeowDisplay 2.0 Mac Displays settings with Extend selected and virtual-display sizing options" width="340">
 
-<sub>Extend on iPad: a separate virtual Mac display, not a mirror · <a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Extend.png">Open full-resolution screenshot</a></sub>
+<sub>Mac display settings: Mirror (left) and Extend (right). <a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Extend.png">See Extend running on an iPad</a>.</sub>
 </p>
 
 - **Mirror** shows an existing Mac display on the receiver. With multiple
@@ -165,6 +161,12 @@ to power; headless compatibility is still being tested across Mac models.
 Choose **Windows** to arrange selected Mac windows in panes on a receiver.
 Each device has its own display mode, so switching one does not change the
 others.
+
+<p align="center">
+<a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.png"><img src="https://meowdisplay.app/press-kit/Previews/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.webp" alt="MeowDisplay 2.0 on iPad with Safari and two TextEdit windows arranged in three panes" width="500"></a>
+
+<sub>Three-pane Window view on an iPad (9th generation) · <a href="https://meowdisplay.app/press-kit/Screenshots/iPad/MeowDisplay-iPad-Window-View-Three-Panes.png">Open full-resolution screenshot</a></sub>
+</p>
 
 - **Tiles.** One window is the default. Every receiver supports up to 9 panes,
   including phones; the available space and minimum pane size decide how
@@ -211,6 +213,12 @@ Direct Touch. Classic is the default Direct Touch style; Natural Touch is
 an optional style. Saved choices can differ.
 
 ### Allow Input & control requests
+
+<p align="center">
+<img src="assets/readme/website/mac-input.webp" alt="MeowDisplay 2.0 Mac Input settings showing the Allow Input master switch and per-device Input Requests policy" width="470">
+
+<sub>Mac Input settings: allowing connections does not grant control.</sub>
+</p>
 
 **Allow Input is the Mac-wide master switch.** Receivers can stay connected
 and view the Mac while it is off. Every new logical session starts with
@@ -334,9 +342,11 @@ works as a trackpad and keyboard for the Mac.
 
 ### Keyboard
 
-Tap the tray's Keyboard button for the on-screen keyboard, or use a hardware
-keyboard connected to the iPhone or iPad. Latched modifiers from the Control
-Tray combine with the keys you type.
+Tap the tray's Keyboard button for the on-screen keyboard, or connect a
+hardware keyboard to the iPhone or iPad. In 2.0, the hardware keyboard's
+**arrow keys**, Escape, Tab and Forward Delete are forwarded to the Mac while
+remote input is allowed. Latched modifiers from the Control Tray combine
+with the keys you type.
 
 ## Control Trays & Chords
 
@@ -347,11 +357,9 @@ The Main Control Tray puts **Command**, **Option**, **Control**, **Shift**,
 Reorder or hide buttons and save different profiles. You can also choose
 haptics, the tray side in landscape, and Avoid Notch.
 
-<p align="center">
-<a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Control-Tray.png"><img src="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Control-Tray.png" alt="MeowDisplay 2.0 on iPhone showing the Mac's Safari window and on-screen control trays with modifier, keyboard, zoom and shortcut buttons" width="680"></a>
+The [iPhone Control Tray screenshot](https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Control-Tray.png)
+shows the actual controls without the device frame.
 
-<sub>The Control Tray on iPhone: modifier keys, shortcuts and the keyboard button · <a href="https://meowdisplay.app/press-kit/Screenshots/iPhone/MeowDisplay-iPhone-Control-Tray.png">Open full-resolution screenshot</a></sub>
-</p>
 
 ### Chords
 
@@ -398,6 +406,12 @@ them back when you interact with the receiver. Manual Collapse works
 separately. You can turn Auto-hide off.
 
 ## Devices
+
+<p align="center">
+<img src="assets/readme/website/mac-devices.webp" alt="MeowDisplay 2.0 Mac Devices settings showing Known Devices, Nearby pairing and Pair over Remote" width="470">
+
+<sub>Mac Devices settings: manage existing pairings and discover receivers.</sub>
+</p>
 
 Pair a receiver once, then manage it in **Devices** on the Mac:
 
