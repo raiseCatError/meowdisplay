@@ -3,12 +3,19 @@
 # after Mac 2.1.0 publication is live.
 #
 # Usage:
-#   reconcile-mac-release.sh [--manifest-only | --execute]
+#   reconcile-mac-release.sh (--execute | --manifest-only)
+#
+# Modes:
+#   --execute        Mutate release-state: advance publication from 'failed' to
+#                    'in-progress', record Mac platform as 'published', process
+#                    stores, generate website manifest, and verify remote state.
+#                    Requires RELEASE_STATE_TOKEN (App ID 5582030).
+#   --manifest-only  Strictly read-only: generate website release.json manifest
+#                    from recorded state without mutating release-state.
 #
 # Requirements:
 #   - Pinned to VERSION 2.1.0, CANDIDATE_SHA 94c796fc34fd699776764d67d2f26013909a308e.
-#   - Release must be published and live as Latest on GitHub before reconciliation.
-#   - Requires RELEASE_STATE_TOKEN (minted via GitHub App meowdisplay-release).
+#   - For --execute, Mac 2.1.0 must already be published live as Latest on GitHub.
 #   - Respects scratch storage policy and verifies all transitions fail-closed.
 set -euo pipefail
 
@@ -19,6 +26,8 @@ readonly PINNED_REPO="raiseCatError/meowdisplay"
 VERSION="${VERSION:-$PINNED_VERSION}"
 CANDIDATE_SHA="${CANDIDATE_SHA:-$PINNED_CANDIDATE_SHA}"
 REPO="${GITHUB_REPOSITORY:-$PINNED_REPO}"
+export GITHUB_REPOSITORY="$REPO"
+export GH_TOKEN="${GH_TOKEN:-${RELEASE_STATE_TOKEN:-${GITHUB_TOKEN:-}}}"
 
 if [ "$VERSION" != "$PINNED_VERSION" ]; then
   echo "::error::VERSION must be '$PINNED_VERSION' (attempted override to '$VERSION' rejected)"
@@ -33,22 +42,31 @@ if [ "$REPO" != "$PINNED_REPO" ]; then
   exit 1
 fi
 
-mode="execute"
-if [ "${1:-}" = "--manifest-only" ]; then
-  mode="manifest-only"
-elif [ -n "${1:-}" ] && [ "${1:-}" != "--execute" ]; then
-  echo "::error::unknown option '${1:-}' (usage: reconcile-mac-release.sh [--manifest-only | --execute])"
-  exit 1
-fi
+mode=""
+case "${1:-}" in
+  --manifest-only)
+    mode="manifest-only"
+    ;;
+  --execute)
+    mode="execute"
+    ;;
+  *)
+    echo "::error::usage: reconcile-mac-release.sh (--execute | --manifest-only)"
+    echo "  --execute:        Reconcile release-state with authorized release App token (mutating)"
+    echo "  --manifest-only:  Generate website release.json from current recorded state (read-only)"
+    exit 1
+    ;;
+esac
 
 here="$(cd "$(dirname "$0")" && pwd)"
+
+state_cmd="release-state.sh"
+command -v "$state_cmd" >/dev/null 2>&1 || state_cmd="$here/release-state.sh"
 
 # Scratch storage policy
 scratch_base=""
 if [ -n "${RUNNER_TEMP:-}" ]; then
   scratch_base="$RUNNER_TEMP"
-elif [ -n "${RECOVERY_TEST_TMPDIR:-}" ]; then
-  scratch_base="$RECOVERY_TEST_TMPDIR"
 elif [ -n "${T7_RUN_DIR:-}" ] && [ -d "$T7_RUN_DIR" ]; then
   scratch_base="$T7_RUN_DIR"
 elif [ -d "/Volumes/T7Tmp/ai-dev" ]; then
@@ -74,20 +92,37 @@ echo "Repository:    $REPO"
 echo "Mode:          $mode"
 echo ""
 
-# 1. Preflight check: Verify Mac 2.1.0 is published live on GitHub
-echo "1. Checking live publication status on GitHub..."
-if [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
-  latest_tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
-  [ "$latest_tag" = "v$VERSION" ] || { echo "::error::Latest release is '$latest_tag', expected 'v$VERSION'"; exit 1; }
+# Mode: manifest-only (genuinely read-only)
+if [ "$mode" = "manifest-only" ]; then
+  echo "1. Generating website manifest from current recorded release-state (read-only)..."
+  git -C "$here/../.." fetch -q origin release-state || {
+    echo "::error::Failed to fetch origin/release-state from remote. Relying on stale local state is prohibited."
+    exit 1
+  }
+  manifest_out="$work/release.json"
+  "$state_cmd" "$VERSION" publish website-manifest STATE \
+    --config "$here/../../.github/release-config.json" \
+    --out "$manifest_out"
 
-  tag_sha=$(gh api "repos/$REPO/commits/v$VERSION" --jq .sha)
-  [ "$tag_sha" = "$CANDIDATE_SHA" ] || { echo "::error::v$VERSION tag points to $tag_sha, expected candidate $CANDIDATE_SHA"; exit 1; }
-  echo "✓ Live GitHub Release v$VERSION is Latest pointing to $CANDIDATE_SHA"
+  cat "$manifest_out"
+  echo ""
+  echo "✓ Manifest generated successfully (read-only mode; zero state mutations performed)"
+  exit 0
 fi
+
+# Mode: execute (mutating)
+# 1. Preflight check: Verify Mac 2.1.0 is published live on GitHub as Latest
+echo "1. Checking live publication status on GitHub..."
+latest_tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+[ "$latest_tag" = "v$VERSION" ] || { echo "::error::Latest release is '$latest_tag', expected 'v$VERSION'"; exit 1; }
+
+tag_sha=$(gh api "repos/$REPO/commits/v$VERSION" --jq .sha)
+[ "$tag_sha" = "$CANDIDATE_SHA" ] || { echo "::error::v$VERSION tag points to $tag_sha, expected candidate $CANDIDATE_SHA"; exit 1; }
+echo "✓ Live GitHub Release v$VERSION is Latest pointing to $CANDIDATE_SHA"
 
 # 2. Require release App token for state writes
 echo "2. Checking release-state authorization..."
-if [ -z "${RELEASE_STATE_TOKEN:-}" ] && [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
+if [ -z "${RELEASE_STATE_TOKEN:-}" ]; then
   echo "::error::RELEASE_STATE_TOKEN is required to mutate the protected release-state branch (Ruleset 26251855)."
   echo "The release App (App ID 5582030) token must be minted in a protected environment."
   exit 1
@@ -95,19 +130,19 @@ fi
 
 # 3. Transition publication from 'failed' to 'in-progress'
 echo "3. Restarting publication state from 'failed' to 'in-progress'..."
-"$here/release-state.sh" "$VERSION" publish start STATE \
+"$state_cmd" "$VERSION" publish start STATE \
   --config "$here/../../.github/release-config.json" \
   --branch-head "$CANDIDATE_SHA"
 
 # 4. Advance Mac platform to 'published'
 echo "4. Recording Mac platform publication in release-state..."
-"$here/release-state.sh" "$VERSION" publish mac-published STATE \
+"$state_cmd" "$VERSION" publish mac-published STATE \
   --config "$here/../../.github/release-config.json" \
   --url "https://github.com/$REPO/releases/tag/v$VERSION"
 
 # 5. Process stores (iOS is already published, Android is excluded)
 echo "5. Verifying store distribution state..."
-out_stores=$("$here/release-state.sh" "$VERSION" publish stores STATE \
+out_stores=$("$state_cmd" "$VERSION" publish stores STATE \
   --config "$here/../../.github/release-config.json" \
   --stores live)
 echo "$out_stores"
@@ -115,7 +150,7 @@ echo "$out_stores"
 # 6. Generate accurate website manifest
 echo "6. Generating website manifest release.json..."
 manifest_out="$work/release.json"
-"$here/release-state.sh" "$VERSION" publish website-manifest STATE \
+"$state_cmd" "$VERSION" publish website-manifest STATE \
   --config "$here/../../.github/release-config.json" \
   --out "$manifest_out"
 

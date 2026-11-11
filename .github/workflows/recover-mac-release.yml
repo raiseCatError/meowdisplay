@@ -1,0 +1,110 @@
+name: Recover Mac release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to recover (pinned to 2.1.0)
+        required: true
+        type: string
+        default: '2.1.0'
+      candidate_sha:
+        description: Candidate commit SHA (pinned)
+        required: true
+        type: string
+        default: '94c796fc34fd699776764d67d2f26013909a308e'
+      draft_id:
+        description: Draft release ID (pinned to 442117184)
+        required: true
+        type: string
+        default: '442117184'
+      action:
+        description: 'Recovery action: verify (read-only draft check) or publish (publish Latest and reconcile release-state)'
+        required: true
+        type: choice
+        options:
+          - verify
+          - publish
+        default: verify
+
+permissions: {}
+
+concurrency:
+  group: recover-mac-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
+      - name: Verify Mac release candidate draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          DRAFT_ID: ${{ inputs.draft_id }}
+        run: |
+          set -euo pipefail
+          scripts/release/recover-mac-release.sh --verify
+
+  publish:
+    needs: verify
+    if: ${{ inputs.action == 'publish' }}
+    runs-on: xcode-27
+    environment: release-publish
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select Xcode (.xcode-version)
+        run: scripts/ci/select-xcode.sh
+      - name: Deployment branch guard
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            "refs/heads/release/"*) ;;
+            *) echo "::error::Publication must run on a release/* branch to satisfy release-publish deployment branch policy (got $REF)"; exit 1 ;;
+          esac
+      - name: Environment requires human approval
+        id: check-env
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh release-publish --require-reviewers
+      - name: Release state token (release App, contents only)
+        id: state-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Publish Mac release as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          DRAFT_ID: ${{ inputs.draft_id }}
+        run: |
+          set -euo pipefail
+          scripts/release/recover-mac-release.sh --publish
+      - name: Reconcile release state
+        env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          scripts/release/reconcile-mac-release.sh --execute

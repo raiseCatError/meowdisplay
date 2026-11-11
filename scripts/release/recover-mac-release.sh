@@ -53,6 +53,7 @@ VERSION="$PINNED_VERSION"
 CANDIDATE_SHA="$PINNED_CANDIDATE_SHA"
 DRAFT_ID="$PINNED_DRAFT_ID"
 REPO="$PINNED_REPO"
+export GITHUB_REPOSITORY="$REPO"
 EXPECTED_SHA256SUMS_DIGEST="$PINNED_SHA256SUMS_DIGEST"
 
 mode="verify"
@@ -76,27 +77,35 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # Publication gate: Local execution is strictly verification-only.
 # Publication MUST run inside GitHub Actions within the protected release-publish environment with required reviewers.
 if [ "$mode" = "publish" ]; then
-  if [ "${GITHUB_ACTIONS:-false}" != "true" ] && [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
-    echo "::error::Local execution is verification-only (--verify). Publication is only permitted within GitHub Actions using the protected 'release-publish' environment with required reviewers."
+  if [ "${GITHUB_ACTIONS:-false}" != "true" ]; then
+    echo "::error::Local execution is verification-only (--verify). Publication is permitted ONLY within GitHub Actions using the protected 'release-publish' environment with required reviewers."
     exit 1
   fi
-  if [ "${GITHUB_ACTIONS:-false}" = "true" ] && [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
-    "$here/check-environment.sh" release-publish --require-reviewers || {
-      echo "::error::Execution environment 'release-publish' is not protected with required reviewers."
-      exit 1
-    }
+  if [ -z "${GITHUB_RUN_ID:-}" ]; then
+    echo "::error::GITHUB_RUN_ID is not set. Publication must run within an active GitHub Actions workflow run."
+    exit 1
   fi
+
+  "$here/check-environment.sh" release-publish --require-reviewers || {
+    echo "::error::Execution environment 'release-publish' is not protected with required reviewers."
+    exit 1
+  }
+
+  approvals_json=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID/approvals" 2>/dev/null || echo "[]")
+  is_approved=$(jq -r '[.[] | select(.environments[].name == "release-publish" and .state == "approved")] | length > 0' <<< "$approvals_json")
+  if [ "$is_approved" != "true" ]; then
+    echo "::error::Current GitHub Actions run $GITHUB_RUN_ID has not received human approval for 'release-publish' from required reviewers."
+    exit 1
+  fi
+  echo "✓ Verified human approval for 'release-publish' on GitHub Actions run $GITHUB_RUN_ID"
 fi
 
 # Scratch storage policy enforcement:
 # In CI: $RUNNER_TEMP is required.
-# In unit test mock: $RECOVERY_TEST_TMPDIR is used.
 # In local runs: external T7 scratch storage (/Volumes/T7Tmp/ai-dev) is required. Internal /tmp is rejected.
 scratch_base=""
 if [ -n "${RUNNER_TEMP:-}" ]; then
   scratch_base="$RUNNER_TEMP"
-elif [ -n "${RECOVERY_TEST_TMPDIR:-}" ]; then
-  scratch_base="$RECOVERY_TEST_TMPDIR"
 elif [ -n "${T7_RUN_DIR:-}" ] && [ -d "$T7_RUN_DIR" ]; then
   scratch_base="$T7_RUN_DIR"
 elif [ -d "/Volumes/T7Tmp/ai-dev" ]; then
@@ -190,17 +199,14 @@ echo "✓ All asset SHA-256 hashes match approved release-state records and SHA2
 echo "5. Verifying signing, notarization, version, build, and Sparkle feeds against baseline..."
 . "$here/baseline.env"
 
-baseline_cmd="$here/published-baseline.sh"
-check_build_cmd="$here/check-build-number.sh"
-verify_mac_cmd="$here/verify-mac-artifact.sh"
-verify_feed_cmd="$here/verify-feed.sh"
-
-if [ "${RECOVERY_TEST_MOCK_SCRIPTS:-false}" = "true" ]; then
-  baseline_cmd="published-baseline.sh"
-  check_build_cmd="check-build-number.sh"
-  verify_mac_cmd="verify-mac-artifact.sh"
-  verify_feed_cmd="verify-feed.sh"
-fi
+baseline_cmd="published-baseline.sh"
+command -v "$baseline_cmd" >/dev/null 2>&1 || baseline_cmd="$here/published-baseline.sh"
+check_build_cmd="check-build-number.sh"
+command -v "$check_build_cmd" >/dev/null 2>&1 || check_build_cmd="$here/check-build-number.sh"
+verify_mac_cmd="verify-mac-artifact.sh"
+command -v "$verify_mac_cmd" >/dev/null 2>&1 || verify_mac_cmd="$here/verify-mac-artifact.sh"
+verify_feed_cmd="verify-feed.sh"
+command -v "$verify_feed_cmd" >/dev/null 2>&1 || verify_feed_cmd="$here/verify-feed.sh"
 
 "$baseline_cmd" "$work/baseline"
 
@@ -260,22 +266,22 @@ rollback() {
   fi
 
   # 2. Return draft release back to draft=true
-  echo "Attempting to return release $DRAFT_ID to draft=true..."
-  if gh release edit "$DRAFT_ID" --draft=true -R "$REPO"; then
+  echo "Attempting to return release v$VERSION (ID $DRAFT_ID) to draft=true..."
+  if gh release edit "v$VERSION" --draft=true -R "$REPO"; then
     draft_status=$(gh api "repos/$REPO/releases/$DRAFT_ID" --jq .draft 2>/dev/null || echo "")
     if [ "$draft_status" = "true" ]; then
       revert_draft_ok=true
-      echo "✓ Release $DRAFT_ID successfully returned to draft"
+      echo "✓ Release v$VERSION (ID $DRAFT_ID) successfully returned to draft"
     else
       echo "::error::Draft status check after revert returned '$draft_status', expected 'true'"
     fi
   else
-    echo "::error::Failed to execute 'gh release edit $DRAFT_ID --draft=true'"
+    echo "::error::Failed to execute 'gh release edit v$VERSION --draft=true'"
   fi
 
   # Explicit reporting on failure modes
   if $revert_latest_ok && $revert_draft_ok; then
-    echo "::error::Rollback succeeded: $DRAFT_ID returned to draft; $previous_latest restored as Latest."
+    echo "::error::Rollback succeeded: v$VERSION (ID $DRAFT_ID) returned to draft; $previous_latest restored as Latest."
   else
     echo "::error::PARTIAL ROLLBACK FAILURE: revert_latest=$revert_latest_ok, revert_draft=$revert_draft_ok"
   fi
@@ -283,7 +289,7 @@ rollback() {
 }
 trap rollback ERR
 
-gh release edit "$DRAFT_ID" --draft=false --latest -R "$REPO"
+gh release edit "v$VERSION" --draft=false --latest -R "$REPO"
 
 echo "7. Verifying published tag and Latest status..."
 tagged_sha=$(gh api "repos/$REPO/commits/v$VERSION" --jq .sha)
@@ -307,7 +313,7 @@ success=false
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
   echo "Checking live feeds (attempt $attempt/10)..."
   if live_ok; then success=true; echo "Live feeds serve v$VERSION!"; break; fi
-  sleep 30
+  sleep "${FEED_POLL_SLEEP:-30}"
 done
 
 if [ "$success" != "true" ]; then
