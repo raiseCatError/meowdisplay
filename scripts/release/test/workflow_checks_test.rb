@@ -253,4 +253,36 @@ class WorkflowChecksTest < Minitest::Test
     assert_caught("stores must wait for publish-mac (or a resume)",
                   "release-publish.yml" => ["(!inputs.resume && needs.publish-mac.result == 'success')", "(true)"])
   end
+
+  # Run 43117186436: the recovery workflow ran reconcile-mac-release.sh
+  # directly while Git tracked it as 100644, and every check still passed.
+  def test_a_directly_run_script_must_be_tracked_executable
+    Dir.mktmpdir do |repo|
+      system("git", "init", "-q", repo, exception: true)
+      index, status = Open3.capture2("git", "-C", ROOT, "ls-files", "-s", "--", "scripts")
+      assert status.success?
+      flipped = index.sub(/^100755 (\h+ 0\tscripts\/release\/reconcile-mac-release\.sh)$/, '100644 \\1')
+      refute_equal index, flipped, "fixture: reconcile-mac-release.sh is not 100755 in the real index"
+      _, status = Open3.capture2("git", "-C", repo, "update-index", "--add", "--info-only", "--index-info", stdin_data: flipped)
+      assert status.success?
+      out, status = Open3.capture2e({ "MEOW_REPO_ROOT" => repo }, "ruby", CHECKER)
+      refute status.success?, out
+      assert_includes out, "recover-mac-release.yml: job verify runs scripts/release/reconcile-mac-release.sh directly, but Git tracks it as 100644"
+      assert_includes out, "scripts/release/reconcile-mac-release.sh: tracked as 100644"
+    end
+  end
+
+  def test_recovery_publication_stays_behind_its_gates
+    f = "recover-mac-release.yml"
+    assert_caught("the publish step must run only for action == 'publish'",
+                  f => ["        if: ${{ inputs.action == 'publish' }}\n        env:\n          GH_TOKEN: ${{ github.token }}\n          VERSION: ${{ inputs.version }}\n          CANDIDATE_SHA: ${{ inputs.candidate_sha }}\n          DRAFT_ID",
+                        "        env:\n          GH_TOKEN: ${{ github.token }}\n          VERSION: ${{ inputs.version }}\n          CANDIDATE_SHA: ${{ inputs.candidate_sha }}\n          DRAFT_ID"])
+    assert_caught("verify job must hold no credential",
+                  f => ["    runs-on: xcode-27\n    permissions:\n      contents: read\n    steps:",
+                        "    runs-on: xcode-27\n    permissions:\n      contents: write\n    steps:"])
+    assert_caught("step \"Finish publication (website serves release.json)\" writes the release state without RELEASE_STATE_TOKEN",
+                  f => ["          PROMOTION_PR: ${{ inputs.promotion_pr }}", "          PROMOTION_PR: ${{ inputs.promotion_pr }}\n          RELEASE_STATE_TOKEN: x"])
+    assert_caught("publish job must use the release-publish environment",
+                  f => ["    environment: release-publish\n", "    environment: release-elsewhere\n"])
+  end
 end

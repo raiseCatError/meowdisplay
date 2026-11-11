@@ -4,6 +4,7 @@ require_relative "test_helper"
 require "open3"
 require "tmpdir"
 require "fileutils"
+require "json"
 
 class RecoverMacReleaseTest < Minitest::Test
   SCRIPT = File.expand_path("../recover-mac-release.sh", __dir__)
@@ -28,33 +29,65 @@ class RecoverMacReleaseTest < Minitest::Test
       "GH_TOKEN" => "mock-token",
       "FEED_POLL_SLEEP" => "0"
     }
-    Open3.capture3(default_env.merge(env), "bash", SCRIPT, *args)
+    Open3.capture3(default_env.merge(env), SCRIPT, *args)
   end
 
   def run_reconcile(args = [], env = {})
     default_env = {
       "GH_TOKEN" => "mock-token"
     }
-    Open3.capture3(default_env.merge(env), "bash", RECONCILE_SCRIPT, *args)
+    Open3.capture3(default_env.merge(env), RECONCILE_SCRIPT, *args)
+  end
+
+  RECORDED_ARTIFACTS = [
+    ["MeowDisplay.dmg", DMG1_HASH], ["MeowDisplayReceiver.dmg", DMG2_HASH],
+    ["appcast-receiver.xml", FEED2_HASH], ["appcast.xml", FEED1_HASH]
+  ].freeze
+  RECORDED_ARTIFACTS_JSON = RECORDED_ARTIFACTS.map { |n, h| { "name" => n, "sha256" => h } }.to_json
+
+  # The GitHub API as seen after publication: release 442117184 public,
+  # Latest, tagged at the candidate, with GitHub's own asset digests.
+  def live_release_json(draft: false, overrides: {})
+    assets = (RECORDED_ARTIFACTS + [["SHA256SUMS.txt", EXPECTED_SUMS_HASH]]).map do |name, hash|
+      { "name" => name, "digest" => "sha256:#{overrides.fetch(name, hash)}" }
+    end
+    { "id" => 442_117_184, "tag_name" => "v2.1.0", "draft" => draft, "target_commitish" => VALID_SHA,
+      "assets" => assets }.to_json
+  end
+
+  def write_live_release_gh(bin_dir, latest: "v2.1.0", release_json: live_release_json, log: nil)
+    File.write(File.join(bin_dir, "release.json.mock"), release_json)
+    gh = File.join(bin_dir, "gh")
+    File.write(gh, <<~SH)
+      #!/usr/bin/env bash
+      #{log ? "echo \"gh $*\" >> '#{log}'" : ''}
+      case "$*" in
+        *"releases/latest"*) echo '#{latest}' ;;
+        *"commits/v2.1.0"*) echo '#{VALID_SHA}' ;;
+        "api repos/raiseCatError/meowdisplay/releases/442117184") cat '#{bin_dir}/release.json.mock' ;;
+        *) echo "unexpected gh $*" >&2; exit 1 ;;
+      esac
+    SH
+    FileUtils.chmod(0o755, gh)
   end
 
   def test_input_pinning_rejects_differing_version_or_sha_or_draft_or_repo
-    out, err, status = Open3.capture3({ "VERSION" => "2.2.0" }, "bash", SCRIPT)
+    out, err, status = Open3.capture3({ "VERSION" => "2.2.0" }, SCRIPT)
     refute status.success?
     assert_includes err + out, "VERSION must be '2.1.0'"
     assert_includes err + out, "rejected"
 
-    out, err, status = Open3.capture3({ "CANDIDATE_SHA" => "1111111111111111111111111111111111111111" }, "bash", SCRIPT)
+    out, err, status = Open3.capture3({ "CANDIDATE_SHA" => "1111111111111111111111111111111111111111" }, SCRIPT)
     refute status.success?
     assert_includes err + out, "CANDIDATE_SHA must be '94c796fc34fd699776764d67d2f26013909a308e'"
     assert_includes err + out, "rejected"
 
-    out, err, status = Open3.capture3({ "DRAFT_ID" => "99999999" }, "bash", SCRIPT)
+    out, err, status = Open3.capture3({ "DRAFT_ID" => "99999999" }, SCRIPT)
     refute status.success?
     assert_includes err + out, "DRAFT_ID must be '442117184'"
     assert_includes err + out, "rejected"
 
-    out, err, status = Open3.capture3({ "GITHUB_REPOSITORY" => "other/repo" }, "bash", SCRIPT)
+    out, err, status = Open3.capture3({ "GITHUB_REPOSITORY" => "other/repo" }, SCRIPT)
     refute status.success?
     assert_includes err + out, "GITHUB_REPOSITORY must be 'raiseCatError/meowdisplay'"
     assert_includes err + out, "rejected"
@@ -65,7 +98,7 @@ class RecoverMacReleaseTest < Minitest::Test
       "GITHUB_ACTIONS" => "false",
       "GITHUB_RUN_ID" => ""
     }
-    out, err, status = Open3.capture3(env, "bash", SCRIPT, "--publish")
+    out, err, status = Open3.capture3(env, SCRIPT, "--publish")
     refute status.success?
     assert_includes err + out, "Local execution is verification-only (--verify)"
     assert_includes err + out, "release-publish"
@@ -104,7 +137,7 @@ class RecoverMacReleaseTest < Minitest::Test
         "GITHUB_RUN_ID" => "12345",
         "RUNNER_TEMP" => bin_dir
       }
-      out, err, status = Open3.capture3(env, "bash", SCRIPT, "--publish")
+      out, err, status = Open3.capture3(env, SCRIPT, "--publish")
       refute status.success?
       assert_includes err + out, "Current GitHub Actions run 12345 has not received human approval for 'release-publish' from required reviewers"
     end
@@ -167,13 +200,13 @@ class RecoverMacReleaseTest < Minitest::Test
       SH
       FileUtils.chmod(0o755, mock_t7run)
 
-      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", SCRIPT)
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, SCRIPT)
       refute status.success?
       assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
       assert_includes err + out, "Arbitrary scratch paths are rejected"
 
       # Reconcile script also rejects arbitrary T7_RUN_DIR
-      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", RECONCILE_SCRIPT, "--manifest-only")
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, RECONCILE_SCRIPT, "--manifest-only")
       refute status.success?
       assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
       assert_includes err + out, "Arbitrary scratch paths are rejected"
@@ -188,7 +221,7 @@ class RecoverMacReleaseTest < Minitest::Test
       SH
       FileUtils.chmod(0o755, mock_mount)
 
-      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, "bash", SCRIPT)
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, SCRIPT)
       refute status.success?
       assert_includes err + out, "External T7 scratch volume (/Volumes/T7Tmp) is not mounted"
     end
@@ -210,7 +243,7 @@ class RecoverMacReleaseTest < Minitest::Test
       SH
       FileUtils.chmod(0o755, mock_df)
 
-      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, "bash", SCRIPT)
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, SCRIPT)
       refute status.success?
       assert_includes err + out, "detected fake mount-point directory on internal disk"
     end
@@ -252,7 +285,8 @@ class RecoverMacReleaseTest < Minitest::Test
 
       out, err, status = run_recovery([], "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => bin_dir)
       refute status.success?
-      assert_includes err + out, "release 442117184 is not a draft"
+      assert_includes err + out, "release 442117184 (v2.1.0) is already public (draft=false)"
+      assert_includes err + out, "run this workflow with action=reconcile"
     end
   end
 
@@ -665,6 +699,134 @@ class RecoverMacReleaseTest < Minitest::Test
     end
   end
 
+  def test_post_publication_latest_mismatch_rolls_back_instead_of_exiting
+    with_scratch_dir do |bin_dir|
+      invocations_file = File.join(bin_dir, "gh_calls.txt")
+      File.write(invocations_file, "")
+      state_file = File.join(bin_dir, "gh_state.txt")
+      File.write(state_file, "latest=v2.0.0\ndraft=true\n")
+
+      sums_content = "#{DMG1_HASH}  MeowDisplay.dmg\n#{DMG2_HASH}  MeowDisplayReceiver.dmg\n#{FEED1_HASH}  appcast.xml\n#{FEED2_HASH}  appcast-receiver.xml\n"
+
+      mock_gh = File.join(bin_dir, "gh")
+      File.write(mock_gh, <<~SH)
+        #!/usr/bin/env bash
+        echo "gh $*" >> "#{invocations_file}"
+        case "$*" in
+          *"deployment-branch-policies"*)
+            if [[ "$*" == *"--jq"* ]]; then
+              echo "branch:release/*"
+            else
+              echo '{"branch_policies":[{"name":"release/*","type":"branch"}]}'
+            fi
+            ;;
+          *"environments/release-publish"*)
+            echo '{"deployment_branch_policy":{"custom_branch_policies":true},"protection_rules":[{"type":"required_reviewers"}]}'
+            ;;
+          *"actions/runs/12345/approvals"*)
+            echo '[{"state":"approved","environments":[{"name":"release-publish"}]}]'
+            ;;
+          *"releases/442117184"*"--jq .draft"*)
+            grep "^draft=" "#{state_file}" | cut -d= -f2
+            ;;
+          *"releases/442117184")
+            draft_val=$(grep "^draft=" "#{state_file}" | cut -d= -f2)
+            echo '{"id":442117184,"tag_name":"v2.1.0","draft":'"$draft_val"',"target_commitish":"#{VALID_SHA}","assets":[{"name":"MeowDisplay.dmg"},{"name":"MeowDisplayReceiver.dmg"},{"name":"SHA256SUMS.txt"},{"name":"appcast-receiver.xml"},{"name":"appcast.xml"}]}'
+            ;;
+          *"releases/latest"*)
+            grep "^latest=" "#{state_file}" | cut -d= -f2
+            ;;
+          *"release download v2.1.0"*)
+            dest="${@: -1}"
+            mkdir -p "$dest"
+            printf "%s" "#{sums_content}" > "$dest/SHA256SUMS.txt"
+            echo "mock-dmg1" > "$dest/MeowDisplay.dmg"
+            echo "mock-dmg2" > "$dest/MeowDisplayReceiver.dmg"
+            echo "mock-feed1" > "$dest/appcast.xml"
+            echo "mock-feed2" > "$dest/appcast-receiver.xml"
+            ;;
+          *"release edit v2.1.0"*"--draft=false --latest"*)
+            # Published, but GitHub does not report it as Latest.
+            sed -i '' 's/^draft=.*/draft=false/' "#{state_file}" 2>/dev/null || sed -i 's/^draft=.*/draft=false/' "#{state_file}"
+            ;;
+          *"release edit v2.0.0"*"--latest"*)
+            sed -i '' 's/^latest=.*/latest=v2.0.0/' "#{state_file}" 2>/dev/null || sed -i 's/^latest=.*/latest=v2.0.0/' "#{state_file}"
+            ;;
+          *"release edit v2.1.0"*"--draft=true"*)
+            sed -i '' 's/^draft=.*/draft=true/' "#{state_file}" 2>/dev/null || sed -i 's/^draft=.*/draft=true/' "#{state_file}"
+            ;;
+          *"commits/v2.1.0"*)
+            echo "#{VALID_SHA}"
+            ;;
+          *) exit 0 ;;
+        esac
+      SH
+      FileUtils.chmod(0o755, mock_gh)
+
+      mock_shasum = File.join(bin_dir, "shasum")
+      File.write(mock_shasum, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "-a" ] && [ "$2" = "256" ] && [ "$3" = "-c" ]; then exit 0; fi
+        target="${@: -1}"
+        case "$target" in
+          *"MeowDisplay.dmg") echo "#{DMG1_HASH}  $target" ;;
+          *"MeowDisplayReceiver.dmg") echo "#{DMG2_HASH}  $target" ;;
+          *"appcast.xml") echo "#{FEED1_HASH}  $target" ;;
+          *"appcast-receiver.xml") echo "#{FEED2_HASH}  $target" ;;
+          *"SHA256SUMS.txt") echo "#{EXPECTED_SUMS_HASH}  $target" ;;
+          *)
+            content=$(cat)
+            case "$content" in
+              *"mock-feed1"*) echo "#{FEED1_HASH}  -" ;;
+              *"mock-feed2"*) echo "#{FEED2_HASH}  -" ;;
+              *) echo "0000000000000000000000000000000000000000000000000000000000000000  -" ;;
+            esac
+            ;;
+        esac
+      SH
+      FileUtils.chmod(0o755, mock_shasum)
+
+      File.write(File.join(bin_dir, "verify-feed.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod(0o755, File.join(bin_dir, "verify-feed.sh"))
+      File.write(File.join(bin_dir, "verify-mac-artifact.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod(0o755, File.join(bin_dir, "verify-mac-artifact.sh"))
+      File.write(File.join(bin_dir, "check-build-number.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod(0o755, File.join(bin_dir, "check-build-number.sh"))
+      File.write(File.join(bin_dir, "published-baseline.sh"), "#!/usr/bin/env bash\nmkdir -p \"$1\"\necho k > \"$1/sender.key\"\necho k > \"$1/receiver.key\"\n")
+      FileUtils.chmod(0o755, File.join(bin_dir, "published-baseline.sh"))
+
+      mock_curl = File.join(bin_dir, "curl")
+      File.write(mock_curl, "#!/usr/bin/env bash\nexit 1\n")
+      FileUtils.chmod(0o755, mock_curl)
+
+      mock_sleep = File.join(bin_dir, "sleep")
+      File.write(mock_sleep, "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod(0o755, mock_sleep)
+
+      env = {
+        "PATH" => "#{bin_dir}:#{ENV['PATH']}",
+        "GITHUB_ACTIONS" => "true",
+        "GITHUB_RUN_ID" => "12345",
+        "RUNNER_TEMP" => bin_dir
+      }
+      out, err, status = run_recovery(["--publish"], env)
+      refute status.success?
+      # A bare `exit 1` here skipped the ERR trap and left the release public.
+      assert_includes err + out, "Latest is v2.0.0, expected v2.1.0"
+      refute_includes err + out, "Checking live feeds"
+      assert_includes err + out, "Rollback succeeded: v2.1.0 (ID 442117184) returned to draft; v2.0.0 restored as Latest"
+
+      state = File.read(state_file)
+      assert_includes state, "latest=v2.0.0"
+      assert_includes state, "draft=true"
+
+      calls = File.read(invocations_file)
+      # Assert both rollback commands used the correct tag names
+      assert_includes calls, "gh release edit v2.0.0 --latest -R raiseCatError/meowdisplay"
+      assert_includes calls, "gh release edit v2.1.0 --draft=true -R raiseCatError/meowdisplay"
+    end
+  end
+
   def test_partial_rollback_failure_when_reverting_latest_fails
     with_scratch_dir do |bin_dir|
       state_file = File.join(bin_dir, "gh_state.txt")
@@ -884,13 +1046,13 @@ class RecoverMacReleaseTest < Minitest::Test
   end
 
   def test_reconcile_script_requires_explicit_mode
-    out, err, status = Open3.capture3({}, "bash", RECONCILE_SCRIPT)
+    out, err, status = Open3.capture3({}, RECONCILE_SCRIPT)
     refute status.success?
-    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --manifest-only | --preflight)"
+    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --finish | --manifest-only | --preflight)"
   end
 
   def test_reconcile_script_rejects_overrides
-    out, err, status = Open3.capture3({ "VERSION" => "3.0.0" }, "bash", RECONCILE_SCRIPT, "--execute")
+    out, err, status = Open3.capture3({ "VERSION" => "3.0.0" }, RECONCILE_SCRIPT, "--execute")
     refute status.success?
     assert_includes err + out, "VERSION must be '2.1.0'"
     assert_includes err + out, "rejected"
@@ -977,16 +1139,7 @@ class RecoverMacReleaseTest < Minitest::Test
       invocations_file = File.join(bin_dir, "reconcile_calls.txt")
       File.write(invocations_file, "")
 
-      mock_gh = File.join(bin_dir, "gh")
-      File.write(mock_gh, <<~SH)
-        #!/usr/bin/env bash
-        case "$*" in
-          *"releases/latest"*) echo 'v2.1.0' ;;
-          *"commits/v2.1.0"*) echo '#{VALID_SHA}' ;;
-          *) exit 0 ;;
-        esac
-      SH
-      FileUtils.chmod(0o755, mock_gh)
+      write_live_release_gh(bin_dir)
 
       mock_state = File.join(bin_dir, "release-state.sh")
       File.write(mock_state, <<~SH)
@@ -1012,7 +1165,7 @@ class RecoverMacReleaseTest < Minitest::Test
             echo '{"requiredPlatforms":["mac","ios"],"excludedPlatforms":["android"],"ios":{"submitForReview":false}}'
             ;;
           *"show origin/release-state"*)
-            echo '{"publication":{"stage":"in-progress"},"platforms":{"mac":{"stage":"published"},"ios":{"stage":"published"}}}'
+            echo '{"publication":{"stage":"in-progress"},"platforms":{"mac":{"stage":"published","artifacts":#{RECORDED_ARTIFACTS_JSON}},"ios":{"stage":"published"}}}'
             ;;
           *) exec /usr/bin/git "$@" ;;
         esac

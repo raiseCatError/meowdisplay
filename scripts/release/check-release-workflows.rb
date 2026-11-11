@@ -374,6 +374,24 @@ if (doc = load("recover-mac-release.yml"))
     err(name, "publish job must use the release-publish environment") unless env_name(pub) == "release-publish"
     err(name, "publish job must depend on verify") unless needs(pub).include?("verify")
     err(name, "publish job must check release-publish with required reviewers") unless steps(pub).any? { |s| run_text(s).include?("check-environment.sh release-publish --require-reviewers") }
+    # Only action=publish may edit the GitHub Release; reconcile and finish
+    # write release-state only, with the release App's token.
+    steps(pub).each do |s|
+      text = run_text(s)
+      if text.include?("recover-mac-release.sh --publish") && s["if"].to_s.gsub(/\s+/, " ") != "${{ inputs.action == 'publish' }}"
+        err(name, "the publish step must run only for action == 'publish'")
+      end
+      if text.match?(/reconcile-mac-release\.sh --(execute|finish)/) &&
+         s.dig("env", "RELEASE_STATE_TOKEN") != "${{ steps.state-token.outputs.token }}"
+        err(name, "step #{s['name'].inspect} writes the release state without RELEASE_STATE_TOKEN")
+      end
+    end
+  end
+  # The unprotected verify job stays read-only: no environment, secret,
+  # App token or write permission.
+  if ver && (env_name(ver) || uses_secrets?(ver) || ver.to_s.include?("create-github-app-token") ||
+             ver["permissions"] != { "contents" => "read" })
+    err(name, "verify job must hold no credential: no environment, secret, App token or write permission")
   end
 end
 
@@ -652,6 +670,65 @@ if (doc = load("release-publish.yml"))
       err(name, "job #{id} must run only after publish-mac, or on resume only after verify-resume succeeded")
     end
   end
+end
+
+# MARK: - Executed scripts are executable in Git
+
+# A workflow step that runs `scripts/...` directly needs the file's Git mode
+# to be 100755: the runner's checkout restores modes from Git, so a 100644
+# script fails there with "Permission denied" (2.1.0 recovery run 43117186436)
+# while tests that run it through `bash` still pass. Shell scripts under
+# scripts/ also call each other directly ("$here/release-state.sh"), so every
+# tracked scripts/**/*.sh must be executable too. Git's index is the source of
+# truth, not the local filesystem. MEOW_REPO_ROOT (tests only) points at another
+# repository's index.
+REPO_ROOT = ENV["MEOW_REPO_ROOT"] || File.expand_path("../..", __dir__)
+# A script path in command position: line start, or after ; & | ( { $( ! or a
+# shell keyword. `ruby scripts/x.rb`, `bash scripts/x.sh` and `. scripts/x.env`
+# name their interpreter and need no executable bit.
+DIRECT_SCRIPT = %r!(?:^|[;&|(\{]|\$\(|\!|\b(?:then|do|else|if|exec|time)\b)\s*(scripts/[A-Za-z0-9_./-]+)!.freeze
+
+def git_modes(root)
+  out = IO.popen(["git", "-C", root, "ls-files", "-s", "--", "scripts"], err: File::NULL, &:read)
+  return nil unless $?.success?
+
+  out.lines.to_h do |line|
+    meta, path = line.chomp.split("\t", 2)
+    [path, meta.split(" ").first]
+  end
+end
+
+if (modes = git_modes(REPO_ROOT))
+  Dir[File.join(DIR, "*.yml")].sort.each do |path|
+    name = File.basename(path)
+    doc = YAML.safe_load(File.read(path), aliases: false)
+    doc.fetch("jobs", {}).each do |id, job|
+      steps(job).each do |s|
+        run_text(s).each_line do |line|
+          next if line.strip.start_with?("#")
+
+          line.scan(DIRECT_SCRIPT).flatten.uniq.each do |script|
+            script = script.sub(/[.,]+\z/, "")
+            mode = modes[script]
+            if mode.nil?
+              err(name, "job #{id} runs #{script}, which Git does not track")
+            elsif mode != "100755"
+              err(name, "job #{id} runs #{script} directly, but Git tracks it as #{mode}, not 100755 " \
+                        "(git update-index --chmod=+x #{script})")
+            end
+          end
+        end
+      end
+    end
+  end
+  modes.each do |script, mode|
+    next unless script.end_with?(".sh") || script == "scripts/release/meow-release"
+    next if mode == "100755"
+
+    err(script, "tracked as #{mode}; scripts are executed directly and must be 100755 (git update-index --chmod=+x #{script})")
+  end
+else
+  err(REPO_ROOT, "cannot read Git file modes (git ls-files); executable bits must be checked from Git")
 end
 
 if @errors.empty?
