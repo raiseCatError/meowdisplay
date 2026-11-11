@@ -19,7 +19,7 @@ on:
         type: string
         default: '442117184'
       action:
-        description: 'Recovery action: verify (read-only draft check) or publish (publish Latest and reconcile release-state)'
+        description: 'Recovery action: verify (read-only candidate preflight) or publish (protected draft verification, publication and reconciliation)'
         required: true
         type: choice
         options:
@@ -94,7 +94,7 @@ jobs:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
-      - name: Publish Mac release as Latest
+      - name: Verify protected draft and publish Mac release as Latest
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
