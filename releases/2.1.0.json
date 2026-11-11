@@ -74,7 +74,7 @@
       "updatedAt": "2026-11-09T23:46:00Z"
     },
     "ios": {
-      "stage": "uploaded",
+      "stage": "published",
       "sha": "94c796fc34fd699776764d67d2f26013909a308e",
       "build": 2,
       "ipaSha256": "2bd9382b0298cf5d184d9d18ddec6e0358385d446d0b34d6326c409e88af4269",
@@ -82,7 +82,9 @@
       "blockers": [
 
       ],
-      "updatedAt": "2026-11-09T23:39:26Z"
+      "updatedAt": "2026-11-11T19:16:38Z",
+      "storeState": "READY_FOR_DISTRIBUTION",
+      "listingVersion": "2.1.0"
     },
     "android": {
       "stage": "pending",
@@ -181,6 +183,13 @@
       "platform": "mac",
       "from": "uploaded",
       "to": "approved"
+    },
+    {
+      "at": "2026-11-11T19:16:38Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "uploaded",
+      "to": "published"
     }
   ]
 }
