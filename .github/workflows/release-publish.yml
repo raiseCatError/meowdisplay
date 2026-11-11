@@ -242,7 +242,7 @@ jobs:
           set -euo pipefail
           . scripts/release/baseline.env
           names=$(gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(" ")')
-          want=$(printf '%s\n' "$SENDER_DMG" "$RECEIVER_DMG" "$SENDER_FEED" "$RECEIVER_FEED" SHA256SUMS.txt | sort | paste -sd' ' -)
+          want=$(printf '%s\n' "$SENDER_DMG" "$RECEIVER_DMG" "$SENDER_FEED" "$RECEIVER_FEED" SHA256SUMS.txt | LC_ALL=C sort | paste -sd' ' -)
           [ "$names" = "$want" ] || { echo "::error::draft assets are '$names', expected '$want'"; exit 1; }
           mkdir check && gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -D check
           sed 's# dist/# check/#' expected.sha256 | shasum -a 256 -c -
