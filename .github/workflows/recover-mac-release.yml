@@ -19,13 +19,20 @@ on:
         type: string
         default: '442117184'
       action:
-        description: 'Recovery action: verify (read-only candidate preflight) or publish (protected draft verification, publication and reconciliation)'
+        description: 'verify (read-only preflight) | publish (protected: verify draft, publish, reconcile) | reconcile (protected: release already public, record it) | finish (protected: website live, finish publication)'
         required: true
         type: choice
         options:
           - verify
           - publish
+          - reconcile
+          - finish
         default: verify
+      promotion_pr:
+        description: 'finish only: number of the release/2.1.0 -> main promotion PR (optional)'
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -48,6 +55,8 @@ jobs:
       # Do not grant an unprotected job write access. The protected publish job
       # runs recover-mac-release.sh --publish, which verifies every draft asset,
       # notarization and Sparkle signature BEFORE editing the release.
+      # The repository is public: the script's git fetches of release/2.1.0
+      # and release-state need no credential, so none is persisted.
       - name: Preflight frozen candidate and release-state (read-only)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,9 +67,15 @@ jobs:
           set -euo pipefail
           scripts/release/reconcile-mac-release.sh --preflight
 
+  # One protected job for every mutating action. publish is the only action
+  # that edits the GitHub Release; reconcile and finish refuse to write
+  # anything unless the release is already public, Latest, tagged at the
+  # candidate and carrying exactly the recorded assets. After a run whose
+  # release went public but whose reconciliation failed, re-run with
+  # action=reconcile, never publish (publish refuses a non-draft release).
   publish:
     needs: verify
-    if: ${{ inputs.action == 'publish' }}
+    if: ${{ inputs.action == 'publish' || inputs.action == 'reconcile' || inputs.action == 'finish' }}
     runs-on: xcode-27
     environment: release-publish
     permissions:
@@ -95,6 +110,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
       - name: Verify protected draft and publish Mac release as Latest
+        if: ${{ inputs.action == 'publish' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -104,6 +120,7 @@ jobs:
           set -euo pipefail
           scripts/release/recover-mac-release.sh --publish
       - name: Reconcile release state
+        if: ${{ inputs.action == 'publish' || inputs.action == 'reconcile' }}
         env:
           RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
@@ -112,3 +129,14 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release/reconcile-mac-release.sh --execute
+      - name: Finish publication (website serves release.json)
+        if: ${{ inputs.action == 'finish' }}
+        env:
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PROMOTION_PR: ${{ inputs.promotion_pr }}
+        run: |
+          set -euo pipefail
+          scripts/release/reconcile-mac-release.sh --finish

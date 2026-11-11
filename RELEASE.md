@@ -413,6 +413,28 @@ finished step.
 Never hand-edit a published feed: it is signed, and the apps reject an
 edited copy.
 
+### 2.1.0 Mac recovery (`recover-mac-release.yml`)
+
+The 2.1.0 publication stopped after the draft was created (run
+43085872196). `recover-mac-release.yml`, dispatched from
+`release/2.1.0-recovery`, finishes it from that draft without rebuilding.
+Its `action` input selects one step:
+
+| Action | Jobs | What it does |
+| --- | --- | --- |
+| `verify` | `verify` only (read-only) | Checks the frozen candidate's config and runs the real `publish start` gate on a scratch copy of release-state |
+| `publish` | `verify` + `publish` (release-publish approval) | Verifies the draft, publishes it as Latest, checks the live feeds (reverts on failure), then reconciles release-state |
+| `reconcile` | `verify` + `publish` (approval) | For a release that is already public: verifies it live (Latest, tag at the candidate, the five recorded asset digests) and records Mac as published. Never edits the release |
+| `finish` | `verify` + `publish` (approval) | When `meowdisplay.app/release.json` serves 2.1.0: records the website and finishes the publication |
+
+If a `publish` run made the release public but failed afterwards, re-run
+with `reconcile`, never `publish`: `publish` refuses a release that is no
+longer a draft. A rollback returns the release to a draft and restores
+`v2.0.0` as Latest. The `v2.1.0` tag stays (tags can't be deleted), and
+anyone who fetched the feed while it was live may already have updated.
+Every script a workflow runs directly must be tracked as `100755`;
+`check-release-workflows.rb` checks this in Git's index.
+
 ## Release PR and versions
 
 `release-pr.yml` (manual, from `release/<version>`) runs release-please

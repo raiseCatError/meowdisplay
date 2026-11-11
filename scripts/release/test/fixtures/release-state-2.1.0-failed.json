@@ -1,0 +1,204 @@
+{
+  "schema": 1,
+  "version": "2.1.0",
+  "branch": "release/2.1.0",
+  "mode": "manual-final-approval",
+  "requiredPlatforms": [
+    "mac",
+    "ios"
+  ],
+  "excludedPlatforms": [
+    "android"
+  ],
+  "candidate": {
+    "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+    "runId": 42720735729,
+    "createdAt": "2026-11-09T23:28:46Z"
+  },
+  "superseded": [
+    {
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "at": "2026-11-09T23:28:46Z",
+      "platforms": {
+        "mac": {
+          "stage": "failed",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+          "blockers": "Mac pipeline skipped (run 42710323487)",
+          "updatedAt": "2026-11-09T22:19:00Z"
+        },
+        "ios": {
+          "stage": "uploaded",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+          "build": 1,
+          "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
+          "runId": 42710323487,
+          "blockers": [],
+          "updatedAt": "2026-11-09T22:26:02Z"
+        },
+        "android": {
+          "stage": "pending",
+          "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45"
+        }
+      }
+    }
+  ],
+  "platforms": {
+    "mac": {
+      "stage": "approved",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "build": "2.1.0",
+      "runId": 42720735729,
+      "artifacts": [
+        {
+          "name": "MeowDisplay.dmg",
+          "sha256": "d02273969b8a00fc7269f69ab6440bae92028bcb55b9e5f4765cb5d925e8c316"
+        },
+        {
+          "name": "MeowDisplayReceiver.dmg",
+          "sha256": "4981863429e85dacf916287e466867ff1c38c838bc364c0ae483739b8d17eaf7"
+        },
+        {
+          "name": "appcast-receiver.xml",
+          "sha256": "306cd1cbc1f415bf7668892be261907ea66f0a381a56b7f6921c3e6758f36609"
+        },
+        {
+          "name": "appcast.xml",
+          "sha256": "b97d8bdddec17083407dbc08bc23052b84d6d3f7440ddfd6e4443d78f50548d5"
+        }
+      ],
+      "blockers": [],
+      "updatedAt": "2026-11-09T23:46:00Z"
+    },
+    "ios": {
+      "stage": "published",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "build": 2,
+      "ipaSha256": "2bd9382b0298cf5d184d9d18ddec6e0358385d446d0b34d6326c409e88af4269",
+      "runId": 42720735729,
+      "blockers": [],
+      "updatedAt": "2026-11-11T19:16:38Z",
+      "storeState": "READY_FOR_DISTRIBUTION",
+      "listingVersion": "2.1.0"
+    },
+    "android": {
+      "stage": "pending",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e"
+    }
+  },
+  "website": {
+    "stage": "pending"
+  },
+  "publication": {
+    "stage": "failed",
+    "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+    "startedAt": "2026-11-11T19:21:53Z",
+    "updatedAt": "2026-11-11T19:22:47Z",
+    "reason": "Mac publication stopped before going live (run 43085872196)",
+    "reverted": false
+  },
+  "events": [
+    {
+      "at": "2026-11-09T22:16:26Z",
+      "event": "created"
+    },
+    {
+      "at": "2026-11-09T22:16:28Z",
+      "event": "candidate",
+      "sha": "df0fef73a182bc51aafb783a1e98d339b8624e45",
+      "runId": 42710323487
+    },
+    {
+      "at": "2026-11-09T22:19:00Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "pending",
+      "to": "failed"
+    },
+    {
+      "at": "2026-11-09T22:25:57Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "pending",
+      "to": "built"
+    },
+    {
+      "at": "2026-11-09T22:26:00Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "built",
+      "to": "signed"
+    },
+    {
+      "at": "2026-11-09T22:26:02Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "signed",
+      "to": "uploaded"
+    },
+    {
+      "at": "2026-11-09T23:28:46Z",
+      "event": "candidate",
+      "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+      "runId": 42720735729
+    },
+    {
+      "at": "2026-11-09T23:39:23Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "pending",
+      "to": "built"
+    },
+    {
+      "at": "2026-11-09T23:39:24Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "built",
+      "to": "signed"
+    },
+    {
+      "at": "2026-11-09T23:39:26Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "signed",
+      "to": "uploaded"
+    },
+    {
+      "at": "2026-11-09T23:45:55Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "pending",
+      "to": "signed"
+    },
+    {
+      "at": "2026-11-09T23:45:57Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "signed",
+      "to": "uploaded"
+    },
+    {
+      "at": "2026-11-09T23:46:00Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "uploaded",
+      "to": "approved"
+    },
+    {
+      "at": "2026-11-11T19:16:38Z",
+      "event": "platform",
+      "platform": "ios",
+      "from": "uploaded",
+      "to": "published"
+    },
+    {
+      "at": "2026-11-11T19:21:53Z",
+      "event": "publication",
+      "to": "in-progress"
+    },
+    {
+      "at": "2026-11-11T19:22:47Z",
+      "event": "publication",
+      "to": "failed"
+    }
+  ]
+}
