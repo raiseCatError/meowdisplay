@@ -886,7 +886,7 @@ class RecoverMacReleaseTest < Minitest::Test
   def test_reconcile_script_requires_explicit_mode
     out, err, status = Open3.capture3({}, "bash", RECONCILE_SCRIPT)
     refute status.success?
-    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --manifest-only)"
+    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --manifest-only | --preflight)"
   end
 
   def test_reconcile_script_rejects_overrides
@@ -916,7 +916,17 @@ class RecoverMacReleaseTest < Minitest::Test
       FileUtils.chmod(0o755, mock_state)
 
       mock_git = File.join(bin_dir, "git")
-      File.write(mock_git, "#!/usr/bin/env bash\nexit 0\n")
+      File.write(mock_git, <<~SH)
+        #!/usr/bin/env bash
+        case "$*" in
+          *"fetch"*) exit 0 ;;
+          *"rev-parse FETCH_HEAD"*) echo '#{VALID_SHA}' ;;
+          *"show #{VALID_SHA}:.github/release-config.json"*)
+            echo '{"requiredPlatforms":["mac","ios"],"excludedPlatforms":["android"],"ios":{"submitForReview":false}}'
+            ;;
+          *) exit 1 ;;
+        esac
+      SH
       FileUtils.chmod(0o755, mock_git)
 
       env = {
@@ -993,10 +1003,14 @@ class RecoverMacReleaseTest < Minitest::Test
       FileUtils.chmod(0o755, mock_state)
 
       mock_git = File.join(bin_dir, "git")
-      File.write(mock_git, <<~'SH')
+      File.write(mock_git, <<~SH)
         #!/usr/bin/env bash
         case "$*" in
           *"fetch"*) exit 0 ;;
+          *"rev-parse FETCH_HEAD"*) echo '#{VALID_SHA}' ;;
+          *"show #{VALID_SHA}:.github/release-config.json"*)
+            echo '{"requiredPlatforms":["mac","ios"],"excludedPlatforms":["android"],"ios":{"submitForReview":false}}'
+            ;;
           *"show origin/release-state"*)
             echo '{"publication":{"stage":"in-progress"},"platforms":{"mac":{"stage":"published"},"ios":{"stage":"published"}}}'
             ;;
@@ -1021,17 +1035,55 @@ class RecoverMacReleaseTest < Minitest::Test
       # Assert state progression happened in exact order
       idx_start = calls.index("publish start STATE")
       idx_mac = calls.index("publish mac-published STATE")
-      idx_stores = calls.index("publish stores STATE")
       idx_manifest = calls.index("publish website-manifest STATE")
 
       assert idx_start, "publish start STATE was not called"
       assert idx_mac, "publish mac-published STATE was not called"
-      assert idx_stores, "publish stores STATE was not called"
       assert idx_manifest, "publish website-manifest STATE was not called"
-
       assert idx_start < idx_mac, "publish start must precede mac-published"
-      assert idx_mac < idx_stores, "mac-published must precede stores"
-      assert idx_stores < idx_manifest, "stores must precede website-manifest"
+      assert idx_mac < idx_manifest, "mac-published must precede website-manifest"
+      assert_includes calls, "approved-release-config.json"
+      refute_includes calls, "publish stores STATE"
+      refute_includes calls, "/.github/release-config.json"
+    end
+  end
+
+  def test_preflight_rejects_generic_android_required_config
+    with_scratch_dir do |bin_dir|
+      git = File.join(bin_dir, "git")
+      File.write(git, <<~SH)
+        #!/usr/bin/env bash
+        case "$*" in
+          *"fetch"*) exit 0 ;;
+          *"rev-parse FETCH_HEAD"*) echo '#{VALID_SHA}' ;;
+          *"show #{VALID_SHA}:.github/release-config.json"*)
+            echo '{"requiredPlatforms":["mac","ios","android"],"excludedPlatforms":[],"ios":{"submitForReview":true}}'
+            ;;
+          *) exit 1 ;;
+        esac
+      SH
+      FileUtils.chmod(0o755, git)
+      out, err, status = run_reconcile(["--preflight"], "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => bin_dir)
+      refute status.success?
+      assert_includes err + out, "Frozen candidate config must require mac + ios, exclude android"
+    end
+  end
+
+  def test_candidate_branch_movement_fails_closed
+    with_scratch_dir do |bin_dir|
+      git = File.join(bin_dir, "git")
+      File.write(git, <<~'SH')
+        #!/usr/bin/env bash
+        case "$*" in
+          *"fetch"*) exit 0 ;;
+          *"rev-parse FETCH_HEAD"*) echo '1111111111111111111111111111111111111111' ;;
+          *) exit 1 ;;
+        esac
+      SH
+      FileUtils.chmod(0o755, git)
+      out, err, status = run_reconcile(["--manifest-only"], "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => bin_dir)
+      refute status.success?
+      assert_includes err + out, "release/2.1.0 moved"
     end
   end
 end

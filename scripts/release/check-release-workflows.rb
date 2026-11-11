@@ -346,6 +346,8 @@ if (doc = load("recover-mac-release.yml"))
   only_trigger(name, doc, "workflow_dispatch")
   secrets_behind_environments(name, doc, %w[release-publish])
   jobs = doc["jobs"] || {}
+  ver = jobs["verify"]
+  err(name, "verify must preflight candidate configuration") unless ver && steps(ver).any? { |s| run_text(s).include?("reconcile-mac-release.sh --preflight") }
   pub = jobs["publish"]
   if pub.nil?
     err(name, "missing the publish job")

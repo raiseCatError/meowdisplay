@@ -53,6 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release/recover-mac-release.sh --verify
+          # Verify reconciliation can start BEFORE Mac becomes public.
+          scripts/release/reconcile-mac-release.sh --preflight
 
   publish:
     needs: verify
