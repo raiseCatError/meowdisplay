@@ -143,17 +143,53 @@ class RecoverMacReleaseTest < Minitest::Test
   end
 
   def test_scratch_volume_enforcement_locally
-    out, err, status = Open3.capture3({}, "bash", "-c", <<~SH)
-      export RUNNER_TEMP="" T7_RUN_DIR="" TMPDIR="/private/tmp"
-      if [ ! -d "/Volumes/T7Tmp/ai-dev" ]; then
-        bash "#{SCRIPT}"
-      else
-        echo "::error::No approved scratch location found. T7 scratch storage (/Volumes/T7Tmp/ai-dev) is required for local execution. Never fall back to internal /tmp."
-        exit 1
-      fi
-    SH
+    # 1. Arbitrary T7_RUN_DIR outside /Volumes/T7Tmp/ai-dev is rejected
+    out, err, status = Open3.capture3({ "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", SCRIPT)
     refute status.success?
-    assert_includes err + out, "No approved scratch location found"
+    assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
+    assert_includes err + out, "Arbitrary scratch paths are rejected"
+
+    # Reconcile script also rejects arbitrary T7_RUN_DIR
+    out, err, status = Open3.capture3({ "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", RECONCILE_SCRIPT, "--manifest-only")
+    refute status.success?
+    assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
+    assert_includes err + out, "Arbitrary scratch paths are rejected"
+
+    # 2. Unmounted /Volumes/T7Tmp volume is rejected
+    with_scratch_dir do |bin_dir|
+      mock_mount = File.join(bin_dir, "mount")
+      File.write(mock_mount, <<~'SH')
+        #!/usr/bin/env bash
+        echo "/dev/disk1s1 on / (apfs, local)"
+      SH
+      FileUtils.chmod(0o755, mock_mount)
+
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, "bash", SCRIPT)
+      refute status.success?
+      assert_includes err + out, "External T7 scratch volume (/Volumes/T7Tmp) is not mounted"
+    end
+
+    # 3. Fake mount point directory on internal disk is rejected
+    with_scratch_dir do |bin_dir|
+      mock_mount = File.join(bin_dir, "mount")
+      File.write(mock_mount, <<~'SH')
+        #!/usr/bin/env bash
+        echo "/dev/disk8s1 on /Volumes/T7Tmp (apfs)"
+      SH
+      FileUtils.chmod(0o755, mock_mount)
+
+      mock_df = File.join(bin_dir, "df")
+      File.write(mock_df, <<~'SH')
+        #!/usr/bin/env bash
+        echo "Filesystem 512-blocks Used Available Capacity Mounted on"
+        echo "/dev/disk1s1 1000 500 500 50% /System/Volumes/Data"
+      SH
+      FileUtils.chmod(0o755, mock_df)
+
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "" }, "bash", SCRIPT)
+      refute status.success?
+      assert_includes err + out, "detected fake mount-point directory on internal disk"
+    end
   end
 
   def test_failure_before_publication_when_target_commit_mismatches

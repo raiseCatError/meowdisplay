@@ -63,23 +63,64 @@ here="$(cd "$(dirname "$0")" && pwd)"
 state_cmd="release-state.sh"
 command -v "$state_cmd" >/dev/null 2>&1 || state_cmd="$here/release-state.sh"
 
-# Scratch storage policy
+# Scratch storage policy enforcement:
+# In CI: $RUNNER_TEMP is required.
+# In local runs: scratch storage must genuinely reside on the mounted external T7 volume (/Volumes/T7Tmp/ai-dev).
+# Fake mount points, unmounted volumes, and arbitrary non-T7 paths are strictly rejected.
 scratch_base=""
 if [ -n "${RUNNER_TEMP:-}" ]; then
   scratch_base="$RUNNER_TEMP"
-elif [ -n "${T7_RUN_DIR:-}" ] && [ -d "$T7_RUN_DIR" ]; then
-  scratch_base="$T7_RUN_DIR"
-elif [ -d "/Volumes/T7Tmp/ai-dev" ]; then
-  if command -v t7run >/dev/null 2>&1; then
-    t7run --check || { echo "::error::T7 scratch storage check failed"; exit 1; }
-  fi
-  mkdir -p "/Volumes/T7Tmp/ai-dev/tmp"
-  scratch_base="/Volumes/T7Tmp/ai-dev/tmp"
-elif [ -n "${TMPDIR:-}" ] && [[ "$TMPDIR" == /Volumes/T7Tmp/* ]]; then
-  scratch_base="$TMPDIR"
 else
-  echo "::error::No approved scratch location found. T7 scratch storage (/Volumes/T7Tmp/ai-dev) is required locally."
-  exit 1
+  # 1. Verify /Volumes/T7Tmp is genuinely mounted and present in mount table
+  if ! mount | grep -E -q '[[:space:]]on /Volumes/T7Tmp[[:space:]]'; then
+    echo "::error::External T7 scratch volume (/Volumes/T7Tmp) is not mounted."
+    exit 1
+  fi
+  # 2. Verify /Volumes/T7Tmp is an actual mount point, not a directory on internal root
+  if [ "$(df -P /Volumes/T7Tmp 2>/dev/null | awk 'NR==2{print $6}')" != "/Volumes/T7Tmp" ]; then
+    echo "::error::/Volumes/T7Tmp is not a mounted volume (detected fake mount-point directory on internal disk)."
+    exit 1
+  fi
+  # 3. Verify external T7 health via t7run if available
+  if command -v t7run >/dev/null 2>&1; then
+    t7run --check || { echo "::error::T7 scratch storage verification (t7run --check) failed"; exit 1; }
+  fi
+
+  # 4. Resolve candidate scratch directory
+  target_scratch=""
+  if [ -n "${T7_RUN_DIR:-}" ]; then
+    target_scratch="$T7_RUN_DIR"
+  elif [ -n "${TMPDIR:-}" ] && [[ "$TMPDIR" == /Volumes/T7Tmp/* ]]; then
+    target_scratch="$TMPDIR"
+  else
+    target_scratch="/Volumes/T7Tmp/ai-dev/tmp"
+  fi
+
+  # 5. Ensure candidate directory exists or can be created
+  mkdir -p "$target_scratch" 2>/dev/null || {
+    echo "::error::Failed to create or access scratch directory '$target_scratch'"
+    exit 1
+  }
+
+  # 6. Verify canonical physical path (resolving symlinks) genuinely resides under /Volumes/T7Tmp/ai-dev
+  canonical_scratch=$(cd "$target_scratch" && pwd -P)
+  case "$canonical_scratch" in
+    /Volumes/T7Tmp/ai-dev | /Volumes/T7Tmp/ai-dev/*)
+      ;;
+    *)
+      echo "::error::Scratch path '$target_scratch' resolves to '$canonical_scratch', which is outside /Volumes/T7Tmp/ai-dev. Arbitrary scratch paths are rejected."
+      exit 1
+      ;;
+  esac
+
+  # 7. Verify the filesystem mount point of the canonical path is /Volumes/T7Tmp
+  scratch_mount=$(df -P "$canonical_scratch" 2>/dev/null | awk 'NR==2{print $6}')
+  if [ "$scratch_mount" != "/Volumes/T7Tmp" ]; then
+    echo "::error::Scratch path '$canonical_scratch' is mounted on '$scratch_mount', expected '/Volumes/T7Tmp'."
+    exit 1
+  fi
+
+  scratch_base="$canonical_scratch"
 fi
 
 work=$(mktemp -d "$scratch_base/meow-reconcile.XXXXXX")
