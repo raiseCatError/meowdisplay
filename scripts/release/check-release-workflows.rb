@@ -106,7 +106,8 @@ REPO_ADMIN = %r{gh api[^\n]*-X\s*(PUT|PATCH|POST|DELETE)[^\n]*(rulesets|environm
 REFERENCE_MERGE = %r{(git (merge|cherry-pick|rebase)[^\n]*reference)|(gh pr (create|merge)[^\n]*reference/opendisplay)}.freeze
 
 RELEASE_WORKFLOWS = %w[release-candidate.yml release-mac.yml release-ios.yml release-android.yml release-publish.yml
-                       release-pr.yml release-dry-run.yml release-monitor.yml release-state-access.yml].freeze
+                       release-pr.yml release-dry-run.yml release-monitor.yml release-state-access.yml
+                       recover-mac-release.yml].freeze
 SCHEDULE_SWITCHES = { "release-monitor.yml" => "RELEASE_AUTOMATION", "reference-sync.yml" => "REFERENCE_SYNC",
                       "repository-guard.yml" => "REPOSITORY_GUARD" }.freeze
 
@@ -334,6 +335,26 @@ if (doc = load("release-publish.yml"))
   stores = jobs["stores"]
   unless stores && needs(stores).include?("publish-mac") && stores["if"].to_s.include?("needs.publish-mac.result == 'success'")
     err(name, "stores must wait for publish-mac (or a resume)")
+  end
+end
+
+# MARK: - Mac release recovery
+
+if (doc = load("recover-mac-release.yml"))
+  name = "recover-mac-release.yml"
+  common(name, doc)
+  only_trigger(name, doc, "workflow_dispatch")
+  secrets_behind_environments(name, doc, %w[release-publish])
+  jobs = doc["jobs"] || {}
+  ver = jobs["verify"]
+  err(name, "verify must preflight candidate configuration") unless ver && steps(ver).any? { |s| run_text(s).include?("reconcile-mac-release.sh --preflight") }
+  pub = jobs["publish"]
+  if pub.nil?
+    err(name, "missing the publish job")
+  else
+    err(name, "publish job must use the release-publish environment") unless env_name(pub) == "release-publish"
+    err(name, "publish job must depend on verify") unless needs(pub).include?("verify")
+    err(name, "publish job must check release-publish with required reviewers") unless steps(pub).any? { |s| run_text(s).include?("check-environment.sh release-publish --require-reviewers") }
   end
 end
 
