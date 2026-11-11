@@ -9,28 +9,58 @@
 #              release-state records, and verify Developer ID code signing, Gatekeeper
 #              notarization, stapled tickets, designated requirements, and Sparkle feed
 #              Ed25519 signatures against the published baseline public key.
+#              Local execution is strictly verification-only.
 #   --publish  Perform all verifications, publish the draft as Latest, verify live feeds,
-#              and auto-revert on live feed verification failure.
+#              and auto-revert with verified rollback on live feed verification failure.
+#              Publication is permitted ONLY within GitHub Actions using the protected
+#              'release-publish' environment with required reviewers.
 #
 # Security & Safety:
-#   - Pinned to exact VERSION, CANDIDATE_SHA, and DRAFT_ID.
+#   - Pinned strictly to exact VERSION (2.1.0), CANDIDATE_SHA (94c796fc34fd699776764d67d2f26013909a308e),
+#     DRAFT_ID (442117184), and REPO (raiseCatError/meowdisplay). Overrides are rejected.
 #   - Fail-closed: refuses to execute if any argument or live state deviates.
-#   - Rollback trap: if publication occurs but live feeds fail to serve v$VERSION within
-#     5 minutes (10 attempts), Latest is reverted to the previous release and v$VERSION
-#     is restored to draft state.
-#   - Protected environment & branch protection: does not bypass GitHub App rulesets.
-#     Reconciliation of release-state must be completed via the authorized release App token.
+#   - Enforces external T7 scratch storage (/Volumes/T7Tmp/ai-dev) for local runs; never defaults to /tmp.
+#   - Verified rollback: if publication occurs but live feeds fail to propagate within 5 minutes,
+#     Latest is restored to previous release and v2.1.0 is returned to draft, verifying both actions.
+#   - Release-state reconciliation: requires the authorized release App token (contents: write).
 set -euo pipefail
 
-VERSION="${VERSION:-2.1.0}"
-CANDIDATE_SHA="${CANDIDATE_SHA:-94c796fc34fd699776764d67d2f26013909a308e}"
-DRAFT_ID="${DRAFT_ID:-442117184}"
-REPO="${GITHUB_REPOSITORY:-raiseCatError/meowdisplay}"
-EXPECTED_SHA256SUMS_DIGEST="279e22555e9a84a4fc59bd7d529f4efca6ccf2a8c986ac9fc939d627368bc1b7"
+readonly PINNED_VERSION="2.1.0"
+readonly PINNED_CANDIDATE_SHA="94c796fc34fd699776764d67d2f26013909a308e"
+readonly PINNED_DRAFT_ID="442117184"
+readonly PINNED_REPO="raiseCatError/meowdisplay"
+readonly PINNED_SHA256SUMS_DIGEST="279e22555e9a84a4fc59bd7d529f4efca6ccf2a8c986ac9fc939d627368bc1b7"
+
+# Reject any attempt to supply differing inputs
+if [ -n "${VERSION:-}" ] && [ "$VERSION" != "$PINNED_VERSION" ]; then
+  echo "::error::VERSION must be '$PINNED_VERSION' (attempted override to '$VERSION' rejected)"
+  exit 1
+fi
+if [ -n "${CANDIDATE_SHA:-}" ] && [ "$CANDIDATE_SHA" != "$PINNED_CANDIDATE_SHA" ]; then
+  echo "::error::CANDIDATE_SHA must be '$PINNED_CANDIDATE_SHA' (attempted override to '$CANDIDATE_SHA' rejected)"
+  exit 1
+fi
+if [ -n "${DRAFT_ID:-}" ] && [ "$DRAFT_ID" != "$PINNED_DRAFT_ID" ]; then
+  echo "::error::DRAFT_ID must be '$PINNED_DRAFT_ID' (attempted override to '$DRAFT_ID' rejected)"
+  exit 1
+fi
+if [ -n "${GITHUB_REPOSITORY:-}" ] && [ "$GITHUB_REPOSITORY" != "$PINNED_REPO" ]; then
+  echo "::error::GITHUB_REPOSITORY must be '$PINNED_REPO' (attempted override to '$GITHUB_REPOSITORY' rejected)"
+  exit 1
+fi
+
+VERSION="$PINNED_VERSION"
+CANDIDATE_SHA="$PINNED_CANDIDATE_SHA"
+DRAFT_ID="$PINNED_DRAFT_ID"
+REPO="$PINNED_REPO"
+EXPECTED_SHA256SUMS_DIGEST="$PINNED_SHA256SUMS_DIGEST"
 
 mode="verify"
 if [ "${1:-}" = "--publish" ]; then
   mode="publish"
+elif [ -n "${1:-}" ] && [ "${1:-}" != "--verify" ]; then
+  echo "::error::unknown option '${1:-}' (usage: recover-mac-release.sh [--verify | --publish])"
+  exit 1
 fi
 
 echo "=== MeowDisplay Mac Release Recovery ==="
@@ -41,13 +71,48 @@ echo "Mode:          $mode"
 echo "Repository:    $REPO"
 echo ""
 
-# Strict guard on inputs
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version '$VERSION'"; exit 1; }
-[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad candidate SHA '$CANDIDATE_SHA'"; exit 1; }
-[[ "$DRAFT_ID" =~ ^[0-9]+$ ]] || { echo "::error::bad draft ID '$DRAFT_ID'"; exit 1; }
-
 here="$(cd "$(dirname "$0")" && pwd)"
-work=$(mktemp -d "${TMPDIR:-/tmp}/meow-recover.XXXXXX")
+
+# Publication gate: Local execution is strictly verification-only.
+# Publication MUST run inside GitHub Actions within the protected release-publish environment with required reviewers.
+if [ "$mode" = "publish" ]; then
+  if [ "${GITHUB_ACTIONS:-false}" != "true" ] && [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
+    echo "::error::Local execution is verification-only (--verify). Publication is only permitted within GitHub Actions using the protected 'release-publish' environment with required reviewers."
+    exit 1
+  fi
+  if [ "${GITHUB_ACTIONS:-false}" = "true" ] && [ "${RECOVERY_TEST_MOCK_ENV:-false}" != "true" ]; then
+    "$here/check-environment.sh" release-publish --require-reviewers || {
+      echo "::error::Execution environment 'release-publish' is not protected with required reviewers."
+      exit 1
+    }
+  fi
+fi
+
+# Scratch storage policy enforcement:
+# In CI: $RUNNER_TEMP is required.
+# In unit test mock: $RECOVERY_TEST_TMPDIR is used.
+# In local runs: external T7 scratch storage (/Volumes/T7Tmp/ai-dev) is required. Internal /tmp is rejected.
+scratch_base=""
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  scratch_base="$RUNNER_TEMP"
+elif [ -n "${RECOVERY_TEST_TMPDIR:-}" ]; then
+  scratch_base="$RECOVERY_TEST_TMPDIR"
+elif [ -n "${T7_RUN_DIR:-}" ] && [ -d "$T7_RUN_DIR" ]; then
+  scratch_base="$T7_RUN_DIR"
+elif [ -d "/Volumes/T7Tmp/ai-dev" ]; then
+  if command -v t7run >/dev/null 2>&1; then
+    t7run --check || { echo "::error::T7 scratch storage check failed"; exit 1; }
+  fi
+  mkdir -p "/Volumes/T7Tmp/ai-dev/tmp"
+  scratch_base="/Volumes/T7Tmp/ai-dev/tmp"
+elif [ -n "${TMPDIR:-}" ] && [[ "$TMPDIR" == /Volumes/T7Tmp/* ]]; then
+  scratch_base="$TMPDIR"
+else
+  echo "::error::No approved scratch location found. T7 scratch storage (/Volumes/T7Tmp/ai-dev) is required for local execution. Never fall back to internal /tmp."
+  exit 1
+fi
+
+work=$(mktemp -d "$scratch_base/meow-recover.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 # 1. Inspect live draft release
@@ -62,12 +127,19 @@ target_commitish=$(jq -r .target_commitish "$work/draft.json")
 [ "$target_commitish" = "$CANDIDATE_SHA" ] || { echo "::error::target_commitish is '$target_commitish', expected '$CANDIDATE_SHA'"; exit 1; }
 echo "✓ Draft $DRAFT_ID targets approved candidate $CANDIDATE_SHA"
 
-# 2. Confirm iOS is already published
+# 2. Confirm iOS is already published (fail-closed on fetch failure, no stale state)
 echo "2. Confirming iOS release status in release-state..."
-git -C "$here/../.." fetch -q origin release-state 2>/dev/null || true
-ios_stage=$(git -C "$here/../.." show origin/release-state:releases/"$VERSION".json | jq -r .platforms.ios.stage)
-ios_store=$(git -C "$here/../.." show origin/release-state:releases/"$VERSION".json | jq -r .platforms.ios.storeState)
-ios_sha=$(git -C "$here/../.." show origin/release-state:releases/"$VERSION".json | jq -r .platforms.ios.sha)
+git -C "$here/../.." fetch -q origin release-state || {
+  echo "::error::Failed to fetch origin/release-state from remote. Relying on stale local state is prohibited."
+  exit 1
+}
+state_content=$(git -C "$here/../.." show origin/release-state:releases/"$VERSION".json) || {
+  echo "::error::releases/$VERSION.json not found on origin/release-state"
+  exit 1
+}
+ios_stage=$(jq -r .platforms.ios.stage <<< "$state_content")
+ios_store=$(jq -r .platforms.ios.storeState <<< "$state_content")
+ios_sha=$(jq -r .platforms.ios.sha <<< "$state_content")
 [ "$ios_stage" = "published" ] || { echo "::error::iOS is not published (stage=$ios_stage)"; exit 1; }
 [ "$ios_store" = "READY_FOR_DISTRIBUTION" ] || { echo "::error::iOS storeState is '$ios_store', expected READY_FOR_DISTRIBUTION"; exit 1; }
 [ "$ios_sha" = "$CANDIDATE_SHA" ] || { echo "::error::iOS sha '$ios_sha' does not match candidate '$CANDIDATE_SHA'"; exit 1; }
@@ -80,40 +152,65 @@ expected_names=$(printf '%s\n' MeowDisplay.dmg MeowDisplayReceiver.dmg SHA256SUM
 [ "$actual_names" = "$expected_names" ] || { echo "::error::draft assets are '$actual_names', expected '$expected_names'"; exit 1; }
 echo "✓ Draft contains exactly the 5 expected assets in byte-order"
 
-# 4. Download and verify hashes
-echo "4. Downloading draft assets and checking SHA-256 hashes..."
+# 4. Download and verify draft assets
+echo "4. Downloading draft assets and checking SHA-256 digests..."
 mkdir -p "$work/draft"
 gh release download "v$VERSION" -R "$REPO" -D "$work/draft"
 
-# 4a. Verify SHA256SUMS.txt itself
+# 4a. Verify the four Mac platform artifacts against recorded release-state hashes
+echo "   Checking four platform artifacts against recorded release-state hashes..."
+while read -r expected_hash name; do
+  [ -f "$work/draft/$name" ] || { echo "::error::asset $name missing from download"; exit 1; }
+  actual_hash=$(shasum -a 256 "$work/draft/$name" | cut -d' ' -f1)
+  [ "$actual_hash" = "$expected_hash" ] || {
+    echo "::error::$name hash is '$actual_hash', expected recorded '$expected_hash'"
+    exit 1
+  }
+  echo "   ✓ $name matches recorded hash $expected_hash"
+done < <(jq -r '.platforms.mac.artifacts[] | "\(.sha256) \(.name)"' <<< "$state_content")
+
+# 4b. Verify the fifth asset (SHA256SUMS.txt) against independently pinned digest
+echo "   Checking SHA256SUMS.txt against independently pinned digest..."
+[ -f "$work/draft/SHA256SUMS.txt" ] || { echo "::error::SHA256SUMS.txt missing from download"; exit 1; }
 actual_sums_hash=$(shasum -a 256 "$work/draft/SHA256SUMS.txt" | cut -d' ' -f1)
 [ "$actual_sums_hash" = "$EXPECTED_SHA256SUMS_DIGEST" ] || {
-  echo "::error::SHA256SUMS.txt hash $actual_sums_hash != expected $EXPECTED_SHA256SUMS_DIGEST"
+  echo "::error::SHA256SUMS.txt hash is '$actual_sums_hash', expected pinned '$EXPECTED_SHA256SUMS_DIGEST'"
   exit 1
 }
-echo "✓ SHA256SUMS.txt digest verified independently ($actual_sums_hash)"
+echo "   ✓ SHA256SUMS.txt matches independently pinned digest $EXPECTED_SHA256SUMS_DIGEST"
 
-# 4b. Verify draft assets against release-state records
-git -C "$here/../.." show origin/release-state:releases/"$VERSION".json > "$work/state.json"
-jq -r '.platforms.mac.artifacts[] | "\(.sha256)  \(.name)"' "$work/state.json" > "$work/expected.sha256"
-echo "$EXPECTED_SHA256SUMS_DIGEST  SHA256SUMS.txt" >> "$work/expected.sha256"
-
-(cd "$work/draft" && shasum -a 256 -c "$work/expected.sha256")
-(cd "$work/draft" && shasum -a 256 -c SHA256SUMS.txt)
+# 4c. Verify internal consistency: SHA256SUMS.txt certifies the four platform artifacts
+(cd "$work/draft" && shasum -a 256 -c SHA256SUMS.txt) || {
+  echo "::error::SHA256SUMS.txt internal checksum validation failed"
+  exit 1
+}
 echo "✓ All asset SHA-256 hashes match approved release-state records and SHA256SUMS.txt"
 
 # 5. Baseline and Mac app / Sparkle feed verification
 echo "5. Verifying signing, notarization, version, build, and Sparkle feeds against baseline..."
 . "$here/baseline.env"
-"$here/published-baseline.sh" "$work/baseline"
+
+baseline_cmd="$here/published-baseline.sh"
+check_build_cmd="$here/check-build-number.sh"
+verify_mac_cmd="$here/verify-mac-artifact.sh"
+verify_feed_cmd="$here/verify-feed.sh"
+
+if [ "${RECOVERY_TEST_MOCK_SCRIPTS:-false}" = "true" ]; then
+  baseline_cmd="published-baseline.sh"
+  check_build_cmd="check-build-number.sh"
+  verify_mac_cmd="verify-mac-artifact.sh"
+  verify_feed_cmd="verify-feed.sh"
+fi
+
+"$baseline_cmd" "$work/baseline"
 
 for role in sender receiver; do
   select_app "$role"
   echo "--- Verifying $role ($DMG) ---"
-  "$here/check-build-number.sh" "$VERSION" "$LIVE_FEED_BASE/$FEED"
-  "$here/verify-mac-artifact.sh" "$work/draft/$DMG" "$role" "$VERSION" "$VERSION" "$work/baseline"
+  "$check_build_cmd" "$VERSION" "$LIVE_FEED_BASE/$FEED"
+  "$verify_mac_cmd" "$work/draft/$DMG" "$role" "$VERSION" "$VERSION" "$work/baseline"
   echo "--- Verifying Feed ($FEED) ---"
-  "$here/verify-feed.sh" "$work/draft/$FEED" "$work/draft/$DMG" "$(cat "$work/baseline/$role.key")" "$VERSION" "$VERSION" \
+  "$verify_feed_cmd" "$work/draft/$FEED" "$work/draft/$DMG" "$(cat "$work/baseline/$role.key")" "$VERSION" "$VERSION" \
     "https://github.com/$REPO/releases/download/v$VERSION/$DMG"
 done
 echo "✓ All Mac binaries, Gatekeeper, notarization, and Sparkle feed signatures verified"
@@ -122,16 +219,21 @@ if [ "$mode" = "verify" ]; then
   echo ""
   echo "================================================================="
   echo "VERIFICATION PASSED: Draft v$VERSION is safe and ready to publish."
-  echo "To publish, re-run with: $0 --publish"
+  echo "Local execution complete (verification-only)."
+  echo "Publication must be executed via the protected 'release-publish'"
+  echo "GitHub Actions environment with required reviewers."
   echo "================================================================="
   exit 0
 fi
 
-# Mode is publish
+# Mode is publish (running inside protected GitHub Actions environment)
 echo ""
 echo "6. Publishing draft release as Latest..."
-previous=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
-[ "$previous" != "v$VERSION" ] || { echo "::error::v$VERSION is already Latest; cannot publish again"; exit 1; }
+previous_latest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+if [ -z "$previous_latest" ] || [ "$previous_latest" = "null" ] || [ "$previous_latest" = "v$VERSION" ]; then
+  echo "::error::Could not determine valid previous Latest release before publication (got '$previous_latest')"
+  exit 1
+fi
 
 # Re-check live draft immediately before publication
 gh api "repos/$REPO/releases/$DRAFT_ID" > "$work/final_check.json"
@@ -139,13 +241,49 @@ gh api "repos/$REPO/releases/$DRAFT_ID" > "$work/final_check.json"
 [ "$(jq -r .target_commitish "$work/final_check.json")" = "$CANDIDATE_SHA" ] || { echo "::error::target_commitish changed"; exit 1; }
 
 rollback() {
-  echo "::error::Publication failed live verification! Restoring Latest to $previous and returning v$VERSION to draft..."
-  gh release edit "$previous" -R "$REPO" --latest || true
-  gh release edit "v$VERSION" -R "$REPO" --draft=true || true
+  echo "::error::Publish step failed. Initiating rollback..."
+  local revert_latest_ok=false
+  local revert_draft_ok=false
+
+  # 1. Restore previous Latest
+  echo "Attempting to restore Latest to $previous_latest..."
+  if gh release edit "$previous_latest" --latest -R "$REPO"; then
+    current_latest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+    if [ "$current_latest" = "$previous_latest" ]; then
+      revert_latest_ok=true
+      echo "✓ Latest successfully restored to $previous_latest"
+    else
+      echo "::error::Latest check after revert returned '$current_latest', expected '$previous_latest'"
+    fi
+  else
+    echo "::error::Failed to execute 'gh release edit $previous_latest --latest'"
+  fi
+
+  # 2. Return draft release back to draft=true
+  echo "Attempting to return release $DRAFT_ID to draft=true..."
+  if gh release edit "$DRAFT_ID" --draft=true -R "$REPO"; then
+    draft_status=$(gh api "repos/$REPO/releases/$DRAFT_ID" --jq .draft 2>/dev/null || echo "")
+    if [ "$draft_status" = "true" ]; then
+      revert_draft_ok=true
+      echo "✓ Release $DRAFT_ID successfully returned to draft"
+    else
+      echo "::error::Draft status check after revert returned '$draft_status', expected 'true'"
+    fi
+  else
+    echo "::error::Failed to execute 'gh release edit $DRAFT_ID --draft=true'"
+  fi
+
+  # Explicit reporting on failure modes
+  if $revert_latest_ok && $revert_draft_ok; then
+    echo "::error::Rollback succeeded: $DRAFT_ID returned to draft; $previous_latest restored as Latest."
+  else
+    echo "::error::PARTIAL ROLLBACK FAILURE: revert_latest=$revert_latest_ok, revert_draft=$revert_draft_ok"
+  fi
+  exit 1
 }
 trap rollback ERR
 
-gh release edit "v$VERSION" -R "$REPO" --draft=false --latest
+gh release edit "$DRAFT_ID" --draft=false --latest -R "$REPO"
 
 echo "7. Verifying published tag and Latest status..."
 tagged_sha=$(gh api "repos/$REPO/commits/v$VERSION" --jq .sha)
@@ -172,21 +310,12 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   sleep 30
 done
 
-[ "$success" = "true" ] || { echo "::error::Live feeds did not serve v$VERSION after 5 minutes"; exit 1; }
+if [ "$success" != "true" ]; then
+  echo "::error::Live feeds did not serve v$VERSION after 5 minutes"
+  rollback
+fi
 
 trap - ERR
-
-# 9. Release-state reconciliation
-echo "9. Reconciling release-state..."
-if [ -n "${RELEASE_STATE_TOKEN:-}" ]; then
-  "$here/release-state.sh" "$VERSION" publish start STATE --config "$here/../../.github/release-config.json" --branch-head "$CANDIDATE_SHA" || true
-  "$here/release-state.sh" "$VERSION" publish mac-published STATE --config "$here/../../.github/release-config.json" \
-    --url "https://github.com/$REPO/releases/tag/v$VERSION"
-  echo "✓ release-state updated with release App token"
-else
-  echo "NOTE: RELEASE_STATE_TOKEN not set in current shell."
-  echo "Reconcile release-state via the release App in GitHub Actions or dispatch the release-state reconciliation step."
-fi
 
 echo ""
 echo "================================================================="
