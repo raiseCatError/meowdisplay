@@ -32,9 +32,7 @@
           "build": 1,
           "ipaSha256": "c5759e6720bb2b531a33c38ae9fddf59965ac554320b5aef26e4c066eccccf1b",
           "runId": 42710323487,
-          "blockers": [
-
-          ],
+          "blockers": [],
           "updatedAt": "2026-11-09T22:26:02Z"
         },
         "android": {
@@ -68,9 +66,7 @@
           "sha256": "b97d8bdddec17083407dbc08bc23052b84d6d3f7440ddfd6e4443d78f50548d5"
         }
       ],
-      "blockers": [
-
-      ],
+      "blockers": [],
       "updatedAt": "2026-11-09T23:46:00Z"
     },
     "ios": {
@@ -79,9 +75,7 @@
       "build": 2,
       "ipaSha256": "2bd9382b0298cf5d184d9d18ddec6e0358385d446d0b34d6326c409e88af4269",
       "runId": 42720735729,
-      "blockers": [
-
-      ],
+      "blockers": [],
       "updatedAt": "2026-11-11T19:16:38Z",
       "storeState": "READY_FOR_DISTRIBUTION",
       "listingVersion": "2.1.0"
@@ -95,7 +89,10 @@
     "stage": "pending"
   },
   "publication": {
-    "stage": "not-started"
+    "stage": "in-progress",
+    "sha": "94c796fc34fd699776764d67d2f26013909a308e",
+    "startedAt": "2026-11-11T19:21:53Z",
+    "updatedAt": "2026-11-11T19:21:53Z"
   },
   "events": [
     {
@@ -190,6 +187,11 @@
       "platform": "ios",
       "from": "uploaded",
       "to": "published"
+    },
+    {
+      "at": "2026-11-11T19:21:53Z",
+      "event": "publication",
+      "to": "in-progress"
     }
   ]
 }
