@@ -89,10 +89,12 @@
     "stage": "pending"
   },
   "publication": {
-    "stage": "in-progress",
+    "stage": "failed",
     "sha": "94c796fc34fd699776764d67d2f26013909a308e",
     "startedAt": "2026-11-11T19:21:53Z",
-    "updatedAt": "2026-11-11T19:21:53Z"
+    "updatedAt": "2026-11-11T19:22:47Z",
+    "reason": "Mac publication stopped before going live (run 43085872196)",
+    "reverted": false
   },
   "events": [
     {
@@ -192,6 +194,11 @@
       "at": "2026-11-11T19:21:53Z",
       "event": "publication",
       "to": "in-progress"
+    },
+    {
+      "at": "2026-11-11T19:22:47Z",
+      "event": "publication",
+      "to": "failed"
     }
   ]
 }
