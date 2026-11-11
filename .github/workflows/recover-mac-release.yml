@@ -44,7 +44,11 @@ jobs:
           persist-credentials: false
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
-      - name: Verify Mac release candidate draft
+      # Read-only GITHUB_TOKEN cannot inspect an unpublished GitHub Release.
+      # Do not grant an unprotected job write access. The protected publish job
+      # runs recover-mac-release.sh --publish, which verifies every draft asset,
+      # notarization and Sparkle signature BEFORE editing the release.
+      - name: Preflight frozen candidate and release-state (read-only)
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -52,8 +56,6 @@ jobs:
           DRAFT_ID: ${{ inputs.draft_id }}
         run: |
           set -euo pipefail
-          scripts/release/recover-mac-release.sh --verify
-          # Verify reconciliation can start BEFORE Mac becomes public.
           scripts/release/reconcile-mac-release.sh --preflight
 
   publish:
