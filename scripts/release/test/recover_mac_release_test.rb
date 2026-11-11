@@ -144,16 +144,40 @@ class RecoverMacReleaseTest < Minitest::Test
 
   def test_scratch_volume_enforcement_locally
     # 1. Arbitrary T7_RUN_DIR outside /Volumes/T7Tmp/ai-dev is rejected
-    out, err, status = Open3.capture3({ "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", SCRIPT)
-    refute status.success?
-    assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
-    assert_includes err + out, "Arbitrary scratch paths are rejected"
+    with_scratch_dir do |bin_dir|
+      mock_mount = File.join(bin_dir, "mount")
+      File.write(mock_mount, <<~'SH')
+        #!/usr/bin/env bash
+        echo "/dev/disk8s1 on /Volumes/T7Tmp (apfs)"
+      SH
+      FileUtils.chmod(0o755, mock_mount)
 
-    # Reconcile script also rejects arbitrary T7_RUN_DIR
-    out, err, status = Open3.capture3({ "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", RECONCILE_SCRIPT, "--manifest-only")
-    refute status.success?
-    assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
-    assert_includes err + out, "Arbitrary scratch paths are rejected"
+      mock_df = File.join(bin_dir, "df")
+      File.write(mock_df, <<~'SH')
+        #!/usr/bin/env bash
+        echo "Filesystem 512-blocks Used Available Capacity Mounted on"
+        echo "/dev/disk8s1 1000 500 500 50% /Volumes/T7Tmp"
+      SH
+      FileUtils.chmod(0o755, mock_df)
+
+      mock_t7run = File.join(bin_dir, "t7run")
+      File.write(mock_t7run, <<~'SH')
+        #!/usr/bin/env bash
+        exit 0
+      SH
+      FileUtils.chmod(0o755, mock_t7run)
+
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", SCRIPT)
+      refute status.success?
+      assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
+      assert_includes err + out, "Arbitrary scratch paths are rejected"
+
+      # Reconcile script also rejects arbitrary T7_RUN_DIR
+      out, err, status = Open3.capture3({ "PATH" => "#{bin_dir}:#{ENV['PATH']}", "RUNNER_TEMP" => "", "T7_RUN_DIR" => "/tmp/unapproved_scratch" }, "bash", RECONCILE_SCRIPT, "--manifest-only")
+      refute status.success?
+      assert_includes err + out, "outside /Volumes/T7Tmp/ai-dev"
+      assert_includes err + out, "Arbitrary scratch paths are rejected"
+    end
 
     # 2. Unmounted /Volumes/T7Tmp volume is rejected
     with_scratch_dir do |bin_dir|
