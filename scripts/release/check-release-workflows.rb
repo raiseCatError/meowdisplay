@@ -344,9 +344,18 @@ if (doc = load("recover-mac-release.yml"))
   name = "recover-mac-release.yml"
   common(name, doc)
   only_trigger(name, doc, "workflow_dispatch")
-  secrets_behind_environments(name, doc, %w[release-publish])
+  secrets_behind_environments(name, doc, %w[release-publish website-update])
   jobs = doc["jobs"] || {}
   ver = jobs["verify"]
+  # The site-evidence job only reads the private website repository.
+  if (se = jobs["site-evidence"])
+    tok = steps(se).find { |s| s["uses"].to_s.start_with?("actions/create-github-app-token@") } || {}
+    perms = (tok["with"] || {}).select { |k, _| k.start_with?("permission-") }
+    unless env_name(se) == "website-update" && perms == { "permission-contents" => "read" } &&
+           se["permissions"] == { "contents" => "read" } && !se.to_s.include?("RELEASE_STATE_TOKEN")
+      err(name, "site-evidence must stay read-only: website-update, website App token with contents: read only, no state token")
+    end
+  end
   err(name, "verify must preflight candidate configuration") unless ver && steps(ver).any? { |s| run_text(s).include?("reconcile-mac-release.sh --preflight") }
   pub = jobs["publish"]
   if pub.nil?

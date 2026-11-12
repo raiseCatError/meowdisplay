@@ -1048,7 +1048,7 @@ class RecoverMacReleaseTest < Minitest::Test
   def test_reconcile_script_requires_explicit_mode
     out, err, status = Open3.capture3({}, RECONCILE_SCRIPT)
     refute status.success?
-    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --finish | --manifest-only | --preflight)"
+    assert_includes err + out, "usage: reconcile-mac-release.sh (--execute | --finish | --manifest-only | --preflight | --site-evidence DIR)"
   end
 
   def test_reconcile_script_rejects_overrides
