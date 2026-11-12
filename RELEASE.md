@@ -425,7 +425,7 @@ Its `action` input selects one step:
 | `verify` | `verify` only (read-only) | Checks the frozen candidate's config and runs the real `publish start` gate on a scratch copy of release-state |
 | `publish` | `verify` + `publish` (release-publish approval) | Verifies the draft, publishes it as Latest, checks the live feeds (reverts on failure), then reconciles release-state |
 | `reconcile` | `verify` + `publish` (approval) | For a release that is already public: verifies it live (Latest, tag at the candidate, the five recorded asset digests) and records Mac as published. Never edits the release |
-| `finish` | `verify` + `publish` (approval) | When `meowdisplay.app/release.json` serves 2.1.0: records the website and finishes the publication |
+| `finish` | `verify` + `publish` (approval) | When `meowdisplay.app/release.json` serves 2.1.0: records the website and finishes the publication. If Cloudflare's Bot Fight Mode challenges the runner (it does for GitHub-hosted runners, and WAF skip rules can't exempt a path from it), production is proven instead by Cloudflare's own Pages deployment record for the site's `main` HEAD, that deployment's manifest (identical to `main` and to release-state's), `llms.txt` and `site.js` served identically by production, and `live_release_sha256`: the SHA-256 of production `release.json` as the approver fetched it (`curl -fsSL https://meowdisplay.app/release.json \| shasum -a 256`) |
 
 If a `publish` run made the release public but failed afterwards, re-run
 with `reconcile`, never `publish`: `publish` refuses a release that is no

@@ -5,6 +5,7 @@ require "open3"
 require "tmpdir"
 require "fileutils"
 require "json"
+require "digest"
 
 # The 2.1.0 Mac recovery's production paths, as the workflow runs them:
 # scripts executed directly (their Git mode matters, run 43117186436), the
@@ -80,9 +81,18 @@ class RecoveryIntegrationTest < Minitest::Test
     [origin, work]
   end
 
-  def stub_bin(dir, release_json:, latest: "v2.1.0", site: '{"version":"2.1.0"}')
+  SITE = "raiseCatError/MeowDisplayWebsite"
+  SITE_HEAD = "38426be3e61f4592cd2e3c313b606ea54f72c930"
+  PAGES_UUID = "e3a2b883-379e-4210-bde3-415043fd8539"
+  DEPLOY = "https://e3a2b883.meowdisplay.pages.dev"
+  PROD = "https://meowdisplay.app"
+  CHALLENGE_HEADERS = "HTTP/2 403\r\ncontent-type: text/html; charset=UTF-8\r\ncf-mitigated: challenge\r\nserver: cloudflare\r\n\r\n"
+
+  # Only the network is stubbed: gh answers from fixture files, curl serves
+  # status/headers/body per URL (query string ignored) and honours -f, -D, -o, -w.
+  def stub_bin(dir, release_json:, latest: "v2.1.0")
     bin = File.join(dir, "bin")
-    FileUtils.mkdir_p(bin)
+    FileUtils.mkdir_p(File.join(bin, "site/files"))
     File.write(File.join(bin, "release.json.mock"), release_json)
     File.write(File.join(bin, "gh"), <<~SH)
       #!/usr/bin/env bash
@@ -91,13 +101,81 @@ class RecoveryIntegrationTest < Minitest::Test
         "api repos/raiseCatError/meowdisplay/releases/442117184") cat "#{bin}/release.json.mock" ;;
         "api repos/raiseCatError/meowdisplay/releases/latest --jq .tag_name") echo "#{latest}" ;;
         "api repos/raiseCatError/meowdisplay/commits/v2.1.0 --jq .sha") echo "#{CANDIDATE}" ;;
+        "api repos/#{SITE}/commits/main --jq .sha") cat "#{bin}/site/head" ;;
+        "api repos/#{SITE}/commits/"*"/check-runs?app_id=85455&check_name=Cloudflare%20Pages&filter=latest") cat "#{bin}/site/checks.json" ;;
+        "api -H Accept: application/vnd.github.raw repos/#{SITE}/contents/"*)
+          path=${4#repos/#{SITE}/contents/}; path=${path%%[?]ref=*}
+          [ "${4##*[?]ref=}" = "$(cat "#{bin}/site/head")" ] || exit 1
+          cat "#{bin}/site/files/$path" ;;
         *) echo "unexpected gh $*" >&2; exit 1 ;;
       esac
     SH
-    File.write(File.join(bin, "curl"), "#!/usr/bin/env bash\necho '#{site}'\n")
+    File.write(File.join(bin, "curl"), <<~SH)
+      #!/usr/bin/env bash
+      echo "curl $*" >> "#{bin}/curl.log"
+      hdr= out= fmt= url= fail=
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -D) hdr=$2; shift ;; -o) out=$2; shift ;; -w) fmt=$2; shift ;; --max-time) shift ;;
+          --*) ;; -*f*) fail=1 ;; -*) ;; *) url=$1 ;;
+        esac
+        shift
+      done
+      key=$(printf '%s' "${url%%[?]*}" | tr -c 'A-Za-z0-9._-' '_')
+      d="#{bin}/www/$key"
+      code=$(cat "$d/code" 2>/dev/null || echo 404)
+      [ -z "$hdr" ] || cat "$d/headers" > "$hdr" 2>/dev/null || : > "$hdr"
+      if [ -n "$out" ]; then cat "$d/body" > "$out" 2>/dev/null || : > "$out"; else cat "$d/body" 2>/dev/null; fi
+      [ -z "$fmt" ] || printf '%s' "$code"
+      [ -n "$fail" ] && [ "$code" -ge 400 ] && exit 22
+      exit 0
+    SH
     FileUtils.chmod(0o755, File.join(bin, "gh"))
     FileUtils.chmod(0o755, File.join(bin, "curl"))
     bin
+  end
+
+  def web(bin, url, body, code: 200, headers: "HTTP/2 #{code}\r\n\r\n")
+    d = File.join(bin, "www", url.gsub(/[^A-Za-z0-9._-]/, "_"))
+    FileUtils.mkdir_p(d)
+    File.write(File.join(d, "code"), code.to_s)
+    File.write(File.join(d, "headers"), headers)
+    File.write(File.join(d, "body"), body)
+  end
+
+  # The website as deployed from SITE_HEAD by Cloudflare Pages: the repository
+  # files, the deployment's copies and the production origin (whose
+  # release.json Bot Fight Mode challenges, as it does for GitHub runners).
+  def site(bin, manifest, check_app: 85_455, check_slug: "cloudflare-workers-and-pages", conclusion: "success",
+           deployed_manifest: manifest, prod_llms: "llms 2.1\n", prod_llms_code: 200, prod_manifest: :challenge)
+    File.write(File.join(bin, "site/head"), "#{SITE_HEAD}\n")
+    File.write(File.join(bin, "site/checks.json"), {
+      "check_runs" => [{ "name" => "Cloudflare Pages", "head_sha" => SITE_HEAD, "conclusion" => conclusion,
+                         "completed_at" => "2026-11-12T00:05:00Z",
+                         "app" => { "id" => check_app, "slug" => check_slug },
+                         "details_url" => "https://dash.cloudflare.com/?to=/c1644ccedec713ad6e4f2d34cd76aa06/pages/view/meowdisplay/#{PAGES_UUID}" }]
+    }.to_json)
+    files = { "release.json" => manifest, "llms.txt" => "llms 2.1\n", "site.js" => "/* site 2.1 */\n" }
+    files.each { |name, body| File.write(File.join(bin, "site/files", name), body) }
+    web(bin, "#{DEPLOY}/release.json", deployed_manifest)
+    web(bin, "#{DEPLOY}/llms.txt", files["llms.txt"])
+    web(bin, "#{DEPLOY}/site.js", files["site.js"])
+    web(bin, "#{PROD}/llms.txt", prod_llms, code: prod_llms_code)
+    web(bin, "#{PROD}/site.js", files["site.js"])
+    case prod_manifest
+    when :challenge then web(bin, "#{PROD}/release.json", "<title>Just a moment...</title>", code: 403, headers: CHALLENGE_HEADERS)
+    when :forbidden then web(bin, "#{PROD}/release.json", "forbidden", code: 403)
+    else web(bin, "#{PROD}/release.json", prod_manifest)
+    end
+  end
+
+  # The manifest release-state generates, through the real --manifest-only path.
+  def generated_manifest(work, bin, origin)
+    out, err, status = reconcile(work, bin, origin, "--manifest-only")
+    assert status.success?, "#{out}\n#{err}"
+    json = out[/^\{\n.*?^\}$/m]
+    JSON.parse(json)
+    json + "\n"
   end
 
   def recorded
@@ -215,18 +293,22 @@ class RecoveryIntegrationTest < Minitest::Test
   end
 
   def test_finish_needs_the_live_site_then_finishes_once
-    with_fixture(site: '{"version":"2.0.0"}') do |origin, work, bin|
+    with_fixture do |origin, work, bin|
       _, _, status = reconcile(work, bin, origin, "--execute")
       assert status.success?
+      manifest = generated_manifest(work, bin, origin)
+      site(bin, manifest, prod_manifest: '{"version":"2.0.0"}')
       before = state_commits(origin)
       out, err, status = reconcile(work, bin, origin, "--finish")
       refute status.success?
       assert_includes out + err, "serves version '2.0.0', not 2.1.0; deploy the website first (nothing recorded)"
       assert_equal before, state_commits(origin)
 
-      File.write(File.join(bin, "curl"), "#!/usr/bin/env bash\necho '{\"version\":\"2.1.0\"}'\n")
+      web(bin, "#{PROD}/release.json", manifest)
       out, err, status = reconcile(work, bin, origin, "--finish", "PROMOTION_PR" => "250")
       assert status.success?, "#{out}\n#{err}"
+      assert_includes out, "fetched directly (version 2.1.0)"
+      refute_match(/check-runs/, File.read(File.join(bin, "gh.log")), "a direct fetch needs no deployment evidence")
       state = remote_state(origin)
       assert_equal "published", state.dig("publication", "stage")
       assert_equal 250, state.dig("publication", "promotionPr")
@@ -235,6 +317,107 @@ class RecoveryIntegrationTest < Minitest::Test
       out, err, status = reconcile(work, bin, origin, "--finish")
       assert status.success?, "#{out}\n#{err}"
       assert_includes out, "already recorded as published"
+    end
+  end
+
+  # Run 43125145760: Bot Fight Mode challenged the runner on release.json.
+  def finish_through_challenge(sha: :deployed, **site_options)
+    with_fixture do |origin, work, bin|
+      _, _, status = reconcile(work, bin, origin, "--execute")
+      assert status.success?
+      manifest = generated_manifest(work, bin, origin)
+      site(bin, manifest, **site_options)
+      sha = Digest::SHA256.hexdigest(site_options.fetch(:deployed_manifest, manifest)) if sha == :deployed
+      before = state_commits(origin)
+      out, err, status = reconcile(work, bin, origin, "--finish", "LIVE_RELEASE_SHA256" => sha.to_s)
+      yield out + err, status, origin, before
+    end
+  end
+
+  def assert_refused(text, status, origin, before, message)
+    refute status.success?, text
+    assert_includes text, message
+    assert_includes text, "nothing recorded"
+    assert_equal before, state_commits(origin), "nothing may be written"
+    assert_equal "pending", remote_state(origin).dig("website", "stage")
+    assert_equal "in-progress", remote_state(origin).dig("publication", "stage")
+  end
+
+  def test_finish_through_a_challenge_with_complete_production_evidence
+    finish_through_challenge do |text, status, origin, _|
+      assert status.success?, text
+      assert_includes text, "answered this runner with a Cloudflare challenge"
+      assert_includes text, "Cloudflare Pages deployment e3a2b883 built #{SITE}@#{SITE_HEAD}"
+      assert_includes text, "deployment manifest = main's file = release-state's manifest"
+      assert_includes text, "production https://meowdisplay.app/llms.txt = deployment e3a2b883"
+      assert_includes text, "production https://meowdisplay.app/site.js = deployment e3a2b883"
+      state = remote_state(origin)
+      assert_equal "published", state.dig("publication", "stage")
+      assert_equal "published", state.dig("website", "stage")
+      assert_equal "https://meowdisplay.app/release.json", state.dig("website", "url")
+    end
+  end
+
+  def test_challenge_without_the_approvers_production_hash_records_nothing
+    finish_through_challenge(sha: "") do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "live_release_sha256 is required here")
+    end
+  end
+
+  def test_challenge_with_a_different_production_hash_records_nothing
+    finish_through_challenge(sha: "1" * 64) do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "is not the deployment's")
+    end
+  end
+
+  def test_challenge_needs_cloudflares_own_successful_deployment_record
+    finish_through_challenge(check_app: 1) do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "no successful Cloudflare Pages deployment (app 85455)")
+    end
+    finish_through_challenge(check_slug: "someone-else") do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "no successful Cloudflare Pages deployment")
+    end
+    finish_through_challenge(conclusion: "failure") do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "no successful Cloudflare Pages deployment")
+    end
+  end
+
+  def test_challenge_with_a_deployed_manifest_unlike_the_repository_records_nothing
+    finish_through_challenge(deployed_manifest: "{\"version\":\"2.1.0\"}\n") do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "differs from #{SITE}@#{SITE_HEAD}")
+    end
+  end
+
+  def test_challenge_with_a_manifest_unlike_release_state_records_nothing
+    with_fixture do |origin, work, bin|
+      _, _, status = reconcile(work, bin, origin, "--execute")
+      assert status.success?
+      bad = JSON.parse(generated_manifest(work, bin, origin))
+      bad["platforms"]["android"] = { "store" => "https://play.google.com/store/apps/details?id=x" }
+      bad = JSON.pretty_generate(bad) + "\n"
+      site(bin, bad)
+      before = state_commits(origin)
+      out, err, status = reconcile(work, bin, origin, "--finish", "LIVE_RELEASE_SHA256" => Digest::SHA256.hexdigest(bad))
+      assert_refused(out + err, status, origin, before, "the deployed manifest is not what release-state describes")
+    end
+  end
+
+  def test_challenge_when_production_serves_another_deployment_records_nothing
+    finish_through_challenge(prod_llms: "llms 2.0\n") do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "production https://meowdisplay.app/llms.txt is not deployment e3a2b883's")
+    end
+  end
+
+  def test_challenge_when_production_is_unreachable_records_nothing
+    finish_through_challenge(prod_llms_code: 403) do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "answered HTTP 403; production unverified")
+    end
+  end
+
+  def test_a_403_that_is_not_a_cloudflare_challenge_gets_no_fallback
+    finish_through_challenge(prod_manifest: :forbidden) do |text, status, origin, before|
+      assert_refused(text, status, origin, before, "answered HTTP 403 without a Cloudflare challenge")
+      refute_includes text, "Cloudflare Pages deployment"
     end
   end
 
