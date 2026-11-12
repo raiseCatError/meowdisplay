@@ -189,6 +189,8 @@ final class MirrorUnavailableWaitTests: XCTestCase {
         XCTAssertGreaterThan(MirrorUnavailableOfferPolicy.readinessGrace, 0)
         XCTAssertLessThanOrEqual(MirrorUnavailableOfferPolicy.readinessGrace, 10,
                                  "a missing display must still reach the Extend offer promptly")
+        XCTAssertGreaterThan(MirrorUnavailableOfferPolicy.wakeRecoverySettle, 0)
+        XCTAssertLessThanOrEqual(MirrorUnavailableOfferPolicy.wakeRecoverySettle, 10, "bounded")
     }
 
     func testWaitKeepsTheSessionAndClearsOnTheMacsAnswer() {

@@ -2167,7 +2167,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if DisplayHealth.hasUsablePhysicalDisplay(excluding: nil) {
                 try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
             } else if try await awaitMirrorDisplayReadiness(sessionGeneration: admittedGeneration) {
-                try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
+                try await startMirrorOnceDisplayReturned(sessionGeneration: admittedGeneration)
             } else {
                 try await offerExtendOrFailMirror(info: admitted.info, sessionGeneration: admittedGeneration)
             }
@@ -2317,6 +2317,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return false
     }
 
+    /// Starts Mirror once a waiting display is back (the readiness wait, or
+    /// the offer's poll). The wake that brought it back usually also fires
+    /// `screensDidWake`, whose wake recovery starts Mirror for this session on
+    /// its own: a second start would fail ("capture stream is already active")
+    /// or supersede that one. Waits, bounded, for a wake recovery in progress,
+    /// then starts only if nothing is capturing yet.
+    private func startMirrorOnceDisplayReturned(sessionGeneration: UInt64) async throws {
+        let pollsLeft = Int(MirrorUnavailableOfferPolicy.wakeRecoverySettle / 0.25)
+        for poll in 0...pollsLeft {
+            let (recovering, capturing) = try await onQueue { sender in
+                (sender.wakeCaptureRecoveryScheduled || sender.wakeCaptureRecoveryRunning,
+                 sender.captureOwnership.liveStream != nil)
+            }
+            if capturing {
+                Log.info("displayDebug: mirrorReadiness wake recovery already started Mirror")
+                return
+            }
+            if !recovering || poll == pollsLeft { break }
+            try await Task.sleep(for: .milliseconds(250))
+            guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+        }
+        try await startMirrorCaptureUsingPreference(sessionGeneration: sessionGeneration)
+    }
+
     private func offerExtendOrFailMirror(info: PhoneInfo, sessionGeneration: UInt64) async throws {
         guard MirrorUnavailableOfferPolicy.shouldOffer(
             hasUsablePhysicalDisplay: false, receiverProtocolVersion: info.protocolVersion
@@ -2360,7 +2384,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 mirrorUnavailableOfferGeneration = nil
                 Log.info("displayDebug: mirrorUnavailable offer cleared generation=\(sessionGeneration) "
                     + "— a physical display returned and stayed stable, resuming Mirror")
-                try await startMirrorCaptureUsingPreference(sessionGeneration: sessionGeneration)
+                try await startMirrorOnceDisplayReturned(sessionGeneration: sessionGeneration)
                 return
             }
         }
@@ -4688,6 +4712,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
             Log.info("wakeCapture: startCaptureSucceeded")
+        } catch is CancellationError {
+            // Superseded by a newer start (Mirror startup, another recovery), a
+            // stop, a pause or the session ending: whoever won owns capture now.
+            // Marking an unexpected stop here would put a healthy new capture
+            // back into recovery, where keyboard input is refused.
+            Log.info("wakeCapture: startCaptureSuperseded")
+            wakeCaptureAwaitingFirstFrameGeneration = nil
+            wakeCaptureAwaitingEncodedFrameGeneration = nil
         } catch {
             Log.info("wakeCapture: startCaptureFailed error=\(error)")
             wakeCaptureAwaitingFirstFrameGeneration = nil
