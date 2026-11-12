@@ -53,6 +53,16 @@ Rather than repeatedly opening duplicate tickets for major out-of-scope directio
 
 GitHub Discussions is not enabled in this repository. For now, the linked **issues are the discussion venues**; opening an issue for an idea does not turn it into planned work.
 
+## How we evaluate and prioritize issues
+
+The five forms above remain intentionally lightweight: you **do not** need to research Apple HIG, compare competing apps, calculate impact or supply hardware logs just to report a problem. Optional context and known workarounds help, but a credible report is useful even when it has not been reproduced yet.
+
+Maintainer triage distinguishes what was **observed** (reported) from what was **reproduced**, **proposed** and **verified**, **research** from **approved implementation**, and source inspection / automated tests from **physical-device validation**. Core reliability, privacy/permission safety, accessibility and repeatable regressions generally take precedence over exploratory modes, but priority is a judgment based on actual impact, frequency, workaround, risk and evidence—not a promise or an algorithmic score. Contributors should not assume that an open research issue is assigned work.
+
+For proposed gestures or substantial UX changes, the maintainer may compare the current MeowDisplay workflow, simpler alternatives, relevant Apple/Android design and accessibility guidance, and real-device behavior **before** choosing an implementation. Important actions must retain a discoverable, accessible alternative to custom gestures. For capture/image quality concerns, comparisons must use controlled devices and actual pipeline measurements before asserting a root cause.
+
+See [Issue triage and research guide](docs/ISSUE_TRIAGE.md) for the short workflow, prioritization examples, evidence standards and validation expectations. This is internal maintainer guidance, **not a new submission requirement**.
+
 ## Contributing code or docs
 
 1. For large features, architecture changes, new dependencies or new platforms, open an issue before implementation to discuss scope. Small bug fixes and clear documentation corrections can be proposed directly.

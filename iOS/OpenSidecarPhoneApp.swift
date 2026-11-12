@@ -46,6 +46,10 @@ struct ReceiverScreen: View {
     @State private var showOnboarding = false
     @State private var nagDismissed = false
     @State private var keyboardVisibleRect: CGRect?
+    /// The picture's keyboard-adjusted rect in the video surface's
+    /// coordinates while the on-screen keyboard moves it; see
+    /// `workspacePicture(canvas:)`.
+    @State private var keyboardPictureRect: CGRect?
     @State private var runtimeSafeInsets: ControlSafeInsets?
     // Physical notch side (see `PhysicalNotchSide`) derived from
     // `UIInterfaceOrientation`, not from comparing safe-area depths — a real
@@ -55,7 +59,7 @@ struct ReceiverScreen: View {
     @State private var occupiedControlFrames: [CGRect] = []
     /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
     /// `nil` means the whole screen.
-    @State private var padCanvas: CGRect?
+    @State private var padCanvas: PadCanvasPublication?
     /// The on-surface Request Control affordance — see `ReceiverInputPrompt`.
     @State private var inputPrompt = ReceiverInputPrompt()
     @Environment(\.scenePhase) private var scenePhase
@@ -71,6 +75,10 @@ struct ReceiverScreen: View {
     @AppStorage("onboardingDismissed") private var onboardingDismissed = false
     // M4: the native keyboard responder is focused only while this is true.
     @State private var keyboardActive = false
+    /// Which keyboard `keyboardActive` opened: the lock screen's (true) or the ordinary one. Fixed
+    /// when it opens, so ownership never passes from one to the other while it stays open (the
+    /// lock screen ending must not hand the ordinary keyboard a moment of focus).
+    @State private var keyboardForLockScreen = false
     /// "Switch to Window view?" answered (either way) for this launch.
     @State private var windowPromptAnswered = false
     /// Mirror or Extend, whichever showed last: where "View Full Screen" returns from Window mode.
@@ -82,12 +90,30 @@ struct ReceiverScreen: View {
     // control store. Both are nil outside the demo.
     @State private var demo: DemoSession?
     @State private var demoControlStore: ReceiverControlStore?
+    /// The keyboard was open when Home was chosen; Resume reopens it (#121).
+    @State private var keyboardBeforeHome = false
+    /// Touch and hold Settings: Back to Home or Disconnect, over the session.
+    @State private var sessionActions = ReceiverSessionActionsState()
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
     }
 
     /// Banners slide in from an edge; with Reduce Motion they only fade.
+    /// A centred prompt or hint moved wholly to one side of a fold (iPhone
+    /// Duo) when it would straddle it; unchanged on every other device.
+    /// `size` is the overlay's approximate size.
+    private func clearOfFolds(_ centre: CGPoint, size: CGSize, container: CGSize,
+                              regions: [ControlReservedRegion]) -> CGPoint {
+        let divisions = ControlReservedRegion.frames(of: .division, in: regions)
+        guard !divisions.isEmpty else { return centre }
+        let frame = CGRect(x: centre.x - size.width / 2, y: centre.y - size.height / 2,
+                           width: size.width, height: size.height)
+        let moved = ControlFoldGeometry.clearOfFolds(frame, in: CGRect(origin: .zero, size: container),
+                                                     divisions: divisions)
+        return CGPoint(x: moved.midX, y: moved.midY)
+    }
+
     private func slideTransition(from edge: Edge) -> AnyTransition {
         reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
     }
@@ -106,18 +132,122 @@ struct ReceiverScreen: View {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
 
+    /// The keyboard's place for the controls and the Mac: what the surface reported, only while
+    /// this keyboard is open and that surface is shown (`SoftwareKeyboardPresence`).
+    private var shownKeyboardRect: CGRect? {
+        SoftwareKeyboardPresence.visibleRect(reported: keyboardVisibleRect, keyboardActive: keyboardActive,
+                                             surfaceShown: showsReceiverSurface)
+    }
+
     private var route: ReceiverPresentationRoute {
-        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface)
+        .resolve(demoActive: demo != nil, realSurfaceShown: showsReceiverSurface, presentation: model.presentation)
     }
 
     /// Auto-Lock is held off only while the Mac's picture is watched (ScreenAwakePolicy).
     private var screenAwakeInputs: ScreenAwakePolicy.Inputs {
         .init(enabled: keepScreenAwake, foreground: scenePhase == .active,
-              watching: route == .receiver && !showSettings, streaming: isStreaming)
+              watching: route.watchesMac && !showSettings, streaming: isStreaming)
     }
 
-    /// Full-screen chrome rules apply to the demo surface as well.
+    /// Full-screen chrome rules apply to the demo surface as well, and to
+    /// Home over a kept session: nothing under it changes geometry.
     private var fullScreenSurface: Bool { route != .idle }
+
+    /// Back to Home — Keep Connected (#121).
+    private func showHomeKeepingSession() {
+        keyboardBeforeHome = keyboardActive
+        showSettings = false
+        model.showHomeKeepingSession()
+    }
+
+    /// Offered in Settings ▸ Connections only while a real session is on screen.
+    private var keepSessionOnHomeAction: (@MainActor () -> Void)? {
+        guard route == .receiver else { return nil }
+        return { showHomeKeepingSession() }
+    }
+
+    /// A connected session on screen: the Settings control's hold opens Session Actions.
+    private var sessionActionsAvailable: Bool {
+        !lockScreenShowing && ReceiverSessionActionsPolicy.available(sessionConnected: model.receiver.connected,
+                                                                    sessionOnScreen: route == .receiver)
+    }
+
+    /// The Mac's own lock screen is up on this device and playing: only the picture and a small
+    /// banner show. Until video is on, the locked cover stays (`MacLockedCoverPolicy`).
+    private var lockScreenShowing: Bool {
+        MacLockedCoverPolicy.showsLockScreen(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                             videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
+    }
+
+    /// The opaque locked cover is up, including through Show Lock Screen's switch to Full Desktop,
+    /// and over the Mac's lock screen whenever the app isn't active (app switcher snapshot,
+    /// Control Center, a call), so no picture of it (its password dots) is kept or shown there.
+    private var macLockedCoverShowing: Bool {
+        if scenePhase != .active, model.receiver.macLock != nil { return true }
+        return MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
+                                        videoEnabled: model.receiver.videoEnabled,
+                                        freshFrame: model.receiver.freshFrameSinceVideoReset)
+    }
+
+    private var sessionActionsAnimation: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .easeOut(duration: 0.22)
+    }
+
+    /// Nothing reaches the Mac while the overlay is up (see `inputReachesMac`);
+    /// anything held is released first, as Home does.
+    private func openSessionActions() {
+        guard sessionActionsAvailable else { return }
+        var next = sessionActions
+        guard next.open(keyboardActive: keyboardActive) else { return }
+        model.receiver.releaseLocalInput()
+        keyboardActive = false
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+    }
+
+    /// Cancel, a tap outside or escape: the session exactly as it was.
+    private func dismissSessionActions() {
+        var next = sessionActions
+        let reopenKeyboard = next.dismiss()
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+        if reopenKeyboard, keyboardAvailable, inputReachesMac { keyboardActive = true }
+        UIAccessibility.post(notification: .screenChanged, argument: nil)
+    }
+
+    private func endLockMacFlow() {
+        model.workspace.cancelLockMac()
+        model.workspace.clearLockMacStatus()
+    }
+
+    private func chooseSessionAction(_ action: ReceiverSessionAction) {
+        var next = sessionActions
+        guard let outcome = next.choose(action) else { return }
+        withAnimation(sessionActionsAnimation) { sessionActions = next }
+        switch outcome {
+        case .backToHome(let reopenKeyboard):
+            showHomeKeepingSession()
+            // The overlay already closed the keyboard; Resume reopens what was open before it.
+            if model.presentation.keepsSessionOnHome {
+                keyboardBeforeHome = reopenKeyboard
+            } else if reopenKeyboard, keyboardAvailable, inputReachesMac {
+                keyboardActive = true
+            }
+        case .lockMac:
+            model.workspace.beginLockMac()
+        case .disconnect:
+            // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
+            model.receiver.disconnect()
+        }
+    }
+
+    /// What Home shows while the session is kept behind it.
+    private var keptSessionHome: KeptSessionHome? {
+        guard model.presentation.keepsSessionOnHome else { return nil }
+        let host = model.workspace.hostName
+        return KeptSessionHome(macName: host.isEmpty ? String(localized: "your Mac") : host,
+                               interruption: model.receiver.session.interruption,
+                               onResume: { model.resumeSession() })
+    }
 
     private func enterDemo() {
         // A real session always wins (see `route`); never start a demo behind it.
@@ -145,7 +275,19 @@ struct ReceiverScreen: View {
         BlockedInputAttemptPolicy.inputReachesMac(sessionLive: model.receiver.session.allowsLiveInput,
                                                   localAllow: controlStore.preferences.allowInput,
                                                   macPV: model.receiver.macProtocolVersion,
-                                                  macState: controlStore.sessionInputState)
+                                                  macState: controlStore.sessionInputState,
+                                                  surfaceInteractive: localInputSurfaceOpen)
+    }
+
+    /// Whether the receiver surface can be used at all: the app is active,
+    /// Home and Session Actions don't cover it, and the picture isn't in
+    /// Picture in Picture (which is view-only). Mirrored into the receiver
+    /// (`StreamReceiver.setLocalInputSurfaceOpen`), which releases what's
+    /// held, ends delayed actions and lets only releases out while it's false.
+    private var localInputSurfaceOpen: Bool {
+        scenePhase == .active
+            && sessionActions.surfaceInteractive(model.presentation)
+            && !model.pictureInPicture.isShowingWindow
     }
 
     /// Screen edges whose system gestures wait for a second swipe — see
@@ -158,12 +300,49 @@ struct ReceiverScreen: View {
             voiceOverRunning: voiceOverEnabled) ? .all : []
     }
 
+    /// What tucked floating windows' edge handles give way to, in global coordinates: the
+    /// screen (the system's own edge gestures start at its top and bottom), the controls
+    /// (control tray, function tray, shortcut column, keypads, calculator), folds, and Stage
+    /// Peek's edge handle, placed from the very values Stage Peek places it with. Stage Peek
+    /// itself doesn't dodge the handles, so neither chases the other along an edge.
+    private func workspaceEdgeReservations(geo: GeometryProxy, canvas: CGRect, peekSafe: CGRect, peekAvoiding: [CGRect],
+                                           reservedRegions: [ControlReservedRegion]) -> WorkspaceEdgeReservations {
+        let origin = geo.frame(in: .global).origin
+        var controls = occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions)
+        if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
+           let strip = StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding) {
+            controls.append(strip.offsetBy(dx: canvas.minX, dy: canvas.minY))
+        }
+        return WorkspaceEdgeReservations(
+            screen: CGRect(origin: origin, size: geo.size),
+            controls: controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) })
+    }
+
+    /// Where Window view's chrome goes, in screen coordinates (issue #92).
+    /// `drawn` is where the picture actually is: with the on-screen keyboard
+    /// up, the video slides (and with Zoom While Typing, scales) to keep the
+    /// caret visible, and pane outlines, title pills and divider grips must
+    /// follow it or they sit over the wrong window. `layout` stays the normal
+    /// fit, so opening the keyboard never changes the workspace size sent to
+    /// the Mac.
+    private func workspacePicture(canvas: CGRect) -> (drawn: CGRect, layout: CGRect) {
+        let layout = RemoteViewportCalculator.normal(
+            viewBounds: CGRect(origin: .zero, size: canvas.size),
+            remoteAspectSize: model.receiver.videoSize).displayedRect
+            .offsetBy(dx: canvas.minX, dy: canvas.minY)
+        // No `keyboardVisibleRect` check: while the picture slides back after
+        // the keyboard closes, the surface keeps publishing where it is, and
+        // publishes nil once it is home.
+        guard let keyboardPictureRect,
+              keyboardPictureRect.width > 0, keyboardPictureRect.height > 0 else { return (layout, layout) }
+        return (keyboardPictureRect.offsetBy(dx: canvas.minX, dy: canvas.minY), layout)
+    }
+
     /// The Mac canvas in screen coordinates: the iPad Strip's remaining
     /// area, or the whole screen.
     private func canvas(in size: CGSize) -> CGRect {
-        let full = CGRect(origin: .zero, size: size)
-        guard controlStore.isPad, let padCanvas, padCanvas.width > 0, padCanvas.height > 0 else { return full }
-        return padCanvas.intersection(full)
+        guard controlStore.isPad else { return CGRect(origin: .zero, size: size) }
+        return PadCanvasPublication.resolved(padCanvas, in: size)
     }
 
     /// Everything outside AVKit that decides whether Picture in Picture may
@@ -175,7 +354,9 @@ struct ReceiverScreen: View {
             rendersThroughDisplayLayer: !metalRenderer,
             receiverSurfaceShown: showsReceiverSurface,
             sessionPhase: model.receiver.session.phase,
-            videoEnabled: model.receiver.videoEnabled)
+            // Nothing goes to Picture in Picture while the Mac is locked (its lock screen included).
+            videoEnabled: model.receiver.videoEnabled && model.receiver.macLock == nil,
+            sessionOnHome: model.presentation.keepsSessionOnHome)
     }
 
     // The floating keyboard button is offered only while keyboard input can
@@ -251,6 +432,7 @@ struct ReceiverScreen: View {
             SettingsView(receiver: model.receiver, controlStore: controlStore,
                          pictureInPicture: model.pictureInPicture, haptics: haptics, clipboard: model.workspace.clipboard)
             .environment(\.lockMacClient, model.workspace)
+            .environment(\.keepSessionOnHome, keepSessionOnHomeAction)
         }
     }
 
@@ -298,6 +480,8 @@ struct ReceiverScreen: View {
                                    receiver: model.receiver,
                                    useMetal: metalRenderer,
                                    zoomWhileTyping: zoomWhileTyping,
+                                   lockScreenShowing: lockScreenShowing,
+                                   freshFrame: model.receiver.freshFrameSinceVideoReset,
                                    keyboardRequested: keyboardActive,
                                    inputMode: controlStore.preferences.inputMode,
                                    trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
@@ -324,7 +508,12 @@ struct ReceiverScreen: View {
                                        haptics: controlStore.preferences.hapticsEnabled,
                                        smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
-                                   onActivityBegan: { controlStore.beginAutoHideActivity() },
+                                   onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
+                                   onActivityBegan: {
+                                       controlStore.beginAutoHideActivity()
+                                       // A touch on the Mac closes the arrow keypad; the touch still goes through.
+                                       controlStore.noteSurfaceTouch()
+                                   },
                                    onActivityEnded: { controlStore.scheduleAutoHide() },
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: controlStore.moveViewActive,
@@ -352,7 +541,8 @@ struct ReceiverScreen: View {
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
                                    threeFingerHoldEnabled: model.workspace.available,
                                    onThreeFingerHold: { model.workspace.openOverview() },
-                                   onHardwarePointer: { model.workspace.hover(at: $0) })
+                                   onHardwarePointer: { model.workspace.hover(at: $0) },
+                                   onBackToHome: { showHomeKeepingSession() })
                         .id(metalRenderer)   // rebuild the layer tree on toggle
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
@@ -387,8 +577,10 @@ struct ReceiverScreen: View {
                         }
                         .allowsHitTesting(false)   // never block touch input
                     }
+                    // The ordinary keyboard never types on the Mac's lock screen: that has its own.
                     RemoteKeyboardInputView(
-                        isActive: $keyboardActive,
+                        isActive: Binding(get: { keyboardActive && !keyboardForLockScreen && !lockScreenShowing },
+                                          set: { keyboardActive = $0 }),
                         onCommitText: { commitKeyboardText($0) },
                         onSpecialPress: { usage in
                             model.receiver.sendKeyboardPress(usage: usage, modifiers: SoftwareKeyboardChordPolicy.modifiers(
@@ -408,17 +600,46 @@ struct ReceiverScreen: View {
                     .frame(width: 1, height: 1)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    // The Mac's lock screen: a bare key input (no predictions, AutoFill or echo),
+                    // its keys tagged for the lock screen, no chord modifiers.
+                    LockScreenKeyInputView(
+                        isActive: keyboardActive && keyboardForLockScreen && lockScreenShowing,
+                        onText: { model.receiver.sendKeyboardText($0) },
+                        onReturn: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardReturnOrEnter.rawValue)) },
+                        onDelete: { model.receiver.sendKeyboardPress(usage: Int(UIKeyboardHIDUsage.keyboardDeleteOrBackspace.rawValue)) },
+                        onRequestDismiss: { keyboardActive = false })
+                    .frame(width: 1, height: 1)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+                    if !lockScreenShowing {
                     // Window mode: tile chrome and the window rail over the picture,
                     // under the MeowDisplay controls (which stay on top).
-                    let picture = RemoteViewportCalculator.normal(
-                        viewBounds: CGRect(origin: .zero, size: canvas.size),
-                        remoteAspectSize: model.receiver.videoSize).displayedRect
-                        .offsetBy(dx: canvas.minX, dy: canvas.minY)
-                    WorkspaceChromeView(model: model.workspace, picture: picture, inputAllowed: inputReachesMac,
+                    let picture = workspacePicture(canvas: canvas)
+                    // Stage Peek's safe area and what it keeps clear of (overlay coordinates): the
+                    // same values place its edge handle and reserve it from tucked floats' handles.
+                    let peekSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
+                                          width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
+                                          height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
+                        .intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                    let peekAvoiding = (occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions))
+                        .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
+                    let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
+                                                                     peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
+                    // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
+                    // too) and a docked keyboard (its visible rect is in the canvas's coordinates).
+                    let keyboardCover = shownKeyboardRect.map { visible -> CGRect in
+                        let top = canvas.minY + visible.maxY
+                        return CGRect(x: canvas.minX, y: top, width: canvas.width, height: max(0, geo.size.height - top))
+                    }
+                    WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
+                                        layoutPicture: picture.layout, inputAllowed: inputReachesMac,
                                         divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                         safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                        controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
                                         onSettings: { showSettings = true },
                                         onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
+                        .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
+                        .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)
@@ -429,7 +650,7 @@ struct ReceiverScreen: View {
                         keyboardActive: $keyboardActive,
                         showSettings: $showSettings,
                         keyboardAvailable: keyboardAvailable,
-                        keyboardVisibleRect: keyboardVisibleRect,
+                        keyboardVisibleRect: shownKeyboardRect,
                         containerSize: geo.size,
                         safeInsets: effectiveSafeInsets,
                         notchSide: physicalNotchSide,
@@ -437,47 +658,50 @@ struct ReceiverScreen: View {
                         haptics: haptics,
                         onOccupiedFramesChange: { occupiedControlFrames = $0 },
                         onCanvasChange: { padCanvas = $0 },
-                        surfaceOrigin: canvas.origin)
+                        surfaceOrigin: canvas.origin,
+                        onSessionActions: sessionActionsAvailable ? { openSessionActions() } : nil)
                     if let kind = inputPrompt.kind {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
                         // window needs control; the pane, its tabs, zoom and pan stay as they are.
                         let paneAnchor = model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
-                            let pic = RemoteViewportCalculator.normal(viewBounds: CGRect(origin: .zero, size: canvas.size),
-                                                                      remoteAspectSize: model.receiver.videoSize).displayedRect
-                                .offsetBy(dx: canvas.minX, dy: canvas.minY)
+                            let pic = workspacePicture(canvas: canvas).drawn
                             return CGPoint(x: pic.minX + r.midX * pic.width,
                                            y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
                         } : nil
+                        let promptCentre = clearOfFolds(
+                            CGPoint(x: paneAnchor?.x ?? canvas.midX,
+                                    y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
+                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76),
+                            size: CGSize(width: 260, height: 44), container: geo.size,
+                            regions: reservedRegions)
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
-                            .position(x: paneAnchor?.x ?? canvas.midX,
-                                      y: paneAnchor?.y ?? keyboardVisibleRect.map { canvas.minY + $0.maxY - 110 }
-                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76)
+                            .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                     }
                     if inputReachesMac, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
                        !controlStore.preferences.naturalTouchHintShown, !showSettings {
+                        // Narrower than a Duo half, so it fits beside the crease.
+                        let hintWidth: CGFloat = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+                            .isEmpty ? 460 : 400
                         NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
                             .padding(.horizontal, 16)
-                            .frame(maxWidth: 460)
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60)
+                            .frame(maxWidth: hintWidth)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60),
+                                                   size: CGSize(width: min(hintWidth, canvas.width), height: 96),
+                                                   container: geo.size, regions: reservedRegions))
                             .transition(.opacity)
                     }
                     if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
                         // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
                         // Opening, browsing, searching and expanding never change the mode; only
                         // tapping a window switches (to Window mode, with that window).
-                        let screenSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
-                                                width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
-                                                height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
                         StagePeekOverlay(
                             model: model.workspace,
                             edge: controlStore.preferences.stagePeekEdge,
                             frame: canvas,
-                            safe: screenSafe.intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY),
-                            avoiding: (occupiedControlFrames
-                                       + ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                            safe: peekSafe,
+                            avoiding: peekAvoiding,
                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             dock: controlStore.preferences.stagePeekDock,
@@ -492,9 +716,11 @@ struct ReceiverScreen: View {
                        !showSettings, !model.workspace.overviewOpen {
                         // Full-desktop view: offer Window mode once per launch, never forced.
                         WindowModePrompt(
+                            extending: model.receiver.confirmedDisplayMode == .extend,
                             onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
                             onNo: { windowPromptAnswered = true })
-                            .position(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34)
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
+                                                   size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
                             .transition(slideTransition(from: .top))
                     }
                     WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
@@ -502,6 +728,7 @@ struct ReceiverScreen: View {
                                        onMirror: { model.receiver.requestDisplayMode(.mirror) },
                                        onExtend: { model.receiver.requestDisplayMode(.extend) },
                                        safeInsets: effectiveSafeInsets.edgeInsets)
+                    }
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
                                        keyboardActive: $keyboardActive,
@@ -509,9 +736,13 @@ struct ReceiverScreen: View {
                                        onExit: { exitDemo() })
                 } else {
                     IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
-                             onExploreDemo: { enterDemo() })
+                             onExploreDemo: { enterDemo() }, keptSession: keptSessionHome)
                 }
             }
+            // Home over a kept session: the surface stays mounted (zoom,
+            // panes, decoder) but takes no touches and is hidden from VoiceOver.
+            .allowsHitTesting(route != .sessionHome)
+            .accessibilityHidden(route == .sessionHome)
             .background(ReceiverWindowPanelProbe { points, scale in
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
@@ -525,6 +756,47 @@ struct ReceiverScreen: View {
         .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
         .statusBarHidden(fullScreenSurface)
         .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
+        .overlay {
+            if route == .sessionHome {
+                ZStack {
+                    Color(horizontalSizeClass == .regular ? .systemGroupedBackground : .systemBackground)
+                        .ignoresSafeArea()
+                    IdleView(receiver: model.receiver, wakeConnect: model.wakeConnect, showSettings: $showSettings,
+                             onExploreDemo: { enterDemo() }, keptSession: keptSessionHome)
+                }
+            }
+        }
+        .overlay {
+            if sessionActions.isPresented {
+                let host = model.workspace.hostName
+                SessionActionsOverlay(
+                    macName: host.isEmpty ? String(localized: "your Mac") : host,
+                    workspace: model.workspace,
+                    actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
+                                                                  presentation: model.presentation,
+                                                                  canLockMac: model.workspace.canLockMac),
+                    onAction: { chooseSessionAction($0) },
+                    onCancel: { dismissSessionActions() })
+                .transition(.opacity)
+            }
+        }
+        // The session ended or left the screen under the overlay: close it, restore nothing.
+        .onChange(of: sessionActionsAvailable) { available in
+            guard !available, sessionActions.isPresented else { return }
+            withAnimation(sessionActionsAnimation) { sessionActions.sessionEnded() }
+        }
+        // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
+        .onChange(of: showSettings) { shown in
+            if shown, sessionActions.isPresented { dismissSessionActions() }
+        }
+        // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
+        .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }
+        // Lock Mac: closing or opening the overlay, or leaving Settings, ends any wait and clears an old result.
+        .onChange(of: sessionActions.isPresented) { _ in endLockMacFlow() }
+        .onChange(of: showSettings) { shown in if !shown { endLockMacFlow() } }
+        // The Mac's answer to Request Control, or the session going away, moves the Lock Mac flow on.
+        .onChange(of: controlStore.sessionInputState) { _ in model.workspace.lockFlowInputsChanged() }
+        .onChange(of: model.receiver.session.allowsLiveInput) { _ in model.workspace.lockFlowInputsChanged() }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()
@@ -593,6 +865,33 @@ struct ReceiverScreen: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .modifier(WorkspaceDragGuard(model: model.workspace))
+        // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
+        .overlay {
+            if macLockedCoverShowing {
+                MacLockedCover(notice: MacLockedCoverPolicy.coverNotice(model.receiver.macLock),
+                               macName: model.workspace.hostName,
+                               lockFlow: model.lockScreenFlow,
+                               onShowLockScreen: { model.showLockScreen() },
+                               onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
+                               onDisconnect: { model.receiver.disconnect() })
+                    .transition(.opacity)
+            }
+        }
+        // The Mac said its own lock screen is up here: the picture shows (fresh frames), plus this.
+        .overlay(alignment: .top) {
+            if lockScreenShowing {
+                LockScreenBanner(keyboardAvailable: keyboardAvailable && inputReachesMac,
+                                 onKeyboard: { if keyboardAvailable, inputReachesMac { keyboardActive.toggle() } },
+                                 onHide: { keyboardActive = false; model.hideLockScreen() })
+                    .padding(.top, 8)
+                    .transition(slideTransition(from: .top))
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: model.receiver.macLock)
+        // Leaving the app: the cover is there at once (no fade), before iOS takes its snapshot.
+        .animation(scenePhase == .active ? .easeOut(duration: 0.15) : nil, value: macLockedCoverShowing)
+        .modifier(WorkspaceLeaveExtendConfirmation(model: model.workspace))
         .overlay(alignment: .top) {
             if showPairedToast {
                 PairedToast()
@@ -605,6 +904,37 @@ struct ReceiverScreen: View {
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
         }
+        // The lock screen going away (Hide, or the Mac unlocking) closes the keyboard it opened.
+        .onChange(of: lockScreenShowing) { showing in
+            // Either way the open keyboard closes: the ordinary one never types on the lock
+            // screen, and the lock screen's never types on the desktop.
+            keyboardActive = false
+            _ = showing
+        }
+        .onChange(of: keyboardActive) { active in
+            keyboardForLockScreen = active && lockScreenShowing
+        }
+        // The Mac locked: whatever keyboard was open closes (the cover is up).
+        .onChange(of: model.receiver.macLock != nil) { locked in
+            if locked { keyboardActive = false }
+        }
+        // Keystrokes the Mac refused (typed for the lock screen after it unlocked, for example):
+        // said in one line, never silently lost.
+        .overlay(alignment: .top) {
+            if let notice = model.lockScreenInputNotice {
+                Label(notice, systemImage: "keyboard.badge.exclamationmark")
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.horizontal, 16)
+                    .padding(.top, 60)
+                    .transition(slideTransition(from: .top))
+                    .accessibilityAddTraits(.isStaticText)
+                    .accessibilityIdentifier("lockScreenInputNotice")
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.lockScreenInputNotice)
         // Below the force floor → blocking gate. Setter is a no-op: the user
         // cannot dismiss it, only update.
         .fullScreenCover(item: Binding(get: { requiredUpdate }, set: { _ in })) { update in
@@ -662,12 +992,20 @@ struct ReceiverScreen: View {
                 model.sceneDidActivate()
                 // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
                 model.workspace.clipboard.checkLocal(automatic: true)
-            case .background: model.sceneDidBackground()
+            case .background:
+                // The Mac's lock screen isn't left live behind the app: it ends (the cover is
+                // already up while inactive), and the Mac sends no more of its frames.
+                if lockScreenShowing || model.lockScreenFlow.isShowing { model.hideLockScreen() }
+                model.sceneDidBackground()
             default: break
             }
             // M4: never hold the keyboard responder while backgrounded.
             if phase != .active { keyboardActive = false }
         }
+        // Input stops while the surface can't be used: the app inactive or in
+        // the background, Home or Session Actions over it, or Picture in Picture.
+        .onAppear { model.receiver.setLocalInputSurfaceOpen(localInputSurfaceOpen) }
+        .onChange(of: localInputSurfaceOpen) { model.receiver.setLocalInputSurfaceOpen($0) }
         .onAppear { model.pictureInPicture.update(pictureInPictureConditions) }
         .onChange(of: pictureInPictureConditions) { model.pictureInPicture.update($0) }
         // The receiver surface is covered while the picture is in the
@@ -683,8 +1021,19 @@ struct ReceiverScreen: View {
         // Caret-following Zoom While Typing: the Mac reads the focused text
         // caret only while the keyboard is up (a Mac that predates it never
         // gets this message).
-        .onChange(of: keyboardVisibleRect != nil) { open in
+        .onChange(of: shownKeyboardRect != nil) { open in
             model.receiver.sendKeyboardState(open: open)
+        }
+        // A closed keyboard leaves no place behind, even if the surface that reported it was
+        // rebuilt meanwhile and couldn't say it closed (unlocking from the lock screen).
+        .onChange(of: keyboardActive) { active in
+            if !active { keyboardVisibleRect = nil }
+        }
+        // Resume reopens the keyboard that was open when Home was chosen.
+        .onChange(of: model.presentation.surfaceInteractive) { interactive in
+            guard interactive else { return }
+            if keyboardBeforeHome, keyboardAvailable, inputReachesMac { keyboardActive = true }
+            keyboardBeforeHome = false
         }
         // Allow Input OFF must close the keyboard responder too — it's the
         // one interactive element the video-layer hit-testing gate above
@@ -1114,6 +1463,14 @@ struct OverflowMarqueeText: View {
 
 // MARK: - Idle view (no Mac connected) — regular iOS look, follows light/dark
 
+/// What Home shows and does while a session is kept behind it (#121).
+struct KeptSessionHome {
+    let macName: String
+    /// The session's interruption, if any, titles the card instead.
+    let interruption: ReceiverSessionInterruption?
+    let onResume: () -> Void
+}
+
 /// The home screen. Three things, top to bottom: who this is and one short
 /// status line; one card listing Macs (paired, then nearby ones to pair);
 /// and a quiet row of links with Settings & Help beneath it. Everything else
@@ -1124,12 +1481,16 @@ struct IdleView: View {
     @ObservedObject var wakeConnect: WakeConnectCoordinator
     @Binding var showSettings: Bool
     let onExploreDemo: () -> Void
+    /// Home over a kept session: a card to go back to it, and one session at a time.
+    var keptSession: KeptSessionHome?
     @State private var showRemoteAccessSetup = false
     @State private var showRemotePairing = false
     @State private var homeSheet: HomeSheet?
     @State private var remoteEditPeerID: String?
     /// Bumped when remote details change so the (non-observable) store is re-read.
     @State private var remoteRefresh = 0
+    /// How each Mac's last Remote Access knock ended: the row's reason after a failed Connect.
+    @ObservedObject private var knockOutcomes = RemoteKnockOutcomes.shared
     @State private var forgetConfirmation = PeerForgetPrompt()
     // Cat Mode's only effect here: a purely decorative paw accent next to
     // the MeowDisplay wordmark. Reads straight from storage rather than
@@ -1173,6 +1534,9 @@ struct IdleView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let keptSession { keptSessionCard(keptSession) }
+        }
         .background(horizontalSizeClass == .regular ? Color(.systemGroupedBackground) : Color(.systemBackground))
         .sheet(isPresented: Binding(
             get: { showRemotePairing && receiver.pairingPrompt.pending == nil },
@@ -1200,6 +1564,11 @@ struct IdleView: View {
         .sheet(isPresented: $showRemoteAccessSetup, onDismiss: { remoteRefresh += 1 }) {
             NavigationStack {
                 RemoteAccessSettingsView(receiver: receiver, initialPeerID: remoteEditPeerID)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { showRemoteAccessSetup = false }
+                        }
+                    }
             }
         }
         .sheet(item: $homeSheet) { sheet in
@@ -1472,7 +1841,14 @@ struct IdleView: View {
                     macRow(mac)
                 }
             }
-            if demoLivesInCard {
+            if let keptSession, macs.contains(where: { sessionRole($0) == .otherMacInSession }) {
+                Text("Disconnect from \(keptSession.macName) to connect to another.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 8)
+            }
+            if demoLivesInCard, keptSession == nil {
                 Divider()
                 Button(action: onExploreDemo) {
                     Label("Try the Demo", systemImage: "play.rectangle")
@@ -1552,6 +1928,7 @@ struct IdleView: View {
         let user = PairedMacUserName.name(peerID: mac.peerID)
         let subtitle = [macSubtitle(mac), user, shortID.map { String(localized: "ID \($0)") }].compactMap { $0 }
             .joined(separator: " · ").nilIfEmpty
+        let remoteHint = remoteProblemHint(mac)
         func label(lines: Int?) -> some View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: mac.name)
@@ -1560,6 +1937,13 @@ struct IdleView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // What to check after a Connect over Remote failed, under the reason.
+                if let remoteHint {
+                    Text(verbatim: remoteHint)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1591,25 +1975,73 @@ struct IdleView: View {
         guard let peerID = mac.peerID else {
             return mac.switchedOut ? String(localized: "Switched Out") : String(localized: "Not paired")
         }
-        if receiver.connected { return String(localized: "Connected") }
+        if sessionRole(mac) == .current { return String(localized: "Connected") }
         // The Mac can see this iPhone but macOS won't let it connect back: say where to fix it.
         if mac.localNetworkBlocked {
             return String(localized: "The Mac can't connect: on the Mac, turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Local Network")
         }
-        if wakeConnect.isRunning(forPeerID: peerID) { return wakeConnect.statusLabel }
-        if wakeConnect.failed(forPeerID: peerID) { return remoteStatusText(peerID: peerID) }
+        if wakeConnect.isRunning(forPeerID: peerID) {
+            return remoteProgress(mac, peerID: peerID)?.text ?? wakeConnect.statusLabel
+        }
+        if wakeConnect.failed(forPeerID: peerID) {
+            return remoteProblem(mac, peerID: peerID)?.summary(deviceKind: deviceKind) ?? remoteStatusText(peerID: peerID)
+        }
         if mac.switchedOut { return String(localized: "Switched Out") }
         if mac.nearby != nil { return String(localized: "Nearby") }
         if mac.hasRemote { return String(localized: "Remote") }
         return String(localized: "Not found")
     }
 
+    /// Contacting your Mac / Waiting for your Mac to connect while a Connect
+    /// over Remote runs, from this device's knock (`RemoteConnectRowStatus`).
+    private func remoteProgress(_ mac: HomeMac, peerID: String) -> RemoteConnectRowStatus.Progress? {
+        RemoteConnectRowStatus.progress(stage: wakeConnect.attempt.stage,
+                                        wakePacketsSent: wakeConnect.attempt.wolBurstsSent,
+                                        hasSavedAddress: mac.hasRemote,
+                                        lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// Why the last Connect over Remote to this Mac failed, when its knock tells.
+    private func remoteProblem(_ mac: HomeMac, peerID: String) -> RemoteAccessProblem? {
+        RemoteConnectRowStatus.problem(failureReason: wakeConnect.failureReason(forPeerID: peerID),
+                                       macConnected: wakeConnect.attempt.promoteGeneration != nil,
+                                       hasSavedAddress: mac.hasRemote,
+                                       lastKnock: knockOutcomes.outcome(forPeerID: peerID)?.result)
+    }
+
+    /// The line under the reason: what to check next. Only where the row shows that reason.
+    private func remoteProblemHint(_ mac: HomeMac) -> String? {
+        guard let peerID = mac.peerID, sessionRole(mac) != .current, !mac.localNetworkBlocked,
+              !wakeConnect.isRunning(forPeerID: peerID), wakeConnect.failed(forPeerID: peerID),
+              let problem = remoteProblem(mac, peerID: peerID) else { return nil }
+        var otherMacName: String?
+        if case .some(.identityMismatch(let otherPeerID?)) = knockOutcomes.outcome(forPeerID: peerID)?.result {
+            otherMacName = TrustStore.shared.pinnedPeers().first { $0.peerID == otherPeerID }?.displayName
+        }
+        return problem.hint(deviceKind: deviceKind, otherMacName: otherMacName)
+    }
+
+    /// One session at a time: only the session's own Mac is Connected.
+    private func sessionRole(_ mac: HomeMac) -> HomeMacSessionRole {
+        .resolve(rowPeerID: mac.peerID, sessionMacPeerID: receiver.connectedMacPeerID,
+                 sessionActive: receiver.connected || keptSession != nil)
+    }
+
     @ViewBuilder
     private func macPrimaryControl(_ mac: HomeMac) -> some View {
+        let role = sessionRole(mac)
         if let peerID = mac.peerID {
-            if receiver.connected || mac.switchedOut {
-                // Connected: nothing to do. Switched out: it can't share, so
-                // there is nothing to connect to until it is in front.
+            if role == .current, let keptSession {
+                Button("Resume", action: keptSession.onResume)
+                    .buttonStyle(.borderedProminent)
+                    .fixedSize()
+                    .accessibilityLabel(Text("Resume session with \(mac.name)"))
+                    .accessibilityInputLabels([Text("Resume session with \(mac.name)"), Text("Resume")])
+                    .accessibilityIdentifier("resumeSessionRow")
+            } else if role != .available || mac.switchedOut {
+                // Connected (or another Mac's session holds this device):
+                // nothing to do. Switched out: it can't share, so there is
+                // nothing to connect to until it is in front.
                 EmptyView()
             } else if wakeConnect.isRunning(forPeerID: peerID) {
                 ProgressView().controlSize(.small)
@@ -1620,7 +2052,7 @@ struct IdleView: View {
             } else {
                 connectButton(for: mac, peerID: peerID)
             }
-        } else if let result = mac.nearby, !mac.switchedOut {
+        } else if let result = mac.nearby, !mac.switchedOut, role == .available {
             Button("Pair") { receiver.pairWithMac(result) }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel(Text("Pair with \(mac.name)"))
@@ -1640,6 +2072,8 @@ struct IdleView: View {
         if hasWakeHint || mac.nearby == nil {
             let failed = wakeConnect.failed(forPeerID: peerID)
             Button {
+                // A new attempt: an earlier knock's result no longer describes it.
+                knockOutcomes.reset(peerID: peerID)
                 wakeConnect.begin(peerID: peerID)
             } label: {
                 // Full label, never truncated: the row stacks the buttons
@@ -1681,14 +2115,15 @@ struct IdleView: View {
     private func macMenu(_ mac: HomeMac) -> some View {
         Menu {
             if let peerID = mac.peerID {
+                // The Mac's Remote Access address (TERMINOLOGY.md: Address).
                 if mac.hasRemote {
-                    Button("Edit Remote Details…") { presentRemoteSettings(peerID: peerID) }
-                    Button("Remove Remote Details", role: .destructive) {
+                    Button("Edit Address…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Remove Address", role: .destructive) {
                         RemoteEndpointStore.removeEndpoint(forPeerID: peerID, role: .receiverRole)
                         remoteRefresh += 1
                     }
                 } else {
-                    Button("Set Up Remote Access…") { presentRemoteSettings(peerID: peerID) }
+                    Button("Add Address…") { presentRemoteSettings(peerID: peerID) }
                 }
                 Button("Forget…", role: .destructive) {
                     forgetConfirmation.request(peerID: peerID, name: mac.name)
@@ -1719,6 +2154,61 @@ struct IdleView: View {
         return String(localized: "Not connected")
     }
 
+    // MARK: Kept session
+
+    /// Pinned above Home while the session is kept: back to it, or end it.
+    private func keptSessionCard(_ kept: KeptSessionHome) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: kept.interruption == nil ? "display" : "exclamationmark.triangle")
+                    .font(.title2)
+                    .foregroundStyle(kept.interruption == nil ? Color.accentColor : Color.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(kept.interruption?.title ?? String(localized: "Connected to \(kept.macName)"))
+                        .font(.headline)
+                    Text(kept.interruption == nil ? String(localized: "The Mac keeps this display. Resume to see and control it.")
+                                                  : kept.macName)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { keptSessionButtons(kept) }
+                VStack(spacing: 8) { keptSessionButtons(kept) }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func keptSessionButtons(_ kept: KeptSessionHome) -> some View {
+        Button(action: kept.onResume) {
+            Text("Resume").frame(maxWidth: .infinity, minHeight: 32)
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityLabel(Text("Resume session with \(kept.macName)"))
+        .accessibilityInputLabels([Text("Resume session with \(kept.macName)"), Text("Resume")])
+        .accessibilityIdentifier("resumeSession")
+        Button(role: .destructive) {
+            receiver.disconnect()
+        } label: {
+            Text("Disconnect").frame(maxWidth: .infinity, minHeight: 32)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel(Text("Disconnect from \(kept.macName)"))
+        .accessibilityInputLabels([Text("Disconnect from \(kept.macName)"), Text("Disconnect")])
+        .accessibilityIdentifier("homeDisconnect")
+    }
+
     // MARK: Footer
 
     private var homeFooter: some View {
@@ -1731,7 +2221,7 @@ struct IdleView: View {
     /// How to Connect · Try the Demo · This Device. Wraps to a column when
     /// the three don't fit on one line (small screens, large text).
     private var footerLinks: some View {
-        let demoInFooter = !demoLivesInCard
+        let demoInFooter = !demoLivesInCard && keptSession == nil
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: 2) {
                 howToConnectLink
@@ -1801,6 +2291,7 @@ private struct HowToConnectSheet: View {
                     instructionRow("cable.connector", "Plug in the USB cable and open the Mac app")
                     instructionRow("wifi", "Or, on the same Wi-Fi, choose this \(deviceKind) in the Mac app")
                     instructionRow("hand.tap", "Or tap Connect next to a paired Mac")
+                    instructionRow("network", "Away from your Mac's Wi-Fi? Turn on Tailscale on both devices, then choose Remote Access at the bottom of the Macs card.")
                     instructionRow("play.circle", "Keep this app open. The picture appears on its own.")
                 }
                 .padding(20)
@@ -1959,8 +2450,104 @@ final class ReceiverModel: ObservableObject {
     /// Turns this window's size into the panel the Mac's Extend display takes (iPhone Duo,
     /// Stage Manager, Split View): see `ReceiverPanelGeometry`.
     let panelSettler: ReceiverPanelSettler
+    /// In the session, or on Home with the session kept behind it (#121).
+    @Published private(set) var presentation = ReceiverSessionPresentation.session {
+        didSet { if presentation != oldValue { presentationChanged() } }
+    }
     private var started = false
     private var cancellables = Set<AnyCancellable>()
+
+    // MARK: Show Lock Screen (PROTOCOL.md 6.19)
+    // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
+    // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
+    @Published private(set) var lockScreenFlow = LockScreenFlow() {
+        didSet { syncLockScreenInputTag() }
+    }
+    /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
+    private var lockScreenReturnsToExtend = false
+    /// Going back to Extend waits for video (the receiver can't ask for Extend while the locked
+    /// Mac says video is off): retried once it's on.
+    private var lockScreenExtendReturnPending = false
+    /// The Mac Show Lock Screen started on. Another Mac on the connection stops the flow (fail
+    /// closed): nothing is asked of, or switched on, a Mac the user didn't start it with.
+    private var lockScreenMacID: String?
+    /// "N keystrokes weren't sent: …" (`lockScreenInputRefused`), shown briefly.
+    @Published private(set) var lockScreenInputNotice: String?
+    private var lockScreenRefusalTotal: (refusal: LockScreenInputRefusal, at: Date)?
+    private var lockScreenNoticeGeneration = 0
+
+    func showLockScreen() {
+        lockScreenMacID = receiver.connectedMacPeerID
+        perform(lockScreenFlow.begin(notice: receiver.macLock, now: Date()))
+    }
+
+    func hideLockScreen() {
+        perform(lockScreenFlow.hide(now: Date()))
+    }
+
+    private func lockScreenInputsChanged() {
+        if receiver.connected, let current = receiver.connectedMacPeerID, lockScreenFlow.phase != .idle {
+            if let started = lockScreenMacID, started != current {
+                Log.info("lockScreen: another Mac on the connection — stopped")
+                lockScreenFlow.abandon()
+                lockScreenReturnsToExtend = false
+                lockScreenExtendReturnPending = false
+                lockScreenMacID = nil
+                return
+            }
+            if lockScreenMacID == nil { lockScreenMacID = current }
+        }
+        perform(lockScreenFlow.update(notice: receiver.macLock, connected: receiver.connected, now: Date()))
+        if lockScreenExtendReturnPending, receiver.connected, receiver.videoEnabled, receiver.macLock == nil {
+            lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+        }
+        syncLockScreenInputTag()
+    }
+
+    /// Input leaves tagged with the lock screen view exactly while this device shows it (asked
+    /// here, and the Mac says `active` with that view's number): the Mac then takes it on that
+    /// view only, never on the desktop or another view. While the Mac is locked otherwise, the
+    /// receiver tags it without a view (never delivered).
+    private func syncLockScreenInputTag() {
+        let shown = (receiver.macLock?.showsMacLockScreen ?? false) && lockScreenFlow.isShowing
+        receiver.setLockScreenInputView(shown ? receiver.macLock?.lockScreenView : nil)
+    }
+
+    private func lockScreenInputRefused(_ refusal: LockScreenInputRefusal) {
+        let now = Date()
+        var total = refusal
+        if let last = lockScreenRefusalTotal, now.timeIntervalSince(last.at) < 3 { total = last.refusal.adding(refusal) }
+        lockScreenRefusalTotal = (total, now)
+        lockScreenInputNotice = total.notice
+        lockScreenNoticeGeneration &+= 1
+        let generation = lockScreenNoticeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.lockScreenNoticeGeneration == generation else { return }
+            self.lockScreenInputNotice = nil
+        }
+    }
+
+    private func perform(_ action: LockScreenAction) {
+        switch action {
+        case .none: break
+        case .requestControl: receiver.requestAllowInput(true)
+        case .switchToFullDesktop:
+            // Mirror: the main display, where macOS shows its login window (Extend's display
+            // would show only its wallpaper).
+            lockScreenReturnsToExtend = !workspace.windowMode && receiver.confirmedDisplayMode == .extend
+            if !receiver.requestDisplayMode(.mirror) { lockScreenFlow.couldNotPerform() }
+        case .show(let show): receiver.requestLockScreen(show: show)
+        case .returnToWindowView:
+            // Back to where Show Lock Screen started: Window view, or Extend (after an unlock, or
+            // after a failed or refused attempt). Never on another Mac (`lockScreenInputsChanged`).
+            if lockScreenReturnsToExtend {
+                lockScreenExtendReturnPending = !receiver.requestDisplayMode(.extend)
+            } else {
+                _ = receiver.requestWindowMode()
+            }
+            lockScreenReturnsToExtend = false
+        }
+    }
 
     init() {
         // maximumFramesPerSecond reports this specific screen's real
@@ -2002,6 +2589,39 @@ final class ReceiverModel: ObservableObject {
         workspace.clipboard.platform = IOSClipboardPlatform.shared
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
+        workspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
+        workspace.mirrorChoice = { [weak receiver] in
+            guard let state = receiver?.mirrorDisplayState, let chosen = state.selectedUUID else { return nil }
+            return state.displays.first { $0.uuid == chosen }
+        }
+        receiver.$macLock
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$videoEnabled
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.lockScreenInputsChanged() }
+            .store(in: &cancellables)
+        receiver.$lockScreenInputRefusal
+            .compactMap { $0?.refusal }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] refusal in self?.lockScreenInputRefused(refusal) }
+            .store(in: &cancellables)
+        Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Waiting: time out. Failed while switching: an unlock still takes it back.
+                if self.lockScreenFlow.isWaiting || self.lockScreenFlow.returnToWindowView { self.lockScreenInputsChanged() }
+            }
+            .store(in: &cancellables)
         receiver.$connected
             .removeDuplicates()
             .filter { !$0 }
@@ -2016,6 +2636,31 @@ final class ReceiverModel: ObservableObject {
             .store(in: &cancellables)
         pictureInPicture.onStartedAfterLinger = { [weak self] in self?.resumeFromLinger() }
         pictureInPicture.onEndedInBackground = { [weak self] in self?.lingerInBackground() }
+        pictureInPicture.onRestoreUserInterface = { [weak self] in self?.resumeSession() }
+        // A window opening or closing over Home changes what plays locally;
+        // in the background the callbacks above own that.
+        pictureInPicture.$lifecycle
+            .removeDuplicates { $0.isEngaged == $1.isEngaged }
+            .dropFirst()
+            .sink { [weak self] lifecycle in
+                guard lifecycle.presence == .foreground else { return }
+                self?.applyLocalMediaPolicy(lifecycle)
+            }
+            .store(in: &cancellables)
+        // A kept session ends with its surface, so a later one never starts hidden behind Home.
+        receiver.$session
+            .map(\.retainsReceiverSurface)
+            .removeDuplicates()
+            .sink { [weak self] retains in self?.followSession(retainsSurface: retains) }
+            .store(in: &cancellables)
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.followSession(retainsSurface: self.receiver.session.retainsReceiverSurface)
+            }
+            .store(in: &cancellables)
     }
 
     func start() {
@@ -2062,13 +2707,14 @@ final class ReceiverModel: ObservableObject {
     func sceneDidActivate() {
         pictureInPicture.sceneDidActivate()
         endBackgroundAssertion()
-        receiver.setRenderingPaused(false)
-        receiver.setLocalAudioSuspended(false)
+        // Home over a kept session stays paused in front too.
+        let media = applyLocalMediaPolicy()
+        receiver.resumeAudioAfterInterruption(reason: "back in the app")
         receiver.ensureListening()
         // Resume a parked recovery run from where it stopped. If the session
         // is healthy this is a no-op; if it is beyond recovery the session
         // state already settled into its failed/disconnected phase.
-        receiver.setAppActive(true)
+        receiver.setAppActive(!media.recoveryParked)
     }
 
     func deviceWillLock() {
@@ -2113,9 +2759,56 @@ final class ReceiverModel: ObservableObject {
     /// keeps the app running, so undo the pause and let recovery continue.
     private func resumeFromLinger() {
         endBackgroundAssertion()
-        receiver.setRenderingPaused(false)
-        receiver.setLocalAudioSuspended(false)
-        receiver.setAppActive(true)
+        let media = applyLocalMediaPolicy()
+        receiver.setAppActive(!media.recoveryParked)
+    }
+
+    // MARK: - Back to Home, Keep Connected (#121)
+
+    /// Home in front, the session kept behind it: the Mac keeps its display
+    /// and keeps encoding, this device stops showing, playing and sending.
+    func showHomeKeepingSession() {
+        let surfaceRetained = receiver.session.retainsReceiverSurface && receiver.videoSize != .zero
+        var next = presentation
+        guard next.showHome(surfaceRetained: surfaceRetained, macPeerID: receiver.connectedMacPeerID) else { return }
+        // Nothing stays pressed on the Mac while nobody can see it.
+        receiver.releaseLocalInput()
+        presentation = next
+        Log.info("session: Home, session kept")
+    }
+
+    func resumeSession() {
+        var next = presentation
+        guard next.resume() else { return }
+        presentation = next
+        Log.info("session: resumed from Home")
+    }
+
+    private func followSession(retainsSurface: Bool) {
+        var next = presentation
+        guard next.sessionChanged(retainsSurface: retainsSurface, macPeerID: receiver.connectedMacPeerID) else { return }
+        presentation = next
+        if !next.keepsSessionOnHome { Log.info("session: kept session ended or replaced, leaving Home") }
+    }
+
+    private func presentationChanged() {
+        // Rotating or resizing on Home doesn't reshape the Mac's display;
+        // the latest size goes out on Resume.
+        panelSettler.setHeld(presentation.keepsSessionOnHome)
+        applyLocalMediaPolicy()
+    }
+
+    /// Rendering and local audio for where the app is, what's in front and
+    /// whether a Picture in Picture window shows the picture. Resuming
+    /// rendering flushes and asks for a keyframe; nothing else reaches the Mac.
+    @discardableResult
+    private func applyLocalMediaPolicy(_ lifecycle: ReceiverPictureInPictureLifecycle? = nil) -> ReceiverLocalMediaPolicy {
+        let lifecycle = lifecycle ?? pictureInPicture.lifecycle
+        let media = ReceiverLocalMediaPolicy.resolve(presence: lifecycle.presence, presentation: presentation,
+                                                     pictureInPictureEngaged: lifecycle.isEngaged)
+        receiver.setRenderingPaused(media.renderingPaused)
+        receiver.setLocalAudioSuspended(media.audioSuspended)
+        return media
     }
 
     private func goToSleep() {
@@ -2169,6 +2862,9 @@ struct VideoLayerView: UIViewRepresentable {
     /// last touch when the keyboard opens if true; pans (never zooms) if
     /// false. Either way the typing area still ends up visible.
     let zoomWhileTyping: Bool
+    var lockScreenShowing = false
+    /// `StreamReceiver.freshFrameSinceVideoReset`: false clears the Metal renderer's last picture.
+    var freshFrame = true
     /// M4: mirrors `ReceiverScreen`'s `keyboardActive` — VideoView only
     /// reacts to keyboard-frame notifications while this is true, so a
     /// keyboard opened for an unrelated text field elsewhere in the app
@@ -2208,6 +2904,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// Whether Smart Touch hold feedback plays — see `SmartTouchHapticPolicy`.
     let smartTouchHapticsEnabled: Bool
     let onKeyboardVisibleRectChange: (CGRect?) -> Void
+    /// See `VideoView.onKeyboardPictureRectChange`.
+    var onKeyboardPictureRectChange: (CGRect?) -> Void = { _ in }
     /// See `VideoView.onActivityBegan`/`onActivityEnded` — lets Auto-hide
     /// reveal from any receiver-surface interaction, not only a tray touch.
     let onActivityBegan: () -> Void
@@ -2240,15 +2938,19 @@ struct VideoLayerView: UIViewRepresentable {
     var onThreeFingerHold: () -> Void = {}
     /// The hardware pointer over the picture (normalized), for tile hover.
     var onHardwarePointer: (CGPoint?) -> Void = { _ in }
+    /// The picture's "Back to Home" accessibility action (keeps the session, #121).
+    var onBackToHome: (() -> Void)?
 
     func makeUIView(context: Context) -> VideoView {
         let view = VideoView()
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
+        view.observeLockScreenInputBoundary(receiver)
         view.threeFingerHoldEnabled = threeFingerHoldEnabled
         view.onThreeFingerHold = onThreeFingerHold
         view.onHardwarePointer = onHardwarePointer
+        view.onBackToHome = onBackToHome
         view.setZoomWhileTyping(zoomWhileTyping)
         view.setKeyboardRequested(keyboardRequested)
         view.setInputMode(inputMode)
@@ -2268,6 +2970,7 @@ struct VideoLayerView: UIViewRepresentable {
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
         view.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        view.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
@@ -2349,10 +3052,10 @@ struct VideoLayerView: UIViewRepresentable {
 
         // Two-finger double-tap resets manual zoom/pan. `require(toFail:)`
         // isn't needed against the pan/pinch recognizer above — it needs
-        // real movement to begin, which a tap by definition doesn't have —
-        // but a *future* single two-finger tap (right-click) recognizer
-        // should `require(toFail: viewportDoubleTap)` so a fast double-tap
-        // is never swallowed as two single taps.
+        // real movement to begin, which a tap by definition doesn't have.
+        // Two-finger right-click comes from the pointer engine, not a
+        // recognizer; its claim on a fast second tap is arbitrated in
+        // `gestureRecognizerShouldBegin` (`ViewportDoubleTapArbitration`).
         let viewportDoubleTap = UITapGestureRecognizer(
             target: view, action: #selector(VideoView.didViewportDoubleTap(_:)))
         viewportDoubleTap.numberOfTapsRequired = 2
@@ -2396,6 +3099,8 @@ struct VideoLayerView: UIViewRepresentable {
 
     func updateUIView(_ uiView: VideoView, context: Context) {
         uiView.setZoomWhileTyping(zoomWhileTyping)
+        uiView.setLockScreenShowing(lockScreenShowing)
+        if !freshFrame { uiView.metalRenderer?.clear() }
         uiView.setKeyboardRequested(keyboardRequested)
         uiView.setInputMode(inputMode)
         uiView.setTrackpadSensitivity(trackpadSensitivity)
@@ -2414,6 +3119,7 @@ struct VideoLayerView: UIViewRepresentable {
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
         uiView.onKeyboardVisibleRectChange = onKeyboardVisibleRectChange
+        uiView.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
@@ -2423,6 +3129,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.threeFingerHoldEnabled = threeFingerHoldEnabled
         uiView.onThreeFingerHold = onThreeFingerHold
         uiView.onHardwarePointer = onHardwarePointer
+        uiView.onBackToHome = onBackToHome
         uiView.setMoveViewActive(moveViewActive)
         uiView.setViewportResetGeneration(viewportResetGeneration)
         // videoSize arrives after the format description — re-fit the layers.
@@ -2444,6 +3151,17 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+        private var lockScreenInputBoundary: AnyCancellable?
+
+        /// A new lock episode (PROTOCOL.md 6.19): every touch, drag, scroll and its momentum,
+        /// Pencil stroke, gesture and held hardware key or button ends here, synchronously, while
+        /// the old tag still applies, so nothing started on the lock screen goes on on the desktop
+        /// after an unlock (or the other way round).
+        func observeLockScreenInputBoundary(_ receiver: StreamReceiver) {
+            lockScreenInputBoundary = receiver.lockScreenInputBoundary.sink { [weak self] in
+                self?.clearInputStateForPause()
+            }
+        }
 
         // MARK: Window mode and hardware pointer/keyboard (HID-B)
 
@@ -2451,6 +3169,9 @@ struct VideoLayerView: UIViewRepresentable {
         var onThreeFingerHold: (() -> Void)?
         /// The hardware pointer, normalized to the picture (nil outside it): the workspace's hover.
         var onHardwarePointer: ((CGPoint?) -> Void)?
+        var onBackToHome: (() -> Void)? {
+            didSet { if (oldValue == nil) != (onBackToHome == nil) { refreshPictureAccessibility() } }
+        }
         var threeFingerHoldEnabled = false {
             didSet { threeFingerHoldRecognizer.isEnabled = threeFingerHoldEnabled && !UIAccessibility.isVoiceOverRunning }
         }
@@ -2481,7 +3202,7 @@ struct VideoLayerView: UIViewRepresentable {
         let hardwareKeyboard = HardwareKeyboardForwarder()
 
         private func normalizedPicturePoint(_ p: CGPoint) -> CGPoint? {
-            guard let n = currentTransform.remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
+            guard let n = presentedTransform().remotePoint(forView: p), (0...1).contains(n.x), (0...1).contains(n.y) else { return nil }
             return n
         }
 
@@ -2596,8 +3317,22 @@ struct VideoLayerView: UIViewRepresentable {
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
+        /// Where the pointer is drawn: the newest Mac report, or a point on the path between
+        /// two consecutive reports while `cursorPacer` paces it (see `moveCursor`).
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
+        private var cursorPacer = CursorPresentationPacer()
+        private var cursorLink: CADisplayLink?
+        /// On by default. Launching with `-cursorPacing NO` draws each report on arrival, as
+        /// before, for side-by-side comparison on a device.
+        private let pacesCursor = UserDefaults.standard.object(forKey: "cursorPacing") == nil
+            || UserDefaults.standard.bool(forKey: "cursorPacing")
+        #if DEBUG
+        private var cursorPacingTicks = 0
+        private var cursorPacingHeldTicks = 0
+        private var cursorPacingReports = 0
+        private var lastCursorPacingLogAt = Date.distantPast
+        #endif
 
         private var lastLoggedLayout = ""
 
@@ -2621,14 +3356,34 @@ struct VideoLayerView: UIViewRepresentable {
         private var keyboardVisibleRect: CGRect? {
             didSet {
                 // A closed keyboard forgets the caret: the next session starts
-                // from the Mac's first reading, not a stale one.
+                // from the Mac's first reading, not a stale one. It also drops
+                // the typing reveal, so the picture returns to exactly the
+                // zoom and pan the user had.
                 if keyboardVisibleRect == nil {
-                    textCaret = nil
+                    typingFocus.keyboardClosed()
                     lastCaretBase = nil
+                    typingReveal = .zero
+                } else {
+                    typingRevealNeedsUpdate = true
                 }
             }
         }
         var onKeyboardVisibleRectChange: ((CGRect?) -> Void)?
+        /// The keyboard-adjusted picture rect (this view's coordinates), or
+        /// nil when the normal presentation applies. SwiftUI draws Window
+        /// view's pane chrome over the picture and can't recompute this
+        /// itself: the caret and anchor live here (issue #92).
+        var onKeyboardPictureRectChange: ((CGRect?) -> Void)?
+        private var publishedKeyboardPictureRect: CGRect?
+        private var keyboardPicturePublishedOnce = false
+        /// Runs only while the content layer animates in Window view: the
+        /// chrome follows the picture's presentation frame by frame instead
+        /// of jumping to where the animation will end.
+        private var keyboardPictureLink: CADisplayLink?
+        /// Where Window view's chrome belongs once the picture settles: the
+        /// keyboard-adjusted rect before manual zoom (Window view drops
+        /// whole-picture zoom), or nil for the normal fit.
+        private var keyboardPictureTarget: CGRect?
         /// Fired on every new touch beginning on the receiver surface —
         /// Direct Touch, Trackpad (delivered as indirect-pointer touches),
         /// multi-finger/system gestures, and Pencil all route through
@@ -2648,12 +3403,24 @@ struct VideoLayerView: UIViewRepresentable {
         // simply never call the note*Anchor* methods below).
         private var lastAnchor: CGPoint?
         // The Mac's focused text caret, normalized to the remote display
-        // (`textCaret` wire message). While known it replaces the touch anchor
-        // as the typing focus, on both axes; `lastCaretBase` is the picture
-        // placement it produced, so it only moves once the caret leaves the
-        // comfortable inner region (`RemoteViewportCalculator.keyboardOpen`).
-        private var textCaret: CGRect?
+        // (`textCaret` wire message), and which of it or the last touch steers
+        // the view (`TypingFocus`). While it steers, the caret replaces the
+        // touch anchor on both axes; `lastCaretBase` is the picture placement
+        // it produced, so it only moves once the caret leaves the comfortable
+        // inner region (`RemoteViewportCalculator.keyboardOpen`).
+        private var typingFocus = TypingFocus()
         private var lastCaretBase: CGRect?
+        // With the keyboard open over a picture the user zoomed or panned by
+        // hand: how far it is moved so the typing location shows above the
+        // keyboard (`RemoteViewportCalculator.typingRevealOffset`). Added on
+        // top of `manualZoom`, never folded into it, and zero again once the
+        // keyboard closes. Recomputed only when the typing location, the
+        // keyboard or the view's size changes — never while a pinch or Move
+        // View gesture is under way, so it can't pull the picture from under
+        // the fingers.
+        private var typingReveal = CGVector.zero
+        private var typingRevealNeedsUpdate = false
+        private var typingRevealBoundsSize = CGSize.zero
         // True only while layoutSubviews is running inside the UIView.animate
         // block a keyboard-frame change (or a live preference toggle) drives
         // — lets the content layer's geometry inherit that animation instead
@@ -2798,7 +3565,7 @@ struct VideoLayerView: UIViewRepresentable {
             let points = navigationTouches.values
                 .sorted { ObjectIdentifier($0).hashValue < ObjectIdentifier($1).hashValue }
                 .map { $0.location(in: self) }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             var next = navigationSession.update(points: points, current: manualZoom, base: base,
                                                 allowsZoom: true,
                                                 allowsRotation: rotateTarget == .viewport)
@@ -3185,14 +3952,22 @@ struct VideoLayerView: UIViewRepresentable {
             accessibilityHint = pictureTouch.screenReaderRunning && !pictureTouch.directTouch
                 ? String(localized: "Touches here don't reach the Mac. Use the actions to turn on Direct Touch.")
                 : nil
+            var actions: [UIAccessibilityCustomAction] = []
             if let turnsOn = pictureTouch.directTouchActionTurnsOn {
                 let name = turnsOn ? String(localized: "Turn On Direct Touch") : String(localized: "Turn Off Direct Touch")
-                accessibilityCustomActions = [UIAccessibilityCustomAction(name: name) { [weak self] _ in
+                actions.append(UIAccessibilityCustomAction(name: name) { [weak self] _ in
                     self?.setPictureDirectTouch(turnsOn) ?? false
-                }]
-            } else {
-                accessibilityCustomActions = nil
+                })
             }
+            if onBackToHome != nil {
+                // Keeps the session: Home's Resume comes back to it.
+                actions.append(UIAccessibilityCustomAction(name: String(localized: "Back to Home")) { [weak self] _ in
+                    guard let back = self?.onBackToHome else { return false }
+                    back()
+                    return true
+                })
+            }
+            accessibilityCustomActions = actions.isEmpty ? nil : actions
         }
 
         func installVideoLayer(_ layer: CALayer) {
@@ -3205,16 +3980,36 @@ struct VideoLayerView: UIViewRepresentable {
         /// The Mac's text caret changed (nil: none known). Re-targets the
         /// open keyboard's viewport with the same short ease as an anchor change.
         func setTextCaret(_ caret: CGRect?) {
-            guard caret != textCaret else { return }
+            retargetTyping { $0.caretReported(caret) }
+        }
+
+        /// Applies a change to the typing focus and, with the keyboard open,
+        /// eases the picture to it. Most caret moves stay inside the
+        /// comfortable region and leave the picture where it is: only a real
+        /// change animates.
+        private func retargetTyping(_ change: (inout TypingFocus) -> Void) {
+            var next = typingFocus
+            change(&next)
+            guard next != typingFocus else { return }
             guard keyboardVisibleRect != nil else {
-                textCaret = caret
+                typingFocus = next
                 return
             }
-            // Most caret moves stay inside the comfortable region and leave
-            // the picture where it is: only animate a real change.
-            let before = unzoomedBaseTransform().displayedRect
-            textCaret = caret
-            guard unzoomedBaseTransform().displayedRect != before else { return }
+            let before = presentationBase().displayedRect
+            typingFocus = next
+            typingRevealNeedsUpdate = true
+            guard presentationBase().displayedRect != before else { return }
+            animateTransformChange(duration: 0.25, options: .curveEaseInOut)
+        }
+
+        /// The Mac's own lock screen is what this surface shows: with the keyboard open, all of it
+        /// is fitted above the keyboard (`RemoteViewportCalculator.lockScreenKeyboardOpen`).
+        private var lockScreenShowing = false
+
+        func setLockScreenShowing(_ showing: Bool) {
+            guard showing != lockScreenShowing else { return }
+            lockScreenShowing = showing
+            guard keyboardVisibleRect != nil else { return }   // only matters while open
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3222,6 +4017,7 @@ struct VideoLayerView: UIViewRepresentable {
             guard enabled != zoomWhileTypingEnabled else { return }
             zoomWhileTypingEnabled = enabled
             guard keyboardVisibleRect != nil else { return }   // only matters while open
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3393,7 +4189,9 @@ struct VideoLayerView: UIViewRepresentable {
         /// visibly changing yet.
         private func setAnchor(_ normalized: CGPoint) {
             lastAnchor = normalized
+            typingFocus.touched()
             guard keyboardVisibleRect != nil else { return }
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -3403,6 +4201,13 @@ struct VideoLayerView: UIViewRepresentable {
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
             lastAnchor = nil
+            // A whole right-click still waiting for a possible second tap
+            // (Window view) is dropped, not sent: input is stopping. This
+            // must come before `resetPointerEngine`, whose releases would
+            // otherwise flush it to the Mac first.
+            heldRightTapWork?.cancel()
+            heldRightTapWork = nil
+            heldRightTaps.removeAll()
             resetPointerEngine()
             cancelScrollMomentum()
             activeFingerTouchIDs.removeAll()
@@ -3496,16 +4301,111 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func updateCurrentTransform() {
-            let base = unzoomedBaseTransform()
+            let base = presentationBase()
             currentTransform = VideoInteractionPolicy.viewportTransform(
                 base: base, state: manualZoom, videoEnabled: videoEnabled)
+            keyboardPictureTarget = keyboardVisibleRect != nil && videoEnabled && base.isValid
+                ? base.displayedRect : nil
+            // Inside `animateTransformChange` the content layer is about to
+            // animate: in Window view, follow it frame by frame (the first
+            // tick runs after this transaction commits its animations).
+            if animatingKeyboardTransition, workspacePinch != nil, keyboardPictureTarget != publishedKeyboardPictureRect {
+                startKeyboardPictureLink()
+            } else if keyboardPictureLink == nil {
+                publishKeyboardPicture(keyboardPictureTarget)
+            }
+        }
+
+        private func publishKeyboardPicture(_ rect: CGRect?) {
+            guard !keyboardPicturePublishedOnce || rect != publishedKeyboardPictureRect else { return }
+            keyboardPicturePublishedOnce = true
+            publishedKeyboardPictureRect = rect
+            // Layout can run inside a SwiftUI update; publish after it.
+            let publish = onKeyboardPictureRectChange
+            DispatchQueue.main.async { publish?(rect) }
+        }
+
+        private var contentIsAnimating: Bool {
+            !(videoContentView.layer.animationKeys() ?? []).isEmpty
+        }
+
+        private func startKeyboardPictureLink() {
+            guard keyboardPictureLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tickKeyboardPicture))
+            link.add(to: .main, forMode: .common)
+            keyboardPictureLink = link
+        }
+
+        @objc private func tickKeyboardPicture() {
+            guard contentIsAnimating, manualZoom.isIdentity, workspacePinch != nil else {
+                keyboardPictureLink?.invalidate()
+                keyboardPictureLink = nil
+                publishKeyboardPicture(keyboardPictureTarget)
+                return
+            }
+            publishKeyboardPicture(presentedTransform().displayedRect)
+        }
+
+        /// The picture as it is on screen right now: while the content layer
+        /// animates, rebuilt from its presentation layer (the inverse of
+        /// `applyContentGeometry`); otherwise `currentTransform`.
+        private func presentedTransform() -> RemoteViewportTransform {
+            guard videoEnabled, currentTransform.isValid, contentIsAnimating,
+                  let layer = videoContentView.layer.presentation() else { return currentTransform }
+            return RemoteViewportTransform.presented(
+                position: layer.position, boundsSize: layer.bounds.size,
+                transform: layer.affineTransform(), remoteCrop: currentTransform.remoteCrop) ?? currentTransform
+        }
+
+        /// `unzoomedBaseTransform` moved by `typingReveal`: what manual zoom
+        /// is composed on, in `updateCurrentTransform` and in the pinch and
+        /// Move View gestures alike, so a touch maps to where the picture is
+        /// drawn. Moving the base moves the zoomed picture by the same amount
+        /// (manual zoom's clamp depends only on the base's size).
+        private func presentationBase() -> RemoteViewportTransform {
+            let base = unzoomedBaseTransform()
+            guard base.isValid, let keyboardVisibleRect, videoEnabled, !lockScreenShowing,
+                  workspacePinch == nil, !manualZoom.isIdentity else {
+                // Nothing to reveal: the keyboard-open base already shows the
+                // typing location. A zoom the user pinches in from here is
+                // theirs until the typing location or the keyboard changes.
+                typingReveal = .zero
+                typingRevealNeedsUpdate = false
+                return base
+            }
+            if bounds.size != typingRevealBoundsSize {
+                typingRevealBoundsSize = bounds.size
+                typingRevealNeedsUpdate = true
+            }
+            if typingRevealNeedsUpdate, !manualViewportGestureActive {
+                typingRevealNeedsUpdate = false
+                if let focus = typingFocusRect {
+                    typingReveal = RemoteViewportCalculator.typingRevealOffset(
+                        of: RemoteViewportCalculator.applyManualZoom(to: base, state: manualZoom),
+                        focus: focus, visibleRect: keyboardVisibleRect, current: typingReveal)
+                }
+            }
+            return base.offsetBy(typingReveal)
+        }
+
+        /// The typing location for `typingReveal`: the caret that steers, or
+        /// the last touch as a point.
+        private var typingFocusRect: CGRect? {
+            if let caret = typingFocus.steeringCaret { return caret }
+            return lastAnchor.map { CGRect(origin: $0, size: .zero) }
+        }
+
+        /// A pinch or Move View gesture is moving the picture right now.
+        private var manualViewportGestureActive: Bool {
+            if navigationSession.touchCount > 0 { return true }
+            guard let recognizer = twoFingerRecognizer, recognizer.intent == .viewportZoomPan else { return false }
+            return recognizer.state == .began || recognizer.state == .changed
         }
 
         /// The normal or keyboard-adjusted presentation, *before* manual
-        /// zoom/pan — the fixed reference frame both `updateCurrentTransform`
-        /// and the live pinch/pan gesture (`manualZoomGestureBase`) compose
-        /// on top of, so there is exactly one place that decides between
-        /// `.normal`/`.keyboardOpen`.
+        /// zoom/pan and the typing reveal — the fixed reference frame
+        /// `presentationBase` moves, so there is exactly one place that
+        /// decides between `.normal`/`.keyboardOpen`.
         private func unzoomedBaseTransform() -> RemoteViewportTransform {
             guard let video = receiver?.videoSize, video != .zero,
                   bounds.width > 0, bounds.height > 0 else {
@@ -3543,13 +4443,18 @@ struct VideoLayerView: UIViewRepresentable {
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
                     displayedRect: rect)
             }
+            if let keyboardVisibleRect, lockScreenShowing {
+                lastCaretBase = nil
+                return RemoteViewportCalculator.lockScreenKeyboardOpen(
+                    viewBounds: bounds, remoteAspectSize: video, visibleRect: keyboardVisibleRect)
+            }
             if let keyboardVisibleRect {
                 let base = RemoteViewportCalculator.keyboardOpen(
                     viewBounds: bounds, remoteAspectSize: video,
                     visibleRect: keyboardVisibleRect, anchor: lastAnchor,
                     zoomEnabled: zoomWhileTypingEnabled,
-                    caret: textCaret, previous: lastCaretBase)
-                lastCaretBase = textCaret == nil ? nil : base.displayedRect
+                    caret: typingFocus.steeringCaret, previous: lastCaretBase)
+                lastCaretBase = typingFocus.steeringCaret == nil ? nil : base.displayedRect
                 return base
             }
             lastCaretBase = nil
@@ -3592,18 +4497,97 @@ struct VideoLayerView: UIViewRepresentable {
             return currentTransform.displayedRect.width / (currentTransform.remoteCrop.width * video.width)
         }
 
+        /// One confirmed Mac cursor report. Showing, hiding and jumps are drawn now. Moves are
+        /// drawn on the display's refreshes by `cursorPacer`, about one report interval behind
+        /// and only ever on the path between two reports, so the pointer advances evenly
+        /// however the reports were bunched on the way here.
         func moveCursor(x: Double, y: Double, visible: Bool) {
-            cursorNorm = CGPoint(x: x, y: y)
+            #if DEBUG
+            defer { logCursorTraceIfDue(reason: "moveCursor") }
+            #endif
             cursorVisible = visible
+            let report = CGPoint(x: x, y: y)
+            guard pacesCursor else {
+                drawCursor(at: report)
+                return
+            }
+            cursorPacer.receive(report, visible: visible, at: CACurrentMediaTime())
+            #if DEBUG
+            cursorPacingReports += 1
+            #endif
+            if cursorPacer.isSettled {
+                stopCursorLink()
+                drawCursor(at: cursorPacer.newest ?? report)
+            } else {
+                startCursorLink()
+            }
+        }
+
+        private func drawCursor(at point: CGPoint) {
+            cursorNorm = point
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            cursorLayer.isHidden = !visible || cursorLayer.contents == nil
+            cursorLayer.isHidden = !cursorVisible || cursorLayer.contents == nil
             updateCursorLayout()
             CATransaction.commit()
-            #if DEBUG
-            logCursorTraceIfDue(reason: "moveCursor")
-            #endif
         }
+
+        private func startCursorLink() {
+            guard cursorLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(tickCursor(_:)))
+            // The screen's full rate while the pointer moves: 120 Hz on ProMotion (on iPhone
+            // only with CADisableMinimumFrameDurationOnPhone in Info.plist).
+            let maximum = Float(window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, maximum), maximum: maximum,
+                                                            preferred: maximum)
+            link.add(to: .main, forMode: .common)
+            cursorLink = link
+        }
+
+        private func stopCursorLink() {
+            cursorLink?.invalidate()
+            cursorLink = nil
+        }
+
+        /// Runs only while the pointer is catching up with a report; stops once the newest
+        /// report is drawn, so a resting pointer costs nothing.
+        @objc private func tickCursor(_ link: CADisplayLink) {
+            guard let point = cursorPacer.frame(at: link.timestamp) else {
+                stopCursorLink()
+                return
+            }
+            #if DEBUG
+            noteCursorPacingTick(moved: point != cursorNorm)
+            #endif
+            if point != cursorNorm { drawCursor(at: point) }
+            if cursorPacer.isSettled { stopCursorLink() }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // Off screen: stop pacing and show the newest report when the view returns.
+            guard window == nil, cursorLink != nil else { return }
+            stopCursorLink()
+            cursorPacer.settle()
+            if let newest = cursorPacer.newest { drawCursor(at: newest) }
+        }
+
+        #if DEBUG
+        /// Every 2 s while the pointer moves: refreshes drawn, how many held because the next
+        /// report had not arrived yet, and the pacing delay. The on-device check for pacing.
+        private func noteCursorPacingTick(moved: Bool) {
+            cursorPacingTicks += 1
+            if !moved { cursorPacingHeldTicks += 1 }
+            let now = Date()
+            guard now.timeIntervalSince(lastCursorPacingLogAt) >= 2 else { return }
+            lastCursorPacingLogAt = now
+            Log.info("cursorPacing: refreshes=\(cursorPacingTicks) held=\(cursorPacingHeldTicks) "
+                + "reports=\(cursorPacingReports) delayMs=\(String(format: "%.1f", cursorPacer.delay * 1000))")
+            cursorPacingTicks = 0
+            cursorPacingHeldTicks = 0
+            cursorPacingReports = 0
+        }
+        #endif
 
         func setCursorSprite(_ image: CGImage, anchor: CGPoint, normSize: CGSize) {
             CATransaction.begin()
@@ -3668,6 +4652,8 @@ struct VideoLayerView: UIViewRepresentable {
         func setCursorPaneSize(_ size: CursorPaneSize?) {
             guard size != cursorPaneSize else { return }
             cursorPaneSize = size
+            // Another pane: the report that follows is drawn where it is, not glided to.
+            cursorPacer.jumpAtNextReport()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             updateCursorLayout()
@@ -3680,7 +4666,10 @@ struct VideoLayerView: UIViewRepresentable {
         // tapped while zoomed/panned still receives input at that precise
         // Mac location.
         fileprivate func normalized(_ point: CGPoint) -> (x: Double, y: Double)? {
-            guard let remote = currentTransform.remotePoint(forView: point) else { return nil }
+            // Mid-animation (keyboard, caret or anchor re-target, zoom reset)
+            // the model value is already the end state while the picture is
+            // still sliding: map through what the finger is actually on.
+            guard let remote = presentedTransform().remotePoint(forView: point) else { return nil }
             return (Double(remote.x), Double(remote.y))
         }
 
@@ -3884,7 +4873,7 @@ struct VideoLayerView: UIViewRepresentable {
             twoFingerActive = false
             cancelPointerAndLegacyTouchState()   // also cancels any remote-scroll momentum — see its doc
             manualZoomGestureStart = manualZoom
-            manualZoomGestureBase = unzoomedBaseTransform().displayedRect
+            manualZoomGestureBase = presentationBase().displayedRect
             engagedSnapQuarter = nil
         }
 
@@ -4082,11 +5071,12 @@ struct VideoLayerView: UIViewRepresentable {
                 return
             }
             guard recognizer.state == .ended, videoEnabled, localNavigationAllowed else { return }
-            let base = unzoomedBaseTransform().displayedRect
+            let base = presentationBase().displayedRect
             guard let toggled = ViewportResetRestorePolicy.toggled(
                 current: manualZoom, memory: manualZoomMemory, base: base) else { return }
             manualZoom = toggled.current
             manualZoomMemory = toggled.memory
+            typingRevealNeedsUpdate = true
             animateTransformChange(duration: 0.25, options: .curveEaseInOut)
         }
 
@@ -4121,6 +5111,12 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if gestureRecognizer === viewportDoubleTapRecognizer,
+               ViewportDoubleTapArbitration.mayBeginOverEngine(
+                   engineMode: pointerEngine.mode, isChordContinuation: pointerEngine.isChordContinuation,
+                   windowMode: workspacePinch != nil) {
+                return true
+            }
             if pointerEngineOwnsAnchor { return false }
             if gestureRecognizer === threeFingerPanRecognizer {
                 return gestureRecognizer.numberOfTouches == 3
@@ -4628,7 +5624,10 @@ struct VideoLayerView: UIViewRepresentable {
             let touches = touches.subtracting(pointer)
             guard !touches.isEmpty else { return }
             if let workspaceTouch, let first = touches.first {
-                let base = unzoomedBaseTransform().displayedRect
+                // The pane under the finger as drawn, mid-slide too, so the
+                // pane this selects is the one the click lands in.
+                let base = manualZoom.isIdentity ? presentedTransform().displayedRect
+                    : unzoomedBaseTransform().displayedRect
                 if base.width > 0, base.height > 0 {
                     let p = first.location(in: self)
                     if workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)) {
@@ -5148,6 +6147,8 @@ enum ActiveScene {
 /// Full-desktop view: a small yes/no offer to switch to Window view.
 private struct WindowModePrompt: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    /// In Extend, Yes also ends Extend: the prompt says so before it is answered.
+    var extending = false
     let onYes: () -> Void
     let onNo: () -> Void
 
@@ -5155,13 +6156,22 @@ private struct WindowModePrompt: View {
         HStack(spacing: 10) {
             Image(systemName: "rectangle.split.2x1")
                 .accessibilityHidden(true)
-            Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Switch to Window view?").font(.subheadline.weight(.semibold))
+                if extending {
+                    Text("Ends Extend. Windows on it move to your Mac's other displays.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Button("Yes", action: onYes)
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("windowModePromptYes")
-                .accessibilityHint(Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
+                .accessibilityHint(extending
+                    ? Text("Window view shows chosen Mac windows as tiles. Extend ends: the extended display goes away and its windows move to your Mac's other displays.")
+                    : Text("Window view shows chosen Mac windows as tiles instead of the whole screen."))
             Button("No", action: onNo)
                 .font(.subheadline)
                 .buttonStyle(.bordered)

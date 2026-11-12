@@ -777,6 +777,22 @@ and the stylus would go dead; the fallback keeps it usable.)
   only while that key is held and MUST ignore it otherwise; a sender that
   doesn't know the field treats it as the duplicate down it already
   ignores.
+* `exactModifiers` (bool, additive, no `pv` bump) MAY be carried by
+  `"press"`, `"down"` and `"up"`. By default a sender posts a key with its
+  own `modifiers` **plus** every modifier the receiver holds down with
+  `"modifierDown"` (the Mac Receiver forwards Shift as a held modifier and
+  relies on that). `true` asks for exactly the message's own `modifiers`,
+  none of the held ones. A sender that understands it lists
+  `"exactKeyModifiers"` in `welcome.features`; a receiver sends the field
+  only to such a sender, and treats every other sender as adding the held
+  modifiers. Such a sender SHOULD keep the flags a key went down with for
+  that key's repeats, its `"up"` and any release on cancellation, whatever
+  those messages say. It changes only how a key's flags are composed:
+  every input gate (consent, Allow Input, View Only, revocation) applies
+  exactly as before. Anything but `true` means the default. The official
+  iOS receiver uses it for the arrow keypad's own Shift, Option and
+  Command, so they never mix with the tray's latched modifiers.
+  `{"type":"keyboard","action":"down","usage":79,"modifiers":["shift"],"exactModifiers":true}`
 * `"modifierDown"` / `"modifierUp"` (pv 6) — a synthetic modifier's held
   lifecycle: `modifier` is one of `"command"`, `"option"`, `"control"`, or
   `"shift"`. Every down MUST be followed by an up; senders MUST also release
@@ -867,6 +883,16 @@ the session, stop redialing). Both are courtesy messages sent best-effort
 right before the receiver closes the connection; senders MUST NOT rely on
 receiving them (a cut cable produces neither).
 
+Over QUIC (2.4), closing the connection discards stream data the sender
+has not read yet, and the end of Video or Audio is not ordered with data
+on Control. A receiver that sends `closing` for a deliberate Disconnect
+therefore SHOULD leave the connection and all its streams open until the
+sender closes it, for a bounded time (the iPhone, iPad and Mac receivers
+wait up to 3 s; the Android receiver has no QUIC listener). A sender ends
+the session on `closing`, which closes the connection. Nothing on the wire
+changes; a receiver that closes at once only risks the sender reading
+the goodbye as a dropped link.
+
 ### 6.2 Sender to receiver
 
 These ride the same connection as video and MUST satisfy the demux rule of
@@ -912,9 +938,13 @@ informational only. Note the asymmetry: the receiver's `ping` solicits a
 **`cursor`**: `v` is 1 (visible) or 0 (hidden). When visible, `x`, `y`
 give the normalized position (section 7); when hidden they MAY be absent.
 The cursor rides the control path rather than being baked into the video
-so it moves at input rate, not at video latency; the official sender emits
-up to 120 updates/s, deduplicated by movement threshold. Receivers without
-cursor rendering MAY ignore both cursor messages.
+so it moves at input rate, not at video latency; the official sender reads
+the Mac cursor every 8 ms and sends a position whenever its four-decimal
+value changes, so up to about 120 updates/s while it moves and none at rest.
+Receivers without cursor rendering MAY ignore both cursor messages. A
+receiver MAY draw the cursor on its own display refresh, a short delay
+behind the newest report, interpolating between two consecutive reported
+positions; it MUST NOT draw a position past the newest report.
 
 **`displayState`** carries `paused` when the user pauses capture and
 `running` after every successful capture start, including initial capture,
@@ -1122,6 +1152,33 @@ would offer.
 * **Efficiency** requests at most 60.
 * **Performance** and **Custom "Auto"** request up to 120.
 * **Custom** with a manual pick (30/60/90/120) requests that number.
+
+#### Receiver-requested profile and priority
+
+A receiver asks with `{"type":"streamingProfileRequest","profile":…,
+"customFrameRate":…}` (pv ≥ 21) or `{"type":"streamingPriorityRequest",
+"priority":…}`. The Mac is authoritative and these are Mac-wide settings:
+
+* While the Mac's **Streaming Mode is Automatic** it applies a fixed policy
+  (Performance, Auto priority), so a request is **not applied**: nothing is
+  stored and no stream restarts. The Mac re-sends its state to the asking
+  receiver.
+* A request for what the Mac already uses is likewise not applied and
+  restarts nothing.
+* Otherwise the Mac stores it and rebuilds every session. `customFrameRate`
+  only matters for the Custom profile: a request for another profile keeps
+  the Mac's stored frame-rate pick.
+
+The Mac reports `{"type":"streamingProfileState","profile":…}` after every
+hello and after a declined request. A Mac with the issue #142 change also
+sends two optional, additive keys (no `pv` bump; receivers ignore
+unknown keys):
+
+* `mode`: `"automatic"` or `"custom"`. A receiver SHOULD disable its profile,
+  frame-rate and priority pickers while it is `"automatic"` and say why. When
+  it is absent (older Mac), receivers keep their controls as before.
+* `customFrameRate`: in Custom, the stored frame-rate pick
+  (`auto`/`fps30`/`fps60`/`fps90`/`fps120`).
 
 120 is a hard product ceiling for this milestone regardless of what a
 receiver advertises or Custom requests. A receiver that omits `maxFPS`
@@ -1338,7 +1395,7 @@ can never bypass the receiver's approval preference.
 ### 6.10 Window workspaces (`hello.ws`, `welcome.features`)
 
 Additive and capability-gated: no `pv` bump. A receiver that can arrange
-Mac windows sends `hello.ws` (its workspace version, currently `1`). A Mac
+Mac windows sends `hello.ws` (its workspace version: `1`, or `2` with floating panes). A Mac
 that offers it lists `"window"` in `welcome.features` (array of strings;
 the Mac's user can turn it off in Displays settings). Neither side sends
 any message below unless both are present; an older peer never sees them.
@@ -1368,8 +1425,9 @@ with `windowCatalog`:
   shows a tilted thumbnail, so it has no current picture until it is on
   the stage again (`w`/`h` are still the real window's);
 * `apps` — running regular apps `{bundle, name, windows}`;
-* `installed` — only when asked: apps the receiver may ask to open
-  `{bundle, name}`.
+* `installed` — only when asked, and only by Macs before the full app list
+  below: apps the receiver may ask to open `{bundle, name}`. Current Macs
+  ignore the flag; receivers list apps to open from `appCatalog`.
 
 MeowDisplay's own windows, system UI (Dock, menu bar, Stage Manager strip,
 password and authentication prompts) and windows that opted out of capture
@@ -1404,10 +1462,22 @@ launchable app the Mac finds (Spotlight's index of the app folders, a folder
 scan when Spotlight is off), one per bundle id, Finder first, at most 900:
 `{bundle, name, running?, windows?, used?}` (`used`: last-used time, seconds
 since 1970) — or `{rev, same: true}` when the receiver's `rev` is current.
-`appLaunch {bundle}` needs the input grant, opens only an app the Mac listed,
-never activates it (no focus change on the Mac), and is answered with
-`appLaunchResult {bundle, ok}`. `windowAction` also takes
+`appLaunch {bundle, reveal?}` needs the input grant, opens only an app the Mac
+listed, never activates it (no focus change on the Mac) unless `reveal: true`
+(the person's Show a Window on Mac: brought forward, so macOS sends an app
+that's running without a window its reopen and it opens one), and is answered
+with `appLaunchResult {bundle, ok, window?}`. `window: false`: the app was
+already running with no on-screen window and still has none 1.5 s after a
+background open (receivers stop waiting and offer Show a Window on Mac);
+absent when unknown. Without the grant when it arrives it is
+ignored (not answered); the grant is checked again right before the app
+opens, and if it ended nothing opens and `ok` is false. Receivers ask for
+`appCatalog` when a browser opens (the window picker, Stage Peek,
+Launchpad), not on every catalog refresh. `windowAction` also takes
 `minimize {window, gen}` (input grant; the real Mac window; never activates).
+The Mac brings a tile's minimized or hidden window back only when the tile
+first shows it that way; a window minimized later stays minimized until
+`activate`.
 
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
@@ -1423,7 +1493,8 @@ the same `gen`; anything else is rejected, never retargeted.
 `workspaceState {host, tiles, active?, hostFocus, rejected, canvas, limit,
 stageManager?, stageManagerControl?}`
 reports what the Mac shows: per tile `{id, window, gen, state, app, bundle,
-title, follow, rotation, fit}` with `state` one of `live`, `waiting`,
+title, follow, rotation, fit, restore?}` (`restore`: see Fill Window on Mac
+below) with `state` one of `live`, `waiting`,
 `offscreen`, `closed`, `failed`, `limit` (paused by the Mac's capture
 budget; the tile is kept). `active` is the tile keyboard input goes to;
 `hostFocus` is `deliver`, `noActiveTile`, `hostFocusElsewhere` (another
@@ -1431,11 +1502,20 @@ app is frontmost on the Mac) or `otherWindowFocused`; keys are not
 delivered unless it is `deliver`. `rejected` maps tile ids to `duplicate`,
 `limit`, `geometry`, `tooSmall`, `overlap` or `unavailable`. `stageManager` is true while Stage Manager is on; `stageManagerControl` is
 `ready` (the Mac can switch it: the owner made its two shortcuts), `setup`
-(not yet: the device explains where to set it up instead of offering Turn
-Off) or `failed` (macOS didn't apply the last change, for a few seconds).
+(not yet, or they need setting up again so they leave the Mac's Dock alone:
+the device explains where to set it up instead of offering Turn Off) or
+`failed` (the Mac didn't make the last change, for a few seconds).
 
-`workspaceFocus {tile}` makes a tile active (the Mac raises its window when
-input is granted). `windowAction {action}` needs this session's input
+`workspaceFocus {tile, raise?}` makes a tile active (the Mac raises its window
+when input is granted). `raise: false` (optional; older Macs ignore it and
+raise) means the receiver chose the tile by arranging its own view (moving,
+resizing, tucking or docking a float, fullscreen on the device, a zoom): the
+Mac makes it the keyboard target but leaves its window, its app and Stage
+Manager as they are. The window comes forward once, when the first key for
+that tile arrives with the input grant (the key waits up to 0.25 s until the
+window is really in front, and is dropped otherwise), or on a press in the
+tile. Until then `workspaceState.hostFocus` reports `deliver` for it, since
+typing will reach it. `windowAction {action}` needs this session's input
 grant: `activate {window, gen}`, `launch {bundle}` (only an app the Mac
 listed) and `close {window, gen}` (closes the real Mac window; receivers
 send it only from its own explicit, confirmed action — removing a tile is
@@ -1451,6 +1531,57 @@ the owner answers on the Mac), `stillOpen`, `stale` (not that window any
 more), `control` (no input grant: View Only cannot close), `accessibility`
 (the Mac lacks the permission), `noButton` or `ambiguous` (more than one
 window matched; nothing was pressed). A fresh `windowCatalog` follows.
+
+**Fill Window on Mac / Restore Previous Size on Mac** (welcome feature
+`windowFrame`, listed only while Window mode is allowed; Window mode only).
+The only messages that change the size of a real Mac window. Receivers send
+them only from a window pane's own explicit menu items, never from a gesture,
+a pane or float resize, a zoom or Fullscreen on This Device, and label them
+"… on Mac" (the pane's own Fill/Show Whole Window only changes how the device
+draws the picture). Receiver → Mac:
+`{"type":"windowFrame","op":"fill"|"restore","window":ID,"gen":G,"req":N}`.
+Mac → receiver, always (also when it does nothing):
+`{"type":"windowFrameResult","op":…,"window":ID,"req":N,"result":R,"restorable":Bool}`.
+
+`fill` sets that one window's Accessibility position and size to the usable
+area of the display it overlaps most (below the menu bar, clear of the Dock,
+and clear of Stage Manager's strip when its items are on that display) — not
+macOS full screen: no new Space, no green button, no Window menu, no key
+shortcut, no AXRaise, no activation, and AXFullScreen is never written.
+`restore` puts back the frame the window had before the last `fill` from
+any device, only while the window is still exactly where that `fill` left it.
+
+The Mac acts only when all of these hold: the session is admitted and has
+control (Allow Input on, a grant for this connection, capture allows input),
+checked when the message arrives and again, without side effects, right
+before the first write (also not while the Privacy Shield asks for the
+password or Mission Control is open); the window is listed to this session
+with that `gen`, shown in one of this receiver's panes, on screen, not in
+Stage Manager's strip; the window server still lists that id for the same
+app (pid), as a normal on-screen window, with no other on-screen window of
+that app at the same bounds; exactly one standard Accessibility window of
+that app has those bounds (±2 points) and the listed title (exactly, when
+the listing has one); it isn't in full screen or minimized, and its position
+and size are settable. After writing, the Mac reads the frame back every
+0.1 s for up to 0.6 s until it settles and the window server reports the same
+bounds for that id; only then does it report success. If Accessibility
+changed but the window server's window didn't, the element is put back and
+the answer is `ambiguous`.
+
+R is one of `filled`, `limited` (resized, but the app kept its own size
+limits; restorable), `alreadyFilled` (nothing moved), `restored`,
+`nothingToRestore`, `changed` (moved or resized on the Mac since `fill`;
+nothing moved and the old size is forgotten), `displayChanged` (less than
+half of the old frame is on a connected display; nothing moved), `stale`,
+`ambiguous`, `notResizable`, `fullScreen`, `offscreen` (minimized, hidden or
+on another Space), `stageStrip`, `missionControl`, `privacyShield`,
+`control` (no control: nothing was attempted), `accessibility` or `failed`.
+`restorable` says whether a `restore` would be tried now. While a restorable
+frame is kept, that window's `workspaceState` tile carries `restore: true`.
+The Mac keeps at most 64 frames, in memory only, per window id and owner pid,
+and forgets one when the window closes, its id passes to another app, or a
+listing shows it moved since. Receivers show the outcome briefly and treat no
+answer within 8 s as failed.
 
 **Input.** Unchanged messages, canvas coordinates. The Mac maps a point to
 the tile under it, through that tile's fit and rotation, to the window. A
@@ -1471,6 +1602,68 @@ canvas isn't the Mac display's shape, so a receiver sizes the sprite as
 `cursorImg.pw × kx` by `cursorImg.ph × ky` of the picture and turns it by
 `r` about its hotspot, instead of using `nw`/`nh` (which would stretch it).
 Receivers may bound the drawn size so it stays visible; its shape is kept.
+
+**Floating panes** (`hello.ws` 2, welcome feature `windowFloat`). Additive:
+no `pv` bump and no new message. A receiver that can show panes floating over
+the others sends `hello.ws: 2` (a version-1 Mac reads any `ws` as "speaks
+workspaces"); a Mac that accepts them adds `"windowFloat"` to
+`welcome.features` next to `"window"` (only while Window mode is allowed).
+Only when both are present may a `workspaceRequest` tile carry
+`layer: "float"` and `z` (an integer, 0 at the back). Everything else about
+the tile is unchanged: the same `id`, `host`, `window`/`gen`, `x y w h`
+inside the canvas, minimum size, `rotation`, `fit` and `zoom`, and the same
+9-tile limit (floats count). Tiled panes still may not overlap each other;
+a float may overlap anything. A Mac that hasn't seen `ws` 2 ignores `layer`
+and `z` and validates exactly as before (an overlapping float is rejected
+as `overlap`), so a ws-1 receiver such as Android 2.0 sees no change, and a
+receiver must not send `layer` to a Mac without `windowFloat`.
+
+The Mac draws the tiled panes first, then the floats back to front by `z`
+(ties in request order), and maps input the same way round: a point goes to
+the frontmost float that contains it, else to the tiled pane there. A pane a
+float covers is never reached through the float, and the Mac's cursor isn't
+drawn on a float where it is over a covered pane's window. A tile keeps its
+capture (no restart) while it moves, resizes, changes `z` or switches
+between tiled and floating, as long as its `id` and window stay the same.
+A tiled pane at least 90% covered by floats is captured at 2 fps; a visible
+float is captured at no less than 15 fps. `workspaceState` echoes
+`layer: "float"` and `z` on the floats it accepted. A float the receiver has
+tucked to an edge or hidden is simply left out of the request: hiding is
+local, and nothing here closes, minimizes or moves a Mac window
+(`windowAction`, `windowClose` and `windowFrame` stay limited to the
+receiver's explicit, confirmed menu items). Arranging floats never brings a window forward on the
+Mac either: the receiver sends `workspaceFocus` with `raise: false`. Floats are panes: an admitted session, the input grant and View
+Only apply to them unchanged.
+
+**Lifted floats** (welcome feature `floatLift`, additive, no `pv` bump). A
+Mac that lists `"floatLift"` next to `"windowFloat"` accepts `lift: true` on
+a float tile: while a finger moves or resizes that float the receiver draws
+it itself (from the tile's whole-source still, `workspaceBackdrop`, with the
+tile's own `fit`, `zoom` and `rotation` at its current size), and the Mac
+leaves it out of the picture and out of input mapping (a point there goes to
+the float behind it or the tiled pane) and doesn't count it as covering a
+pane. Its capture keeps running (same assignment, no restart), so it is drawn
+again in the next frame after the receiver sends it without `lift`. Dropping
+`lift` changes the tile's `view` epoch; the receiver keeps drawing its own
+copy until `workspaceView` echoes that epoch (plus a moment for the frame to
+arrive, at most about a second), so the float is never on screen twice and
+never missing. `lift` on a tiled pane, or from a receiver that hasn't sent
+`hello.ws` 2, is ignored. `workspaceState` echoes `lift: true` on a lifted
+float. A receiver never sends `lift` to a Mac without `floatLift`; there the
+Mac keeps drawing a moving float a moment behind the finger, as before.
+
+Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
+`schema` 3 and byte-identical while a layout has no floats. A layout with
+floats is `schema` 4 and adds `floats: [{tile, x, y, w, h, tuck?,
+offset?}]` (back to front; `tuck` is `left`, `right`, `top` or `bottom` with
+`offset` where its strip is along that edge, 0–1 from its top or left end;
+`x`, `y`, `w`, `h` are where it comes back to, flush with that edge at its own
+size). A reader that doesn't know a `tuck` value (builds from before `top` and
+`bottom`) shows that float untucked there; tucks are receiver-local
+and never reach the Mac (a tucked float is left out of the request). Its
+`tree` and `tiles` are as before, so a reader that ignores `floats` keeps the
+tiled arrangement and drops the floating tiles (nothing in its tree refers to
+them).
 
 ### 6.11 Text caret (`keyboardState` / `textCaret`)
 
@@ -1972,8 +2165,11 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 21 | Session invitations: `sessionInvite` / `sessionInviteResponse` / `sessionInviteCancel` (section 6.9) |
 | 22 | Optional QUIC transport (section 2.4): `_meowdisp-q._udp` hint, ALPN `meowdisplay-quic/1`, MEOW stream preface, `transports`/`qv` capability in `hello`/`welcome`; TCP unchanged, `min` stays 1 |
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
+| 22 (additive) | Floating panes (section 6.10): `hello.ws` 2, `welcome.features: ["windowFloat"]`, `workspaceRequest`/`workspaceState` tile `layer: "float"` and `z`, saved-layout `schema` 4 `floats`; gated by capability, no bump, ws-1 receivers unchanged |
+| 22 (additive) | Lifted floats (section 6.10): `welcome.features: ["floatLift"]`, float tile `lift: true` (left out of the picture and input while the receiver draws it); gated by capability, no bump |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
+| 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |
 
 ---
 
@@ -2077,6 +2273,8 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-29 | Additive, no `pv` change: pane menus (section 6.13), `welcome.features` `menus`, `menuRequest`, `menu`, `menuPress`, `menuResult` |
 | 2026-10-30 | Additive, no `pv` change: Close Window from Stage Peek (section 6.10), `welcome.features` `windowClose`, `windowClose`, `windowCloseResult`; Remote Finder writes and transfers (section 6.12); `windowCatalog` window `strip`, `windowThumbnail` `stale`/`reason` documented (section 6.10) |
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
+| 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
+| 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
@@ -2120,6 +2318,139 @@ Tailscale without anyone typing an address.
 * **Trust.** An address is only a routing hint. Every connection to it is the usual pinned mutual
   TLS; a report never creates, changes or approves a pairing.
 
+### 6.18 Mac lock state (`macLockState`)
+
+Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.features`.
+
+- Mac → receiver: `{"type":"macLockState","state":S,"remoteUnlock":B}` (plus `lockScreen`, 6.19) with S one of
+  `unlocked`, `locked` (macOS shows its lock screen), `switchedOut` (Fast User Switching: another
+  login session is on the console) or `unknown` (the session couldn't be read). Every value other
+  than `unlocked`, including one a receiver doesn't recognise, means locked.
+- Sent on every change, and right after `welcome` when a receiver connects while the Mac is
+  already locked. On a change to a locked state it is followed by `inputReset` and
+  `videoState` with `enabled:false`, so a receiver that doesn't know `macLockState` still drops
+  its last picture.
+- While locked the Mac sends no media (video, audio, window frames), no cursor or cursor image
+  (except to a device showing the lock screen, 6.19) and
+  none of `windowCatalog`, `windowThumbnail`, `appIcon`, `workspaceState`, `workspaceView`,
+  `workspaceBackdrop`, `appCatalog`, `displayThumbnail`, `files`, `menu`, `menuResult`,
+  `appLaunchResult`, `windowCloseResult`, `clip` or `textCaret`. Session messages (`welcome`,
+  pings, `videoState`, `allowInputState`, `inputReset`, `lockMacResult`, mode and profile states)
+  still go, so nothing reconnects. Window captures and listings stop and restart on unlock; the
+  first frame after it is a keyframe.
+- Input received while locked is dropped, whatever the grant. `allowInputRequest` while locked: a
+  device set to Ask is refused (`notAllowed`) without a prompt, Never Allow is refused as before,
+  Always Allow is granted but input still waits for the unlock. `lockMac` while locked answers
+  `locked`.
+- `remoteUnlock` is `true` only when this device may show the Mac's own lock screen (6.19), now
+  or after the step `lockScreen` names; older Macs always send `false`. No message carries a
+  password. Receivers show an opaque locked screen, forget stills, window names and anything in
+  progress (drags, Stage Peek, pickers), keep the layout, and ask for the window list again after
+  the unlock.
+
+### 6.19 Lock screen control (`lockScreenRequest`, `macLockState.lockScreen`)
+
+Optional and additive: no `pv` bump. The Mac lists `"lockScreenControl"` in `welcome.features`.
+Who may use it, and what the Mac enforces: SECURITY.md "Lock screen control".
+
+- While not `unlocked`, `macLockState` also carries `"lockScreen":L`:
+  - `available`: the device may ask to show the lock screen now.
+  - `active`: it is shown on this device.
+  - `needsControl`: ask for control first (`allowInputRequest`); the Mac grants it without a
+    prompt (Always Allow), then answers `available`.
+  - `needsFullDesktop`: switch to Full Desktop first (Window view and Extend can't show it: the
+    login window is only on the main display); receivers pick Mirror, the main display, where
+    macOS shows its login window. Control is asked for again on the new connection.
+  - any other word: not offered; the word is the Mac's reason (`controlBeforeLock`, `turnedOff`,
+    `neverAllow`, `inputOff`, `otherUser`, `notAdmitted`, `windowView` (also sent in Extend),
+    `unavailable`). `turnedOff`: the Mac's owner turned Allow Lock Screen Control off for this
+    device (it otherwise follows the input policy: on with Always Allow, SECURITY.md). Unknown
+    words mean not offered. `unavailable` right after connecting can mean the Mac hasn't matched
+    the connection to its device settings yet; a receiver that just switched modes for this waits
+    for the next `macLockState` (or its own timeout).
+  `remoteUnlock` is `true` for the first four. A receiver treats `remoteUnlock:false` as not
+  offered whatever `lockScreen` says.
+- Receiver → Mac: `{"type":"lockScreenRequest","show":true|false}`. The Mac answers with
+  `macLockState`. `show:true` when allowed: `lockScreen:"active"`, then `videoState` with
+  `enabled:true` and fresh frames of the lock screen (a keyframe first; nothing from before the
+  request), and `cursor`/`cursorImg` again, for this device only, while it lasts. With `active`
+  the Mac sends `"lockScreenView":V`: this view's number, a positive integer it never reuses (any
+  connection, any device). Macs before it send none. `show:false`: the view ends, `lockScreen:"available"`, `videoState enabled:false`.
+- While `active`, the Mac accepts only `touch`, pointer `move`/`moveRelative`, `down`/`up` with the
+  left button, and `keyboard` `press`/`down`/`up` of character keys, Space, Return and Delete
+  (not Tab, the arrows, Escape or Forward Delete) with only `shift`, `option` or `capsLock` in `modifiers`,
+  `modifierDown`/`modifierUp` of Shift or Option, and `text` of up to 128 printable characters.
+  Everything else is dropped. Releases always go through.
+- The Mac ends the view (`lockScreen` no longer `active`, `inputReset`, `videoState
+  enabled:false`) when it is no longer allowed (checked on every input event too), after 120 s
+  without input, or on unlock. On unlock `macLockState` says `unlocked`, `inputReset` follows, and
+  the session continues as before; a receiver that switched modes to show the lock screen switches
+  back (also when the attempt failed or was refused after the switch).
+- Lock episodes. While a receiver sees the Mac locked (any `macLockState` but `unlocked`, until it
+  hears `unlocked` or the connection ends) it adds `"lockScreen":true` to every input message it
+  sends: `touch`, `pointer`, `keyboard` (`cancel` too), `scroll`, `pencil`, `proximity`,
+  `gesture`, `nativeAppGesture`, `smartTouchProbe`, `windowAction`, `workspaceFocus`,
+  `menuPress`, `appLaunch`, `windowClose`; while it shows view V (it asked on this connection and
+  the Mac said `active` with V) also `"lockScreenView":V`. Whenever its tag changes it first ends
+  everything in progress (touches, drags, scroll momentum, Pencil strokes, gestures, held keys,
+  with the old tag) and sends `keyboard` `cancel`. Older receivers send no tag; nothing changes
+  for them. The Mac:
+  - delivers tagged input only to the live view V names on this connection (any other number, a
+    bare `true`, a boolean, string or non-positive V: not delivered), and untagged input only when
+    no view is live on this connection (while locked otherwise, the privacy gate drops it as
+    before). Tagged input arriving after the view ended (an unlock in between, a hide, a new view,
+    a reconnect, a revoke) never reaches the desktop or another view. Untagged input otherwise is
+    ordinary input (no hold after an unlock).
+  - on a live view takes only what the login window needs (above): `scroll`, `pencil`,
+    `proximity`, `gesture`, `nativeAppGesture`, `smartTouchProbe` (answered `false`), `windowAction`,
+    `workspaceFocus`, `menuPress`, `appLaunch` and `windowClose` never act while a view is live and
+    never act tagged, ends and cancels included (nothing of theirs was pressed).
+  - Keystrokes (`keyboard` `press`/`down`, one each; `text`, one per character) and presses
+    (`touch` `began`, `pointer` `down`, one click each) that are refused are reported to that
+    receiver: `{"type":"lockScreenInputRefused","count":N,"clicks":C,"reason":R}`, R `unlocked`
+    (tagged, the Mac is unlocked now), `notShown` (tagged for no view live on this connection) or
+    `untagged`. Receivers say so in one line ("1 click wasn't sent: the Mac unlocked").
+  - Moves (`touch` `moved`, `pointer` `move`/`moveRelative`, an unknown action) and the other
+    families that can't go are dropped without a report.
+  - Releases (`keyboard` `up`/`modifierUp`/`cancel`, `touch` `ended`/`cancelled`, `pointer` `up`)
+    always go, and release only what their own episode (the desktop, or that view) pressed: held
+    keys, modifiers and buttons are released when a view starts or ends and before anything of
+    another episode acts, so nothing is left held, nothing crosses an unlock, and a release from
+    another episode releases nothing.
+- An Ask device in Window view or Extend whose control a person granted on that connection before
+  the lock is offered `needsFullDesktop`: when it asks to switch to Mirror the Mac keeps a
+  one-time, Mac-internal ticket (never on the wire) bound to the device's pinned key, this lock
+  and this login session on the console, valid 10 s; the new Mirror connection is told
+  `needsControl` and its first `allowInputRequest` is granted once without a prompt. Without such
+  a grant it is told `controlBeforeLock`; nothing is asked or granted behind the lock.
+- The view belongs to the connection that asked: any new connection starts without it and must
+  send `show:true` again. A receiver never treats `active` it didn't ask for on the current
+  connection as shown (it answers `show:false`). `show:true` starts a view at most once per 5 s
+  per connection; a quicker one is answered with the current `macLockState`.
+
+#### 6.10 addendum: Windows closed on the Mac (`workspaceRequest` `watch`, `workspaceState` `gone`)
+
+Additive: a Mac that doesn't know `watch` ignores it and never sends `gone`; a receiver that
+doesn't know `gone` ignores it.
+
+- Receiver → Mac, in `workspaceRequest`: `"watch":[{"window":N,"gen":G},…]`, every window the
+  receiver holds on this Mac (shown panes, other tabs, floating panes, tucked or not) that it saw
+  listed on this connection, at most 128. Whole displays and panes that follow an app aren't
+  sent.
+- Mac → receiver, in `workspaceState`: `"gone":[{"window":N,"gen":G},…]`, the watched (or shown)
+  windows proved closed. Proof comes from the window server's list of every window (any Space,
+  minimized, hidden, any layer): the id missing from two reads at least 1 s apart, or the id now
+  owned by another process than the one it was listed under. Not being in `windowCatalog`
+  (minimized untitled windows, Stage Manager's strip, Mission Control, other Spaces, a skipped
+  listing, capture loss) is never proof, and a read that returns no windows concludes nothing.
+  A proved window stays in `gone` while it is watched.
+- The receiver acts only on a `gone` entry whose `gen` is the one it holds for that window: a
+  floating pane holding it is removed (tucked too), a tab is removed and its pane shows the next
+  tab, and a pane whose last window closed stays in place, empty, with Choose Window and Remove
+  Pane (saved as `emptied` in the layout record until the person fills or removes it). This isn't
+  an undoable edit, and undo never brings a closed window back. A window that closed while
+  disconnected isn't removed (it shows as unavailable, as before).
+
 #### 6.10 addendum: Add to Current Stage (`windowAction` `addToStage`)
 
 `{"type":"windowAction","action":"addToStage","window":ID,"gen":G}` (needs control, Window mode):
@@ -2137,11 +2468,18 @@ currently never sends it (research: RESEARCH-2026-10-30-add-to-stage.md in the i
 
 While Mission Control is open on the Mac, macOS pauses every window capture. In Window mode the
 Mac then adds `"missionControl":"open"` to `workspaceState` and holds paused panes as `paused`
-without restarting them (no reconnect loop); without the field it is closed. Receivers say
-"Mission Control is open on your Mac. Video is paused." on every paused, waiting or retrying
-pane, and one pane (the selected one if paused, else the first paused one) offers Exit Mission
-Control, or inline Request Control without control. When it closes, macOS resumes the captures;
-a pane still paused after the usual 2 s gets one fresh stream.
+without restarting them (no reconnect loop); without the field it is closed. Display sources
+(Full Desktop in a pane) keep streaming: the display shows Mission Control itself. Receivers say
+so only on the Window-view panes and floats it holds (a window source that is `paused`, `waiting`
+or `retrying` while the field is present; never a display): "Paused while Mission Control is open",
+with one button: Exit Mission Control with control, Request Control to Exit without it (then
+Exit), Awaiting Approval while asked, or, when the Mac takes no control requests from this device,
+the text "Press Esc on the Mac to close it." Its × folds it on that device to a small "Paused ·
+Mission Control" status that brings it back; nothing is sent. The pane's menu and its
+accessibility action offer the same way out. Folds are forgotten when Mission Control closes.
+(Before 2026-11: one banner over all of Window view, covering a Full Desktop pane that was fine,
+and before that one pane's inline button, which floats could hide.) When it closes, macOS resumes
+the captures; a pane still paused after the usual 2 s gets one fresh stream.
 
 `{"type":"windowAction","action":"missionControl","exit":true}` (needs control): the Mac checks
 that Mission Control is open right now and only then posts Escape; otherwise nothing is sent.

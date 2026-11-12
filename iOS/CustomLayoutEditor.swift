@@ -717,6 +717,11 @@ struct CustomLayoutEditorScreen: View {
                     Label("Edit Shortcut…", systemImage: "keyboard")
                 }
             }
+            if placement.kind == .calculator {
+                Text("Opens a calculator on this iPad, in View Only too. It never sends anything to your Mac.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         if placement.kind.modifier != nil {
             paletteSection(for: placement)
@@ -857,6 +862,7 @@ struct CustomLayoutEditorScreen: View {
                     Button(item.title) { add(.tray(item)) }.disabled(placed.contains(.tray(item)))
                 }
                 Button("Move View") { add(.moveView) }.disabled(placed.contains(.moveView))
+                Button("Calculator") { addCalculator() }.disabled(placed.contains(.calculator))
             }
             Section("Actions") {
                 ForEach(functionItems) { item in
@@ -874,6 +880,17 @@ struct CustomLayoutEditorScreen: View {
         selectedID = placement.id
     }
 
+    /// The local Calculator starts in the first free spot along the top
+    /// edge from the left, utility-sized; nothing else moves.
+    private func addCalculator() {
+        guard let arrangement else { return }
+        let spot = arrangement.suggestedCalculatorPosition(portrait: editingPortrait)
+        let placement = CustomControlPlacement(kind: .calculator, x: spot.x, y: spot.y,
+                                               size: CustomControlArrangement.utilitySize)
+        mutate { $0.placements.append(placement) }
+        selectedID = placement.id
+    }
+
     // MARK: Helpers
 
     private var functionItems: [ShortcutItem] { store.functionItems(for: draft) }
@@ -884,6 +901,7 @@ struct CustomLayoutEditorScreen: View {
         case .moveView: return String(localized: "Move View")
         case .function(let id): return functionItems.first { $0.id == id }?.title ?? id
         case .shortcut(let item): return item.title
+        case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")
         }
     }
 
@@ -1203,7 +1221,7 @@ private struct CustomLayoutCanvas: View {
                 if let item = functionItems.first(where: { $0.id == id }) { onPreviewAction(item) }
             case .shortcut(let item):
                 onPreviewAction(item)
-            case .moveView:
+            case .moveView, .calculator:
                 break
             }
         }
@@ -1242,6 +1260,7 @@ private struct CustomLayoutCanvas: View {
         case .moveView: return String(localized: "Move View")
         case .function(let id): return functionItems.first { $0.id == id }?.title ?? id
         case .shortcut(let item): return item.title
+        case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")
         }
     }
 }
@@ -1380,6 +1399,9 @@ struct CustomControlGlyph: View {
         case .moveView:
             Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
                 .font(.system(size: diameter * 0.38, weight: .semibold))
+        case .calculator:
+            Image(systemName: LocalCalculatorPanel.symbolName)
+                .font(.system(size: diameter * 0.4, weight: .semibold))
         case .function(let id):
             itemGlyph(functionItems.first { $0.id == id })
         case .shortcut(let item):

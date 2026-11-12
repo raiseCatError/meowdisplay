@@ -82,6 +82,24 @@ struct AutoConnectPolicy {
         return beginAttempt(logicalID: logicalID)
     }
 
+    /// An explicit attempt for a logical receiver that another live session
+    /// already owns on a different route. The owner decides the outcome
+    /// (route migration or ignore), so it must keep its own attempt: taking
+    /// its slot would leave it running with every controller callback
+    /// ignored, never visible, never failing, and still blocking every later
+    /// connect for that device (issue #128). The returned attempt is never
+    /// current, so finishing it releases nothing. Suppression is still
+    /// cleared: this is an explicit action.
+    mutating func beginExplicitAttempt(logicalID: String, identifiers: Set<String>,
+                                       besideOwner owner: Attempt?) -> Attempt {
+        guard let owner, owner.logicalID == logicalID, isCurrent(owner) else {
+            return beginExplicitAttempt(logicalID: logicalID, identifiers: identifiers)
+        }
+        allowExplicitConnection(identifiers)
+        nextGeneration &+= 1
+        return Attempt(logicalID: logicalID, generation: nextGeneration)
+    }
+
     /// Rebuilds requested by an already-owned session (wake, settings) do not
     /// change trust or suppression; they only replace attempt ownership.
     mutating func beginContinuationAttempt(logicalID: String) -> Attempt {

@@ -1259,6 +1259,94 @@ final class PointerGestureEngineTests: XCTestCase {
         XCTAssertEqual(engine.handle(sample(2, .began, view: CGPoint(x: 60, y: 60), t: 1)), [])
         XCTAssertEqual(engine.mode, .firstTouchPending)
     }
+
+    // MARK: - Fast two-finger double-tap (issue #137)
+
+    /// The precondition the arbitration handles: a second two-finger tap
+    /// 0.1 s after the first is a pending chord continuation until it lifts.
+    func testAFastSecondTwoFingerTapIsAPendingChordContinuation() {
+        let engine = PointerGestureEngine()
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 140, y: 100), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 100, y: 100), t: 0.06))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 140, y: 100), t: 0.07))
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 102, y: 101), t: 0.17))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 141, y: 101), t: 0.18))
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        XCTAssertTrue(engine.isChordContinuation)
+        XCTAssertTrue(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: engine.mode, isChordContinuation: engine.isChordContinuation, windowMode: true))
+    }
+
+    func testDoubleTapArbitrationOnlyOverridesAnUndecidedContinuationInWindowView() {
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .twoFingerPending, isChordContinuation: true, windowMode: false),
+            "single picture: nothing drops the engine's right-clicks, so keep the veto")
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .rightDragHeld, isChordContinuation: true, windowMode: true),
+            "a committed right-drag keeps its claim")
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: .twoFingerPending, isChordContinuation: false, windowMode: true),
+            "a fresh pair isn't vetoed anyway; nothing to override")
+    }
+
+    /// The first tap of a fast two-finger double-tap, lifted at t = 0.07.
+    private func firstTwoFingerTap(_ engine: PointerGestureEngine) {
+        _ = engine.handle(sample(1, .began, view: CGPoint(x: 100, y: 100), t: 0))
+        _ = engine.handle(sample(2, .began, view: CGPoint(x: 140, y: 100), t: 0.01))
+        _ = engine.handle(sample(1, .ended, view: CGPoint(x: 100, y: 100), t: 0.06))
+        _ = engine.handle(sample(2, .ended, view: CGPoint(x: 140, y: 100), t: 0.07))
+    }
+
+    /// UIKit asks `gestureRecognizerShouldBegin` as the second tap lifts, and
+    /// the fingers rarely lift in the same event: with one of them up the
+    /// engine must still be the overridable pending continuation. Both
+    /// lifts then emit whole right-clicks only (down and up in one batch),
+    /// the shape Window view's held/suppressed right taps catch.
+    func testTheContinuationStaysOverridableUntilTheLastFingerLifts() {
+        let engine = PointerGestureEngine()
+        firstTwoFingerTap(engine)
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 102, y: 101), t: 0.17))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 141, y: 101), t: 0.18))
+        XCTAssertEqual(engine.handle(sample(3, .ended, view: CGPoint(x: 102, y: 101), t: 0.24)), [])
+        XCTAssertEqual(engine.mode, .twoFingerPending)
+        XCTAssertTrue(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: engine.mode, isChordContinuation: engine.isChordContinuation, windowMode: true))
+        let rightTap: [PointerCommand] = [.mouseDown(button: .right, clickCount: 1), .mouseUp(button: .right, clickCount: 1)]
+        XCTAssertEqual(engine.handle(sample(4, .ended, view: CGPoint(x: 141, y: 101), t: 0.25)), rightTap)
+        XCTAssertEqual(engine.mode, .idle)
+        XCTAssertEqual(engine.poll(now: 0.25 + PointerGestureConfig.tapChainWindow + 0.01), rightTap)
+    }
+
+    /// The 0.22 s chain window is the whole difference between the vetoed
+    /// path and the one that always worked.
+    func testOnlyASecondTapInsideTheChainWindowIsAContinuation() {
+        for (gap, continues) in [(PointerGestureConfig.tapChainWindow - 0.01, true),
+                                 (PointerGestureConfig.tapChainWindow + 0.01, false)] {
+            let engine = PointerGestureEngine()
+            firstTwoFingerTap(engine)
+            _ = engine.poll(now: 0.07 + gap - 0.001)
+            _ = engine.handle(sample(3, .began, view: CGPoint(x: 102, y: 101), t: 0.07 + gap))
+            _ = engine.handle(sample(4, .began, view: CGPoint(x: 141, y: 101), t: 0.07 + gap + 0.01))
+            XCTAssertEqual(engine.mode, .twoFingerPending, "gap \(gap)")
+            XCTAssertEqual(engine.isChordContinuation, continues, "gap \(gap)")
+        }
+    }
+
+    /// Known limit: a second contact held past `holdCommitDelay` (0.15 s)
+    /// commits a right-drag (the right button goes down on the Mac at once),
+    /// which keeps its veto, so that double-tap still doesn't reset the pane.
+    func testASecondContactHeldPastTheHoldDelayIsARightDragNotADoubleTap() {
+        let engine = PointerGestureEngine()
+        firstTwoFingerTap(engine)
+        _ = engine.handle(sample(3, .began, view: CGPoint(x: 102, y: 101), t: 0.17))
+        _ = engine.handle(sample(4, .began, view: CGPoint(x: 141, y: 101), t: 0.18))
+        XCTAssertEqual(engine.poll(now: 0.17 + PointerGestureConfig.holdCommitDelay + 0.01),
+                       [.mouseDown(button: .right, clickCount: 1)])
+        XCTAssertEqual(engine.mode, .rightDragHeld)
+        XCTAssertFalse(ViewportDoubleTapArbitration.mayBeginOverEngine(
+            engineMode: engine.mode, isChordContinuation: engine.isChordContinuation, windowMode: true))
+    }
 }
 
 final class AppGestureCommandAccumulatorTests: XCTestCase {

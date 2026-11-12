@@ -95,6 +95,9 @@ struct PhoneInfo: Decodable {
     /// Window workspaces version (PROTOCOL.md 6.10); absent = not supported.
     let ws: Int?
     var supportsWindowWorkspace: Bool { (ws ?? 0) >= WindowWorkspaceWire.version }
+    /// Floating panes (PROTOCOL.md 6.10): `ws` 2 or later, and only while this Mac offers
+    /// `windowFloat`. A `ws` 1 receiver (Android 2.0, older Apple receivers) is unchanged.
+    var supportsWindowFloats: Bool { (ws ?? 0) >= WindowWorkspaceWire.floatVersion && WindowStreamingPolicy.isAllowed() }
     /// Reassembles control messages sent in parts (PROTOCOL.md 6.14); absent = not supported.
     let chunks: Int?
     var supportsControlChunks: Bool { (chunks ?? 0) >= ControlChunkWire.version }
@@ -348,7 +351,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
-    @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection) -> Void)?
+    /// The frame rate is nil when the receiver sent none.
+    @MainActor var onStreamingProfileRequest: ((StreamingProfile, CustomFrameRateSelection?) -> Void)?
     /// A receiver asked to change Streaming Priority. Handed to
     /// `SenderController`, which owns the canonical `streamingPriority`
     /// setting (same one its own Settings picker writes) and rebuilds the
@@ -459,10 +463,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `minimumFrameInterval`/`ExpectedFrameRate` alone are requests/hints,
     /// not proof VideoToolbox receives no more than that rate (see
     /// `FrameRateLimiter`). Reconfigured from `setupEncoder`, the one choke
-    /// point every FPS change already goes through. Mutated only from
-    /// `queue` (both `setupEncoder` and the capture callback run there), so
-    /// this needs no lock of its own.
-    private var frameRateLimiter = FrameRateLimiter(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
+    /// point every FPS change already goes through. Also holds the frame the
+    /// limit turned away, so the last change on screen still goes out (see
+    /// `FrameAdmission`). Mutated only from `queue` (both `setupEncoder` and
+    /// the capture callback run there), so this needs no lock of its own.
+    private var frameAdmission = FrameAdmission(fps: StreamingFPSPolicy.defaultReceiverMaxFPS)
+    /// `queue` only: the frame `frameAdmission` holds, and its retry.
+    private var heldFrame: HeldFrame?
+    private var heldFrameTimer: DispatchSourceTimer?
     /// Set by Extend setup and reconfiguration (this class's nonisolated `async` methods), cleared by
     /// `stop()` on the main thread, read on `queue` and by `SenderController`: locked (audit C8). The
     /// display a write replaces is released after the lock, since releasing it removes the display.
@@ -508,6 +516,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // session (see SenderController.restartAll).
     private let streamingProfile: StreamingProfile
     private let customFPS: Int?
+    /// Reported to the receiver with the profile (issue #142): the Mac's
+    /// Streaming Mode, and in Custom the stored frame-rate pick, so the
+    /// receiver can tell when its profile controls can't take effect. nil
+    /// keeps them out of the message.
+    private let reportedStreamingMode: StreamingMode?
+    private let reportedCustomFrameRate: CustomFrameRateSelection?
     /// Streaming Priority (bounded encoder-pipelining depth, see
     /// `StreamingPriorityPolicy`): like `streamingProfile`, applies per-
     /// pipeline at construction — a change rebuilds the session (see
@@ -787,6 +801,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var capturePixelsWide = 0
     private var capturePixelsHigh = 0
+    /// What the live display stream is configured with (`queue` only), kept
+    /// with the stream it belongs to. A live change edits a copy and applies
+    /// every field (see `DisplayCaptureSettings`).
+    private struct LiveCaptureConfiguration {
+        /// Weak, so a stopped stream isn't kept alive by its settings.
+        weak var stream: SCStream?
+        var settings: DisplayCaptureSettings
+    }
+    private var liveCapture: LiveCaptureConfiguration?
+    /// The last configuration update sent to ScreenCaptureKit. The next one
+    /// waits for it, so updates land in the order they were asked for and the
+    /// newest settings are the ones that stick.
+    private var pendingCaptureUpdate: Task<Void, Error>?
     private let authenticatedSession = AuthenticatedSessionState()
     private var activeConnectionGeneration: UInt64 = 0
     /// `remoteEndpoints` (PROTOCOL.md 6.17), `queue` only.
@@ -1110,7 +1137,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          extendShapePreference: ExtendDisplayShapePreference = .standard,
          receiverMaxFPSPreference: ReceiverMaxFPSPreference = .standard,
          streamingPriority: StreamingPriority = .auto,
-         codecPreference: CodecPreference = .auto) {
+         codecPreference: CodecPreference = .auto,
+         streamingMode: StreamingMode? = nil,
+         customFrameRateSelection: CustomFrameRateSelection? = nil) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -1122,6 +1151,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.desiredVideoEnabled = videoEnabled
         self.streamingProfile = streamingProfile
         self.customFPS = customFPS
+        self.reportedStreamingMode = streamingMode
+        self.reportedCustomFrameRate = customFrameRateSelection
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
@@ -1348,6 +1379,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendMaxFPSState()
     }
 
+    /// `queue` only. Changes the live display stream's settings and sends all
+    /// of them to ScreenCaptureKit, after any update already in flight (see
+    /// `DisplayCaptureSettings`: a configuration with one field set would
+    /// reset the rest). Nil when `stream` isn't the stream they belong to.
+    private func updateLiveCapture(_ stream: SCStream,
+                                   _ change: (inout DisplayCaptureSettings) -> Void) -> Task<Void, Error>? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard var live = liveCapture, live.stream === stream else {
+            Log.info("capture: no settings for the live stream, update skipped")
+            return nil
+        }
+        change(&live.settings)
+        liveCapture = live
+        let config = live.settings.configuration
+        let previous = pendingCaptureUpdate
+        let update = Task {
+            _ = await previous?.result
+            try await stream.updateConfiguration(config)
+        }
+        pendingCaptureUpdate = update
+        return update
+    }
+
     /// Re-derives the effective FPS for the live pipeline's current encode
     /// size (a profile/user-ceiling/receiver-capability change, never a
     /// resolution change — resolution changes already go through
@@ -1367,12 +1421,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard rebuildEncoder || fpsResult.fps != captureTargetFPS else { return }
         logEncodeCapability(width: capturePixelsWide, height: capturePixelsHigh, result: fpsResult)
         needsKeyframe = true
-        let config = SCStreamConfiguration()
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fpsResult.fps * 2))
+        let update = updateLiveCapture(stream) { $0.targetFPS = fpsResult.fps }
         let selfBox = self.selfBox
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("FPS reconfigure failed: \(error)")
             }
@@ -1494,8 +1547,282 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.sessionInputGrant.set(true)
             self.sendAllowInputState(state: .allowed)
+            self.reviewLockScreen()
             let sink = self.statusSink
             Task { @MainActor in sink.publishSessionInputGrantChanged(true) }
+        }
+    }
+
+    /// Which lock state this sender reads (tests set their own; the app keeps `.shared` current).
+    var privacyGate: MacPrivacyGate = .shared { didSet { inputInjector?.privacyGate = privacyGate } }
+
+    // MARK: Lock screen control (SECURITY.md "Lock screen control", PROTOCOL.md 6.19)
+
+    /// The app's answer for this device: its input policy and Allow Lock Screen Control, pushed
+    /// once its pinned identity is proven (`onHello`) and on every change (`setLockScreenPermit`).
+    /// Until then: not offered, and refused.
+    private var lockScreenPermit: (policy: PeerInputRequestPolicy, allowed: Bool, handoff: Bool)?
+    /// This receiver shows macOS's lock screen and puts its restricted input in (`queue`).
+    private var lockScreenActive = false
+    /// The connection the view was started on: it never carries over to another one (F2).
+    private var lockScreenGeneration: UInt64?
+    /// This view's number (`LockScreenViewNumbers`): its input carries it back, and nothing
+    /// tagged for another view (an earlier one, another connection's, another device's) goes.
+    private var lockScreenView: Int?
+    /// `show:true` at most once per `LockScreenSessionPolicy.showInterval` on this connection (F7).
+    private var lockScreenShowLimit = LockScreenShowRateLimit()
+    /// Wake promotions for the view (one per view at most), for tests.
+    private var lockScreenWakeCount = 0
+    private var lockScreenFrames = LockScreenFrameGate()
+    private var lockScreenLastInput: TimeInterval = 0
+    /// A refusal was logged since the view last started or ended (at most one line each).
+    private var lockScreenRefusalLogged = false
+    /// Refusal lines logged, for tests.
+    private var lockScreenRefusalLogCount = 0
+    private var lockScreenIdleTimer: DispatchSourceTimer?
+    /// Read by the injector for every event while the Mac is locked.
+    let lockScreenInputGate = LockScreenInputGate()
+
+    /// Every injector waits on this sender's lock state (desktop, extend and window mode alike).
+    private func makeInputInjector(displayID: CGDirectDisplayID) -> InputInjector {
+        let injector = InputInjector(displayID: displayID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+        injector.privacyGate = privacyGate
+        injector.lockScreenGate = lockScreenInputGate
+        return injector
+    }
+
+    /// Main actor (the app): this device's input policy and Allow Lock Screen Control changed or
+    /// are first known. Narrowing ends a lock screen view at once. `handoff`: a valid
+    /// `LockScreenGrantHandoffs` ticket waits for this device (its pre-lock control, carried across
+    /// the switch to Mirror), so asking for control will be granted once without a prompt.
+    func setLockScreenPermit(policy: PeerInputRequestPolicy, allowed: Bool, handoff: Bool = false) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            self.lockScreenPermit = (policy, allowed, handoff)
+            self.reviewLockScreen()
+        }
+    }
+
+    /// `queue`.
+    private func lockScreenInputs() -> LockScreenEligibility.Inputs {
+        LockScreenEligibility.Inputs(admitted: sessionAuthorization.isAdmitted, masterInput: InputPolicy.allowsInput(),
+                                     onConsole: LoginSessionConsole.shared.isOnConsole, privacy: privacyGate.state,
+                                     policy: lockScreenPermit?.policy ?? .neverAllow,
+                                     lockScreenControlAllowed: lockScreenPermit?.allowed ?? false,
+                                     sessionGranted: sessionInputGrant.get(), windowView: mode == .window,
+                                     extend: mode == .extend, handoffPending: lockScreenPermit?.handoff ?? false)
+    }
+
+    /// `queue`: the lock screen view is live for this connection: started on it, its grant still
+    /// held, macOS still showing its lock screen. Everything the view lets out or in reads this.
+    private var lockScreenLive: Bool {
+        lockScreenActive && lockScreenGeneration == activeConnectionGeneration
+            && sessionInputGrant.get() && privacyGate.state == .locked
+    }
+
+    /// `queue`: the view tagged input may name now (nil: none live on this connection).
+    private var liveLockScreenView: Int? { lockScreenLive ? lockScreenView : nil }
+
+    /// `queue`: the pointer's position and sprite are screen content. Unlocked: as always. Locked:
+    /// only while this connection shows the lock screen, on the condition `sendFramed` admits that
+    /// view's frames on (`LockScreenCursorPolicy`).
+    private var cursorEchoAllowed: Bool {
+        LockScreenCursorPolicy.allows(privacy: privacyGate.state, lockScreenActive: lockScreenLive)
+    }
+
+    /// `queue`: send the pointer's position and sprite again on the next poll (a drop while they
+    /// weren't allowed must not count as sent).
+    private func resetCursorEcho() {
+        lastCursorPNGHash = 0
+        lastCursorSent = (-1, -1, false)
+        lastCursorPane = nil
+    }
+
+    /// `queue`: the lock state and what this device may do about it.
+    private func sendLockState() {
+        guard sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        let privacy = privacyGate.state
+        let offer: LockScreenOffer = privacy == .unlocked || lockScreenPermit == nil ? .unavailable(nil)
+            : LockScreenEligibility.offer(lockScreenInputs(), active: lockScreenLive)
+        sendJSONObject(MacLockWire.message(privacy, lockScreen: offer, view: liveLockScreenView))
+    }
+
+    /// `queue`: something the lock screen view depends on changed. No longer allowed: it ends.
+    /// `announce`: say the new offer while the Mac is locked.
+    private func reviewLockScreen(announce: Bool = true) {
+        if lockScreenActive, let why = LockScreenEligibility.denial(lockScreenInputs()) {
+            Log.info("lockScreen: ended (\(why.rawValue))")
+            endLockScreen()
+        }
+        if announce, !privacyGate.allowsContent { sendLockState() }
+    }
+
+    /// `queue`: the receiver asked to show the lock screen. Only when allowed right now; the picture
+    /// starts fresh (no frame held from before, a keyframe first) and the display is woken.
+    private func beginLockScreen() {
+        guard !lockScreenActive else { return sendLockState() }
+        if let why = LockScreenEligibility.denial(lockScreenInputs()) {
+            Log.info("lockScreen: not shown (\(why.rawValue))")
+            return sendLockState()
+        }
+        // Repeated show:true (a stuck or hostile receiver) can't keep waking the display.
+        guard lockScreenShowLimit.admits(now: ProcessInfo.processInfo.systemUptime) else {
+            Log.info("lockScreen: not shown (too soon)")
+            return sendLockState()
+        }
+        // Nothing held from before (a key, a modifier, a drag) is carried into the view.
+        inputInjector?.cancelActiveInput()
+        nativeAppGestureState.cancelAll()
+        let view = LockScreenViewNumbers.next()
+        lockScreenActive = true
+        lockScreenGeneration = activeConnectionGeneration
+        lockScreenView = view
+        lockScreenInputGate.set(view: view)
+        lockScreenRefusalLogged = false
+        lastPixelBuffer = nil
+        needsKeyframe = true
+        lockScreenFrames.start(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        lockScreenLastInput = ProcessInfo.processInfo.systemUptime
+        resetCursorEcho()   // the login window's pointer goes out from the first poll
+        // One wake per view; views start at most once per `showInterval` (checked above).
+        lockScreenWakeCount += 1
+        _ = InteractiveWakePromotion.promote(reason: "MEOW Lock Screen")
+        startLockScreenIdleTimer()
+        Log.info("lockScreen: shown on \(endpointName)")
+        sendLockState()
+        sendVideoState()
+    }
+
+    /// `queue`. Held keys and buttons are released; the picture stops again while locked. The
+    /// receiver is told to reset its input (also when the view ends because the Mac unlocked, so
+    /// nothing it still holds or sends lands in the app in front).
+    private func endLockScreen() {
+        guard stopLockScreenView() else { return }
+        if sessionAuthorization.isAdmitted, lastHello != nil {
+            sendJSONObject(["type": WireMessage.inputReset])
+        }
+        sendVideoState()
+    }
+
+    /// `queue`: the view's own state, with nothing sent. Returns whether a view was on.
+    @discardableResult
+    private func stopLockScreenView() -> Bool {
+        guard lockScreenActive else { return false }
+        lockScreenActive = false
+        lockScreenGeneration = nil
+        lockScreenView = nil
+        lockScreenInputGate.set(view: nil)
+        lockScreenRefusalLogged = false
+        lockScreenFrames.stop()
+        resetCursorEcho()
+        lockScreenIdleTimer?.cancel()
+        lockScreenIdleTimer = nil
+        inputInjector?.cancelActiveInput()
+        nativeAppGestureState.cancelAll()
+        return true
+    }
+
+    /// `queue`: tells the receiver how many keystrokes weren't delivered, and why (never what).
+    private func reportRefusedLockScreenInput(action: String, text: String?, _ refusal: LockScreenTaggedInput.Refusal) {
+        reportRefusedLockScreenInput(keystrokes: LockScreenTaggedInput.keystrokes(action: action, text: text), clicks: 0, refusal)
+    }
+
+    private func reportRefusedLockScreenInput(keystrokes: Int, clicks: Int, _ refusal: LockScreenTaggedInput.Refusal) {
+        // The log says only why, once per view (and once between views): never how many keys or
+        // clicks, or when each one was refused. The counts go to the device alone.
+        if !lockScreenRefusalLogged {
+            lockScreenRefusalLogged = true
+            lockScreenRefusalLogCount += 1
+            Log.info("lockScreen: refused input (\(refusal.rawValue))")
+        }
+        guard keystrokes > 0 || clicks > 0, sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        sendJSONObject(LockScreenWire.inputRefused(count: keystrokes, clicks: clicks, reason: refusal.rawValue))
+    }
+
+    /// `queue`: a `touch` or `pointer` message against the tag rule. False: not delivered (a
+    /// refused press is reported as a click; a move is dropped quietly).
+    private func lockScreenPointerAdmits(type: String, _ obj: [String: Any]) -> Bool {
+        let kind = LockScreenTaggedInput.pointerKind(type: type, phaseOrAction: obj[type == "touch" ? "phase" : "action"] as? String)
+        switch LockScreenTaggedInput.pointerDecision(kind, tag: LockScreenInputTag(message: obj),
+                                                     liveView: liveLockScreenView, unlocked: privacyGate.allowsInput) {
+        case .deliver: return true
+        case .drop: return false
+        case .refuse(let refusal):
+            reportRefusedLockScreenInput(keystrokes: 0, clicks: 1, refusal)
+            return false
+        }
+    }
+
+    private func startLockScreenIdleTimer() {
+        lockScreenIdleTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 10, repeating: 10)
+        let selfBox = self.selfBox
+        timer.setEventHandler {
+            guard let self = selfBox.currentOnQueue(), self.lockScreenActive else { return }
+            if ProcessInfo.processInfo.systemUptime - self.lockScreenLastInput >= LockScreenSessionPolicy.idleTimeout {
+                Log.info("lockScreen: ended (idle)")
+                self.endLockScreen()
+                self.sendLockState()
+            }
+        }
+        timer.resume()
+        lockScreenIdleTimer = timer
+    }
+
+    /// `queue`: touch, pointer or keyboard input while the Mac is locked. Only from the receiver
+    /// showing the lock screen, with this connection's own authorization as always, and only
+    /// what the login window needs (`LockScreenInputFilter`). Unlocked: `receiverInputIsAllowed()`.
+    private func receiverInputIsAllowed(_ event: LockScreenInputEvent) -> Bool {
+        guard !privacyGate.allowsInput else { return receiverInputIsAllowed() }
+        guard lockScreenLive,
+              sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
+              captureStateSnapshot().allowsInput else {
+            inputInjector?.cancelActiveInput()
+            return false
+        }
+        // Every event re-checks who may operate the lock screen, not only when something
+        // announces a change (F5): no longer allowed, the view ends here.
+        if let why = LockScreenEligibility.denial(lockScreenInputs()) {
+            Log.info("lockScreen: ended (\(why.rawValue), on input)")
+            endLockScreen()
+            sendLockState()
+            return false
+        }
+        guard LockScreenInputFilter.allows(event) else { return false }
+        lockScreenLastInput = ProcessInfo.processInfo.systemUptime
+        return true
+    }
+
+    /// The Mac locked, unlocked, switched users or can't say (`MacLockMonitor`, main actor). Not
+    /// unlocked: held keys and buttons are released, window captures and listings stop, and the
+    /// receiver is told (the lock state, then video off, so it drops its last picture) before
+    /// anything else could go. Unlocked again: the next frame is a keyframe and all of it resumes.
+    /// The receiver's control grant (if any) stays with this connection; input waits for the unlock.
+    func macPrivacyChanged(_ state: MacScreenPrivacy) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let self = selfBox.currentOnQueue() else { return }
+            // The lock screen view lasts only while the Mac shows its lock screen: unlocked, the
+            // normal picture and input resume; another user or unknown, it ends.
+            // Keys typed for it and still in flight are refused by their tag
+            // (`LockScreenTaggedInput`), never typed into the app in front.
+            if self.lockScreenActive, state != .locked { self.endLockScreen() }
+            if state.allowsContent {
+                self.needsKeyframe = true
+                self.resetCursorEcho()   // nothing of the pointer went out while locked
+            } else {
+                self.inputInjector?.cancelActiveInput()
+                self.nativeAppGestureState.cancelAll()
+                // Nothing from before the lock is kept to be shown again (a replay or keyframe).
+                self.lastPixelBuffer = nil
+            }
+            self.syncWorkspaceSuspension()
+            guard self.sessionAuthorization.isAdmitted, self.lastHello != nil else { return }
+            self.sendLockState()
+            if !state.allowsContent { self.sendJSONObject(["type": WireMessage.inputReset]) }
+            self.sendVideoState()
         }
     }
 
@@ -1519,6 +1846,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.sendJSONObject(["type": WireMessage.inputReset])
             }
             self.sendAllowInputState(state: state)
+            self.reviewLockScreen()
             if wasGranted {
                 let sink = self.statusSink
                 Task { @MainActor in sink.publishSessionInputGrantChanged(false) }
@@ -1531,8 +1859,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
               info.protocolVersion >= WireProtocol.videoControlWireVersion else { return }
         // Video channel: over QUIC this keeps the state ordered with the
         // frames it describes; over TCP it is the same byte stream as ever.
+        // While the Mac is locked every receiver is told video is off: it drops its last picture
+        // (an older one too, which doesn't know `macLockState`).
         sendJSONObject(["type": WireMessage.videoState,
-                        "enabled": videoEnabled,
+                        "enabled": videoEnabled && (privacyGate.allowsContent || lockScreenLive),
                         "width": capturePixelsWide,
                         "height": capturePixelsHigh], channel: .video)
     }
@@ -1563,17 +1893,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sendAudioState()
             return
         }
-        let config = SCStreamConfiguration()
-        config.capturesAudio = enabled
-        config.sampleRate = 48_000
-        config.channelCount = 2
-        config.excludesCurrentProcessAudio = true
+        let update = updateLiveCapture(stream) { $0.capturesAudio = enabled }
         let selfBox = self.selfBox
         let queue = self.queue
         let audioCaptureEncoder = self.audioCaptureEncoder
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("audio reconfigure failed: \(error)")
             }
@@ -2331,7 +2657,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         if let targetID = InputTargetResolver.displayID(
             mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vdID) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+            inputInjector = makeInputInjector(displayID: targetID)
         }
         // Quality scaling: capture/encode below native when requested — the
         // display itself stays native so window layout is unaffected.
@@ -2504,7 +2830,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
             if let targetID = InputTargetResolver.displayID(
                 mode: .extend, mirrorDisplayID: 0, virtualDisplayID: vd.displayID) {
-                inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+                inputInjector = makeInputInjector(displayID: targetID)
             }
             if UserDefaults.standard.bool(forKey: "testPattern") {
                 let id = vd.displayID
@@ -2692,10 +3018,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let ticket: CaptureStartTicket
         let sessionGeneration: UInt64
         let captureGeneration: UInt64
-        let pixelsWide: Int
-        let pixelsHigh: Int
-        let targetFPS: Int
-        let capturesAudio: Bool
+        let capture: DisplayCaptureSettings
     }
 
     private enum CaptureCommitOutcome: Sendable {
@@ -2749,45 +3072,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             startTrace?.mark("filterReady", "excluded=\(shield.count)")
             let filter = SCContentFilter(display: display, excludingWindows: shield)
-            let config = SCStreamConfiguration()
-            config.width = plan.pixelsWide
-            config.height = plan.pixelsHigh
-            // Ask for double the target even though the source may run slower:
-            // requesting exactly 1/fps makes SCK's rate limiter skip frames that
-            // arrive a hair early (beat frequency) — measured ~51fps instead of
-            // 60 at parity. Same headroom, generalized to the target rate.
-            config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(plan.targetFPS * 2))
-            // 420v matches the encoder's native input — skips a BGRA→YUV conversion
-            // inside VideoToolbox. (`-pixfmt bgra` reverts for A/B testing.)
-            config.pixelFormat = UserDefaults.standard.string(forKey: "pixfmt") == "bgra"
-                ? kCVPixelFormatType_32BGRA
-                : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            // One buffer is held permanently (keyframe replay) and one sits in
-            // the encoder for ~13ms — headroom prevents SCK starvation drops.
-            config.queueDepth = 8
-            config.showsCursor = !localCursor
-            // Mac system audio (M-audio): a copy of system audio, never a
-            // reroute of the Mac's physical output. `capturesAudio` gates SCK's
-            // own audio capture work — off means SCK does none of it, not just
-            // "we ignore the samples" (PROTOCOL.md 5A). Both outputs share this
-            // one SCStream; audio's actual on/off is toggled later at runtime
-            // via `stream.updateConfiguration` rather than tearing this stream
-            // down, and it MUST NOT pick up this Mac's own MeowDisplay audio
-            // (there is none today, but excluding it is the documented,
-            // future-proof way to avoid a feedback loop).
-            if mode == .window {
-                // Window mode: this display stream only carries Mac audio and
-                // keeps the capture lifecycle; video comes from the window
-                // compositor. Tiny and slow, so it costs next to nothing.
-                config.width = 64
-                config.height = 36
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 2)
-                config.showsCursor = false
-            }
-            config.capturesAudio = plan.capturesAudio
-            config.sampleRate = 48_000
-            config.channelCount = 2
-            config.excludesCurrentProcessAudio = true
+            // Window view: this display stream only carries Mac audio and keeps
+            // the capture lifecycle; video comes from the window compositor.
+            let config = plan.capture.configuration
 
             let audioClock = ContinuousClock.now
             await audioCaptureEncoder.reset()
@@ -3000,8 +3287,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         return .stream(CaptureStreamPlan(
             ticket: reservation.ticket, sessionGeneration: sessionGeneration, captureGeneration: generation,
-            pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, targetFPS: targetFPS,
-            capturesAudio: desiredAudioEnabled))
+            capture: DisplayCaptureSettings(pixelsWide: pixelsWide, pixelsHigh: pixelsHigh, targetFPS: targetFPS,
+                                            capturesAudio: desiredAudioEnabled, showsCursor: !localCursor,
+                                            audioCarrierOnly: mode == .window,
+                                            pixelFormat: DisplayCaptureSettings.pixelFormat())))
     }
 
     /// `queue` only: the start's stream exists and is about to start;
@@ -3048,7 +3337,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         _ = captureOwnership.commit(plan.ticket)
         // What the stream was built with. An audio toggle while it was
         // starting only recorded `desiredAudioEnabled`; apply it now.
-        audioEnabled = plan.capturesAudio
+        audioEnabled = plan.capture.capturesAudio
+        liveCapture = LiveCaptureConfiguration(stream: stream, settings: plan.capture)
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
         lastCursorSent = (-1, -1, false)
         lastCursorPane = nil
@@ -3074,12 +3364,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         sendExtendShapeState()
         applyEffectiveFPSChange()   // a max-FPS change while it was starting
-        Log.info("capture started: \(plan.pixelsWide)x\(plan.pixelsHigh) display \(displayID) "
+        Log.info("capture started: \(plan.capture.pixelsWide)x\(plan.capture.pixelsHigh) display \(displayID) "
             + "generation \(plan.captureGeneration) mode \(mode.rawValue) localCursor=\(localCursor) "
             + "video=\(videoEnabled) audio=\(audioEnabled)")
         let kind = lastHello?.kind ?? "device"
         return .committed(status: "\(mode == .extend ? "Extending to" : mode == .window ? "Showing windows on" : "Mirroring to") \(kind) "
-            + "(\(plan.pixelsWide)×\(plan.pixelsHigh))")
+            + "(\(plan.capture.pixelsWide)×\(plan.capture.pixelsHigh))")
     }
 
     // PHASE-1 NOTE: this used to read `connection`/`connectionReady`
@@ -3135,6 +3425,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func stopOnQueue() {
+        endLockScreen()
         stopWorkspaceEngine()
         windowBrowser?.stop()
         windowBrowser = nil
@@ -3182,6 +3473,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         activeUSBBridgeTLS = nil
         videoEncoder.invalidate()
         cancelDropReplayTimer()
+        cancelHeldFrame()
         // Unblock a start() that is still waiting for the hello or admission.
         helloContinuation?.resume(throwing: CancellationError())
         helloContinuation = nil
@@ -3286,6 +3578,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             self.inputInjector?.cancelActiveInput()
             self.sendJSONObject(["type": WireMessage.inputReset])
+            self.reviewLockScreen()
         }
     }
 
@@ -3302,7 +3595,33 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             inputInjector?.cancelActiveInput()
             return false
         }
+        // Never into the lock screen or a window behind it. A receiver showing the lock screen
+        // keeps what it holds (its own input goes by `receiverInputIsAllowed(_:)`).
+        guard privacyGate.allowsInput else {
+            if !lockScreenActive { inputInjector?.cancelActiveInput() }
+            return false
+        }
         return true
+    }
+
+    /// Side-effect free and safe on any thread (every part is lock-protected or a defaults read):
+    /// whether the receiver on connection `generation` may still change this Mac right now. The
+    /// conditions of `receiverInputIsAllowed()` (Allow Input on, that same connection admitted and
+    /// granted, capture state allows input) without cancelling anything, plus this login session on
+    /// the console and no Privacy Shield unlock in progress. Fill/Restore on Mac asks it right before
+    /// its first Accessibility write, after the message itself passed `receiverInputIsAllowed()`.
+    func controlStillAllowed(generation: UInt64) -> Bool {
+        sessionAuthorization.isAdmitted(generation: generation)
+            && sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
+            && captureStateSnapshot().allowsInput
+            && LoginSessionConsole.shared.isOnConsole
+            && !PrivacyShieldWindows.isUnlocking
+    }
+
+    /// Answers a `windowFrame` the Mac won't act on (`queue` only).
+    private func replyWindowFrame(_ obj: [String: Any], _ result: WindowFrameResult) {
+        guard let r = WindowFrameRequest.parse(obj) else { return }
+        sendJSONObject(WindowFrameWire.resultMessage(r.op, window: r.windowID, req: r.req, result: result, restorable: false))
     }
 
     /// M4: the keyboard's own, stricter input gate. Touch/Pencil/scroll keep
@@ -3807,13 +4126,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             + "attempts at \(capturePixelsWide)x\(capturePixelsHigh)@\(captureTargetFPS) — "
             + "recovering once at \(downgraded) FPS")
         needsKeyframe = true
-        let config = SCStreamConfiguration()
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(downgraded * 2))
+        let update = updateLiveCapture(stream) { $0.targetFPS = downgraded }
         let selfBox = self.selfBox
         let queue = self.queue
         Task {
             do {
-                try await stream.updateConfiguration(config)
+                try await update?.value
             } catch {
                 Log.info("failure-streak SCK reconfigure failed: \(error)")
             }
@@ -3958,7 +4276,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             mirrorDisplayID: display.displayID,
             virtualDisplayID: nil
         ) {
-            inputInjector = InputInjector(displayID: targetID, sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+            inputInjector = makeInputInjector(displayID: targetID)
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
@@ -4950,6 +5268,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func pollCursorPosition() {
+        // Locked and not showing the lock screen here: nothing, and nothing counts as sent.
+        // (The sprite's hash is left alone here: resetting it on every poll would re-encode the
+        // sprite 30 times a second while locked. Begin, end and unlock reset it.)
+        guard cursorEchoAllowed else {
+            lastCursorSent = (-1, -1, false)
+            lastCursorPane = nil
+            return
+        }
         // Pointer position is screen content: admitted connections only.
         guard transportController.isReady, sessionAuthorization.isAdmitted, captureDisplayID != 0,
               let loc = CGEvent(source: nil)?.location else {
@@ -4965,11 +5291,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // With the pane's scale and rotation: the canvas isn't the Mac display's shape, so
                 // the sprite's display-normalized size would stretch it (PROTOCOL.md 6.10).
                 let scaleChanged = lastCursorPane.map { abs($0.kx - p.kx) > $0.kx * 0.01 || $0.rotation != p.rotation } ?? true
-                if !lastCursorSent.visible || abs(p.x - lastCursorSent.x) > 0.0004 || abs(p.y - lastCursorSent.y) > 0.0004 || scaleChanged {
-                    lastCursorSent = (p.x, p.y, true)
+                let wire = CursorWirePosition(x: p.x, y: p.y)
+                if !lastCursorSent.visible || wire != CursorWirePosition(x: lastCursorSent.x, y: lastCursorSent.y) || scaleChanged {
+                    lastCursorSent = (wire.x, wire.y, true)
                     lastCursorPane = (p.kx, p.rotation)
-                    sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
-                                      p.x, p.y, p.kx, p.ky, p.rotation))
+                    sendCursor(wire.fields + String(format: ",\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
+                                                    p.kx, p.ky, p.rotation))
                 }
             } else if lastCursorSent.visible {
                 lastCursorSent.visible = false
@@ -4985,12 +5312,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         if bounds.contains(loc) {
-            let x = (loc.x - bounds.minX) / bounds.width
-            let y = (loc.y - bounds.minY) / bounds.height
-            if !lastCursorSent.visible
-                || abs(x - lastCursorSent.x) > 0.0004 || abs(y - lastCursorSent.y) > 0.0004 {
-                lastCursorSent = (x, y, true)
-                sendCursor(String(format: "\"x\":%.4f,\"y\":%.4f,\"v\":1", x, y))
+            // Every change the wire can carry is sent (CursorWirePosition), so slow moves
+            // aren't held back and the receiver rests exactly where the Mac cursor stopped.
+            let wire = CursorWirePosition(x: (loc.x - bounds.minX) / bounds.width,
+                                          y: (loc.y - bounds.minY) / bounds.height)
+            if !lastCursorSent.visible || wire != CursorWirePosition(x: lastCursorSent.x, y: lastCursorSent.y) {
+                lastCursorSent = (wire.x, wire.y, true)
+                sendCursor(wire.fields + ",\"v\":1")
             }
         } else if lastCursorSent.visible {
             lastCursorSent.visible = false
@@ -5021,6 +5349,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastCursorPane: (kx: Double, rotation: Int)?
 
     private func sendCursor(_ fields: String) {
+        guard cursorEchoAllowed else { return }
         cursorSeq &+= 1
         sendJSONFrame("{\"type\":\"cursor\",\(fields),\"s\":\(cursorSeq)}")
     }
@@ -5105,10 +5434,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             size.height > 0 ? hot.y / size.height : 0,
             png.base64EncodedString())
         let selfBox = self.selfBox
-        queue.async { selfBox.currentOnQueue()?.sendJSONFrame(msg) }
+        queue.async { selfBox.currentOnQueue()?.sendCursorSprite(msg) }
         #if DEBUG
         logCursorTraceIfDue(reason: "cursorImg sent: \(png.count) bytes size=\(size) hot=\(hot)")
         #endif
+    }
+
+    /// `queue`: the sprite, under the same rule as the position (`cursorEchoAllowed`). Dropped, it
+    /// is sent again once allowed: the lock screen view and the unlock reset `lastCursorPNGHash`.
+    private func sendCursorSprite(_ msg: String) {
+        guard cursorEchoAllowed else { return }
+        sendJSONFrame(msg)
     }
 
     /// Re-renders `image` into a smaller bitmap, preserving aspect ratio, so
@@ -5216,6 +5552,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // this Mac (PrivacyShieldPolicy.messagesAllowedWhileUnlocking).
         if PrivacyShieldWindows.isUnlocking, !PrivacyShieldPolicy.handlesWhileUnlocking(type) {
             Log.info("privacy shield: \(type) from a device dropped while the Mac asks for its password")
+            // Fill/Restore on Mac is answered (nothing is done), so the device can say why.
+            if type == WindowFrameWire.request { replyWindowFrame(obj, .privacyShield) }
+            return
+        }
+        // Lock episodes (PROTOCOL.md 6.19): scroll, Pencil, gestures and window or menu actions
+        // made while the device saw the Mac locked (tagged), or arriving while a lock screen view
+        // is live, never act, whenever they arrive. Touch, pointer and keyboard check their tag
+        // below, message by message.
+        if LockScreenInputTag.otherTypes.contains(type),
+           !LockScreenTaggedInput.otherInputAdmits(tag: LockScreenInputTag(message: obj), liveView: liveLockScreenView) {
+            if type == WireMessage.smartTouchProbe, let id = obj["id"] as? Int {
+                sendJSONObject(["type": WireMessage.smartTouchProbeResult, "id": id, "scrollable": false, "windowDrag": false])
+            }
             return
         }
         switch type {
@@ -5440,11 +5789,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
         case "touch":
-            guard receiverInputIsAllowed() else { return }
+            guard lockScreenPointerAdmits(type: "touch", obj), receiverInputIsAllowed(.touch) else { return }
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
                let y = obj["y"] as? Double {
-                inputInjector?.handleTouch(phase: phase, x: x, y: y)
+                inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
+                    inputInjector?.handleTouch(phase: phase, x: x, y: y)
+                }
                 if let t = obj["t"] as? Double {
                     let delta = Date().timeIntervalSince1970 * 1000 - t
                     if delta > -50, delta < 1000 {
@@ -5461,26 +5812,35 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "pointer":
             // M7: absolute/relative cursor movement decoupled from button
             // state, plus explicit left/right down/up with click counts.
-            guard receiverInputIsAllowed(), let action = obj["action"] as? String else { return }
-            switch action {
-            case "move":
-                if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
-                    inputInjector?.handlePointerMove(x: x, y: y)
+            guard let action = obj["action"] as? String else { return }
+            let pointerEvent: LockScreenInputEvent = switch action {
+            case "move", "moveRelative": .pointerMove
+            case "down": PointerButton.parse(obj["button"]).map { .pointerButton($0) } ?? .other
+            case "up": .release
+            default: .other
+            }
+            guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
+            inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
+                switch action {
+                case "move":
+                    if let x = obj["x"] as? Double, let y = obj["y"] as? Double {
+                        inputInjector?.handlePointerMove(x: x, y: y)
+                    }
+                case "moveRelative":
+                    if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
+                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
+                    }
+                case "down":
+                    if let button = PointerButton.parse(obj["button"]) {
+                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                    }
+                case "up":
+                    if let button = PointerButton.parse(obj["button"]) {
+                        inputInjector?.handlePointerUp(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                    }
+                default:
+                    break   // unknown pointer action from a newer peer — ignore
                 }
-            case "moveRelative":
-                if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                    inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
-                }
-            case "down":
-                if let button = PointerButton.parse(obj["button"]) {
-                    inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
-                }
-            case "up":
-                if let button = PointerButton.parse(obj["button"]) {
-                    inputInjector?.handlePointerUp(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
-                }
-            default:
-                break   // unknown pointer action from a newer peer — ignore
             }
         case "pencil":
             guard receiverInputIsAllowed() else { return }
@@ -5538,42 +5898,77 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // the capture lifecycle to be fully running, not merely
             // "recovering" (see receiverKeyboardInputIsAllowed), on top of
             // the usual Allow Input requirement.
-            guard receiverKeyboardInputIsAllowed(), let action = obj["action"] as? String else { return }
-            switch action {
-            case "text":
-                if let text = obj["text"] as? String {
-                    inputInjector?.handleKeyboardText(text)
-                }
-            case "press":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    #if DEBUG
-                    if usage == .deleteOrBackspace {
-                        Log.info("keyboardDebug: specialPress received usage=42")
-                    }
-                    #endif
-                    inputInjector?.handleKeyboardPress(
-                        usage, modifiers: obj["modifiers"] as? [String] ?? [])
-                }
-            case "down":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
-                                                      isRepeat: obj["repeat"] as? Bool == true)
-                }
-            case "up":
-                if let usage = HIDKeyUsage.parse(obj["usage"]) {
-                    inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [])
-                }
-            case "modifierDown", "modifierUp":
-                if let name = obj["modifier"] as? String {
-                    inputInjector?.handleModifier(name: name, down: action == "modifierDown")
-                }
-            case "cancel":
-                inputInjector?.cancelActiveInput()
-            default:
-                break   // unknown keyboard action from a newer peer — ignore
+            guard let action = obj["action"] as? String else { return }
+            // Typed for the lock screen (tagged) goes only to a live lock screen view; untagged
+            // typing while it is live is refused. Refused keystrokes are reported, never dropped
+            // silently. Releases always go.
+            let tag = LockScreenInputTag(message: obj)
+            if let refusal = LockScreenTaggedInput.refusal(
+                action: action, tag: tag, liveView: liveLockScreenView, unlocked: privacyGate.allowsInput) {
+                reportRefusedLockScreenInput(action: action, text: obj["text"] as? String, refusal)
+                return
             }
-            // The caret just moved (or is about to): read it soon.
-            textCaretFollower.noteInput()
+            guard receiverKeyboardInputIsAllowed() else { return }
+            if !privacyGate.allowsInput {
+                let modifiers = obj["modifiers"] as? [String] ?? []
+                let keyEvent: LockScreenInputEvent = switch action {
+                case "text": (obj["text"] as? String).map { .text($0) } ?? .other
+                case "press", "down": HIDKeyUsage.parse(obj["usage"]).map { .key($0, modifiers: modifiers) } ?? .other
+                case "up", "modifierUp", "cancel": .release
+                case "modifierDown": (obj["modifier"] as? String).map { .modifier($0) } ?? .other
+                default: .other
+                }
+                guard receiverInputIsAllowed(keyEvent) else { return }
+            }
+            inputInjector?.perform(for: InputEpisode(tag: tag)) {
+                switch action {
+                case "text":
+                    if let text = obj["text"] as? String {
+                        inputInjector?.handleKeyboardText(text)
+                    }
+                case "press":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        #if DEBUG
+                        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
+                            Log.info("keyboardDebug: specialPress received usage=42")
+                        }
+                        #endif
+                        inputInjector?.handleKeyboardPress(
+                            usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                            exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "down":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        inputInjector?.handleKeyboardDown(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                          isRepeat: obj["repeat"] as? Bool == true,
+                                                          exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "up":
+                    if let usage = HIDKeyUsage.parse(obj["usage"]) {
+                        inputInjector?.handleKeyboardUp(usage: usage, modifiers: obj["modifiers"] as? [String] ?? [],
+                                                        exactModifiers: ExactKeyModifiersWire.isExact(obj))
+                    }
+                case "modifierDown", "modifierUp":
+                    if let name = obj["modifier"] as? String {
+                        inputInjector?.handleModifier(name: name, down: action == "modifierDown")
+                    }
+                case "cancel":
+                    inputInjector?.cancelActiveInput()
+                default:
+                    break   // unknown keyboard action from a newer peer — ignore
+                }
+            }
+            // The caret just moved (or is about to): read it soon. Never on the lock screen.
+            if privacyGate.allowsInput { textCaretFollower.noteInput() }
+        case LockScreenWire.request:
+            guard sessionAuthorization.isAdmitted else { return }
+            if obj["show"] as? Bool == true {
+                beginLockScreen()
+            } else {
+                if lockScreenActive { Log.info("lockScreen: closed by the receiver") }
+                endLockScreen()
+                sendLockState()
+            }
         case WireMessage.keyboardState:
             // Optional (PROTOCOL.md 6.11). Reached only for an admitted
             // session (gate above); the follower re-checks control on every
@@ -5588,8 +5983,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
             // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
             let phase = captureStateSnapshot().phase
-            guard videoEnabled, sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
-            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+            guard videoEnabled, sessionAuthorization.isAdmitted, privacyGate.allowsContent,
+                  phase != .pausing, phase != .paused, phase != .stopped else { return }
+            // An app opens only if control still holds right before (asked again, side-effect free).
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            ensureWindowBrowser().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed()) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case LockMacWire.request:
             // Admitted sessions only (gate above), every mode; needs control.
             let req = obj["req"] as? Int
@@ -5602,6 +6003,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             guard sessionAuthorization.isAdmitted else { return }
+            if !privacyGate.allowsContent { reply(.locked); return }   // already locked: nothing to do
             guard receiverInputIsAllowed() else { reply(.control); return }
             Log.info("lock mac: requested by the device")
             DispatchQueue.main.async { MacScreenLock.lock(done: reply) }
@@ -5609,14 +6011,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
             let phase = captureStateSnapshot().phase
-            guard sessionAuthorization.isAdmitted, phase != .pausing, phase != .paused, phase != .stopped else { return }
+            guard sessionAuthorization.isAdmitted, privacyGate.allowsContent,
+                  phase != .pausing, phase != .paused, phase != .stopped else { return }
             ensureFileBrowser().handle(obj, inputGranted: receiverInputIsAllowed())
         case ClipboardWire.type:
             // Admitted sessions only (gate above); every mode. The hub on the main actor decides.
+            // Nothing goes to or comes from the Mac's clipboard while it's locked.
+            guard privacyGate.allowsContent else { return }
             let box = WorkspaceMessageBox(value: obj)
             let generation = activeConnectionGeneration
             let selfBox = self.selfBox
             Task { @MainActor in selfBox.resolve()?.onClipboardMessage?(generation, box.value) }
+        case WindowFrameWire.request:
+            // Fill Window on Mac / Restore Previous Size on Mac (admitted sessions only, gate above): the
+            // only change to a real Mac window's size, from a pane's explicit menu item. Needs control
+            // (asked again, side-effect free, right before the Mac acts) and a Window-mode pane showing
+            // that window. Always answered, so the device never guesses.
+            guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            guard receiverInputIsAllowed() else { replyWindowFrame(obj, .control); return }
+            guard mode == .window, let engine = workspaceEngine else { replyWindowFrame(obj, .stale); return }
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            engine.handleWindowFrame(obj, inputGranted: true) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case WireMessage.workspaceRequest, WireMessage.workspaceFocus, WireMessage.windowAction,
              WireMessage.menuRequest, WireMessage.menuPress, WireMessage.workspaceRetry, WireMessage.workspaceBackdropRequest:
             // Admitted sessions only (gate above). Window metadata exists only
@@ -5725,7 +6143,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   info.protocolVersion >= WireProtocol.streamingProfileRequestWireVersion,
                   let raw = obj["profile"] as? String,
                   let profile = StreamingProfile(rawValue: raw) else { return }
-            let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:)) ?? .auto
+            let custom = (obj["customFrameRate"] as? String).flatMap(CustomFrameRateSelection.init(rawValue:))
             let streamingProfileSelfBox = self.selfBox
             Task { @MainActor in
                 guard let self = streamingProfileSelfBox.resolve() else { return }
@@ -5803,9 +6221,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // against an in-flight or missing cancellation.
             inputInjector?.cancelActiveInput()
             let sessionInputGrant = self.sessionInputGrant
+            let privacyGate = self.privacyGate
             Task { @MainActor in
+                // Locked in the meantime: never onto the lock screen.
                 guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
-                                                           sessionGranted: sessionInputGrant.get()) else { return }
+                                                           sessionGranted: sessionInputGrant.get()),
+                      privacyGate.allowsInput else { return }
                 SystemGestureInvoker.invoke(gesture)
             }
         case "kf":
@@ -6012,6 +6433,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
         textCaretFollower.stop()
+        // The lock screen view belongs to the connection that asked: a new one starts without it
+        // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
+        if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
+        lockScreenShowLimit.reset()
         // No admitted receiver: window streams stop until one is admitted again.
         workspaceEngine?.setSuspended(true)
         windowBrowser?.setActive(false)
@@ -6239,7 +6664,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // single choke point to resync frame ADMISSION to match, so
         // VideoToolbox never actually receives more than `fps` submissions/
         // sec regardless of how fast ScreenCaptureKit delivers frames.
-        frameRateLimiter.reconfigure(fps: fps)
+        frameAdmission.reconfigure(fps: fps)
         Log.info("receiver codecs: \(lastHello?.codecs?.joined(separator: ", ") ?? "h264") "
             + "codec preference: \(codecPreference.rawValue) effective codec: \(codec.wireValue) reason: \(reason)")
         Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
@@ -6330,24 +6755,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // so this guard — not stream teardown — is what makes "no
             // encoding, no network video packets" true then.
             guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
-            // Rate-gate BEFORE backpressure: SCK's capture headroom means
-            // frames can arrive up to ~2x the target rate, and neither
-            // `minimumFrameInterval` nor `kVTCompressionPropertyKey_
-            // ExpectedFrameRate` stops VideoToolbox from being handed more
-            // than the authoritative effective FPS — see `FrameRateLimiter`.
-            // A frame the limiter would reject anyway was never going to be
-            // encoded, so it must not count as an enc↓/net↓ backpressure
-            // drop (that mislabels normal rate-limiting as a stalled
-            // pipeline) or arm the drop-replay timer for a frame nobody
-            // wanted in the first place.
-            guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
-            #if DEBUG
-            debugAdmittedWindow += 1
-            #endif
-            if shouldDropFrame(reason: "pending_encode") { return }  // encoder busy
-            if shouldDropFrame(reason: "pending_sends") { return }   // TCP send queue full
-
-            encode(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer), generation: generation, connectionGeneration: activeConnectionGeneration)
+            offerLatestFrame(pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                             generation: generation, source: .display)
 
         case .audio:
             guard transportController.isReady, audioEnabled, sessionAuthorization.isAdmitted else { return }
@@ -6397,6 +6806,89 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Where a held frame came from, so its retry passes the same gates the original did.
+    private enum FrameSource { case display, workspace }
+
+    /// The frame `frameAdmission` holds. Its pixels are `lastPixelBuffer`.
+    private struct HeldFrame {
+        let pts: CMTime
+        let generation: UInt64
+        let source: FrameSource
+    }
+
+    /// `queue` only. The newest captured frame, past its source's own gates:
+    /// through the rate limit and the pipeline's backpressure to the encoder.
+    ///
+    /// Rate-gate BEFORE backpressure: SCK's capture headroom means frames can
+    /// arrive up to ~2x the target rate, and neither `minimumFrameInterval`
+    /// nor `kVTCompressionPropertyKey_ExpectedFrameRate` stops VideoToolbox
+    /// from being handed more than the authoritative effective FPS (see
+    /// `FrameRateLimiter`). A frame the limit turns away must not count as an
+    /// enc↓/net↓ backpressure drop (that mislabels normal rate limiting as a
+    /// stalled pipeline) or arm the drop-replay timer. It is held instead,
+    /// and goes out if nothing newer does (see `FrameAdmission`).
+    private func offerLatestFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, source: FrameSource) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let held = HeldFrame(pts: pts, generation: generation, source: source)
+        if case .hold(let retryAt) = frameAdmission.offer(now: now) {
+            return holdLatestFrame(held, retryAt: retryAt, now: now)
+        }
+        cancelHeldFrame()
+        #if DEBUG
+        debugAdmittedWindow += 1
+        #endif
+        if shouldDropFrame(reason: "pending_encode") {  // encoder busy
+            // The next captured frame would take its place, but there may be
+            // none: this one may be the last change on screen.
+            if case .hold(let retryAt) = frameAdmission.encoderBusy(now: now) {
+                holdLatestFrame(held, retryAt: retryAt, now: now)
+            }
+            return
+        }
+        if shouldDropFrame(reason: "pending_sends") { return }  // TCP send queue full; the drop replay retries
+        encode(pixelBuffer, pts: pts, generation: generation, connectionGeneration: activeConnectionGeneration)
+    }
+
+    /// `queue` only. Keeps `frame` as the one to send if nothing newer goes
+    /// out, and arms its retry unless one is armed already.
+    private func holdLatestFrame(_ frame: HeldFrame, retryAt: TimeInterval?, now: TimeInterval) {
+        heldFrame = frame
+        guard let retryAt else { return }
+        heldFrameTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + max(retryAt - now, 0), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.retryHeldFrame() }
+        timer.resume()
+        heldFrameTimer = timer
+    }
+
+    /// `queue` only. Nothing newer went out since the frame was held: the
+    /// picture stopped changing. Offers it again through its source's gates.
+    private func retryHeldFrame() {
+        heldFrameTimer = nil
+        let held = heldFrame
+        heldFrame = nil
+        guard frameAdmission.retryFired(), let held, let pixelBuffer = lastPixelBuffer, !stopped,
+              transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
+        switch held.source {
+        case .display:
+            guard mode != .window, !PrivacyShieldWindows.isUnlocking else { return }
+        case .workspace:
+            guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
+                  captureStateSnapshot().phase == .running else { return }
+        }
+        offerLatestFrame(pixelBuffer, pts: held.pts, generation: held.generation, source: held.source)
+    }
+
+    /// `queue` only. The latest frame went out, or nothing may go out any
+    /// more: nothing is held and no retry is armed.
+    private func cancelHeldFrame() {
+        frameAdmission.clearHold()
+        heldFrame = nil
+        heldFrameTimer?.cancel()
+        heldFrameTimer = nil
+    }
+
     private func isPipelineBackedUp() -> Bool {
         pipelineState.isBackedUp()
     }
@@ -6440,10 +6932,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Only arm the replay for genuine network backpressure. With
         // `maxPendingEncodes` now a real (>1) pipeline and the
         // FrameRateLimiter already gating admission upstream, an
-        // encoder-busy drop here means the next rate-eligible SCK sample —
-        // due in a few ms, not 30 — will simply flow through normally once
-        // a slot frees. Replaying it too would bypass the limiter and
-        // inject an extra, arbitrarily-timed frame outside its cadence.
+        // encoder-busy drop here is usually followed by the next
+        // rate-eligible frame once a slot frees. Replaying it too would
+        // bypass the limiter and inject an extra, arbitrarily-timed frame
+        // outside its cadence; if no frame follows, `offerLatestFrame`
+        // holds this one and sends it through the limiter instead.
         // A send-queue drop is different: TCP backpressure on a real link
         // can outlast a frame interval, so proactively retrying once it
         // clears (rather than waiting on the limiter's next tick) still
@@ -6541,6 +7034,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // alone). It is a genuine encode success — counted above — but
             // it must never be published as if the current session made it.
             guard let sessionCodec else { return }
+            let keyframe = MacSender.isKeyframe(buffer)
             guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return }
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
@@ -6558,13 +7052,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let self = selfBox.currentOnQueue(),
                       generation == self.captureGenerationNow,
                       connectionGeneration == self.activeConnectionGeneration else { return }
-                self.sendFramed(framedForSend)
+                // Locked: only the lock screen view's own frames (encoded after it began, keyframe first).
+                let lockScreenFrame = !self.privacyGate.allowsContent && self.lockScreenLive
+                    && self.lockScreenFrames.accepts(encodedAtMs: capturedAtMs, keyframe: keyframe)
+                self.sendFramed(framedForSend, lockScreenFrame: lockScreenFrame)
             }
         }
         if submitStatus == noErr {
             // Encode submission commits this frame to the pipeline; stale in-flight
             // encodes started before a drop won't reach here again, so cancel replay.
             cancelDropReplayTimer()
+            // Every encode is of the newest frame, so nothing older stays held.
+            cancelHeldFrame()
             #if DEBUG
             pipelineState.incrementDebugVTSubmitted()
             #endif
@@ -6821,19 +7320,49 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
+        welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: WindowStreamingPolicy.isAllowed())
+        sendJSONObject(welcome)
+        // Connected while locked (Wake & Connect, a reconnect): said at once, before anything else.
+        if !privacyGate.allowsContent { sendLockState() }
+    }
+
+    /// `welcome.features`: what this Mac offers beyond its `pv`. A receiver
+    /// reads at most 16 entries, so keep the list short. Window-mode features,
+    /// Fill/Restore on Mac (`windowFrame`) among them, only while Window mode is allowed.
+    static func welcomeFeatures(windowStreamingAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
-        if WindowStreamingPolicy.isAllowed() {
+        if windowStreamingAllowed {
             features.insert(WindowWorkspaceWire.welcomeFeature, at: 0)
             features.append(AppMenuWire.welcomeFeature)
             features.append(WindowCloseWire.welcomeFeature)
+            features.append(WindowWorkspaceWire.floatFeature)
+            features.append(WindowWorkspaceWire.floatLiftFeature)
+            features.append(WindowFrameWire.welcomeFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
-        welcome["features"] = features
-        sendJSONObject(welcome)
+        features.append(ExactKeyModifiersWire.welcomeFeature)
+        features.append(MacLockWire.welcomeFeature)
+        features.append(LockScreenWire.welcomeFeature)
+        return features
     }
 
     private func sendStreamingProfileState() {
-        sendJSONFrame("{\"type\":\"\(WireMessage.streamingProfileState)\",\"profile\":\"\(streamingProfile.rawValue)\"}")
+        sendJSONFrame(StreamingProfileStateUpdate(
+            profile: streamingProfile, mode: reportedStreamingMode,
+            customFrameRate: reportedCustomFrameRate).wireJSON)
+    }
+
+    /// Re-reports the streaming settings this session runs with, after the
+    /// Mac declined or didn't need to apply a receiver's request: the
+    /// receiver's picker returns to what is actually in effect, without
+    /// rebuilding anyone's stream (issue #142).
+    func resendStreamingSettingsState() {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let sender = selfBox.currentOnQueue(), sender.lastHello != nil else { return }
+            sender.sendStreamingProfileState()
+            sender.sendStreamingPriorityState()
+        }
     }
 
     private func sendStreamingPriorityState() {
@@ -6934,6 +7463,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func sendJSONObject(_ object: [String: Any], channel: TransportChannel = .control) {
+        // Locked: window lists, titles, stills, icons, Files, Clipboard and menus stay on the Mac.
+        guard LockedContentPolicy.allows(type: object["type"] as? String, privacy: privacyGate.state) else { return }
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         guard data.count >= ControlChunkWire.threshold else {
             guard let json = String(data: data, encoding: .utf8) else { return }
@@ -6988,11 +7519,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (video encode completion, audio/PCM config+packet sends) already runs
     /// inside a `queue.async`/on-queue callback, so reading `currentConnection`/
     /// `isReady` directly here is safe — no change needed.
-    private func sendFramed(_ payload: Data, kind: String = "video") {
+    private func sendFramed(_ payload: Data, kind: String = "video", lockScreenFrame: Bool = false) {
         // Last line for every media frame, video and audio alike: only the
         // live admitted connection receives any.
         guard transportController.currentConnection != nil, transportController.isReady,
               sessionAuthorization.isAdmitted else { return }
+        // Locked: no picture or sound leaves, including a frame captured or queued just before;
+        // only the lock screen view's video, which the encoder output vetted (`LockScreenFrameGate`).
+        guard privacyGate.allowsContent
+              || (kind == "video" && lockScreenFrame && lockScreenLive) else { return }
         // Media rides its own channel: over QUIC, Video and Audio are
         // independent streams, and the in-flight accounting is per channel
         // (video backpressure never gates audio) and per transport epoch (a
@@ -7345,7 +7880,8 @@ extension MacSender {
     /// `queue` only.
     private func installWorkspaceEngine(hostID: String, canvas: CGSize, fps: Int) {
         stopWorkspaceEngine()
-        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser())
+        let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser(),
+                                           allowFloats: lastHello?.supportsWindowFloats == true)
         let selfBox = self.selfBox
         let queue = self.queue
         // Only the CURRENT engine may reach this session: a stopped one's late
@@ -7378,7 +7914,7 @@ extension MacSender {
         workspaceEngine = engine
         // Input is mapped per tile to the window under it; the display id is
         // only the fallback for releases.
-        inputInjector = InputInjector(displayID: CGMainDisplayID(), sessionInputGrant: sessionInputGrant, eventSink: inputEventSink)
+        inputInjector = makeInputInjector(displayID: CGMainDisplayID())
         inputInjector?.setTargetMapper(engine)
         engine.start()
     }
@@ -7435,8 +7971,10 @@ extension MacSender {
     func syncWorkspaceSuspension() {
         let phase = captureStateSnapshot().phase
         let paused = phase == .pausing || phase == .paused || phase == .stopped
-        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted)
-        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted)
+        // Locked: every window capture and listing stops (and is started again on unlock).
+        let hidden = !privacyGate.allowsContent
+        workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted || hidden)
+        windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted && !hidden)
         // Without Screen Recording there is nothing to keep the display awake for.
         streamingDisplayAwake.set(watching: videoEnabled && !paused && sessionAuthorization.isAdmitted
                                   && CGPreflightScreenCaptureAccess())
@@ -7462,11 +8000,10 @@ extension MacSender {
         lastCaptureAt = Date()
         capFrames += 1
         guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
-        guard frameRateLimiter.shouldAdmit(now: ProcessInfo.processInfo.systemUptime) else { return }
-        if shouldDropFrame(reason: "pending_encode") { return }
-        if shouldDropFrame(reason: "pending_sends") { return }
-        encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()), generation: captureGenerationNow,
-               connectionGeneration: activeConnectionGeneration)
+        // The engine composes only when a window changed, so a composed frame
+        // the limit turns away may be the last one for a while: it is held.
+        offerLatestFrame(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
+                         generation: captureGenerationNow, source: .workspace)
     }
 
     /// The receiver rotated or resized: same tiles and windows, a new
@@ -7531,9 +8068,7 @@ extension MacSender {
             }
             _ = sender.updateCaptureState { $0.captureStarted() }
             if sender.inputInjector == nil {
-                sender.inputInjector = InputInjector(displayID: CGMainDisplayID(),
-                                                     sessionInputGrant: sender.sessionInputGrant,
-                                                     eventSink: eventSink)
+                sender.inputInjector = sender.makeInputInjector(displayID: CGMainDisplayID())
             }
             return generation
         }
@@ -7555,6 +8090,56 @@ extension MacSender {
     }
 
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
+
+    /// Changes the device's permit without the review a real change runs (F5: the per-event check
+    /// alone must refuse).
+    func setLockScreenPermitWithoutReviewForTesting(policy: PeerInputRequestPolicy, allowed: Bool) async throws {
+        try await onQueue { $0.lockScreenPermit = (policy, allowed, false) }
+    }
+
+    /// Lets a test show the lock screen again on the same connection without waiting out the
+    /// rate limit (which has its own tests).
+    func resetLockScreenShowLimitForTesting() async throws {
+        try await onQueue { $0.lockScreenShowLimit.reset() }
+    }
+
+    var lockScreenRefusalLogCountForTesting: Int {
+        get async throws { try await onQueue { $0.lockScreenRefusalLogCount } }
+    }
+
+    var lockScreenWakeCountForTesting: Int {
+        get async throws { try await onQueue { $0.lockScreenWakeCount } }
+    }
+
+    /// Whether the encoder output would hand a fresh lock-screen keyframe to `sendFramed` now.
+    func lockScreenFramesWouldSendForTesting() async throws -> Bool {
+        try await onQueue { sender in
+            !sender.privacyGate.allowsContent && sender.lockScreenLive
+                && sender.lockScreenFrames.accepts(encodedAtMs: Int64(Date().timeIntervalSince1970 * 1000) + 1, keyframe: true)
+        }
+    }
+
+    /// The cursor position and sprite paths as the pollers reach them (`queue`).
+    func sendCursorForTesting(_ fields: String) async throws {
+        try await onQueue { $0.sendCursor(fields) }
+    }
+
+    func sendCursorSpriteForTesting(_ json: String) async throws {
+        try await onQueue { $0.sendCursorSprite(json) }
+    }
+
+    /// Marks a position and sprite as already sent, as a poll would.
+    func markCursorSentForTesting() async throws {
+        try await onQueue { sender in
+            sender.lastCursorSent = (0.5, 0.5, true)
+            sender.lastCursorPNGHash = 42
+        }
+    }
+
+    /// Whether the next poll sends the position and sprite again.
+    func cursorEchoWillResendForTesting() async throws -> Bool {
+        try await onQueue { sender in !sender.lastCursorSent.visible && sender.lastCursorPNGHash == 0 }
+    }
 }
 #endif
 

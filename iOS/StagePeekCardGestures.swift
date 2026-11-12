@@ -53,6 +53,10 @@ struct StagePeekCardGestures: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) { context.coordinator.parent = self }
 
+    /// The card went away while it was held (its list changed under the finger): UIKit sends its
+    /// gesture nothing more, so the hold ends here as cancelled, never left half-done.
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) { coordinator.viewWentAway() }
+
     final class TouchView: UIView {}
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
@@ -64,6 +68,14 @@ struct StagePeekCardGestures: UIViewRepresentable {
         private var landedWhileScrolling = false
         private weak var currentTouch: UITouch?
         private var holdIgnored = false
+        /// A hold began and hasn't ended or been cancelled.
+        private var holding = false
+
+        func viewWentAway() {
+            guard holding else { return }
+            holding = false
+            parent.onHoldCancel()
+        }
 
         init(_ parent: StagePeekCardGestures) { self.parent = parent }
 
@@ -92,16 +104,19 @@ struct StagePeekCardGestures: UIViewRepresentable {
                 guard !holdIgnored else { return }
                 holdStart = p
                 holdMoved = false
+                holding = true
                 parent.onHold(p)
             case .changed:
                 guard !holdIgnored else { return }
                 if hypot(p.x - holdStart.x, p.y - holdStart.y) > Self.moveSlop { holdMoved = true }
                 parent.onHoldMove(p)
             case .ended:
-                guard !holdIgnored else { return }
+                guard !holdIgnored, holding else { return }
+                holding = false
                 parent.onHoldEnd(p, holdMoved)
             case .cancelled, .failed:
-                guard !holdIgnored else { return }
+                guard !holdIgnored, holding else { return }
+                holding = false
                 parent.onHoldCancel()
             default:
                 break

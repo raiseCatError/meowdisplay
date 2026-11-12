@@ -94,7 +94,12 @@ final class WorkspaceClientTests: XCTestCase {
         m.updateSpace(WorkspaceSize(width: 800, height: 600), hinge: nil)
         m.choose(m.catalog!.windows[0], asNewTile: false)
         let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // The request goes out after a short debounce. Wait for it to be sent rather than a
+        // fixed time: on a busy CI runner the debounced task can run later than 200 ms.
+        let deadline = Date().addingTimeInterval(5)
+        while !sent.contains(where: { $0["type"] as? String == WireMessage.workspaceRequest }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         let request = try XCTUnwrap(sent.last { $0["type"] as? String == WireMessage.workspaceRequest })
         let tile = try XCTUnwrap((request["tiles"] as? [[String: Any]])?.first)
         let epoch = try XCTUnwrap(tile["view"] as? Int)
@@ -160,6 +165,134 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertTrue(make().savedLayouts.isEmpty)
     }
 
+    /// The double tap on a pane label toggles Fullscreen on This Device: presentation only, the
+    /// arrangement (order, sizes, every pane) comes back exactly; nothing is asked of the Mac's windows.
+    func testDoubleTapFullscreenToggleRestoresTheExactLayout() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
+        m.updateSpace(WorkspaceSize(width: 844, height: 390), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        let before = m.layout
+        let second = before.orderedTileIDs[1]
+        sent.removeAll()
+        m.toggleLocalFullscreen(second)
+        XCTAssertEqual(m.localFullscreen, second)
+        XCTAssertEqual(m.layout.maximized, second)
+        m.toggleLocalFullscreen(second)
+        XCTAssertNil(m.localFullscreen)
+        XCTAssertEqual(m.layout, before, "the prior split, order and sizes come back")
+        let types = sent.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains(WireMessage.windowClose))
+        XCTAssertFalse(types.contains(WireMessage.windowAction))
+    }
+
+    /// The zones sit 12 pt apart (HStack spacing) with 8 pt of touch slop
+    /// each, so their margins overlap: there Cancel lights, the haptic says
+    /// Cancel, and a release must not remove the pane.
+    func testCancelWinsWhereTheCancelAndRemoveMarginsMeet() {
+        let m = model { _ in }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.cancelZoneGlobal = CGRect(x: 40, y: 720, width: 120, height: 44)    // ends at x 160
+        m.removeZoneGlobal = CGRect(x: 172, y: 720, width: 160, height: 44)   // 12 pt later
+        let before = m.layout
+        let between = CGPoint(x: 166, y: 740)   // inside both 8 pt margins
+
+        m.beginDrag(.pane(before.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
+        m.moveDrag(to: between)
+        XCTAssertTrue(m.overCancelZone(between))
+        XCTAssertFalse(m.overRemoveZone(between), "only one zone lights at a time")
+        XCTAssertFalse(m.endDrag())
+        XCTAssertEqual(m.layout, before, "released between the zones: nothing removed")
+
+        // Just past Cancel's margin, Remove still works.
+        let onRemoveEdge = CGPoint(x: 170, y: 740)
+        m.beginDrag(.pane(before.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
+        m.moveDrag(to: onRemoveEdge)
+        XCTAssertTrue(m.overRemoveZone(onRemoveEdge))
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.tiles.count, 1)
+    }
+
+    /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
+    /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
+    /// removal is one undo step and never closes or minimizes the Mac window.
+    func testDraggingAPaneToRemoveTakesItOutOfTheLayoutOnly() {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        m.choose(m.catalog!.windows[0], asNewTile: false)
+        m.choose(m.catalog!.windows[1], asNewTile: true)
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.cancelZoneGlobal = CGRect(x: 40, y: 720, width: 120, height: 44)
+        m.removeZoneGlobal = CGRect(x: 200, y: 720, width: 160, height: 44)
+        let before = m.layout
+        let pane = before.orderedTileIDs[0]
+        let onRemove = CGPoint(x: 280, y: 740)
+
+        // A Stage Peek window or app is never offered Remove, and a drop there removes nothing.
+        m.beginDrag(.window(m.catalog!.windows[0]), at: CGPoint(x: 200, y: 400))
+        XCTAssertFalse(m.canDropToRemove)
+        m.moveDrag(to: onRemove)
+        XCTAssertFalse(m.overRemoveZone(onRemove))
+        m.cancelDrag()
+        m.beginDrag(.app(MacAppItem(bundleID: "dev.zed.Zed", name: "Zed", running: true, windowCount: 1, lastUsed: nil)), at: CGPoint(x: 200, y: 400))
+        XCTAssertFalse(m.canDropToRemove)
+        m.cancelDrag()
+        // A tab is never offered Remove.
+        m.beginDrag(.pane(pane, tab: 0), at: CGPoint(x: 200, y: 20))
+        XCTAssertFalse(m.canDropToRemove)
+        m.cancelDrag()
+        XCTAssertEqual(m.layout, before)
+
+        // A whole pane: Cancel leaves everything as it was.
+        m.beginDrag(.pane(pane, tab: nil), at: CGPoint(x: 200, y: 20))
+        XCTAssertTrue(m.canDropToRemove)
+        m.moveDrag(to: CGPoint(x: 100, y: 740))
+        XCTAssertFalse(m.endDrag())
+        XCTAssertEqual(m.layout, before)
+
+        // Dropped on Remove: gone from this layout only, undoable.
+        sent.removeAll()
+        m.beginDrag(.pane(pane, tab: nil), at: CGPoint(x: 200, y: 20))
+        m.moveDrag(to: onRemove)
+        XCTAssertNil(m.dropTarget(forGlobal: onRemove), "Remove is not also a pane drop")
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.tiles.count, 1)
+        XCTAssertNil(m.layout.tiles[pane])
+        let types = sent.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains(WireMessage.windowClose), "never closes the Mac window")
+        XCTAssertFalse(types.contains(WireMessage.windowAction), "never minimizes it")
+        m.undo()
+        XCTAssertEqual(m.layout.tiles.count, 2)
+
+        // The last pane: neither the drop zone nor its menu offers Remove (#120).
+        XCTAssertTrue(m.canRemoveFromLayout(m.layout.orderedTileIDs[0]))
+        m.removeTile(m.layout.orderedTileIDs[1])
+        XCTAssertFalse(m.canRemoveFromLayout(m.layout.orderedTileIDs[0]))
+        XCTAssertFalse(m.canRemoveFromLayout("no-such-pane"))
+        m.beginDrag(.pane(m.layout.orderedTileIDs[0], tab: nil), at: CGPoint(x: 200, y: 20))
+        XCTAssertFalse(m.canDropToRemove)
+        m.moveDrag(to: onRemove)
+        _ = m.endDrag()
+        XCTAssertEqual(m.layout.tiles.count, 1)
+    }
+
     /// An app dragged onto a pane: its one window goes there; several → the person picks; none →
     /// offered to open it (control), and its first new window then goes where it was dropped.
     /// Nothing opens because a drag began or ended.
@@ -198,16 +331,22 @@ final class WorkspaceClientTests: XCTestCase {
         guard let none = m.appDrop else { return XCTFail("expected the open offer") }
         XCTAssertTrue(none.windows.isEmpty)
         XCTAssertEqual(launches(), [])
-        // Without control, opening sends nothing.
+        // Without control nothing launches: control is asked for first (Request Control & Open).
+        var now: TimeInterval = 100
+        m.clock = { now }
         control = false
-        m.launchForAppDrop(none)
+        m.openAppForDrop(none, requestingControl: true)
         XCTAssertEqual(launches(), [])
+        XCTAssertEqual(m.appOpening?.phase, .awaitingControl)
         control = true
-        m.appDrop = none
-        m.launchForAppDrop(none)
-        XCTAssertEqual(launches(), ["com.apple.TextEdit"])
+        m.advanceAppOpening()
+        XCTAssertEqual(launches(), ["com.apple.TextEdit"], "it opens once the Mac allows control")
         m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 5, "com.apple.Safari"), (12, 5, "com.apple.Safari"), (20, 1, "com.apple.TextEdit")]))
-        XCTAssertTrue(shown().contains(20), "its first new window goes where it was dropped")
+        XCTAssertFalse(shown().contains(20), "a moment for other windows opening with it")
+        now += WorkspaceAppOpening.settle
+        m.advanceAppOpening()
+        XCTAssertTrue(shown().contains(20), "its new window goes where it was dropped")
+        XCTAssertNil(m.appOpening)
 
         // One window: straight in, no question.
         let before = m.layout.tiles.count

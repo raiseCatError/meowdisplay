@@ -14,6 +14,7 @@
 #                  | stores | website-manifest --out F | website-updated --url U --live-version V
 #                  | finish [--pr N]
 #   meow-release summary   STATE --branch-head SHA
+#   meow-release builds    PLATFORM --config CFG     (true unless the config excludes PLATFORM)
 #   meow-release show      STATE --platform P [--sha SHA --at-least STAGE]
 #   meow-release status    STATE
 #   meow-release next-build ios|android --version V [--latest N]
@@ -106,15 +107,18 @@ begin
       puts "release state exists: #{path}"
     else
       save(ReleaseState.fresh(version: o.fetch(:version), mode: config.mode,
-                              required_platforms: config.required_platforms), path)
+                              required_platforms: config.required_platforms,
+                              excluded_platforms: config.excluded_platforms), path)
       puts "created #{path}"
     end
   when "candidate"
     path = ARGV.shift
     o = parse(ARGV, :sha, :run_id, :config)
     state = load_state(path)
-    platforms = o[:config] && Config.load(o[:config]).tap(&:check_publishable!).required_platforms
-    changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i, required_platforms: platforms)
+    config = o[:config] && Config.load(o[:config]).tap(&:check_publishable!)
+    changed = state.begin_candidate(o.fetch(:sha), run_id: o.fetch(:run_id).to_i,
+                                    required_platforms: config&.required_platforms,
+                                    excluded_platforms: config&.excluded_platforms)
     save(state, path)
     puts changed ? "candidate #{o[:sha][0, 12]}" : "candidate unchanged (re-run of #{o[:sha][0, 12]})"
   when "record"
@@ -172,6 +176,12 @@ begin
     else fail!("unknown publish step #{step.inspect}")
     end
     save(state, path)
+  when "builds"
+    # Whether the release candidate builds and uploads PLATFORM at all
+    # (`true`/`false`): false only for a platform the config excludes.
+    platform = ARGV.shift
+    o = parse(ARGV, :config)
+    puts Config.load(o.fetch(:config)).builds?(platform.to_s)
   when "summary"
     o = parse(ARGV.drop(1), :branch_head)
     puts Summary.render(load_state(ARGV.first), branch_head: o.fetch(:branch_head))
@@ -215,7 +225,7 @@ begin
                                          attestedAt: Time.now.utc.iso8601)
     save(state, path)
   else
-    fail!("usage: meow-release init|candidate|record|monitor|gate|publish|summary|next-build|attest (see the header)")
+    fail!("usage: meow-release init|candidate|record|monitor|gate|publish|summary|builds|next-build|attest (see the header)")
   end
 rescue GateClosed, Error, KeyError, OptionParser::ParseError => e
   fail!(e.message)

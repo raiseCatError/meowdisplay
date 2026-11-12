@@ -755,6 +755,11 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published var fps = 0
     @MainActor @Published private(set) var streamingProfile: StreamingProfile = .performance
     @Published private(set) var customFrameRate: CustomFrameRateSelection = .auto
+    /// The Mac's Streaming Mode, as it last reported it; nil when the Mac
+    /// doesn't report it (older Macs). In Automatic the Mac applies a fixed
+    /// profile and priority, so the receiver's pickers can't change them
+    /// (issue #142).
+    @MainActor @Published private(set) var macStreamingMode: StreamingMode?
     /// Mac-authoritative Streaming Priority mirror. Default `.auto` matches
     /// the Mac's own default so an old-peer/pre-hello receiver never assumes
     /// a different bounded encode depth than the Mac is actually running.
@@ -786,6 +791,12 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var macProtocolVersion = WireProtocol.assumedWhenAbsent
     @MainActor @Published private(set) var inputResetGeneration = 0
     @MainActor @Published private(set) var controlResetGeneration = 0
+    /// Whether the receiver surface can be used right now, as the app sees
+    /// it. It's false while Home covers a kept session, while Session Actions
+    /// is open, while the picture is in Picture in Picture, or while the app
+    /// isn't active. While it's false, only releases leave this device (see
+    /// `RemoteInputTransmission`). The Mac Receiver never closes it.
+    @MainActor private(set) var localInputSurfaceOpen = true
     @MainActor @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var displayModeConfirmationGeneration = 0
@@ -797,6 +808,28 @@ final class StreamReceiver: ObservableObject {
     /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
     /// the user acts on it.
     @MainActor @Published private(set) var mirrorUnavailable = false
+    /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
+    /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
+    @MainActor @Published private(set) var macLock: MacLockNotice?
+    /// A frame that arrived after the last video reset (lock, video off/on, codec change) has been
+    /// handed to presentation. The Mac's lock screen (6.19) shows only once this is true, so no
+    /// picture from before the reset (the pre-lock desktop) can show, whichever renderer is on.
+    @MainActor @Published private(set) var freshFrameSinceVideoReset = true
+    /// `queue`: the next presented frame flips `freshFrameSinceVideoReset` back on.
+    private var awaitingFreshFrame = false
+    /// What this device's input is tagged with (PROTOCOL.md 6.19): while it sees the Mac locked,
+    /// every input message carries `"lockScreen":true`, and, while it shows lock screen view V,
+    /// `"lockScreenView":V`; the Mac delivers it only to that live view, never to the desktop after
+    /// an unlock. `locked` follows `macLock` at once; the view is set by the app from what it shows
+    /// (`setLockScreenInputView`).
+    @MainActor private(set) var lockScreenInputTag = LockScreenInputTagState()
+    /// Fires on the main actor, before the tag changes (so releases sent from it still carry the
+    /// old one): every touch, drag, scroll (and its momentum), Pencil stroke and gesture in
+    /// progress ends here, so none started in one lock episode continues in the next.
+    let lockScreenInputBoundary = PassthroughSubject<Void, Never>()
+    /// The Mac's latest report of keystrokes it didn't deliver (`lockScreenInputRefused`), with a
+    /// counter so the same report twice still reads as news.
+    @MainActor @Published private(set) var lockScreenInputRefusal: (refusal: LockScreenInputRefusal, sequence: Int)?
     /// Set when the Mac authoritatively rejects a Mirror request made
     /// WHILE already confirmed extending (see `SenderController.requestMode`)
     /// — a simple informational state, never the "Use Extend?" offer, since
@@ -915,6 +948,10 @@ final class StreamReceiver: ObservableObject {
     /// The connected Mac advertised `textCaret` in its welcome features: it
     /// follows the focused text caret for Zoom While Typing (PROTOCOL.md 6.11).
     @MainActor private(set) var macSupportsTextCaret = false
+    /// The connected Mac advertised `exactKeyModifiers`: a key marked
+    /// `exactModifiers` posts with only its own modifiers, so the arrow
+    /// keypad's ⇧ ⌥ ⌘ never mix with the tray's latch (PROTOCOL.md `keyboard`).
+    @MainActor @Published private(set) var macSupportsExactKeyModifiers = false
 
     @MainActor
     func noteWorkspaceEvent(_ event: WorkspaceEvent) {
@@ -922,8 +959,11 @@ final class StreamReceiver: ObservableObject {
         case .features(let features):
             macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
             macSupportsTextCaret = features.contains(TextCaretWire.welcomeFeature)
+            macSupportsExactKeyModifiers = features.contains(ExactKeyModifiersWire.welcomeFeature)
         case .mode(let window): windowModeActive = window
-        case .disconnected: macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
+        case .disconnected:
+            macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
+            macSupportsExactKeyModifiers = false
         default: break
         }
     }
@@ -1739,8 +1779,9 @@ final class StreamReceiver: ObservableObject {
     /// token, requested mode and manual recovery run), its prompts (answered
     /// `declined`/`blocked`), its current and remembered admission, its
     /// parked candidate connections and its place as a recovery target. The
-    /// current connection ends when it is that Mac's — after Forget always,
-    /// since it may have authenticated before the pin was removed.
+    /// current connection ends when it is that Mac's; after Forget, also when
+    /// it no longer resolves to any pinned Mac (the pin is already gone). A
+    /// session with another, still-pinned Mac carries on.
     private func revokeSessionAuthority(peerID: String, trustRemoved: Bool) {
         let withdrawnRequestID = withdrawManualConnectRequest(covering: peerID)
         let pipeline = self.pipeline
@@ -2113,6 +2154,17 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
+    /// The person came back to the app or turned Audio on: audio the system
+    /// interrupted, without permission to resume, may play again. No effect
+    /// when nothing was interrupted, and none on macOS.
+    func resumeAudioAfterInterruption(reason: String) {
+        #if os(iOS)
+        let queue = self.queue
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.clearAudioInterruption(reason: reason) }
+        #endif
+    }
+
     /// The device locked — nobody can see the stream, so tell the Mac and go
     /// silent. Sends "sleeping" (the Mac drops its virtual display so the
     /// cursor isn't stranded on an invisible screen and arms a reconnect),
@@ -2163,7 +2215,10 @@ final class StreamReceiver: ObservableObject {
             // `StreamReceiver`. It is stored into `pendingDisconnectFinishBox`
             // and passed to both `NWConnection.send`'s completion and
             // `queue.asyncAfter`, both of which require exactly that.
-            let finish: @Sendable () -> Void = {
+            //
+            // `goodbyeConnection` is the connection `closing` was queued on
+            // (the send completion and its 1 s fallback), nil otherwise.
+            let teardown: @Sendable (_ goodbyeConnection: NWConnection?) -> Void = { goodbyeConnection in
                 guard finishedOnce.fireOnce() else { return }
                 pendingDisconnectFinishBox.clear()
                 reconnectContext.update { $0.manualConnectPeerID = nil }
@@ -2181,8 +2236,15 @@ final class StreamReceiver: ObservableObject {
                 // after this `await` completes, so the ordering the C1 fix
                 // established — actor teardown status first, "Disconnected"
                 // after — is unchanged.
+                //
+                // Issue #162: after the goodbye, a QUIC connection stays
+                // open until the Mac has read `closing` (it closes it
+                // then), so the goodbye can't be lost behind the stream
+                // ends or the connection close. The session itself ends
+                // here, now.
                 Task {
-                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect)
+                    await pipeline.disconnectCurrentConnection(reason: .explicitDisconnect,
+                                                               goodbyeSentOn: goodbyeConnection)
                     await uiSink.publishTeardownUIReset(status: "Disconnected")
                     // `resetAudioPlayback()` still needs `self` — it mutates
                     // `audioFormatDescription`/`audioCodecKind` and calls
@@ -2205,19 +2267,24 @@ final class StreamReceiver: ObservableObject {
                     }
                 }
             }
+            let finish: @Sendable () -> Void = { teardown(nil) }
             pendingDisconnectFinishBox.set(finish)
             guard let conn = sendTargetBox.current()?.connection, conn.state == .ready else {
                 Log.info("disconnecting — no live connection")
                 finish()
                 return
             }
+            let finishAfterGoodbye: @Sendable () -> Void = { teardown(conn) }
             Log.info("disconnecting — announcing closing to the Mac")
             StreamReceiver.sendControl(["type": WireMessage.closing], on: conn, sendTargetBox: sendTargetBox) {
-                queue.async { finish() }
+                queue.async { finishAfterGoodbye() }
             }
+            // `closing` is queued from here on: a Connect/Reconnect that
+            // finishes this early still lets the Mac read it.
+            pendingDisconnectFinishBox.set(finishAfterGoodbye)
             // The send completion may never fire on a dying link — don't
             // let that keep this session looking connected after going dark.
-            queue.asyncAfter(deadline: .now() + 1) { finish() }
+            queue.asyncAfter(deadline: .now() + 1) { finishAfterGoodbye() }
         }
     }
 
@@ -2800,9 +2867,8 @@ final class StreamReceiver: ObservableObject {
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
             DispatchQueue.main.async { uiSink.publishConfirmedExtendShape(preference) }
         case WireMessage.streamingProfileState:
-            guard let raw = obj["profile"] as? String,
-                  let profile = StreamingProfile(rawValue: raw) else { return }
-            DispatchQueue.main.async { uiSink.publishStreamingProfile(profile) }
+            guard let update = StreamingProfileStateUpdate(message: obj) else { return }
+            DispatchQueue.main.async { uiSink.publishStreamingProfile(update) }
         case WireMessage.streamingPriorityState:
             guard let raw = obj["priority"] as? String,
                   let priority = StreamingPriority(rawValue: raw) else { return }
@@ -2916,6 +2982,16 @@ final class StreamReceiver: ObservableObject {
                 target = nil
             }
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
+        case MacLockWire.type:
+            guard let notice = MacLockNotice(message: obj) else { return }
+            // The last picture goes now, not when video-off follows. While this device shows the
+            // Mac's lock screen (6.19) its fresh frames keep decoding.
+            if notice.isLocked, notice.lockScreen != .active { resetDecoderForVideoStateChange() }
+            DispatchQueue.main.async { uiSink.publishMacLock(notice) }
+            workspaceEvents.emit(.macLock(notice))
+        case LockScreenWire.inputRefused:
+            guard let refusal = LockScreenInputRefusal(message: obj) else { return }
+            DispatchQueue.main.async { uiSink.publishLockScreenInputRefusal(refusal) }
         case WireMessage.allowInputState:
             guard let allowed = obj["allowed"] as? Bool else { return }
             // `state` is additive (pv 18+) — an older Mac never sends it, so
@@ -3090,8 +3166,9 @@ final class StreamReceiver: ObservableObject {
             "id": Self.installID,
             "pv": advertisedProtocolVersion,   // issue #132 — absent on old receivers
             "pp": WireProtocol.pairingVersion, // unauthenticated pairing-version hint, early UX only
-            // This receiver can arrange Mac windows (PROTOCOL.md 6.10); older Macs ignore it.
-            WindowWorkspaceWire.helloField: WindowWorkspaceWire.version,
+            // This receiver can arrange Mac windows (PROTOCOL.md 6.10). iPhone and iPad also draw
+            // floating panes: `ws` 2. Every Mac that knows Window mode accepts 1 or more.
+            WindowWorkspaceWire.helloField: WorkspaceModel.floatsDrawnHere ? WindowWorkspaceWire.floatVersion : WindowWorkspaceWire.version,
             // This receiver reassembles control messages sent in parts (PROTOCOL.md 6.14).
             ControlChunkWire.helloField: ControlChunkWire.version,
             // This receiver takes the Mac's Tailscale addresses (PROTOCOL.md 6.17).
@@ -3224,20 +3301,22 @@ final class StreamReceiver: ObservableObject {
     /// Stamped in *Mac* clock time (our clock + sync offset) so the Mac can
     /// measure touch→injection latency without doing its own clock sync.
     @MainActor func sendTouch(phase: String, x: Double, y: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running,
+              remoteInputMayLeave(isRelease: RemoteInputTransmission.isRelease(phase: phase)) else { return }
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = presentationTiming.clockOffsetMs { msg["t"] = nowMs + offset }
-        sendUIControl(msg)
+        sendTaggedInput(msg)
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
     @MainActor func sendScroll(dx: Double, dy: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave() else { return }
         sendUIControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
     /// Send a semantic gesture without changing the meaning of touch/scroll input.
     @MainActor func sendGesture(name: String) {
+        guard remoteInputMayLeave() else { return }
         sendUIControl(["type": "gesture", "name": name])
     }
 
@@ -3248,23 +3327,23 @@ final class StreamReceiver: ObservableObject {
     /// Absolute cursor move: `x`/`y` normalized [0,1] in video space, no
     /// button implied.
     @MainActor func sendPointerMove(x: Double, y: Double) {
-        guard displayState == .running else { return }
-        sendUIControl(["type": "pointer", "action": "move", "x": x, "y": y])
+        guard displayState == .running, remoteInputMayLeave() else { return }
+        sendTaggedInput(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
     /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
     /// `scroll`), no button implied.
     @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
-        guard displayState == .running else { return }
-        sendUIControl(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
+        guard displayState == .running, remoteInputMayLeave() else { return }
+        sendTaggedInput(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
     }
 
     /// Presses `button` down at the Mac's current cursor position with the
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
     @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
-        guard displayState == .running else { return }
-        sendUIControl(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
+        guard displayState == .running, remoteInputMayLeave() else { return }
+        sendTaggedInput(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Releases `button`. Every `down` a receiver sends MUST be followed by
@@ -3273,14 +3352,14 @@ final class StreamReceiver: ObservableObject {
     /// contract).
     @MainActor func sendPointerUp(button: PointerButton, clickCount: Int) {
         guard displayState == .running else { return }
-        sendUIControl(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
+        sendTaggedInput(["type": "pointer", "action": "up", "button": button.wireValue, "clickCount": clickCount])
     }
 
     /// Smart Touch (Experimental) probe — callers MUST check
     /// `macSupportsSmartTouch` first. `x`/`y` normalized [0,1] in video
     /// space; the reply arrives via `onSmartTouchProbeResult`.
     @MainActor func sendSmartTouchProbe(id: Int, x: Double, y: Double) {
-        guard displayState == .running, macSupportsSmartTouch else { return }
+        guard displayState == .running, macSupportsSmartTouch, remoteInputMayLeave() else { return }
         sendUIControl(["type": WireMessage.smartTouchProbe, "id": id, "x": x, "y": y])
     }
 
@@ -3288,7 +3367,8 @@ final class StreamReceiver: ObservableObject {
     /// rotation is always 0 until Apple Pencil Pro barrel roll is wired up.
     @MainActor func sendPencil(phase: String, x: Double, y: Double,
                     pressure: Double, azimuth: Double, altitude: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running,
+              remoteInputMayLeave(isRelease: RemoteInputTransmission.isRelease(phase: phase)) else { return }
         var msg: [String: Any] = [
             "type": "pencil",
             "phase": phase,
@@ -3303,7 +3383,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func sendProximity(entering: Bool, x: Double, y: Double) {
-        guard displayState == .running else { return }
+        guard displayState == .running, remoteInputMayLeave(isRelease: !entering) else { return }
         sendUIControl(["type": "proximity", "entering": entering, "x": x, "y": y])
     }
 
@@ -3311,8 +3391,33 @@ final class StreamReceiver: ObservableObject {
     /// (M4). Never carries marked/IME-intermediate text — callers commit
     /// only finished text (see `RemoteKeyboardInputView`).
     @MainActor func sendKeyboardText(_ text: String) {
-        guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty else { return }
-        sendUIControl(["type": "keyboard", "action": "text", "text": text])
+        guard displayState == .running, macSupportsKeyboardWire, !text.isEmpty, remoteInputMayLeave() else { return }
+        sendTaggedInput(["type": "keyboard", "action": "text", "text": text])
+    }
+
+    /// `keyboard`, `touch` and `pointer` messages. Tagging happens in `sendUIControl`, for every
+    /// input family alike (`LockScreenInputTagState`).
+    @MainActor private func sendTaggedInput(_ message: [String: Any]) {
+        sendUIControl(message)
+    }
+
+    /// The lock screen view this device shows (the Mac's number for it, from `macLockState`), or
+    /// nil. Ignored while the Mac isn't locked.
+    @MainActor func setLockScreenInputView(_ view: Int?) {
+        var next = lockScreenInputTag
+        next.view = next.locked ? view : nil
+        setLockScreenInputTag(next)
+    }
+
+    /// A new lock episode for this device's input: everything in progress ends first (with the old
+    /// tag), held keys and buttons are released, and delayed actions (one-tap actions, the tray's
+    /// latches) stop, so nothing begun in one episode goes on in the next.
+    @MainActor private func setLockScreenInputTag(_ next: LockScreenInputTagState) {
+        guard next != lockScreenInputTag else { return }
+        lockScreenInputBoundary.send()
+        if connected { sendCancelActiveInput() }
+        lockScreenInputTag = next
+        controlResetGeneration &+= 1
     }
 
     /// Tells the Mac whether the on-screen keyboard is open so it can follow
@@ -3320,6 +3425,11 @@ final class StreamReceiver: ObservableObject {
     /// only to a Mac that advertised `textCaret`; a close is sent whenever
     /// connected, so the Mac never keeps reading for a keyboard that is gone.
     @MainActor func sendKeyboardState(open: Bool) {
+        // Each keyboard session starts from the Mac's first reading, as the
+        // view does: a caret kept from the last one would make that reading
+        // (the same caret, when it hasn't moved) look unchanged and drop it,
+        // leaving the view to follow an old touch instead.
+        textCaret = nil
         guard macSupportsTextCaret, open ? displayState == .running : connected else { return }
         sendUIControl(TextCaretWire.keyboardStateMessage(open: open))
     }
@@ -3328,29 +3438,77 @@ final class StreamReceiver: ObservableObject {
     /// Backspace) with no down/up lifecycle to track. `usage` is a USB HID
     /// keyboard-page usage number.
     @MainActor func sendKeyboardPress(usage: Int, modifiers: [String] = []) {
-        guard displayState == .running, macSupportsKeyboardWire else { return }
+        sendKeyboardPress(usage: usage, modifiers: modifiers, exactModifiers: false)
+    }
+
+    /// `exactModifiers`: the key carries only `modifiers`, never the ones
+    /// this device holds down with `modifierDown` (the arrow keypad's own).
+    /// The field goes only to a Mac that advertised `exactKeyModifiers`; an
+    /// older Mac adds the held ones, so callers gate on
+    /// `macSupportsExactKeyModifiers` where that matters.
+    @MainActor func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool) {
+        guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
         #if DEBUG
         // 42 = HID usage keyboardDeleteOrBackspace (UIKeyboardHIDUsage's raw
         // value) — this file also compiles into the macOS receiver, which
         // has no UIKit, so the literal is used instead of that enum.
-        if usage == 42 {
+        // Never while this device sees the Mac locked: nothing typed for, or near, its lock
+        // screen is logged (not even that a Delete went).
+        if usage == 42, lockScreenInputTag.tag == nil {
             Log.info("keyboardDebug: specialPress sent usage=\(usage)")
         }
         #endif
-        sendUIControl(["type": "keyboard", "action": "press", "usage": usage,
-                     "modifiers": modifiers])
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
+            action: "press", usage: usage, modifiers: modifiers,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     @MainActor func sendModifier(_ modifier: ControlModifier, down: Bool) {
         guard displayState == .running,
-              macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
-        sendUIControl(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
-                     "modifier": modifier.rawValue])
+              macProtocolVersion >= WireProtocol.receiverControlsWireVersion,
+              remoteInputMayLeave(isRelease: !down) else { return }
+        sendTaggedInput(["type": "keyboard", "action": down ? "modifierDown" : "modifierUp",
+                             "modifier": modifier.rawValue])
     }
 
     @MainActor func sendCancelActiveInput() {
         guard macProtocolVersion >= WireProtocol.receiverControlsWireVersion else { return }
         sendUIControl(["type": "keyboard", "action": "cancel"])
+    }
+
+    /// Releases everything this device holds on the Mac (held keys, modifiers, a drag) and
+    /// resets the local control state, as a display-mode switch does. Home with the session
+    /// kept (#121) leaves nothing pressed behind it.
+    @MainActor func releaseLocalInput() {
+        controlResetGeneration &+= 1
+        sendCancelActiveInput()
+    }
+
+    /// Opens or closes the receiver surface for input (see
+    /// `localInputSurfaceOpen`). Closing it releases everything held, as
+    /// Home does, and ends every delayed remote action started before (its
+    /// `RemoteInputTicket` no longer matches). Opening it again starts
+    /// nothing by itself.
+    @MainActor func setLocalInputSurfaceOpen(_ open: Bool) {
+        guard open != localInputSurfaceOpen else { return }
+        localInputSurfaceOpen = open
+        if !open { releaseLocalInput() }
+    }
+
+    /// The ticket a delayed remote action must still hold before each later
+    /// step goes out. It's nil while input can't leave this device.
+    @MainActor var remoteInputTicket: RemoteInputTicket? {
+        RemoteInputTicket.current(surfaceOpen: localInputSurfaceOpen,
+                                  displayRunning: displayState == .running,
+                                  sessionLive: session.allowsLiveInput,
+                                  controlGeneration: controlResetGeneration,
+                                  connectionGeneration: sendTargetBox.current()?.generation)
+    }
+
+    /// Whether input that starts or continues something may leave now. A
+    /// release always may (see `RemoteInputTransmission`).
+    @MainActor private func remoteInputMayLeave(isRelease: Bool = false) -> Bool {
+        RemoteInputTransmission.mayLeave(surfaceOpen: localInputSurfaceOpen, isRelease: isRelease)
     }
 
     /// `true`: requests control of THIS session — never an assignment, the
@@ -3364,6 +3522,13 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestAllowInput(_ allowed: Bool) {
         guard connected, macProtocolVersion >= WireProtocol.allowInputWireVersion else { return }
         sendUIControl(["type": WireMessage.allowInputRequest, "allowed": allowed])
+    }
+
+    /// Asks the Mac to show (or hide) its own lock screen on this device (PROTOCOL.md 6.19). The
+    /// Mac decides and answers with `macLockState`; nothing here reads or carries a password.
+    @MainActor func requestLockScreen(show: Bool) {
+        guard connected else { return }
+        sendUIControl(LockScreenWire.request(show: show))
     }
 
     @MainActor func requestVideoEnabled(_ enabled: Bool) {
@@ -3401,6 +3566,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func requestAudioEnabled(_ enabled: Bool) {
         let box = audioPreferredBox
         queue.async { box.set(enabled) }
+        if enabled { resumeAudioAfterInterruption(reason: "Audio turned on") }
         guard connected, macSupportsAudio else { return }
         sendUIControl(["type": WireMessage.audioRequest, "enabled": enabled])
     }
@@ -3432,7 +3598,8 @@ final class StreamReceiver: ObservableObject {
                               phase: NativeAppGesturePhase,
                               delta: Double) {
         guard displayState == .running,
-              macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion else { return }
+              macProtocolVersion >= WireProtocol.nativeAppGestureWireVersion,
+              remoteInputMayLeave(isRelease: phase == .ended || phase == .cancelled) else { return }
         sendUIControl(["type": WireMessage.nativeAppGesture,
                      "kind": kind.rawValue,
                      "phase": phase.rawValue,
@@ -3449,6 +3616,9 @@ final class StreamReceiver: ObservableObject {
     private func resetDecoderForVideoStateChange() {
         presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
+        awaitingFreshFrame = true
+        let uiSink = self.uiSink
+        DispatchQueue.main.async { uiSink.publishFreshFrameSinceVideoReset(false) }
     }
 
     /// HEVC milestone: a codec change (Auto re-deciding, an explicit
@@ -3662,16 +3832,28 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
-        guard displayState == .running, macSupportsKeyboardWire else { return }
-        var message: [String: Any] = ["type": "keyboard", "action": "down", "usage": usage, "modifiers": modifiers]
-        if isRepeat { message["repeat"] = true }
-        sendUIControl(message)
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: isRepeat, exactModifiers: false)
+    }
+
+    /// `exactModifiers`: see `sendKeyboardPress(usage:modifiers:exactModifiers:)`.
+    /// The Mac keeps a key's exact flags from its down for its repeats and up.
+    @MainActor func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
+        guard displayState == .running, macSupportsKeyboardWire, remoteInputMayLeave() else { return }
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
+            action: "down", usage: usage, modifiers: modifiers, isRepeat: isRepeat,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     /// The matching release for `sendKeyboardDown`.
     @MainActor func sendKeyboardUp(usage: Int, modifiers: [String]) {
+        sendKeyboardUp(usage: usage, modifiers: modifiers, exactModifiers: false)
+    }
+
+    @MainActor func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) {
         guard displayState == .running, macSupportsKeyboardWire else { return }
-        sendUIControl(["type": "keyboard", "action": "up", "usage": usage, "modifiers": modifiers])
+        sendTaggedInput(ExactKeyModifiersWire.keyMessage(
+            action: "up", usage: usage, modifiers: modifiers,
+            exactModifiers: exactModifiers && macSupportsExactKeyModifiers))
     }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
@@ -3734,9 +3916,10 @@ final class StreamReceiver: ObservableObject {
         return true
     }
 
+    /// Every input message is tagged here, whatever sends it (`LockScreenInputTag.messageTypes`).
     @MainActor
     private func sendUIControl(_ message: [String: Any]) {
-        sendControl(message, on: sendTargetBox.current()?.connection)
+        sendControl(lockScreenInputTag.tagged(message), on: sendTargetBox.current()?.connection)
     }
 
     // MARK: - Socket read + length-prefixed deframing + Annex B parse
@@ -3993,9 +4176,9 @@ final class StreamReceiver: ObservableObject {
                 // NOT blindly resume stale audio otherwise (GOAL: "Do not
                 // blindly resume stale audio after an interruption").
                 if type == .began {
-                    receiver.handleAudioSessionDisruption(reactivateSession: false)
+                    receiver.audioInterruptionBegan()
                 } else if type == .ended, shouldResume {
-                    receiver.handleAudioSessionDisruption(reactivateSession: true)
+                    receiver.clearAudioInterruption(reason: "the system allows resuming")
                 }
             }
         }
@@ -4034,6 +4217,34 @@ final class StreamReceiver: ObservableObject {
             activateAudioSessionIfNeeded()
         }
         resetAudioPlayback(keepingFormat: true)
+    }
+
+    /// `queue` only. The system silenced the session: stop playback and drop
+    /// packets until the interruption clears (see `ReceiverLocalAudioSuspension`).
+    private func audioInterruptionBegan() {
+        // The system has already deactivated the session; activate it anew when resuming.
+        audioSessionActive = false
+        if localAudioSuspension.interruptionBegan() == .stopPlayback {
+            Log.info("audio: local playback stopped (audio session interrupted)")
+            resetAudioPlayback(keepingFormat: true)
+        }
+    }
+
+    /// `queue` only.
+    private func clearAudioInterruption(reason: String) {
+        guard localAudioSuspension.isInterrupted else { return }
+        if !localAudioSuspension.isSuspended {
+            activateAudioSessionIfNeeded()
+            // Still interrupted (a call in progress): the session won't activate yet.
+            guard audioSessionActive else {
+                Log.info("audio: still interrupted, playback stays stopped (\(reason))")
+                return
+            }
+        }
+        let change = localAudioSuspension.interruptionCleared(hasAudioFormat: audioFormatDescription != nil)
+        guard case .resumePlayback(let rebuildChain) = change else { return }
+        Log.info("audio: local playback resumed after an interruption (\(reason))")
+        if rebuildChain { ensureAudioPlaybackChain() }
     }
 
     private func deactivateAudioSessionIfNeeded() {
@@ -4366,10 +4577,18 @@ final class StreamReceiver: ObservableObject {
         // presentation delay, not a sleep on the network/decode path. The
         // delay is constant across frames, so arrival order is preserved.
         let videoDelayMs = AVSyncOffset.videoDelayMs(for: avSyncPreference.get())
-        if videoDelayMs > 0 {
-            queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: present)
-        } else {
+        let firstSinceReset = awaitingFreshFrame
+        awaitingFreshFrame = false
+        let uiSink = self.uiSink
+        let presentAndNote: @Sendable () -> Void = {
             present()
+            // After the frame is queued for display: the main-actor hop lands after it.
+            if firstSinceReset { DispatchQueue.main.async { uiSink.publishFreshFrameSinceVideoReset(true) } }
+        }
+        if videoDelayMs > 0 {
+            queue.asyncAfter(deadline: .now() + .milliseconds(videoDelayMs), execute: presentAndNote)
+        } else {
+            presentAndNote()
         }
 
         // Per-frame timing for the performance overlay.
@@ -5051,6 +5270,8 @@ final class StreamReceiver: ObservableObject {
             otherPeer: { TrustStore.receiverRole.peerID(forSPKI: $0) },
             completion: { result in
                 Log.info("routeDebug: remote connect-request result peer=\(peerID) result=\(result)")
+                // Status only (the Home row's reason); never feeds back into knocking or trust.
+                RemoteKnockOutcomes.record(result, peerID: peerID)
                 completion?(result)
             })
     }
@@ -5798,7 +6019,10 @@ final class StreamReceiver: ObservableObject {
     /// Same single assignment `publishSessionSnapshot` above does, just
     /// reachable from `ReceiverUISink`.
     @MainActor func applyUISessionSnapshot(_ snapshot: ReceiverSessionState) {
+        let endsLiveInput = session.allowsLiveInput && !snapshot.allowsLiveInput
         session = snapshot
+        // A pause, recovery or end: nothing started before it carries on afterwards.
+        if endsLiveInput { controlResetGeneration &+= 1 }
     }
 
     /// The `authenticatedPeerID` UI-publish half of the former
@@ -5881,11 +6105,15 @@ final class StreamReceiver: ObservableObject {
             // Same reasoning again: only ever known from a live Mac.
             self.confirmedMaxFPS = nil
             self.lastMaxFPSState = nil
+            // Same reasoning: the next Mac reports its own mode.
+            self.macStreamingMode = nil
             // The offer belonged to a specific attempt on a specific
             // connection — any disconnect (deliberate or not) ends it;
             // a fresh one arrives on the Mac's own next attempt, if any.
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
+            self.macLock = nil
+            self.setLockScreenInputTag(LockScreenInputTagState())
         }
     }
 
@@ -5946,8 +6174,10 @@ final class StreamReceiver: ObservableObject {
         mirrorDisplayState = update
     }
 
-    @MainActor func applyStreamingProfileUpdate(_ profile: StreamingProfile) {
-        streamingProfile = profile
+    @MainActor func applyStreamingProfileUpdate(_ update: StreamingProfileStateUpdate) {
+        streamingProfile = update.profile
+        macStreamingMode = update.mode
+        if let rate = update.customFrameRate { customFrameRate = rate }
     }
 
     @MainActor func applyStreamingPriorityUpdate(_ priority: StreamingPriority) {
@@ -6000,6 +6230,23 @@ final class StreamReceiver: ObservableObject {
         activeStreamCodec = codec
     }
 
+    @MainActor func applyLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
+        lockScreenInputRefusal = (refusal, (lockScreenInputRefusal?.sequence ?? 0) &+ 1)
+    }
+
+    @MainActor func applyFreshFrameSinceVideoReset(_ fresh: Bool) {
+        if freshFrameSinceVideoReset != fresh { freshFrameSinceVideoReset = fresh }
+    }
+
+    @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
+        macLock = notice.isLocked ? notice : nil
+        // Tagged from the moment this device knows the Mac is locked, untagged from the moment it
+        // knows it's unlocked; a view the Mac no longer calls active ends here too.
+        setLockScreenInputTag(LockScreenInputTagState(
+            locked: notice.isLocked,
+            view: notice.lockScreenView == lockScreenInputTag.view ? lockScreenInputTag.view : nil))
+    }
+
     @MainActor func applyMirrorUnavailableClear() {
         mirrorUnavailable = false
     }
@@ -6034,7 +6281,10 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func applyDisplayStateUpdate(_ state: DisplayState) {
+        let stopsRunning = displayState == .running && state != .running
         displayState = state
+        // Nothing started before a pause carries on after it.
+        if stopsRunning { controlResetGeneration &+= 1 }
         onDisplayStateChange?(state)
     }
 }

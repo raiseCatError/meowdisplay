@@ -55,6 +55,53 @@ final class WindowCaptureHealthTests: XCTestCase {
         XCTAssertEqual(Int(huge.width) % 2, 0)
     }
 
+    // MARK: - Backing scale (issue #138)
+
+    private let retina = WorkspaceCaptureSizing.DisplayScale(
+        bounds: CGRect(x: 0, y: 0, width: 1512, height: 982), modeWidth: 1512, modePixelWidth: 3024)
+    private let external = WorkspaceCaptureSizing.DisplayScale(
+        bounds: CGRect(x: 1512, y: 0, width: 1920, height: 1080), modeWidth: 1920, modePixelWidth: 1920)
+
+    func testBackingScaleComesFromTheDisplayModesPixels() {
+        let window = CGRect(x: 100, y: 50, width: 1200, height: 800)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window, displays: [retina]), 2,
+                       "a Retina mode is 2 px per point; CGDisplayPixelsWide/bounds said 1")
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window.offsetBy(dx: 1600, dy: 0),
+                                                           displays: [retina, external]), 1)
+    }
+
+    func testAWindowAcrossTwoDisplaysUsesTheOneHoldingMostOfIt() {
+        let mostlyExternal = CGRect(x: 1400, y: 0, width: 1000, height: 600)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: mostlyExternal, displays: [retina, external]), 1)
+        let mostlyRetina = CGRect(x: 800, y: 0, width: 1000, height: 600)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: mostlyRetina, displays: [retina, external]), 2)
+    }
+
+    func testUnknownDisplaysFallBackToTwo() {
+        let window = CGRect(x: 0, y: 0, width: 800, height: 600)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window, displays: []), 2)
+        let broken = WorkspaceCaptureSizing.DisplayScale(bounds: window, modeWidth: 0, modePixelWidth: 0)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: window, displays: [broken]), 2)
+    }
+
+    func testAWindowOnNoDisplayTakesTheHighestScaleNotTheFirstDisplay() {
+        // Parked offscreen: every display overlaps by 0, so none of them describes it.
+        let offscreen = CGRect(x: -5000, y: -5000, width: 800, height: 600)
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: offscreen, displays: [external, retina]), 2)
+        // Only 1x displays: 1, as before #138's change; 2 would capture 4x the pixels for nothing.
+        XCTAssertEqual(WorkspaceCaptureSizing.backingScale(source: offscreen, displays: [external]), 1)
+    }
+
+    func testAFullSizePaneOnARetinaMacIsCapturedAtItsRetinaPixels() {
+        // 1512x945 pt window filling a 2388x1668 px iPad canvas: draw scale ~1.58.
+        let window = CGRect(x: 0, y: 0, width: 1512, height: 945)
+        let backing = WorkspaceCaptureSizing.backingScale(source: window, displays: [retina])
+        XCTAssertEqual(WorkspaceCaptureSizing.size(source: window.size, drawScale: 2388.0 / 1512.0, backingScale: backing),
+                       CGSize(width: 3024, height: 1890), "the old 1x scale captured 1512x946 and stretched it 1.58x")
+        XCTAssertEqual(WorkspaceCaptureSizing.size(source: window.size, drawScale: 2388.0 / 1512.0, backingScale: 1),
+                       CGSize(width: 1512, height: 946))
+    }
+
     func testTheContentRectComesFromTheFrameInfoAndPaddingIsLeftOut() throws {
         let buffer = try solid(1200, 800)
         // Measured: a 1920x1050 window in a 1200x800 buffer: content (0,0,1200,656.25), scale 0.625.

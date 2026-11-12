@@ -39,7 +39,7 @@ body:
     id: alternatives
     attributes:
       label: How do you handle this today?
-      description: Optional existing workflow or workaround.
+      description: Optional existing workflow or workaround. If you have tried Stage Peek, Window view or an existing menu, say what is still missing. No design research is required to submit.
   - type: textarea
     id: context
     attributes:

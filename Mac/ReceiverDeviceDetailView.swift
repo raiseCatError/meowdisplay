@@ -82,18 +82,29 @@ struct ReceiverDeviceDetailView: View {
                 }
                 .disabled(!controller.canSetInputPolicy(.alwaysAllow, peerID: peerID)
                     && controller.inputPolicy(peerID: peerID) != .alwaysAllow)
+                // Follows the input policy (on with Always Allow Requests) unless turned off here;
+                // never widens beyond the policy, and lifting an "off" is refused while a device
+                // controls this Mac (like Always Allow).
+                Toggle("Allow Lock Screen Control", isOn: Binding(
+                    get: { controller.inputPolicy(peerID: peerID) != .neverAllow
+                        && controller.lockScreenControlAllowed(peerID: peerID) },
+                    set: { controller.setLockScreenControlAllowed($0, peerID: peerID) }))
+                    .disabled(controller.inputPolicy(peerID: peerID) == .neverAllow
+                        || (controller.anySessionHasEffectiveInput && !controller.lockScreenControlAllowed(peerID: peerID)))
+                    .accessibilityIdentifier("deviceLockScreenControl")
             } header: {
                 Text("Input Authorization")
             } footer: {
-                if controller.anySessionHasEffectiveInput {
-                    Text("Can't promote to Always Allow Requests while a device currently controls this Mac. Never bypasses the Allow Input master switch on the Input page.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("This is a request policy, not a live toggle: even Always Allow Requests still requires the device to explicitly ask each session, and never bypasses the Allow Input master switch on the Input page.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    if controller.anySessionHasEffectiveInput {
+                        Text("Can't promote to Always Allow Requests or turn Lock Screen Control back on while a device currently controls this Mac. Never bypasses the Allow Input master switch on the Input page.")
+                    } else {
+                        Text("This is a request policy, not a live toggle: even Always Allow Requests still requires the device to explicitly ask each session, and never bypasses the Allow Input master switch on the Input page.")
+                    }
+                    Text("Lock Screen Control: a device you trust with control can also show this Mac's own lock screen while it's locked, so you can type your password there and macOS unlocks. On with Always Allow Requests; with Ask, only if control was allowed before the Mac locked; never with Never Allow or with Allow Input off. Turn it off to keep this device to the unlocked desktop. Only typing, Return, Delete and clicks reach the lock screen. Keys go straight to macOS: MeowDisplay doesn't check, log or keep your password.")
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             filesSection

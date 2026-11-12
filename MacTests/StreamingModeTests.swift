@@ -129,4 +129,72 @@ final class StreamingModeTests: XCTestCase {
         XCTAssertEqual(StreamingModePolicy.effectiveCustomFPS(mode: .custom, storedProfile: storedProfile,
                                                                storedCustomFPS: storedFPS), storedFPS)
     }
+
+    // MARK: - Receiver requests (issue #142)
+
+    private let stored = StreamingProfileSetting(profile: .efficiency, customFrameRate: .fps90)
+
+    func testReceiverProfileRequestIsRejectedWhileAutomatic() {
+        for requested in StreamingProfile.allCases {
+            XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+                mode: .automatic, stored: stored, requestedProfile: requested, requestedCustomFrameRate: .fps60),
+                .rejectedAutomatic, "\(requested): Automatic would report Performance anyway; store and restart nothing")
+        }
+    }
+
+    func testReceiverPriorityRequestIsRejectedWhileAutomatic() {
+        for requested in StreamingPriority.allCases {
+            XCTAssertEqual(StreamingModePolicy.remotePriorityRequest(mode: .automatic, stored: .auto, requested: requested),
+                           .rejectedAutomatic)
+        }
+    }
+
+    func testReceiverRequestForTheSettingInUseNeedsNoRestart() {
+        XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+            mode: .custom, stored: stored, requestedProfile: .efficiency, requestedCustomFrameRate: .auto), .unchanged,
+            "a non-Custom profile ignores the request's frame rate, so this is the stored setting")
+        let custom = StreamingProfileSetting(profile: .custom, customFrameRate: .fps60)
+        XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+            mode: .custom, stored: custom, requestedProfile: .custom, requestedCustomFrameRate: .fps60), .unchanged)
+        XCTAssertEqual(StreamingModePolicy.remotePriorityRequest(mode: .custom, stored: .preferFPS, requested: .preferFPS),
+                       .unchanged)
+    }
+
+    func testReceiverRequestInCustomAppliesAndKeepsTheStoredFrameRateForOtherProfiles() {
+        // A 2.0.0 Apple receiver always sends customFrameRate "auto"; picking
+        // Performance must not reset the Mac's custom 90 FPS.
+        XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+            mode: .custom, stored: stored, requestedProfile: .performance, requestedCustomFrameRate: .auto),
+            .apply(StreamingProfileSetting(profile: .performance, customFrameRate: .fps90)))
+        XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+            mode: .custom, stored: stored, requestedProfile: .custom, requestedCustomFrameRate: .fps120),
+            .apply(StreamingProfileSetting(profile: .custom, customFrameRate: .fps120)))
+        XCTAssertEqual(StreamingModePolicy.remoteProfileRequest(
+            mode: .custom, stored: stored, requestedProfile: .custom, requestedCustomFrameRate: nil),
+            .apply(StreamingProfileSetting(profile: .custom, customFrameRate: .fps90)),
+            "no frame rate in the request keeps the stored one")
+        XCTAssertEqual(StreamingModePolicy.remotePriorityRequest(mode: .custom, stored: .auto, requested: .preferLatency),
+                       .apply(.preferLatency))
+    }
+
+    func testProfileStateCarriesModeAndFrameRateAndOlderMessagesStillParse() throws {
+        let update = StreamingProfileStateUpdate(profile: .custom, mode: .custom, customFrameRate: .fps90)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(update.wireJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(object["type"] as? String, WireMessage.streamingProfileState)
+        XCTAssertEqual(StreamingProfileStateUpdate(message: object), update)
+
+        let automatic = StreamingProfileStateUpdate(profile: .performance, mode: .automatic, customFrameRate: nil)
+        let automaticObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(automatic.wireJSON.utf8)) as? [String: Any])
+        XCTAssertNil(automaticObject["customFrameRate"])
+        XCTAssertEqual(StreamingProfileStateUpdate(message: automaticObject), automatic)
+
+        // A pre-#142 Mac: profile only. The mode stays unknown, so the
+        // receiver keeps its controls enabled as before.
+        let old = StreamingProfileStateUpdate(message: ["type": WireMessage.streamingProfileState, "profile": "efficiency"])
+        XCTAssertEqual(old, StreamingProfileStateUpdate(profile: .efficiency, mode: nil, customFrameRate: nil))
+        XCTAssertNil(ReceiverStreamingModeNote.text(for: old?.mode))
+        XCTAssertNil(StreamingProfileStateUpdate(message: ["profile": "turbo"]))
+        XCTAssertNotNil(ReceiverStreamingModeNote.text(for: .automatic))
+    }
 }

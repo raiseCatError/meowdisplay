@@ -67,6 +67,12 @@ enum CustomControlKind: Hashable, Codable {
     /// A user-made one-tap keyboard shortcut, owned by this placement. Uses
     /// the same `ShortcutItem`/`KeyboardShortcut` model as every palette.
     case shortcut(ShortcutItem)
+    /// The receiver-local calculator's button (`LocalCalculator`): opens a
+    /// panel on this device and never sends anything to the Mac. Only ever
+    /// placed by the person. Builds that predate it drop just this
+    /// placement (`{"kind":"calculator"}` is an unknown kind to them, and
+    /// placements decode lossily), keeping every other control.
+    case calculator
 
     private enum CodingKeys: String, CodingKey { case kind, value, shortcut }
 
@@ -84,6 +90,8 @@ enum CustomControlKind: Hashable, Codable {
             self = .function(try container.decode(String.self, forKey: .value))
         case "moveView":
             self = .moveView
+        case "calculator":
+            self = .calculator
         case "shortcut":
             let item = try container.decode(ShortcutItem.self, forKey: .shortcut)
             guard case .keyboardShortcut(let shortcut) = item.action, shortcut.isValid else {
@@ -111,6 +119,8 @@ enum CustomControlKind: Hashable, Codable {
         case .shortcut(let item):
             try container.encode("shortcut", forKey: .kind)
             try container.encode(item, forKey: .shortcut)
+        case .calculator:
+            try container.encode("calculator", forKey: .kind)
         }
     }
 
@@ -119,11 +129,11 @@ enum CustomControlKind: Hashable, Codable {
         return nil
     }
 
-    /// Fires once on tap (a Function action or a one-tap shortcut), rather
-    /// than joining the chord gesture.
+    /// Fires once on tap (a Function action, a one-tap shortcut, or the
+    /// local Calculator's toggle), rather than joining the chord gesture.
     var isOneTapAction: Bool {
         switch self {
-        case .function, .shortcut: return true
+        case .function, .shortcut, .calculator: return true
         case .tray, .moveView: return false
         }
     }
@@ -347,6 +357,7 @@ extension CustomControlKind {
         case .function(let id): return id
         case .moveView: return "move-view"
         case .shortcut(let item): return item.id
+        case .calculator: return "calculator"
         }
     }
 }

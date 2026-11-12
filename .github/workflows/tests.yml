@@ -13,77 +13,101 @@ permissions:
   contents: read
 
 # A superseded run tells us nothing, so drop in-flight runs for the same ref.
+# Except pushes to dev: each merge is validated as its own commit (a group per
+# SHA, never cancelled). Otherwise a later docs-only merge, which skips the app
+# jobs, would cancel the only full run of the code merged just before it.
 concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && format('tests-dev-{0}', github.sha) || format('tests-{0}', github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev') }}
 
 jobs:
-  # Classify PR files using the synthetic merge commit's first parent (the base
-  # branch). Keep the test jobs present, since the dev/main rulesets require
-  # their exact check names; a skipped job reports success for branch protection.
-  # Pushes still run full CI. Doc-only PRs skip all expensive jobs; a
-  # pr-title.yml-only PR runs release-tooling but skips app builds. Everything
-  # else (mixed PRs, and any tests.yml change, which defines these jobs) runs
-  # full CI. Fail closed: the jobs below also run whenever this job didn't
-  # succeed, so a broken classifier never turns into skipped (= passing) checks.
+  # Decide which jobs this change needs from the files it changes, against
+  # the synthetic merge commit's first parent (the PR's base). Keep the test
+  # jobs present, since the dev/main/release rulesets require their exact
+  # check names; a skipped job reports success for branch protection.
+  # A push to dev that adds exactly one commit (a PR's merge or squash commit)
+  # is classified the same way against that commit's parent; every other push
+  # (main, release/**, several commits, a force-push) and every PR into main or
+  # release/* runs full CI.
+  #
+  # Each job runs only for the areas that can change its result: Mac sources
+  # and tests → mac; iOS → mac (its tests read iOS sources), the iOS build and
+  # ios-duo; iOS UI tests → ios-duo; Android → android; Shared/ (protocol,
+  # pairing, encryption) → every app job; fixtures/ → mac and android;
+  # project.yml and .xcode-version → every Apple job; release tooling →
+  # release-tooling, which (cheap, and it checks these rules) also runs for
+  # everything but documentation and media; documentation and press-kit media
+  # → nothing heavy. Everything else runs full CI: unknown paths, tests.yml
+  # and scripts/ci/.
+  # The rules, and tests that check them against project.yml, the Gradle build
+  # and the macOS tests' file reads, are scripts/ci/classify_pr_paths.py and
+  # test_classify_pr_paths.py; the base branch's copy decides, so a PR can't
+  # reclassify itself. Fail closed: a job is skipped only when the classifier
+  # said `false` for it, and every job runs whenever this job didn't succeed,
+  # so a broken classifier never turns into skipped (= passing) checks.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-      workflow_only: ${{ steps.classify.outputs.workflow_only }}
+      mac: ${{ steps.classify.outputs.mac }}
+      ios_build: ${{ steps.classify.outputs.ios_build }}
+      ios_ui: ${{ steps.classify.outputs.ios_ui }}
+      android: ${{ steps.classify.outputs.android }}
+      release_tooling: ${{ steps.classify.outputs.release_tooling }}
+      press_kit: ${{ steps.classify.outputs.press_kit }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 2
-      - name: Determine documentation-only PR
+      - name: Select the jobs this change needs
         id: classify
         shell: bash
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          full_ci() {
+            {
+              for job in mac ios_build ios_ui android release_tooling press_kit; do echo "$job=true"; done
+              echo "reason=$1"
+            } >> "$GITHUB_OUTPUT"
+            echo "Full CI: $1"
+          }
           # If the PR merge ref/parent isn't available, run all tests.
           if ! git rev-parse 'HEAD^1' >/dev/null 2>&1; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "workflow_only=false" >> "$GITHUB_OUTPUT"
+            full_ci "no base commit"
             exit 0
           fi
-          git diff --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed-pr-paths"
-          python3 - "$RUNNER_TEMP/changed-pr-paths" "$GITHUB_OUTPUT" <<'PY'
-          import pathlib
-          import sys
-
-          raw = pathlib.Path(sys.argv[1]).read_bytes()
-          paths = [part.decode("utf-8") for part in raw.split(b"\0") if part]
-          # Only narrow, explicit file sets may skip expensive jobs.
-          docs_only = bool(paths) and all(
-              ("/" not in path and path.endswith(".md"))
-              or (path.startswith("docs/") and path.endswith(".md"))
-              for path in paths
-          )
-          # MacTests/AppStoreTests scans the top-level docs for the upstream
-          # listing ID (built from a number there too, so this file never holds
-          # the literal): a doc that contains it must get the Mac job.
-          upstream_id = str(6_780_264_891)
-          if docs_only and any(upstream_id in pathlib.Path(p).read_text(encoding="utf-8", errors="replace")
-                               for p in paths if pathlib.Path(p).is_file()):
-              docs_only = False
-          workflow_only = bool(paths) and all(path == ".github/workflows/pr-title.yml" for path in paths)
-          with open(sys.argv[2], "a", encoding="utf-8") as out:
-              out.write(f"docs_only={str(docs_only).lower()}\n")
-              out.write(f"workflow_only={str(workflow_only).lower()}\n")
-          print(f"Documentation-only PR: {docs_only}; workflow-only PR: {workflow_only}; {len(paths)} files")
-          PY
+          # Only pull requests and pushes to dev are ever classified; the
+          # classifier then checks the details (single commit, PR base).
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" && ! ( "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/dev" ) ]]; then
+            full_ci "not a pull request or a push to dev"
+            exit 0
+          fi
+          # The base branch's classifier (dev's before the push), never the change's own copy.
+          classifier="$RUNNER_TEMP/classify_pr_paths.py"
+          if ! git show 'HEAD^1:scripts/ci/classify_pr_paths.py' > "$classifier" 2>/dev/null; then
+            full_ci "the base branch has no classifier"
+            exit 0
+          fi
+          if ! grep -q -- '--github' "$classifier"; then
+            full_ci "the base branch's classifier predates per-job selection"
+            exit 0
+          fi
+          # It writes its selection only once it has one; any failure is full CI.
+          selection="$RUNNER_TEMP/selection"
+          if python3 -I "$classifier" --github "$selection"; then
+            cat "$selection" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::the base branch's classifier failed: running full CI"
+            full_ci "the classifier failed"
+          fi
 
   # Fast and first: the release and repository workflows stay fail-closed,
   # and the release library behaves (scripts/release/test).
   release-tooling:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.release_tooling != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -96,16 +120,50 @@ jobs:
         run: ruby scripts/release/check-release-workflows.rb
       - name: Release library, CLI, state branch and reference sync
         run: ruby -Iscripts/release/lib -e 'Dir["scripts/release/test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
+      - name: Pull request classifier
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Shell scripts
         run: |
           set -euo pipefail
           git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 -n1 bash -n
           git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 shellcheck -S warning
 
+  # Press-kit media and tooling: build.py verifies every file against the
+  # reviewed hashes in tools/press-kit/approved-assets.json and rebuilds the
+  # page, previews and ZIPs; README and preview images must decode. Not a
+  # required check; runs for press-kit changes, unclassified pushes and whenever classification failed.
+  press-kit:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.press_kit != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install Pillow
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet 'pillow==12.3.0'
+      - name: Build and verify the press kit
+        if: hashFiles('tools/press-kit/build.py') != ''
+        run: '"$RUNNER_TEMP/venv/bin/python" tools/press-kit/build.py'
+      - name: Images decode
+        run: |
+          set -euo pipefail
+          git ls-files -z assets/press-kit-preview.png 'assets/readme/*.png' 'assets/readme/*.jpg' 'assets/readme/*.jpeg' 'assets/readme/*.webp' 'assets/readme/*.gif' \
+            | xargs -0 -r "$RUNNER_TEMP/venv/bin/python" -c '
+          import sys
+          from PIL import Image
+          for path in sys.argv[1:]:
+              with Image.open(path) as image:
+                  image.load()
+          print(f"{len(sys.argv) - 1} images decode")'
+
   # Runs on every branch; does real work only where the Android app exists.
   android:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.android != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -138,7 +196,7 @@ jobs:
 
   mac:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.mac != 'false') }}
     runs-on: xcode-27
     # A hung test must fail the job, not hold a runner for GitHub's six-hour default.
     timeout-minutes: 60
@@ -198,8 +256,11 @@ jobs:
       # The iPhone/iPad receiver shares Shared/ with both Mac apps but was
       # never compiled here, so an iOS-only break (or an API that exists only
       # on macOS) could reach main unnoticed. A generic-device build needs no
-      # simulator runtime and no signing.
+      # simulator runtime and no signing. Skipped (with the gate below) only
+      # when the classifier says nothing the iOS app compiles changed: Mac,
+      # MacReceiver and MacTests changes.
       - name: Build iOS receiver app
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios_build != 'false' }}
         run: |
           xcodebuild build \
             -project MeowDisplay.xcodeproj \
@@ -216,6 +277,7 @@ jobs:
       # toolchain took: the built app must reference the symbol exactly when
       # the SDK declares it — excluded on older SDKs, enabled on 27.1+.
       - name: Check reserved-region SDK gate
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios_build != 'false' }}
         run: |
           xcodebuild -version
           xcrun swiftc --version
@@ -242,9 +304,15 @@ jobs:
   # iPhone Duo: the receiver's UI tests on the Duo simulator, so adaptive layouts (the
   # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
   # were made for. Not a required check yet: the first runs establish it.
+  #
+  # The simulator boots before the build, so it has settled by the time the tests start. With
+  # the build first (#183), the tests began a few minutes after a fresh boot, while the Duo was
+  # still busy after `bootstatus`: about half of those runs then failed with "Timed out while
+  # evaluating UI query" or a test runner that crashed before starting. The build is slower with
+  # the Duo booted, but it stays a separate step so its time is visible.
   ios-duo:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.workflow_only != 'true')) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
@@ -257,19 +325,36 @@ jobs:
         run: brew install xcodegen
       - name: Generate project
         run: xcodegen generate
-      - name: Boot an iPhone Duo simulator
+      - name: Create an iPhone Duo simulator
         id: duo
-        run: echo "udid=$(scripts/ci/duo-simulator.sh)" >> "$GITHUB_OUTPUT"
-      - name: UI tests on iPhone Duo
+        # An assignment, so the step fails when the script does (never an error text as the UDID).
         run: |
-          xcodebuild test \
+          udid=$(scripts/ci/duo-simulator.sh)
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Boot the iPhone Duo simulator
+        run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
+      - name: Build the receiver and its UI tests
+        run: |
+          xcodebuild build-for-testing \
+            -project MeowDisplay.xcodeproj \
+            -scheme OpenSidecariOS \
+            -destination "id=${{ steps.duo.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+      # No paired Mac is ever reachable here, so the live-Mac tests in DemoModeSmokeTests skip
+      # at once (MEOW_NO_LIVE_MAC) instead of first waiting out their connection timeouts.
+      - name: UI tests on iPhone Duo
+        env:
+          TEST_RUNNER_MEOW_NO_LIVE_MAC: "1"
+        run: |
+          xcodebuild test-without-building \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination "id=${{ steps.duo.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
             -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
             -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
+            -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
             -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY=""
+            -default-test-execution-time-allowance 300

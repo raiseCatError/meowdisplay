@@ -17,12 +17,21 @@ struct DemoReceiverScreen: View {
     let haptics: ReceiverHaptics
     let onExit: () -> Void
 
-    @State private var padCanvas: CGRect?
+    @State private var padCanvas: PadCanvasPublication?
     @State private var keyboardRect: CGRect?
     @State private var hint: DemoHint?
     @State private var hintGeneration = 0
     @State private var feedbackVisible = false
     @State private var showGuide = false
+    /// The banner over the controls, which they treat as an obstacle (it
+    /// moves only what would land under it: the local calculator).
+    @State private var bannerFrame: CGRect?
+    /// Window view with sample windows (floating windows, tucking, docking), instead of the desktop.
+    @State private var windowView = false
+    /// Where the control tray and its groups are (this view's coordinates): tucked floats' strips
+    /// give way to them, as in a live session.
+    @State private var controlFrames: [CGRect] = []
+    @StateObject private var windowDemo = DemoWindowWorkspace(defaults: DemoSession.preferenceDefaults(demoActive: true))
 
     init(demo: DemoSession, store: ReceiverControlStore, showSettings: Binding<Bool>,
          keyboardActive: Binding<Bool>, haptics: ReceiverHaptics, onExit: @escaping () -> Void) {
@@ -53,6 +62,16 @@ struct DemoReceiverScreen: View {
             let targetSize = desktopSize(receiverSize: geo.size)
             ZStack(alignment: .topLeading) {
                 Color(white: 0.03).ignoresSafeArea()
+                if windowView {
+                    // The screen's safe area and what strips keep clear of, as a live session gives them.
+                    let origin = geo.frame(in: .global).origin
+                    DemoWindowModeView(workspace: windowDemo, model: windowDemo.model, area: area, inputAllowed: demo.inputAllowed,
+                                       safeArea: insets.safeRect(in: geo.size).intersection(area),
+                                       reservations: WorkspaceEdgeReservations(
+                                           screen: CGRect(origin: origin, size: geo.size),
+                                           controls: controlFrames.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) }),
+                                       onShowDesktop: { withAnimation(.easeInOut(duration: 0.2)) { windowView = false } })
+                } else {
                 if demo.videoEnabled {
                     desktopLayer(base: base)
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -76,6 +95,7 @@ struct DemoReceiverScreen: View {
                                         : "Direct Touch. Touch the desktop where you want to click."))
                 .accessibilityAction(named: Text("Click at pointer")) {
                     tapAtPointer(base: base)
+                }
                 }
                 if !demo.videoEnabled {
                     videoOffActions
@@ -102,13 +122,18 @@ struct DemoReceiverScreen: View {
                     containerSize: geo.size,
                     safeInsets: insets,
                     notchSide: nil,
-                    reservedRegions: [],
+                    // The same fold and camera regions as a live session
+                    // (an iPhone Duo half open), plus the demo banner.
+                    reservedRegions: ControlReservedRegion.active(in: geo)
+                        + (bannerFrame.map { [ControlReservedRegion(kind: .occlusion, frame: $0)] } ?? []),
                     haptics: haptics,
-                    onOccupiedFramesChange: { _ in },
+                    onOccupiedFramesChange: { controlFrames = $0 },
                     onCanvasChange: { padCanvas = $0 },
                     surfaceOrigin: canvas.origin)
                 chrome(canvas: canvas, insets: insets)
             }
+            .coordinateSpace(name: Self.screenSpace)
+            .onPreferenceChange(DemoBannerFramePreference.self) { bannerFrame = $0 }
             .onAppear { reconfigure(to: targetSize) }
             .onChange(of: DesktopKey(mode: demo.displayMode, size: targetSize)) { key in reconfigure(to: key.size) }
         }
@@ -174,9 +199,8 @@ struct DemoReceiverScreen: View {
     }
 
     private func canvas(in size: CGSize) -> CGRect {
-        let full = CGRect(origin: .zero, size: size)
-        guard store.isPad, let padCanvas, padCanvas.width > 0, padCanvas.height > 0 else { return full }
-        return padCanvas.intersection(full)
+        guard store.isPad else { return CGRect(origin: .zero, size: size) }
+        return PadCanvasPublication.resolved(padCanvas, in: size)
     }
 
     /// The surface ignores the safe area, so read the window's real insets
@@ -192,6 +216,8 @@ struct DemoReceiverScreen: View {
     }
 
     /// Where the banner row starts.
+    private static let screenSpace = "demoScreen"
+
     private static func bandTop(canvas: CGRect, insets: ControlSafeInsets) -> CGFloat {
         max(canvas.minY, insets.top) + 6
     }
@@ -207,7 +233,12 @@ struct DemoReceiverScreen: View {
     private func handle(_ points: [CGPoint], at time: TimeInterval, base: RemoteViewportTransform) {
         let feedback = workspace.interaction.touches(points, at: time, base: base, settings: inputSettings)
         feedback.forEach(workspace.show)
-        if points.isEmpty { store.scheduleAutoHide() } else { store.beginAutoHideActivity() }
+        if points.isEmpty {
+            store.scheduleAutoHide()
+        } else {
+            store.beginAutoHideActivity()
+            store.noteSurfaceTouch()
+        }
     }
 
     private func tapAtPointer(base: RemoteViewportTransform) {
@@ -276,6 +307,22 @@ struct DemoReceiverScreen: View {
                 // The banner is one fixed-height row over the desktop; past
                 // this size its text overflowed and covered Exit Demo.
                 .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: DemoBannerFramePreference.self,
+                                           value: proxy.frame(in: .named(Self.screenSpace)))
+                })
+            if !windowView {
+                // Window view's own toolbar has Show Desktop (here it would cover the panes' titles).
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { windowView = true }
+                } label: {
+                    Label("Show Window View", systemImage: "macwindow.on.rectangle").font(.footnote.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .environment(\.colorScheme, .dark)
+                .accessibilityIdentifier("demoWindowViewToggle")
+            }
             if let hint {
                 DemoHintChip(hint: hint)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -686,6 +733,13 @@ struct DemoTrackpadPreview: View {
 }
 
 // MARK: - Chrome
+
+private struct DemoBannerFramePreference: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
+}
 
 /// Always visible: DEMO, the sample Mac, Allow Input, options and Exit Demo.
 struct DemoSessionBanner: View {

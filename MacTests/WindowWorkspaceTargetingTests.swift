@@ -178,6 +178,31 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
         XCTAssertNotEqual(again.assignments[1].assignmentGeneration, previous["t1"]!.assignmentGeneration)
     }
 
+    /// QA 9000037: with Chrome's Open sheet focused, the iPad's Escape and Return were dropped as
+    /// "another window has focus". The focused window matching the active window's own sheet is its
+    /// child: keys go to it. Anything else of the app still isn't.
+    func testTypingGoesToTheActiveWindowsOwnSheet() {
+        let tile = WorkspaceTileAssignment(tileID: "a", rect: .init(x: 0, y: 0, width: 1, height: 1), windowID: 19519, windowGeneration: 1,
+                                           pid: 300, bundleID: "com.google.Chrome", follow: .window, rotation: .none, fit: .fit,
+                                           assignmentGeneration: 1)
+        let window = CGRect(x: 248, y: 87, width: 1100, height: 762)
+        let sheet = CGRect(x: 0, y: 170, width: 1596, height: 910)
+        let exact: (CGRect, CGRect) -> Bool = { $0.integral == $1.integral }
+        func decision(focused: CGRect, sheets: [CGRect], subroleChild: Bool = false) -> WorkspaceKeyboardGate.Decision {
+            let isChild = subroleChild || WorkspaceKeyboardGate.focusIsOwnSheet(focusedFrame: focused, sheetFrames: sheets, matches: exact)
+            let id = WorkspaceKeyboardGate.focusedTileWindow(active: tile.windowID, focusedFrame: focused, isChild: isChild,
+                                                            frames: [tile.windowID: window], matches: exact)
+            return WorkspaceKeyboardGate.decide(active: tile, frontmostPID: 300, focusedWindowID: id, focusedWindowIsChild: isChild)
+        }
+        XCTAssertEqual(decision(focused: sheet, sheets: [sheet]), .deliver, "its own Open sheet")
+        XCTAssertEqual(decision(focused: sheet, sheets: []), .otherWindowFocused, "no known sheet there: as before")
+        XCTAssertEqual(decision(focused: CGRect(x: 500, y: 300, width: 400, height: 300), sheets: [sheet]), .otherWindowFocused,
+                       "another window of the app")
+        XCTAssertEqual(decision(focused: window, sheets: [sheet]), .deliver, "the window itself")
+        XCTAssertEqual(WorkspaceKeyboardGate.decide(active: tile, frontmostPID: 999, focusedWindowID: nil, focusedWindowIsChild: true),
+                       .hostFocusElsewhere, "another app in front: never")
+    }
+
     // MARK: Input targeting
 
     private func twoTiles() -> WorkspaceInputTargeting {

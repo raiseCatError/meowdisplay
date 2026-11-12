@@ -35,7 +35,9 @@ final class WindowWorkspaceLiveTests: XCTestCase {
         let box = Box()
         let browser = WindowBrowserService(hostID: "live-mac")
         browser.sendMessage = { box.add($0) }
-        let engine = WindowWorkspaceEngine(hostID: "live-mac", canvas: CGSize(width: 1170, height: 2532), fps: 30, browser: browser)
+        // A stand-in for Stage Manager: a test never runs the owner's shortcuts.
+        let engine = WindowWorkspaceEngine(hostID: "live-mac", canvas: CGSize(width: 1170, height: 2532), fps: 30, browser: browser,
+                                           stageManager: StageManagerStandIn())
         engine.deliverFrame = { _ in box.frame() }
         engine.sendMessage = { box.add($0) }
         engine.start()

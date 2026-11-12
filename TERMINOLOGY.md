@@ -42,15 +42,17 @@ sentences where one is shown. Where an app differs today, the
 | **Allow** / **Not Now** / **Always Allow** / **Block** | the Mac's answers | Accept, Deny (as labels) |
 | **Wi-Fi**, **USB**, **Remote** (another network, e.g. Tailscale) | how devices connect | WiFi, wireless, LAN (in UI), tunnel |
 | **Add Remote Mac** | Android: the sheet and the link under the Macs list for reaching a Mac outside this Wi-Fi. One **Address** field, then **Pair New Mac** or **Use for a Paired Mac**. Pair over Remote is the Mac's window for the first pairing | Add Server, Add Host, Add Endpoint |
-| **Address** | where to reach a Mac on another network: a name (MagicDNS) or an IP address, with an optional `:port`. It is a hint; the pairing decides who the Mac is. Menu items: **Add Address for…**, **Edit Address for…**, **Remove Address** | Endpoint, Host, IP (in UI) |
+| **Address** | where to reach a Mac on another network: a name (MagicDNS) or an IP address, with an optional `:port`. It is a hint; the pairing decides who the Mac is. Menu items: **Add Address for…**, **Edit Address for…**, **Remove Address** (iPhone/iPad, in the Mac's ••• menu: **Add Address…**, **Edit Address…**, **Remove Address**). A paired Mac's shared Tailscale address is offered as **Found Automatically** with **Use This Address** | Endpoint, Host, IP, Mac Address (in UI) |
 | **Security Details** | Android per-Mac menu item: the Mac's security key, short ID and saved address | Fingerprint, Certificate |
-| **Contacting your Mac…** · **Waiting for your Mac to connect…** · **Needs approval on your Mac** · **Reconnecting…** | Android Remote status while Connect is under way: the request is being sent, the request is delivered and the Mac should dial back, the Mac user must allow it, recovery after a lost connection | Knocking, Pinging, Dialing back |
+| **Contacting your Mac…** · **Waiting for your Mac to connect…** · **Needs approval on your Mac** · **Reconnecting…** | Remote status while Connect is under way (Android; iPhone/iPad show the first two): the request is being sent, the request is delivered and the Mac should dial back, the Mac user must allow it, recovery after a lost connection | Knocking, Pinging, Dialing back |
 | **Remote** · **Local** | where a connected session runs: **Connected · Remote · Tailscale** on the card and **Remote (Tailscale)** in the Performance Overlay. Tailscale is named only when the evidence shows it; otherwise **Remote** or **VPN**. A session on this Wi-Fi shows no route in the overlay | Tunnel, Relay, Cloud |
 | **Nearby** | a paired Mac this device sees on the local network right now (Android Macs list). A saved address shows as **Saved remote · address** | Available locally, Online |
 | **Auto-Reconnect** | reconnect by itself after a lost connection | Automatic Reconnection |
 | **Settings & Help** | the settings entry on a home screen. Inside a session the same screen is titled **Settings** | Preferences, Options |
 | **Macs** · **How to Connect** · **This Device** | the home screen: one **Macs** card, then the links **How to Connect** · **Try the Demo** (iPhone/iPad) · **This Device**. This Device shows the name Macs list (and, on Android, the security key) | Your Macs, Nearby Devices, Device Details |
 | **Demo** (**Try the Demo** on iPhone/iPad Home) | a sample session with no Mac | tutorial, preview mode |
+| **Back to Home — Keep Connected** · **Resume** | iPhone/iPad: show Home while the session stays up behind it; Home's card offers **Resume** (back to the same session) and **Disconnect**. The interruption card's **Back to Home** still ends the session | Minimize, Background, Hide Session |
+| **Session Actions** | iPhone/iPad: the modal opened by touching and holding the session's Settings control: **Back to Home — Keep Connected**, **Disconnect from Mac**, **Cancel** | session menu, quick actions, long-press menu |
 | **paused** | the Mac paused the picture | frozen, suspended |
 
 ### Display and Window mode
@@ -72,6 +74,7 @@ sentences where one is shown. Where an app differs today, the
 | **Hidden on this screen** | tiles that no longer fit | Stacked, Offscreen |
 | **Arrange**, **Maximize**, **Restore Layout**, **Rotate**, **Fill Tile** / **Show Whole Window**, **Remove Tile** | tile actions | |
 | **Close Window on Mac…** | closes the real Mac window (always confirmed) | close tile |
+| **Fill Window on Mac** / **Restore Previous Size on Mac** | resize the real Mac window to its display's usable area, and put it back (control only, never automatic; not macOS full screen) | Maximize, Zoom, Fill Window (that's the pane's own picture), Full Screen |
 | **Typing paused** | a tile that is not receiving keys because another app is in front on the Mac | |
 | **Switch to Window view?** | the one-time offer on the Full Desktop. **Yes** / **No**; it leaves by itself after 8 seconds | |
 

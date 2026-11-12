@@ -18,18 +18,61 @@ private extension WorkspaceRect {
     }
 }
 
+extension WorkspaceRect {
+    /// Points to points (the layering helpers work in picture points).
+    init(_ r: CGRect) { self.init(x: Double(r.minX), y: Double(r.minY), width: Double(r.width), height: Double(r.height)) }
+    var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+}
+
+/// An alpha mask: opaque over `size`, with `holes` (in the masked view's own coordinates) cut out.
+/// Lets an outline step aside where a float covers it without changing its shape elsewhere.
+struct WorkspaceHoleMask: View {
+    var size: CGSize
+    var holes: [CGRect]
+    var cornerRadius: CGFloat = 10
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle().fill(Color.black).frame(width: size.width, height: size.height)
+            ForEach(holes.indices, id: \.self) { i in
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(Color.black)
+                    .frame(width: max(holes[i].width, 0), height: max(holes[i].height, 0))
+                    .offset(x: holes[i].minX, y: holes[i].minY)
+                    .blendMode(.destinationOut)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .compositingGroup()
+    }
+}
+
+/// Several rectangles as one shape (a touch area with holes cut out of it).
+struct WorkspaceRectsShape: Shape {
+    var rects: [CGRect]
+    func path(in rect: CGRect) -> Path { Path { $0.addRects(rects) } }
+}
+
 /// Tile borders, state badges, title pills with the tile menu, drag-to-move
 /// with a drop preview, and divider grips while arranging. `picture` is where
 /// the Mac's picture is drawn, in this view's coordinates.
 struct WorkspaceChromeView: View {
     @ObservedObject var model: WorkspaceModel
     let picture: CGRect
+    /// The picture's normal fit, when it differs from where it's drawn: the
+    /// on-screen keyboard can slide or zoom the picture (`picture` follows,
+    /// so outlines stay on their windows), but the workspace size and hinge
+    /// sent to the Mac come from this, so typing never relayouts the panes
+    /// (issue #92). nil: `picture`.
+    var layoutPicture: CGRect? = nil
     let inputAllowed: Bool
     /// Separating folds/hinges in this view's coordinates: nothing interactive is placed inside them.
     var divisions: [CGRect] = []
     /// The screen's safe area (clear of a notch, Dynamic Island and the home indicator) in
     /// this view's coordinates. The picture may run under them; labels and buttons don't.
     var safeArea: CGRect?
+    /// The receiver's own controls (the tray or its gear, the Function Tray, the arrow keypad, the
+    /// keyboard and its bar) in this view's coordinates: the drop bar and Arrange's bar sit above them.
+    var controls: [CGRect] = []
     /// Opens the receiver's settings (the fullscreen strip's Settings button).
     var onSettings: (() -> Void)?
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
@@ -46,6 +89,13 @@ struct WorkspaceChromeView: View {
     @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
+    /// While a label is held: its pane and whether its titles were folded then. They keep that
+    /// form until the finger lifts (see `PaneLabelInteraction.folded`).
+    @State private var heldForm: (tile: String, folded: Bool)?
+    /// A label's hold is in progress (reset by SwiftUI when it ends or is cancelled).
+    @GestureState private var labelPress: PaneMenuTarget?
+    /// The last label tap, for telling a double tap (fullscreen toggle) from two single taps.
+    @State private var lastLabelTap: PaneLabelInteraction.Tap?
     @State private var stripVisible = true
     @State private var stripHideTask: Task<Void, Never>?
     /// The pane whose tabs are all shown while the menu bar shares their row; the others show
@@ -54,12 +104,18 @@ struct WorkspaceChromeView: View {
     @State private var tabsCollapseTask: Task<Void, Never>?
     /// Where each pane's label strip ends (workspace coordinates): the menu bar starts there.
     @State private var labelStripEnd: [String: CGFloat] = [:]
+    /// Where the drag's placement chip was last drawn: the first-use tip keeps clear of it.
+    @State private var placementChip: CGRect?
+    @State private var arrangeBarSize: CGSize?
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    struct PaneMenuTarget: Equatable { var tile: String; var tab: Int? }
+    typealias PaneMenuTarget = PaneLabelInteraction.Target
+    /// Matches UIKit's default double-tap timing.
+    static let doubleTapInterval = PaneLabelInteraction.doubleTapInterval
 
-    private var size: WorkspaceSize { WorkspaceSize(width: picture.width, height: picture.height) }
+    private var layoutRect: CGRect { layoutPicture ?? picture }
+    private var size: WorkspaceSize { WorkspaceSize(width: layoutRect.width, height: layoutRect.height) }
 
     private func normalized(_ p: CGPoint) -> WorkspacePoint {
         WorkspacePoint(x: (p.x - picture.minX) / max(picture.width, 1), y: (p.y - picture.minY) / max(picture.height, 1))
@@ -67,6 +123,7 @@ struct WorkspaceChromeView: View {
 
     /// The first division that crosses the picture, as a hinge in canvas coordinates.
     private var hinge: WorkspaceHinge? {
+        let picture = layoutRect
         guard picture.width > 0, picture.height > 0, let d = divisions.first?.intersection(picture), !d.isNull else { return nil }
         let r = WorkspaceRect(x: (d.minX - picture.minX) / picture.width, y: (d.minY - picture.minY) / picture.height,
                               width: d.width / picture.width, height: d.height / picture.height)
@@ -82,7 +139,7 @@ struct WorkspaceChromeView: View {
             Color.clear
                 .allowsHitTesting(false)
                 .onAppear { model.updateSpace(size, hinge: hinge) }
-                .onChange(of: picture) { _ in model.updateSpace(size, hinge: hinge) }
+                .onChange(of: layoutRect) { _ in model.updateSpace(size, hinge: hinge) }
                 .onChange(of: divisions) { _ in model.updateSpace(size, hinge: hinge) }
             chrome
         }
@@ -104,13 +161,13 @@ struct WorkspaceChromeView: View {
                     })
                     .position(x: picture.midX, y: picture.midY)
                     .allowsHitTesting(false)
-                ForEach(Array(frames.tiles.keys).sorted(), id: \.self) { id in
+                ForEach(Array(frames.tiles.keys).filter { !frames.isFloat($0) }.sorted(), id: \.self) { id in
                     if let rect = frames.tiles[id], let tile = model.layout.tiles[id] {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                if let id = model.active, let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
-                   multi || model.localFullscreen == id {
+                if let id = model.active, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
+                   multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     // While all its tabs are shown and leave too little room, the bar steps aside.
                     let e = unsafeInsets(of: rect)
@@ -123,12 +180,25 @@ struct WorkspaceChromeView: View {
                         PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
                     }
                 }
-                WorkspaceDropOverlay(model: model, picture: picture)
+                let titles = titleZones(frames)
+                #if os(iOS)
+                // Floating panes over the arrangement, back to front, and tucked floats' edge handles.
+                if !model.arranging {
+                    WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
+                                        onClose: { confirmClose = $0 }, tipAvoiding: titles, placementChip: placementChip)
+                }
+                #endif
+                WorkspaceDropOverlay(model: model, picture: picture, safeArea: safeArea, controls: controls + divisions,
+                                     titles: titles, onChipFrame: { placementChip = $0 })
                 if model.arranging {
                     arrangeControls(frames)
                 } else if model.localFullscreen == nil, !voiceOver {
                     dividerHolds(frames)
                 }
+                #if os(iOS)
+                // Mission Control: the notices of the floats it pauses, each on its own window.
+                if !model.arranging, model.drag == nil { floatMissionControlNotices(frames) }
+                #endif
                 if let m = menu, let tile = model.layout.tiles[m.tile], let rect = frames.tiles[m.tile]?.onScreen(picture) {
                     // Tap anywhere else to close; nothing reaches the Mac while the menu is open.
                     Color.black.opacity(0.001)
@@ -164,7 +234,21 @@ struct WorkspaceChromeView: View {
             .onAppear { syncMenus() }
             .onChange(of: menuKey) { _ in syncMenus() }
             .onChange(of: model.touchPulse) { _ in if model.localFullscreen != nil { revealStrip() } }
+            .onChange(of: labelPress) { press in if press == nil { DispatchQueue.main.async { finishCancelledHold() } } }
         }
+    }
+
+    /// A label's hold ended without `onEnded` (the system took the touch): nothing stays marked
+    /// held, and a drag it began is cancelled, never dropped where the finger happened to be.
+    private func finishCancelledHold() {
+        guard labelPress == nil, let held = heldLabel else { return }
+        let dragging: Bool
+        if case .pane(let tile, _)? = model.drag?.item, tile == held.tile { dragging = true } else { dragging = false }
+        if PaneLabelInteraction.holdEnded(cancelled: true, dragging: dragging, heldHere: true, folded: false) == .cancelDrag {
+            model.cancelDrag()
+        }
+        heldLabel = nil
+        heldForm = nil
     }
 
     /// What decides whose menus the bar shows: the focused pane, its app, and control.
@@ -186,19 +270,134 @@ struct WorkspaceChromeView: View {
         return "Close \(name) on the Mac?"
     }
 
+    /// Mission Control holds this window's picture: what's happening and the one thing this device
+    /// can do about it (that button is the only way out: never an Escape on its own). The × folds
+    /// it to a small status that brings it back; Mission Control stays open, nothing is sent.
+    @ViewBuilder
+    private func missionControlNotice(_ id: String, compact: Bool, width: CGFloat) -> some View {
+        let animation: Animation? = reduceMotion ? nil : .easeOut(duration: 0.18)
+        if model.missionControlNotice(id) == .folded {
+            Button { withAnimation(animation) { model.unfoldMissionControlNotice(id) } } label: {
+                Label("Paused · Mission Control", systemImage: "pause.circle")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)).lineLimit(1)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(workspaceChip, in: Capsule())
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Paused while Mission Control is open"))
+            .accessibilityHint(Text("Shows the notice again."))
+            .modifier(MissionControlAccess(model: model, id: id, saysState: false))
+            .accessibilityIdentifier("missionControlStatus")
+        } else {
+            let action = model.missionControlAction
+            let font = (compact ? Font.footnote : .callout).weight(.semibold)
+            VStack(spacing: compact ? 6 : 8) {
+                HStack(alignment: .top, spacing: 4) {
+                    Label("Paused while Mission Control is open", systemImage: "rectangle.3.group")
+                        .font(font).foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button { withAnimation(animation) { model.foldMissionControlNotice(id) } } label: {
+                        Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 22, height: 22).background(Color.white.opacity(0.16), in: Circle())
+                            .frame(width: 34, height: 34).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, -7).padding(.trailing, -9)
+                    .accessibilityLabel(Text("Hide Notice"))
+                    .accessibilityHint(Text("Mission Control stays open on the Mac. A small status stays on this window."))
+                    .accessibilityIdentifier("missionControlNoticeHide")
+                }
+                switch action {
+                case .closeOnMac?:
+                    Text("Press Esc on the Mac to close it.").font(compact ? .caption : .footnote)
+                        .foregroundStyle(.white.opacity(0.85)).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                case nil:
+                    EmptyView()
+                default:
+                    Button { model.performMissionControlAction() } label: {
+                        Label(action == .exit ? String(localized: "Exit Mission Control")
+                              : action == .awaitingApproval ? String(localized: "Awaiting Approval on the Mac…")
+                              : String(localized: "Request Control to Exit"),
+                              systemImage: action == .exit ? "xmark.rectangle" : "hand.raised")
+                            .font(font).foregroundStyle(.black).lineLimit(1).minimumScaleFactor(0.8)
+                            .padding(.horizontal, compact ? 11 : 14).padding(.vertical, compact ? 7 : 9)
+                            .background(.white, in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(action == .awaitingApproval)
+                    .accessibilityIdentifier("exitMissionControl")
+                }
+            }
+            .padding(.horizontal, compact ? 12 : 14).padding(.vertical, compact ? 9 : 11)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(white: 0.08, opacity: 0.9)))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .environment(\.colorScheme, .dark)
+            .frame(maxWidth: max(min(width - (compact ? 12 : 24), compact ? 300 : 380), 140))
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("missionControlNotice")
+        }
+    }
+
+    #if os(iOS)
+    /// The floats Mission Control pauses: each one's notice, compact, on its own window (drawn
+    /// here, above the floats). Not while a finger moves that float, and not where a float in
+    /// front covers the notice's spot: that float hides it as it hides the window.
+    @ViewBuilder
+    private func floatMissionControlNotices(_ frames: WorkspaceFrames) -> some View {
+        let ids = frames.floats
+        let bounds = safeArea.map { $0.intersection(picture) } ?? picture
+        ForEach(ids, id: \.self) { id in
+            if let notice = model.missionControlNotice(id), model.floatGesture != id,
+               let i = ids.firstIndex(of: id), let rect = frames.tiles[id]?.onScreen(picture),
+               let spot = WorkspaceModel.missionControlNoticeSpot(on: rect, folded: notice == .folded, within: bounds,
+                                                                  inFront: ids[(i + 1)...].compactMap { frames.tiles[$0]?.onScreen(picture) }) {
+                missionControlNotice(id, compact: true, width: rect.width)
+                    .position(x: spot.midX, y: spot.midY)
+            }
+        }
+    }
+    #endif
+
+    /// On a window Mission Control pauses: its state as the accessibility value (`saysState`) and
+    /// Exit Mission Control (or Request Control to exit it) as an action. Nothing on any other.
+    private struct MissionControlAccess: ViewModifier {
+        @ObservedObject var model: WorkspaceModel
+        let id: String
+        var saysState = true
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if model.missionControlPaused(id) {
+                let action = model.missionControlAction
+                let stated = content.accessibilityValue(saysState ? Text("Paused while Mission Control is open") : Text(verbatim: ""))
+                if action == .exit || action == .requestControl {
+                    stated.accessibilityAction(named: action == .exit ? Text("Exit Mission Control") : Text("Request Control to Exit Mission Control")) {
+                        model.performMissionControlAction()
+                    }
+                } else {
+                    stated
+                }
+            } else {
+                content
+            }
+        }
+    }
+
     private func status(for id: String, tile: WorkspaceTile) -> String? {
         // The Mac is drawing this pane's window: never a stale "choose a window" over a live picture
         // (the window list can lag behind a window that just appeared).
         if let remote = model.tileState(id), remote.status == .live, let source = tile.source, remote.windowID == source.windowID { return nil }
         if tile.source?.isDisplay == true, model.missing.contains(id) { return "This display isn't connected to the Mac now" }
+        if tile.source == nil, tile.emptied { return String(localized: "This pane’s window was closed on the Mac.") }
         if model.missing.contains(id) || tile.source == nil { return "Choose a window for this tile" }
         // Refused by the Mac (e.g. that window already shows in another tile).
         if model.remote?.rejected[id] != nil { return "Tap to choose a window for this tile" }
         guard let remote = model.tileState(id) else { return nil }
         let app = remote.app.isEmpty ? "This window" : remote.app
-        if model.missionControlOpen, [.paused, .waiting, .retrying].contains(remote.status) {
-            return String(localized: "Mission Control is open on your Mac. Video is paused.")
-        }
         switch remote.status {
         case .live: return nil
         case .waiting: return "Waiting for \(remote.app.isEmpty ? "the window" : remote.app)…"
@@ -212,6 +411,49 @@ struct WorkspaceChromeView: View {
                 : "macOS paused \(app)'s picture. It comes back when the window is shown on the Mac."
         case .retrying: return "Reconnecting to \(remote.app.isEmpty ? "the window" : remote.app)… (try \(remote.attempt))"
         }
+    }
+
+    /// A pane whose last window closed on the Mac: it stays where it was until the person chooses
+    /// a window for it or removes it. Two plain buttons, readable and reachable in a small pane
+    /// (they stack when there's no room side by side).
+    private func emptiedPane(id: String, text: String) -> some View {
+        VStack(spacing: 10) {
+            Text(text).font(.callout).foregroundStyle(.white).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if #available(macOS 13.0, iOS 16.0, *) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                    VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+                }
+            } else {
+                VStack(spacing: 8) { emptiedPaneButtons(id: id) }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 12))
+        .padding(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("emptiedPane")
+    }
+
+    @ViewBuilder
+    private func emptiedPaneButtons(id: String) -> some View {
+        Button { model.openOverview(replacing: id) } label: {
+            Label("Choose Window", systemImage: "macwindow").font(.callout.weight(.semibold))
+                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(.white, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneChooseWindow")
+        Button { model.removeTile(id) } label: {
+            Label("Remove Pane", systemImage: "rectangle.badge.minus").font(.callout.weight(.semibold))
+                .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(workspaceChip, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("emptiedPaneRemove")
     }
 
     /// How far each edge of [rect] reaches outside the safe area.
@@ -230,6 +472,9 @@ struct WorkspaceChromeView: View {
             PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
+                // A float's window is in the video, under this outline: the outline steps aside
+                // where a float (or its title) is, instead of showing through it.
+                .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
                 .allowsHitTesting(false)
                 // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
                 // never a tap through to the Mac.
@@ -238,11 +483,61 @@ struct WorkspaceChromeView: View {
                 .accessibilityIdentifier("workspacePane")
                 .accessibilityAddTraits(active ? .isSelected : [])
                 .accessibilityAction { model.focus(id) }
+                // Paused by Mission Control: said here and the way out, even under a float or folded.
+                .modifier(MissionControlAccess(model: model, id: id))
+            // Where a floating pane covers this pane's titles, they step aside: touches there go to the float.
+            let covered = coveredByFloat(titleRow(rect, width: 260), frames)
             tileLabels(id: id, tile: tile, rect: rect, active: active, multi: multi)
                 .padding(unsafeInsets(of: rect))
+                .opacity(covered ? 0 : 1)
+                .allowsHitTesting(!covered)
+                // A container, not an element: an accessibility modifier on this pane-sized layer
+                // otherwise makes it one element that takes its title's label and button trait.
+                .accessibilityElement(children: .contain)
+                .accessibilityHidden(covered)
         }
         .frame(width: rect.width, height: rect.height)
         .position(x: rect.midX, y: rect.midY)
+    }
+
+    /// Whether a shown floating pane (its window or its title pill) overlaps `r` (on screen).
+    private func coveredByFloat(_ r: CGRect, _ frames: WorkspaceFrames) -> Bool {
+        WorkspaceFloatLayering.isCovered(WorkspaceRect(r), by: floatOccluders(frames).map(WorkspaceRect.init))
+    }
+
+    /// What the shown floats cover on screen: each one's window and title pill (where it rests).
+    private func floatOccluders(_ frames: WorkspaceFrames) -> [CGRect] {
+        frames.floats.compactMap { frames.tiles[$0]?.onScreen(picture) }.flatMap { r -> [CGRect] in
+            [r, floatPill(r)]
+        }
+    }
+
+    /// A float's title pill where it rests: on its top edge, moved into the safe area when that
+    /// edge is under the notch, the Dynamic Island or the status bar.
+    private func floatPill(_ content: CGRect) -> CGRect {
+        WorkspaceOverlayPlacement.floatPill(content: content, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(content)).cgRect.size,
+                                            safe: safeArea, picture: picture)
+    }
+
+    /// The panes' label strips and the floats' title pills on screen: the drag's chip and the
+    /// first-use tip keep clear of them.
+    private func titleZones(_ frames: WorkspaceFrames) -> [CGRect] {
+        let panes = frames.tiles.compactMap { id, r -> CGRect? in
+            guard !frames.isFloat(id), let end = labelStripEnd[id] else { return nil }
+            let rect = r.onScreen(picture), e = unsafeInsets(of: rect)
+            let x = rect.minX + e.leading
+            return end > x ? CGRect(x: x, y: rect.minY + e.top, width: end - x, height: WorkspaceOverlayPlacement.paneTitleHeight) : nil
+        }
+        // A float being docked is drawn only as its card under the finger: no pill to avoid.
+        var docked: String?
+        if case .float(let id)? = model.drag?.item { docked = id }
+        return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
+    }
+
+    /// Where a pane's label strip starts: its top-left corner inside the safe area.
+    private func titleRow(_ rect: CGRect, width: CGFloat) -> CGRect {
+        let e = unsafeInsets(of: rect)
+        return CGRect(x: rect.minX + e.leading, y: rect.minY + e.top, width: min(rect.width - e.leading, width), height: 44)
     }
 
     /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
@@ -261,7 +556,14 @@ struct WorkspaceChromeView: View {
     private func tileLabels(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, multi: Bool) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
-            if let text = status(for: id, tile: tile) {
+            if model.missionControlNotice(id) != nil {
+                // Mission Control holds this window's picture: its notice (folded: a small status).
+                missionControlNotice(id, compact: rect.width < 320, width: rect.width)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if tile.source == nil, tile.emptied, let text = status(for: id, tile: tile) {
+                emptiedPane(id: id, text: text)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let text = status(for: id, tile: tile) {
                 VStack(spacing: 8) {
                     Button { model.openOverview(replacing: id) } label: {
                         HStack(spacing: 8) {
@@ -283,21 +585,6 @@ struct WorkspaceChromeView: View {
                                 .background(workspaceChip, in: Capsule())
                         }
                         .buttonStyle(.plain)
-                    }
-                    if model.missionControlActionPane == id {
-                        // One pane offers it. Without control: ask for it here, then Exit.
-                        let granted = model.canControlMac
-                        Button { if granted { model.exitMissionControl() } else { model.requestControl() } } label: {
-                            Label(granted ? String(localized: "Exit Mission Control")
-                                  : model.controlState() == .requesting ? String(localized: "Awaiting Approval on the Mac…")
-                                  : String(localized: "Request Control to Exit Mission Control"),
-                                  systemImage: granted ? "xmark.rectangle" : "hand.raised").font(.callout.weight(.semibold))
-                                .foregroundStyle(.black).padding(.horizontal, 12).padding(.vertical, 8)
-                                .background(.white, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled([.requesting, .requestsDisabled].contains(model.controlState()))
-                        .accessibilityIdentifier("exitMissionControl")
                     }
                     if model.tileState(id)?.status == .paused, model.tileState(id)?.inStageStrip == true, inputAllowed, !model.missionControlOpen {
                         HStack(spacing: 8) {
@@ -396,19 +683,25 @@ struct WorkspaceChromeView: View {
                 })
                 .onDisappear { labelStripEnd[id] = nil }
             }
-            if active, model.remote?.hostFocus.isMismatch == true {
-                Button { model.focus(id) } label: {
-                    Text(model.remote?.hostFocus == .otherWindowFocused
-                         ? "Typing paused: another window is in front on the Mac. Tap to resume."
-                         : "Typing paused: another app is in front on the Mac. Tap to resume.")
-                        .font(.caption).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+            VStack(spacing: 6) {
+                windowFrameStatus(id)
+                if active, model.remote?.hostFocus.isMismatch == true {
+                    Button { model.focus(id) } label: {
+                        Text(model.remote?.hostFocus == .otherWindowFocused
+                             ? "Typing paused: another window is in front on the Mac. Tap to resume."
+                             : "Typing paused: another app is in front on the Mac. Tap to resume.")
+                            .font(.caption).foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(8)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(8)
         }
     }
+
+    private func windowFrameStatus(_ id: String) -> some View { WorkspaceWindowFrameStatus(model: model, id: id) }
+
 
     // MARK: Labels (one per window in the pane; tabs side by side)
 
@@ -428,14 +721,17 @@ struct WorkspaceChromeView: View {
 
     /// `sharesRow`: the menu bar sits in this row, so the tabs shrink to the shown tab's app icon
     /// and "+N" until the person taps, holds or scrolls them (`expandTabs`): then full names,
-    /// scrolling when they don't fit.
+    /// scrolling when they don't fit. A held label keeps the form it was held in until the finger
+    /// lifts, so one hold on the icon opens the options (with the titles shown in full).
     @ViewBuilder
     private func labelStrip(id: String, tile: WorkspaceTile, rect: CGRect, active: Bool, sharesRow: Bool) -> some View {
         let windows = tile.windows
         let available = max(rect.width - 12, 60)
         // Shorter labels when the pane holds several windows; the strip scrolls (by finger only) past that.
         let each = windows.count <= 1 ? min(180, available) : max(76, min(150, available / CGFloat(windows.count) - 6))
-        let compact = sharesRow && !windows.isEmpty && tabsExpanded != id && heldLabel?.tile != id && model.drag == nil
+        let compact = PaneLabelInteraction.folded(sharesRow: sharesRow, hasWindows: !windows.isEmpty, expanded: tabsExpanded == id,
+                                                  held: heldLabel?.tile == id, dragging: model.drag != nil,
+                                                  heldFolded: heldForm?.tile == id ? heldForm?.folded : nil)
         if compact {
             let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
             let visible = [shownIndex]
@@ -443,7 +739,7 @@ struct WorkspaceChromeView: View {
             HStack(spacing: 4) {
                 ForEach(visible, id: \.self) { i in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(windows[i], in: tile, id: id),
-                          icon: windows[i].bundleID.flatMap { model.icons[$0] }, shown: i == shownIndex, active: active,
+                          app: labelApp(windows[i]), shown: i == shownIndex, active: active,
                           width: 64, iconOnly: true)
                 }
                 if hidden > 0 {
@@ -464,11 +760,11 @@ struct WorkspaceChromeView: View {
         } else {
             let row = HStack(spacing: 4) {
                 if windows.isEmpty {
-                    label(id: id, tab: nil, text: String(localized: "Empty"), icon: nil, shown: true, active: active, width: each)
+                    label(id: id, tab: nil, text: String(localized: "Empty"), app: nil, shown: true, active: active, width: each)
                 }
                 ForEach(Array(windows.enumerated()), id: \.offset) { i, s in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(s, in: tile, id: id),
-                          icon: s.bundleID.flatMap { model.icons[$0] }, shown: s == tile.source, active: active, width: each)
+                          app: labelApp(s), shown: s == tile.source, active: active, width: each)
                 }
             }
             .padding(6)
@@ -489,14 +785,23 @@ struct WorkspaceChromeView: View {
         }
     }
 
-    /// `iconOnly`: just the app's icon (its name when there is no icon), beside the menu bar.
-    private func label(id: String, tab: Int?, text: String, icon: CGImage?, shown: Bool, active: Bool, width: CGFloat,
-                       iconOnly: Bool = false) -> some View {
+    /// The app a label names: its icon, or the placeholder until the Mac sends one. nil for a desktop.
+    private func labelApp(_ s: WorkspaceSource) -> (bundleID: String, name: String)? {
+        guard !s.isDisplay, let bundle = s.bundleID ?? windowItem(s)?.bundleID, !bundle.isEmpty else { return nil }
+        return (bundle, windowItem(s)?.app ?? "")
+    }
+
+    /// `iconOnly`: just the app's icon (the placeholder until it arrives; a desktop's name), beside the menu bar.
+    private func label(id: String, tab: Int?, text: String, app: (bundleID: String, name: String)?, shown: Bool, active: Bool,
+                       width: CGFloat, iconOnly: Bool = false) -> some View {
         let highlighted = shown && active
         let target = PaneMenuTarget(tile: id, tab: tab)
         return HStack(spacing: 5) {
-            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 15, height: 15) }
-            if !iconOnly || icon == nil {
+            if let app {
+                WorkspaceAppIcon(icon: model.icons[app.bundleID], name: app.name.isEmpty ? text : app.name,
+                                 bundleID: app.bundleID, size: 15, tint: highlighted ? .black : .white)
+            }
+            if !iconOnly || app == nil {
                 Text(text).font(.caption.weight(shown ? .semibold : .regular)).lineLimit(1).truncationMode(.tail)
             }
         }
@@ -516,36 +821,77 @@ struct WorkspaceChromeView: View {
         .contentShape(Capsule())
         .onTapGesture {
             // A tap selects the pane (typing goes there) or shows that tab. Never a click on the Mac.
-            guard heldLabel == nil else { return }
-            if let tab, !shown { model.switchTab(id, to: tab) } else { model.focus(id) }
-            // Working with tabs: keep them all shown for a while (only matters beside the menu bar).
-            if tab != nil { expandTabs(id) }
+            let now = Date().timeIntervalSinceReferenceDate
+            switch PaneLabelInteraction.tap(target, shown: shown, highlighted: highlighted, folded: iconOnly,
+                                            last: lastLabelTap, now: now, held: heldLabel != nil) {
+            case .toggleFullscreen?:
+                // A second tap: this pane fills the device, or the layout comes back.
+                lastLabelTap = nil
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) { model.toggleLocalFullscreen(id) }
+                Self.haptic(.drop)
+            case .showTab(let t, let expand)?:
+                lastLabelTap = .init(target: target, at: now, folded: iconOnly)
+                model.switchTab(id, to: t)
+                if expand { expandTabs(id) }
+            case .select(let expand)?:
+                lastLabelTap = .init(target: target, at: now, folded: iconOnly)
+                model.focus(id)
+                // Tabs, or the selected pane's folded icon: every title in full for a while.
+                if expand { expandTabs(id) }
+            case nil:
+                // A label is held. With no hold in flight (the system cancelled it), it's let go of
+                // once any ending hold has run, so the next tap acts.
+                if labelPress == nil { DispatchQueue.main.async { finishCancelledHold() } }
+            }
         }
         // Hold: lift the label. Move = drag it to another pane (merge as a tab, split, swap);
-        // release without moving = the label's menu.
+        // release without moving = the label's menu. The strip keeps its form until the finger
+        // lifts, so the view carrying this gesture stays (see `labelStrip`).
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.4)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                .updating($labelPress) { value, state, _ in
+                    if case .second(true, _) = value { state = target }
+                }
                 .onChanged { value in
                     guard case .second(true, let drag) = value else { return }
-                    if heldLabel == nil { heldLabel = target; Self.haptic(.lift) }
+                    if heldLabel == nil { heldLabel = target; heldForm = (id, iconOnly); Self.haptic(.lift) }
                     guard let drag else { return }
                     let moved = hypot(drag.translation.width, drag.translation.height)
                     if model.drag == nil, moved > 10 { model.beginDrag(.pane(id, tab: tab), at: drag.location) }
                     else if model.drag != nil { model.moveDrag(to: drag.location) }
                 }
                 .onEnded { _ in
-                    if model.drag != nil {
+                    switch PaneLabelInteraction.holdEnded(cancelled: false, dragging: model.drag != nil,
+                                                          heldHere: heldLabel == target, folded: heldForm?.folded == true) {
+                    case .drop:
                         if model.endDrag() { Self.haptic(.drop) }
-                    } else if heldLabel == target {
+                    case .menu(let expand):
+                        // One hold on the folded icon: its titles in full and its options together.
+                        if expand { expandTabs(id) }
                         withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.82)) { menu = target }
+                    case .cancelDrag, .nothing:
+                        break
                     }
                     heldLabel = nil
+                    heldForm = nil
                 })
+        // One element with the label's own frame. Without it, the label and traits below also
+        // land on an element that reports the whole pane's frame: VoiceOver outlines the pane,
+        // and a UI test's press on it lands mid-pane, on the Mac picture in a live session.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(text + (shown ? "" : ", tab"))
-        .accessibilityHint(shown ? "Selects this pane for typing. Hold for options or to move it." : "Shows this tab.")
+        .accessibilityHint(shown ? "Selects this pane for typing. Fullscreen and other options are in Actions." : "Shows this tab.")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: "Options") { menu = target }
+        .accessibilityAction(named: model.localFullscreen == id ? "Exit Fullscreen" : "Fullscreen on This Device") {
+            model.toggleLocalFullscreen(id)
+        }
+        #if os(iOS)
+        .accessibilityAction(named: tab == nil ? "Float This Pane" : "Float This Tab") {
+            if model.canFloat(pane: id, tab: tab) { model.floatPane(id, tab: tab) }
+        }
+        #endif
     }
 
     // MARK: The label menu
@@ -573,8 +919,17 @@ struct WorkspaceChromeView: View {
         let isDesktop = tile.source?.isDisplay == true
         let isWindow = tile.source != nil && !isDesktop
         return VStack(alignment: .leading, spacing: 0) {
+            if model.missionControlPaused(m.tile), let action = model.missionControlAction {
+                // Mission Control holds this window's picture: the way out, notice folded or not.
+                menuRow(action == .exit ? "Exit Mission Control" : action == .requestControl ? "Request Control to Exit Mission Control"
+                        : action == .awaitingApproval ? "Awaiting Approval on the Mac…" : "Press Esc on the Mac to Close Mission Control",
+                        action == .exit ? "xmark.rectangle" : action == .closeOnMac ? "escape" : "hand.raised",
+                        enabled: action == .exit || action == .requestControl) { model.performMissionControlAction() }
+                Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
+            }
             menuRow(full ? "Exit Fullscreen" : "Fullscreen on This Device",
-                    full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
+                    full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    hint: full ? "Brings back the other panes." : "Shows only this pane on this device. The Mac is unchanged. Double-tap the pane title to toggle.") {
                 full ? model.exitLocalFullscreen() : model.enterLocalFullscreen(m.tile)
             }
             if isDesktop, let onViewFullScreen {
@@ -590,16 +945,39 @@ struct WorkspaceChromeView: View {
             }
             menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
             menuRow(isDesktop ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            #if os(iOS)
+            if model.canFloat(pane: m.tile, tab: m.tab) {
+                menuRow(m.tab == nil ? "Float This Pane" : "Float This Tab", "macwindow.on.rectangle",
+                        hint: "Shows it as a floating window over the others. Drag its title to move it.") {
+                    model.floatPane(m.tile, tab: m.tab)
+                }
+            }
+            #endif
             menuRow("Arrange Panes", "rectangle.3.group") { model.arranging = true }
             if let tab = m.tab {
                 menuRow("Remove This Tab", "xmark.rectangle") { model.removeTab(m.tile, at: tab) }
             }
-            menuRow("Remove from Layout", "rectangle.badge.minus") { model.removeTile(m.tile) }
+            if model.canRemoveFromLayout(m.tile) {
+                menuRow("Remove from Layout", "rectangle.badge.minus",
+                        hint: "Takes this pane off this device's layout. The window stays open on the Mac.") { model.removeTile(m.tile) }
+            }
             if isWindow, model.menus.available, inputAllowed {
                 menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
             }
             if isWindow {
                 Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
+                if model.offersWindowFrameOnMac(m.tile) {
+                    // The real Mac window, not this pane's picture: only from these items, never a gesture.
+                    let ready = model.canControlMac && !model.isResizingOnMac(m.tile)
+                    menuRow("Fill Window on Mac", "arrow.up.and.down.and.arrow.left.and.right",
+                            hint: "Resizes the window on the Mac to fill its screen, below the menu bar and clear of the Dock. Not full screen.",
+                            enabled: ready) { model.fillWindowOnMac(m.tile) }
+                    if model.canRestoreOnMac(m.tile) {
+                        menuRow("Restore Previous Size on Mac", "arrow.uturn.backward",
+                                hint: "Puts the window on the Mac back to the size and place it had before Fill Window on Mac.",
+                                enabled: ready) { model.restoreWindowOnMac(m.tile) }
+                    }
+                }
                 menuRow("Minimize on Mac", "minus.rectangle", enabled: inputAllowed) { model.minimizeRemoteWindow(m.tile) }
                 menuRow("Close Window on Mac…", "xmark.square", destructive: true, enabled: inputAllowed) { confirmClose = m.tile }
                 if !inputAllowed {
@@ -616,8 +994,8 @@ struct WorkspaceChromeView: View {
         .frame(width: 252, alignment: .leading)
     }
 
-    private func menuRow(_ title: LocalizedStringKey, _ symbol: String, destructive: Bool = false, enabled: Bool = true,
-                         action: @escaping () -> Void) -> some View {
+    private func menuRow(_ title: LocalizedStringKey, _ symbol: String, hint: LocalizedStringKey? = nil,
+                         destructive: Bool = false, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button {
             withAnimation(.easeOut(duration: 0.15)) { menu = nil }
             action()
@@ -635,6 +1013,7 @@ struct WorkspaceChromeView: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.45)
+        .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
     }
 
     // MARK: Fullscreen on This Device
@@ -771,7 +1150,11 @@ struct WorkspaceChromeView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(workspaceChip, in: Capsule())
-        .position(x: picture.midX, y: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44)
+        .background(GeometryReader { g in
+            Color.clear.onAppear { arrangeBarSize = g.size }.onChange(of: g.size) { arrangeBarSize = $0 }
+        })
+        // Where it was, unless that is on the tray or its gear: then just above them.
+        .position(arrangeBarCentre)
         .alert("Save Layout", isPresented: $savingLayout) {
             TextField("Name", text: $layoutName)
             Button("Save") { model.saveLayout(named: layoutName) }
@@ -781,14 +1164,31 @@ struct WorkspaceChromeView: View {
         }
     }
 
+    private var arrangeBarCentre: CGPoint {
+        let bar = WorkspaceOverlayPlacement.bottomBar(
+            size: arrangeBarSize ?? CGSize(width: 260, height: 36),
+            preferredMidY: min(picture.maxY, safeArea?.maxY ?? .infinity) - 44,
+            picture: picture, safe: safeArea, avoiding: controls + divisions)
+        return CGPoint(x: bar.midX, y: bar.midY)
+    }
+
     /// Outside Arrange: press and hold a divider, then drag it. The strip is narrow so the
     /// windows' own edges still get their touches; a short tap there does nothing.
     @ViewBuilder
     private func dividerHolds(_ frames: WorkspaceFrames) -> some View {
+        // A divider takes touches only where no float covers it: a touch on a float drawn over a
+        // divider goes to that float's window, never to the divider under it. One view per divider
+        // (its identity never changes while it's held), its touch shape cut around the floats, and
+        // around tucked floats' strips where it meets an edge (a tap on a strip brings its window back).
+        let covers = (floatOccluders(frames) + stripTouchAreas).map(WorkspaceRect.init)
         ForEach(Array(frames.dividers.enumerated()), id: \.offset) { i, divider in
             let r = divider.hitRect.onScreen(picture)
             let horizontal = divider.axis == .horizontal
             let held = heldDivider == i
+            let size = CGSize(width: horizontal ? min(r.width, 14) : r.width, height: horizontal ? r.height : min(r.height, 14))
+            let strip = CGRect(x: r.midX - size.width / 2, y: r.midY - size.height / 2, width: size.width, height: size.height)
+            let parts = WorkspaceFloatLayering.uncovered(WorkspaceRect(strip), alongX: !horizontal, by: covers)
+                .map { $0.cgRect.offsetBy(dx: -strip.minX, dy: -strip.minY) }
             ZStack {
                 Color.white.opacity(0.001)
                 if held {
@@ -796,8 +1196,8 @@ struct WorkspaceChromeView: View {
                         .frame(width: horizontal ? 6 : 44, height: horizontal ? 44 : 6)
                 }
             }
-            .frame(width: horizontal ? min(r.width, 14) : r.width, height: horizontal ? r.height : min(r.height, 14))
-            .contentShape(Rectangle())
+            .frame(width: size.width, height: size.height)
+            .contentShape(held ? WorkspaceRectsShape(rects: [CGRect(origin: .zero, size: size)]) : WorkspaceRectsShape(rects: parts))
             .position(x: r.midX, y: r.midY)
             .gesture(LongPressGesture(minimumDuration: 0.35, maximumDistance: 10)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("workspace")))
@@ -821,6 +1221,12 @@ struct WorkspaceChromeView: View {
                 })
             .accessibilityHidden(true)   // VoiceOver uses Arrange Panes
         }
+    }
+
+    /// Where tucked floats' strips take touches (this view's coordinates).
+    private var stripTouchAreas: [CGRect] {
+        let dx = picture.minX - model.pictureGlobal.minX, dy = picture.minY - model.pictureGlobal.minY
+        return model.floatHandlesGlobal.map { $0.offsetBy(dx: dx, dy: dy) }
     }
 }
 
@@ -951,6 +1357,9 @@ private extension View {
 }
 
 /// Mission Control-style overview: every shareable window grouped by app, plus layouts and whole-display modes.
+/// Its search also finds Mac apps with no window to show (any app on the Mac, from its app list):
+/// opening one is confirmed first, needs control, and the app's new window goes in the tile the
+/// picker was opened for (`WorkspaceAppOpening`); several new windows: the person picks one.
 struct WindowOverviewView: View {
     @ObservedObject var model: WorkspaceModel
     let macName: String
@@ -960,11 +1369,20 @@ struct WindowOverviewView: View {
     /// Insets that keep the content clear of a notch and the home indicator; the backdrop fills the screen.
     var safeInsets = EdgeInsets()
     @State private var query = ""
+    /// The app tapped under Apps to Open, until the person confirms or cancels opening it.
+    @State private var confirmApp: WorkspacePickerSearch.AppToOpen?
+
+    /// Apps can be opened from here now (control, and input reaching the Mac).
+    private var canOpenApps: Bool { inputAllowed && model.canControlMac }
 
     var body: some View {
         if model.overviewOpen {
             let catalog = model.catalog
-            let windows = catalog?.search(query) ?? []
+            let results = WorkspacePickerSearch.results(query, windows: catalog?.windows ?? [], running: catalog?.apps ?? [],
+                                                        installed: model.apps)
+            let windows = results.windows
+            let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+            let iconBundles = results.apps.prefix(24).map(\.bundleID)
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text(model.replacingTile != nil ? "Choose a window for this tile" : "Windows on \(macName)")
@@ -973,7 +1391,9 @@ struct WindowOverviewView: View {
                     Spacer()
                     Button("Done") { model.closeOverview() }.keyboardShortcut(.cancelAction)
                 }
+                .modifier(OpenedWindowChoice(model: model, forDrop: false))
                 TextField("Search windows and apps", text: $query).textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("windowPickerSearch")
                 HStack(spacing: 8) {
                     Text("Full Desktop:").foregroundStyle(.white.opacity(0.7))
                     Button("Mirror") { model.closeOverview(); onMirror() }.buttonStyle(.bordered)
@@ -990,15 +1410,18 @@ struct WindowOverviewView: View {
                         } }
                     }
                 }
+                if let opening = model.appOpening, opening.isWaiting { openingStatus(opening) }
                 if catalog == nil {
                     Text("Asking \(macName) for its windows…").foregroundStyle(.white.opacity(0.7))
                 } else if catalog?.unavailable == true {
                     Text("\(macName) can't list its windows right now. Check that MeowDisplay has Screen Recording permission on the Mac.")
                         .foregroundStyle(.white.opacity(0.8))
-                } else if windows.isEmpty, !query.isEmpty {
-                    Text("No windows match \"\(query)\".").foregroundStyle(.white.opacity(0.7))
+                } else if windows.isEmpty, searching {
+                    Text(results.apps.isEmpty ? "Nothing on \(macName) matches \"\(query)\"." : "No open windows match \"\(query)\".")
+                        .foregroundStyle(.white.opacity(0.7))
                 }
                 ScrollView {
+                    if !windows.isEmpty, !results.apps.isEmpty { sectionHeader("Open Windows") }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(windows) { w in
                             OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
@@ -1008,48 +1431,232 @@ struct WindowOverviewView: View {
                                              ? { model.choose(w, asNewTile: true) } : nil)
                         }
                     }
-                    appSections(catalog)
+                    appSection(results, searching: searching)
                 }
             }
             .padding(16)
             .padding(safeInsets)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(white: 0.06, opacity: 0.97).ignoresSafeArea())
+            .modifier(AppOpeningFailureAlert(model: model, macName: macName, forDrop: false) { name in query = name })
+            .onAppear { model.requestIcons(iconBundles) }
+            .onChange(of: iconBundles) { model.requestIcons($0) }
         }
     }
 
+    private func sectionHeader(_ title: LocalizedStringKey) -> some View {
+        Text(title).font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7))
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Apps with no window to show, apart from the windows: tapping one asks before opening it.
     @ViewBuilder
-    private func appSections(_ catalog: WorkspaceCatalogMessage?) -> some View {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        let noWindow = (catalog?.apps ?? []).filter { !$0.hasWindows && (q.isEmpty || $0.name.localizedCaseInsensitiveContains(q)) }
-        let installed = (catalog?.installed ?? []).filter { q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) }
-        VStack(alignment: .leading, spacing: 6) {
-            if !noWindow.isEmpty {
-                Text("Running, no open window").font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(noWindow, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Bring Forward") }
-            }
-            if !installed.isEmpty {
-                Text(inputAllowed ? "Open an app" : "Open an app (needs control of the Mac)")
-                    .font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.7)).padding(.top, 8)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(installed, id: \.bundleID) { app in appRow(app.name, bundle: app.bundleID, action: "Open") }
+    private func appSection(_ results: WorkspacePickerSearch.Results, searching: Bool) -> some View {
+        if !results.apps.isEmpty || results.moreApps {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Apps to Open")
+                Text(canOpenApps ? "Not open, or open with no window to show. An app opens on the Mac without coming to the front."
+                                 : "Opening an app needs control of the Mac.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.6))
+                ForEach(results.apps) { app in appRow(app) }
+                if results.moreApps {
+                    Text(searching ? "More apps match. Type more of the name." : "Search to find any app on \(macName).")
+                        .font(.caption).foregroundStyle(.white.opacity(0.6)).padding(.top, 2)
+                }
             }
         }
     }
 
-    private func appRow(_ name: String, bundle: String, action: String) -> some View {
-        HStack {
-            if let icon = model.icons[bundle] { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
-            Text(name).foregroundStyle(.white).lineLimit(1)
-            Spacer()
-            Button(action) { model.launch(bundle) }.disabled(!inputAllowed)
-                // Every row says "Open": name the app, and keep the short word for Voice Control.
-                .accessibilityLabel("\(action) \(name)")
-                .accessibilityInputLabels(["\(action) \(name)", action])
+    private func appRow(_ app: WorkspacePickerSearch.AppToOpen) -> some View {
+        Button { confirmApp = app } label: {
+            HStack(spacing: 10) {
+                WorkspaceAppIcon(icon: model.icons[app.bundleID], name: app.name, bundleID: app.bundleID, size: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(app.name).foregroundStyle(.white).lineLimit(1)
+                    if app.running { Text("Open, with no window to show").font(.caption2).foregroundStyle(.white.opacity(0.6)) }
+                }
+                Spacer()
+                Text("Open…").font(.callout.weight(.semibold)).foregroundStyle(workspaceAccent)
+            }
+            .padding(8)
+            .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
         }
-        .padding(8)
-        .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 10))
+        .buttonStyle(.plain)
+        .disabled(model.appOpening?.bundleID == app.bundleID && model.appOpening?.isWaiting == true)
+        .accessibilityIdentifier("pickerOpenApp.\(app.bundleID)")
+        .accessibilityLabel(app.running ? String(localized: "\(app.name), open with no window to show") : app.name)
+        .accessibilityHint("Asks before opening it on the Mac")
+        .accessibilityInputLabels(["Open \(app.name)", app.name])
+        // On the row itself, so on iPad its popover points at this app (QA 9000025: attached to the
+        // scroll view, it showed far from the row). A row that goes away (the search changed) takes
+        // its question with it.
+        .confirmationDialog(openTitle(app), isPresented: Binding(get: { confirmApp?.bundleID == app.bundleID },
+                                                                 set: { if !$0, confirmApp?.bundleID == app.bundleID { confirmApp = nil } }),
+                            titleVisibility: .visible) {
+            if canOpenApps {
+                Button("Open on Mac") { model.openAppFromPicker(app) }
+                    .accessibilityIdentifier("pickerOpenAppConfirm")
+                    .accessibilityLabel(String(localized: "Open \(app.name) on Mac"))
+            } else if model.appOpenOffer != .unavailable {
+                Button("Request Control & Open") { model.openAppFromPicker(app, requestingControl: true) }
+                    .accessibilityIdentifier("pickerOpenAppRequestControl")
+                    .accessibilityLabel(String(localized: "Request control and open \(app.name)"))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(openMessage(app))
+        }
+    }
+
+    private func openTitle(_ app: WorkspacePickerSearch.AppToOpen) -> String {
+        app.running ? String(localized: "\(app.name) has no window you can show. Open a new one on \(macName)?")
+                    : String(localized: "Open \(app.name) on \(macName)?")
+    }
+
+    private func openMessage(_ app: WorkspacePickerSearch.AppToOpen) -> String {
+        if !canOpenApps {
+            if !model.inputAllowed() { return String(localized: "Opening apps needs a live connection with control of the Mac.") }
+            if model.controlState() == .requestsDisabled {
+                return WorkspaceAppDropDialogs.refusedMessage(macName)
+            }
+            return model.replacingTile != nil
+                ? String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(app.name) opens and its window goes in this tile.")
+                : String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(app.name) opens and its window shows here.")
+        }
+        return model.replacingTile != nil
+            ? String(localized: "Its window goes in this tile; nothing else in your layout changes. It opens without coming to the front on the Mac.")
+            : String(localized: "Its window shows here when it opens. It opens without coming to the front on the Mac.")
+    }
+
+    /// The app opening now: what it's waiting for, and Cancel.
+    private func openingStatus(_ o: WorkspaceAppOpening) -> some View {
+        HStack(spacing: 10) {
+            ProgressView().tint(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(statusText(o)).foregroundStyle(.white)
+                Text(o.tile != nil ? "Its window goes in this tile." : "Its window shows here when it opens.")
+                    .font(.caption).foregroundStyle(.white.opacity(0.7))
+            }
+            Spacer()
+            Button("Cancel") { model.dismissAppOpening() }.buttonStyle(.bordered)
+                .accessibilityLabel(String(localized: "Stop opening \(o.name)"))
+        }
+        .padding(10)
+        .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pickerAppOpening")
+    }
+
+    private func statusText(_ o: WorkspaceAppOpening) -> String {
+        if o.phase == .awaitingControl {
+            return model.controlState() == .requesting
+                ? String(localized: "Waiting for \(macName) to allow control. \(o.name) opens then.")
+                : String(localized: "Requesting control to open \(o.name)…")
+        }
+        return model.appOpeningSlow ? String(localized: "\(o.name) is taking a while to open…")
+                                    : String(localized: "Opening \(o.name) on \(macName)…")
+    }
+}
+
+/// Several new windows after opening an app from the picker (or a drop): which one goes in the
+/// tile. Never chosen for the person; Cancel leaves the tile as it was. `forDrop`: this copy
+/// answers openings from a drop (shown over the layout), the picker's copy those from the picker.
+struct OpenedWindowChoice: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+    let forDrop: Bool
+
+    func body(content: Content) -> some View {
+        let mine = (model.appOpening?.drop != nil) == forDrop
+        let windows: [CatalogWindowItem]? = { if mine, case .choosing(let ws) = model.appOpening?.phase { return ws }; return nil }()
+        let round = model.appOpeningRound
+        content.confirmationDialog(model.appOpening.map { String(localized: "Which \($0.name) window?") } ?? "",
+                                   isPresented: Binding(get: { windows != nil },
+                                                        // Dismissed without a choice (a tap outside): stop, after any pick.
+                                                        set: { if !$0 { DispatchQueue.main.async { model.dismissAppOpening(round: round) } } }),
+                                   titleVisibility: .visible, presenting: windows) { ws in
+            ForEach(ws) { w in
+                Button(w.title.isEmpty ? String(localized: "Untitled Window") : w.title) { model.pickOpenedWindow(w) }
+            }
+            Button("Cancel", role: .cancel) { model.dismissAppOpening() }
+        } message: { _ in
+            Text(model.appOpening?.pickWasStale == true ? "That window closed. Choose another."
+                 : "It opened more than one window. Choose the one to show.")
+        }
+    }
+}
+
+/// An app opening from the picker that didn't end with its window in the tile: what happened,
+/// Try Again (or Request Control), Choose a Window (searches for the app), or Cancel.
+struct AppOpeningFailureAlert: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+    let macName: String
+    let forDrop: Bool
+    let onChooseWindow: (String) -> Void
+
+    func body(content: Content) -> some View {
+        let opening = model.appOpening
+        let mine = (opening?.drop != nil) == forDrop
+        let failure: WorkspaceAppOpening.Failure? = { if mine, case .failed(let f) = opening?.phase { return f }; return nil }()
+        let round = model.appOpeningRound
+        let name = opening?.name ?? ""
+        content.alert(failure.map { title($0, name) } ?? "",
+                      isPresented: Binding(get: { failure != nil },
+                                           set: { if !$0 { DispatchQueue.main.async { model.dismissAppOpening(round: round) } } }),
+                      presenting: failure) { f in
+            if f == .noWindow, model.controlState() != .requestsDisabled {
+                // A background open again wouldn't make a window: this one brings the app forward on the Mac.
+                Button(String(localized: "Show a Window on Mac")) { model.retryAppOpening(reveal: true) }
+                    .accessibilityIdentifier("appOpeningShowWindowOnMac")
+            } else if f.retryable, model.controlState() != .requestsDisabled {
+                Button([.controlDenied, .controlEnded].contains(f) ? String(localized: "Request Control Again") : String(localized: "Try Again")) {
+                    model.retryAppOpening()
+                }
+            }
+            Button("Choose a Window") { model.dismissAppOpening(); onChooseWindow(name) }
+            Button("Cancel", role: .cancel) { model.dismissAppOpening() }
+        } message: { f in
+            Text(message(f, name))
+        }
+    }
+
+    private func title(_ f: WorkspaceAppOpening.Failure, _ name: String) -> String {
+        switch f {
+        case .launchFailed: return String(localized: "Couldn’t Open \(name)")
+        case .noAnswer: return String(localized: "\(name) Didn’t Open")
+        case .noWindow: return String(localized: "No \(name) Window to Show")
+        case .controlDenied: return String(localized: "Control Wasn’t Allowed")
+        case .controlEnded: return String(localized: "Control Ended")
+        case .tileChanged: return String(localized: "The Tile Changed")
+        case .disconnected: return String(localized: "Disconnected")
+        case .macLocked: return String(localized: "\(macName) Locked")
+        }
+    }
+
+    private func message(_ f: WorkspaceAppOpening.Failure, _ name: String) -> String {
+        switch f {
+        case .launchFailed:
+            return String(localized: "\(macName) couldn’t open \(name). Try again, or choose a window instead.")
+        case .noAnswer:
+            return String(localized: "\(macName) didn’t answer. Check that this device still has control, then try again.")
+        case .noWindow:
+            return String(localized: "\(name) is open on \(macName), but has no window to show here. Show a Window on Mac brings \(name) to the front there so it opens one. Or choose a window instead.")
+        case .controlDenied:
+            return model.controlState() == .requestsDisabled
+                ? String(localized: "\(macName) doesn’t accept control requests from this device, so \(name) wasn’t opened.")
+                : String(localized: "\(name) wasn’t opened: opening apps needs control of the Mac.")
+        case .controlEnded:
+            return String(localized: "Control of \(macName) ended before \(name) opened, so it may not have opened.")
+        case .tileChanged:
+            return forDrop
+                ? String(localized: "The panes changed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
+                : String(localized: "That tile changed or was removed while \(name) was opening, so nothing was put there. If \(name) opened, you can choose its window.")
+        case .disconnected:
+            return String(localized: "The connection to \(macName) ended while \(name) was opening.")
+        case .macLocked:
+            return String(localized: "\(macName) locked while \(name) was opening, so nothing was put here. Try again now that it’s unlocked.")
+        }
     }
 }
 
@@ -1134,10 +1741,14 @@ struct WorkspacePresetsView: View {
 }
 
 /// After an app is dropped on a pane: which of its windows (several), or open it on the Mac
-/// (none; needs control). Nothing opens or moves until the person picks.
+/// (none). Opening asks first, with one action that says what happens: Open on Mac with control,
+/// Request Control & Open without, or why it can't from this device. It then runs like the
+/// picker's (`WorkspaceAppOpening`): progress over the layout, a choice of several windows, and
+/// what went wrong. Nothing opens or moves until the person picks.
 struct WorkspaceAppDropDialogs: ViewModifier {
     @ObservedObject var model: WorkspaceModel
     var onRequestControl: () -> Void
+    var macName: String = String(localized: "your Mac")
 
     func body(content: Content) -> some View {
         let d = model.appDrop
@@ -1147,17 +1758,37 @@ struct WorkspaceAppDropDialogs: ViewModifier {
                 ForEach(d.windows) { w in
                     Button(w.title.isEmpty ? String(localized: "Untitled Window") : w.title) { model.completeAppDrop(d, with: w) }
                 }
-            } else if model.inputAllowed() {
-                Button("Open on Mac") { model.launchForAppDrop(d) }
-            } else {
-                Button("Request Control") { model.cancelAppDrop(); onRequestControl() }
+            } else if model.canControlMac {
+                Button("Open on Mac") { model.openAppForDrop(d) }
+                    .accessibilityIdentifier("appDropOpenOnMac")
+                    .accessibilityLabel(String(localized: "Open \(d.app.name) on Mac"))
+            } else if model.appOpenOffer == .requestControl {
+                Button("Request Control & Open") { model.openAppForDrop(d, requestingControl: true) }
+                    .accessibilityIdentifier("appDropRequestControlAndOpen")
+                    .accessibilityLabel(String(localized: "Request control and open \(d.app.name)"))
             }
             Button("Cancel", role: .cancel) { model.cancelAppDrop() }
         } message: { d in
-            if d.windows.isEmpty {
-                Text(model.inputAllowed() ? "Its first new window goes where you dropped it." : "Opening apps needs control of the Mac.")
-            }
+            if d.windows.isEmpty { Text(message(d)) }
         }
+        .overlay(alignment: .bottom) {
+            if let o = model.appOpening, o.drop != nil, o.isWaiting { openingStatus(o) }
+        }
+        .modifier(OpenedWindowChoice(model: model, forDrop: true))
+        .modifier(AppOpeningFailureAlert(model: model, macName: macName, forDrop: true) { _ in
+            model.openOverview(replacing: nil)
+        })
+    }
+
+    static func refusedMessage(_ macName: String) -> String {
+        String(localized: "\(macName) doesn’t accept control requests from this device, so apps can’t be opened from here. To allow it, change this device’s input setting in MeowDisplay on \(macName).")
+    }
+
+    private func message(_ d: WorkspaceModel.AppDrop) -> String {
+        if model.canControlMac { return String(localized: "Its window goes where you dropped it; nothing else in your layout changes. It opens without coming to the front on the Mac.") }
+        if !model.inputAllowed() { return String(localized: "Opening apps needs a live connection with control of the Mac.") }
+        if model.controlState() == .requestsDisabled { return Self.refusedMessage(macName) }
+        return String(localized: "Opening apps needs control of the Mac. Once the Mac allows it, \(d.app.name) opens and its window goes where you dropped it.")
     }
 
     private func title(_ d: WorkspaceModel.AppDrop?) -> String {
@@ -1166,16 +1797,72 @@ struct WorkspaceAppDropDialogs: ViewModifier {
         return d.app.running ? String(localized: "\(d.app.name) has no windows you can show. Open a new one on the Mac?")
                              : String(localized: "Open \(d.app.name) on the Mac?")
     }
+
+    /// The dropped app opening: what it waits for, and Cancel. Small, at the bottom, over the layout.
+    private func openingStatus(_ o: WorkspaceAppOpening) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text(statusText(o)).font(.footnote.weight(.semibold)).lineLimit(2)
+            Button("Cancel") { model.dismissAppOpening() }
+                .font(.footnote.weight(.semibold))
+                .accessibilityLabel(String(localized: "Stop opening \(o.name)"))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .padding(.bottom, 96)
+        .padding(.horizontal, 16)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("appDropOpening")
+    }
+
+    private func statusText(_ o: WorkspaceAppOpening) -> String {
+        if o.phase == .awaitingControl {
+            return model.controlState() == .requesting
+                ? String(localized: "Waiting for \(macName) to allow control. \(o.name) opens then.")
+                : String(localized: "Requesting control to open \(o.name)…")
+        }
+        return model.appOpeningSlow ? String(localized: "\(o.name) is taking a while to open…")
+                                    : String(localized: "Opening \(o.name) on \(macName)…")
+    }
+}
+
+/// From Extend, a tap, pick or drop that would start Window view asks first, and says what
+/// happens: this device's extended display goes away and macOS moves the windows on it.
+struct WorkspaceLeaveExtendConfirmation: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+
+    func body(content: Content) -> some View {
+        content.alert("Switch to Window View?",
+                      isPresented: Binding(get: { model.leaveExtendRequest != nil }, set: { if !$0 { model.cancelLeavingExtend() } })) {
+            Button("Switch to Window View") { model.confirmLeavingExtend() }
+            Button("Stay in Extend", role: .cancel) { model.cancelLeavingExtend() }
+        } message: {
+            Text("This device stops extending your Mac. The extended display goes away, and macOS moves the windows on it to your Mac's other displays.")
+        }
+    }
 }
 
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).
+/// Moving a whole pane that is already in the layout also offers Remove from Layout beside Cancel.
 struct WorkspaceDropOverlay: View {
     @ObservedObject var model: WorkspaceModel
     /// The picture, in this view's coordinates.
     let picture: CGRect
+    /// The screen's safe area in this view's coordinates (nil: all of it). The chip and the drop
+    /// bar stay inside it: clear of the notch, the Dynamic Island and the Home indicator.
+    var safeArea: CGRect? = nil
+    /// The receiver's controls (and the keyboard) in this view's coordinates: the drop bar sits
+    /// above any it would cover (`WorkspaceOverlayPlacement.bottomBar`).
+    var controls: [CGRect] = []
+    /// Pane titles and floats' title pills: the chip slides or steps aside from them.
+    var titles: [CGRect] = []
+    /// Where the chip is drawn, for the first-use tip to keep clear of it.
+    var onChipFrame: ((CGRect) -> Void)? = nil
     @State private var lastKey = ""
+    @State private var chipSize: CGSize?
+    @State private var barSize: CGSize?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -1183,7 +1870,38 @@ struct WorkspaceDropOverlay: View {
             if let d = model.drag {
                 let target = model.dropTarget(forGlobal: d.location)
                 if let target { preview(target, item: d.item) }
-                cancelZone(over: model.overCancelZone(d.location))
+                if d.placement == .float, let f = model.floatDropPreview(forGlobal: d.location) { floatPreview(f) }
+                // A float being docked shows it too: circling again turns it back into the float.
+                if model.canPlace(d.item, .float) || d.placement == .float || d.isFloat { placementChip(d) }
+                // Circling toward the other placement: a ring that fills just above the finger.
+                if model.placementSwitchProgress > 0, model.pictureGlobal.width > 0 {
+                    WorkspacePlacementRing(progress: model.placementSwitchProgress, toFloating: d.placement == .pane)
+                        .position(x: d.location.x - model.pictureGlobal.minX + picture.minX,
+                                  y: d.location.y - model.pictureGlobal.minY + picture.minY - WorkspacePlacementRing.lift)
+                }
+                let removable = model.canDropToRemove
+                let floatable = model.canDropToFloat
+                // Inside the safe area and above the receiver's controls (the Settings gear sat on
+                // Float, iPhone QA 2026-11-06). The zones report where they are drawn, so what a
+                // release does follows the bar wherever it sits.
+                let bar = dropBarFrame
+                HStack(spacing: 12) {
+                    cancelZone(over: model.overCancelZone(d.location), short: removable || floatable)
+                    if floatable { floatZone(over: model.overFloatZone(d.location)) }
+                    if removable { removeZone(over: model.overRemoveZone(d.location), float: d.isFloat) }
+                }
+                .padding(.horizontal, 12)
+                .background(GeometryReader { g in
+                    Color.clear.onAppear { barSize = g.size }.onChange(of: g.size) { barSize = $0 }
+                })
+                .frame(maxWidth: WorkspaceOverlayPlacement.usable(picture: picture, safe: safeArea).width)
+                .position(x: bar.midX, y: bar.midY)
+                #if DEBUG
+                .onChange(of: bar) { b in
+                    Log.info("notchTrace: dragHUD picture=\(picture) safe=\(safeArea.map { "\($0)" } ?? "none") "
+                             + "bar=\(b) controls=\(controls)")
+                }
+                #endif
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1192,13 +1910,18 @@ struct WorkspaceDropOverlay: View {
             if !k.isEmpty, k != lastKey { Self.tick() }
             lastKey = k
         }
-        .onChange(of: model.drag == nil) { ended in if ended { model.cancelZoneGlobal = .zero } }
+        .onChange(of: model.drag == nil) { ended in
+            if ended { model.cancelZoneGlobal = .zero; model.removeZoneGlobal = .zero; model.floatZoneGlobal = .zero }
+        }
     }
 
     /// Changes whenever the landing under the finger changes (one haptic tick each).
     private var key: String {
         guard let d = model.drag else { return "" }
         if model.overCancelZone(d.location) { return "cancel" }
+        if model.overRemoveZone(d.location) { return "remove" }
+        if model.overFloatZone(d.location) { return "float" }
+        if d.placement == .float { return "floating" }
         return model.dropTarget(forGlobal: d.location).map { "\($0)" } ?? ""
     }
 
@@ -1206,6 +1929,8 @@ struct WorkspaceDropOverlay: View {
         let r = target.preview.onScreen(picture)
         let text: String = {
             switch target {
+            case .replace(let tile, _) where model.layout.tiles[tile]?.emptied == true && model.layout.tiles[tile]?.source == nil:
+                return String(localized: "Show Here")
             case .replace:
                 if case .pane = item { return String(localized: "Swap") }
                 if model.windowMode { return String(localized: "Replace") }
@@ -1230,21 +1955,106 @@ struct WorkspaceDropOverlay: View {
             .accessibilityHidden(true)
     }
 
-    private func cancelZone(over: Bool) -> some View {
-        Label(over ? String(localized: "Release to Cancel") : String(localized: "Drop Here to Cancel"), systemImage: "xmark.circle.fill")
+    /// Floating placement: where the window will float, at its own shape. Dashed, unfilled, so it
+    /// never looks like a pane drop (a filled blue area).
+    private func floatPreview(_ f: WorkspaceRect) -> some View {
+        let r = f.onScreen(picture)
+        return RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.9), style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.18)))
+            .overlay(Text("Float Here").font(.caption.weight(.semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(workspaceChip, in: Capsule()))
+            .frame(width: r.width, height: r.height)
+            .position(x: r.midX, y: r.midY)
+            .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: r)
+            .accessibilityHidden(true)
+    }
+
+    /// Where the drop bar sits: centred at the bottom as before, kept above the Home indicator and
+    /// the controls. Until it is measured, a phone-wide guess, so it never flashes under the gear.
+    private var dropBarFrame: CGRect {
+        let usable = WorkspaceOverlayPlacement.usable(picture: picture, safe: safeArea)
+        return WorkspaceOverlayPlacement.bottomBar(
+            size: barSize ?? CGSize(width: min(usable.width, 420), height: 44),
+            preferredMidY: picture.maxY - WorkspaceOverlayPlacement.dropBarLift,
+            picture: picture, safe: safeArea, avoiding: controls)
+    }
+
+    /// Pane or Floating: what a release does now. Circling while holding switches it. Below the
+    /// notch, the Dynamic Island and the status bar, beside or below the titles at the top.
+    private func placementChip(_ d: WorkspaceDrag) -> some View {
+        let floating = d.placement == .float
+        let frame = WorkspaceOverlayPlacement.chip(size: chipSize ?? CGSize(width: 240, height: 30),
+                                                   picture: picture, safe: safeArea, avoiding: titles)
+        return HStack(spacing: 6) {
+            Image(systemName: floating ? "macwindow.on.rectangle" : "rectangle.split.2x1").accessibilityHidden(true)
+            Text(floating ? "Floating" : "Pane").fontWeight(.semibold)
+            Text("· Circle to switch").foregroundStyle(.white.opacity(0.7))
+        }
+        .font(.caption)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(Capsule().fill(floating ? Color(white: 0.16, opacity: 0.92) : workspaceChip))
+        .overlay(Capsule().stroke(Color.white.opacity(floating ? 0.7 : 0.3), lineWidth: 1))
+        .background(GeometryReader { g in
+            Color.clear.onAppear { chipSize = g.size }.onChange(of: g.size) { chipSize = $0 }
+        })
+        .position(x: frame.midX, y: frame.midY)
+        .onAppear { onChipFrame?(frame) }
+        .onChange(of: frame) { onChipFrame?($0) }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: floating)
+        .accessibilityHidden(true)
+    }
+
+    /// Release here to float the window instead (no circling needed).
+    private func floatZone(over: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Float") : String(localized: "Float"),
+                 symbol: "macwindow.on.rectangle", over: over,
+                 fill: over ? Color(white: 0.42, opacity: 0.92) : Color.black.opacity(0.62)) {
+            model.floatZoneGlobal = $0
+        }
+    }
+
+    /// `short`: beside Remove from Layout, so both fit a narrow phone.
+    private func cancelZone(over: Bool, short: Bool) -> some View {
+        let text = over ? String(localized: "Release to Cancel")
+            : (short ? String(localized: "Cancel") : String(localized: "Drop Here to Cancel"))
+        // Beside Remove, Cancel lights neutral so the two never look alike.
+        return dropZone(text, symbol: "xmark.circle.fill", over: over,
+                        fill: over ? (short ? Color(white: 0.42, opacity: 0.92) : Color.red.opacity(0.85)) : Color.black.opacity(0.62)) {
+            model.cancelZoneGlobal = $0
+        }
+    }
+
+    /// Takes the pane out of this device's layout, or a float being docked off this device (the
+    /// float menu's own Remove from This Device). Never closes, minimizes or quits the Mac window.
+    private func removeZone(over: Bool, float: Bool) -> some View {
+        dropZone(over ? String(localized: "Release to Remove")
+                      : (float ? String(localized: "Remove from This Device") : String(localized: "Remove from Layout")),
+                 symbol: "rectangle.badge.minus", over: over,
+                 fill: over ? Color.red.opacity(0.85) : Color(red: 0.35, green: 0.06, blue: 0.06, opacity: 0.72)) {
+            model.removeZoneGlobal = $0
+        }
+    }
+
+    private func dropZone(_ text: String, symbol: String, over: Bool, fill: Color,
+                          frame report: @escaping (CGRect) -> Void) -> some View {
+        Label(text, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
+            .lineLimit(1).minimumScaleFactor(0.85)
             .foregroundStyle(.white)
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .background(Capsule().fill(over ? Color.red.opacity(0.85) : Color.black.opacity(0.62)))
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .frame(minHeight: 44)
+            .background(Capsule().fill(fill))
             .overlay(Capsule().stroke(Color.white.opacity(over ? 0.9 : 0.35), lineWidth: 1))
-            .scaleEffect(over ? 1.08 : 1)
+            .scaleEffect(over && !reduceMotion ? 1.08 : 1)
             .animation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.8), value: over)
             .background(GeometryReader { g in
                 Color.clear
-                    .onAppear { model.cancelZoneGlobal = g.frame(in: .global) }
-                    .onChange(of: g.frame(in: .global)) { model.cancelZoneGlobal = $0 }
+                    .onAppear { report(g.frame(in: .global)) }
+                    .onChange(of: g.frame(in: .global)) { report($0) }
             })
-            .position(x: picture.midX, y: picture.maxY - 64)
             .accessibilityHidden(true)
     }
 
@@ -1487,4 +2297,60 @@ struct PaneMenuBar: View {
 private struct PaneMenuHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// Circling while holding a drag switches it between Pane and Floating: this ring, just above the
+/// finger (where the finger doesn't hide it), fills as the loops add up and shows what it will
+/// switch to. Decoration only: the placement chip and its haptic say what happened.
+struct WorkspacePlacementRing: View {
+    var progress: Double
+    /// What it switches to: Floating (true) or Pane.
+    var toFloating: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let lift: CGFloat = 64
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.black.opacity(0.55))
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 4)
+            Circle().trim(from: 0, to: min(max(progress, 0), 1))
+                .stroke(Color.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Image(systemName: toFloating ? "macwindow.on.rectangle" : "rectangle.split.2x1")
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+        }
+        .frame(width: 46, height: 46)
+        .shadow(color: .black.opacity(0.45), radius: 2)
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: progress)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
+/// Shown at the bottom of the pane or float the item was chosen on.
+struct WorkspaceWindowFrameStatus: View {
+    @ObservedObject var model: WorkspaceModel
+    let id: String
+
+    var body: some View {
+        if model.isResizingOnMac(id) {
+            HStack(spacing: 6) {
+                ProgressView().progressViewStyle(.circular).tint(.white).controlSize(.small)
+                Text("Resizing the window on the Mac…").font(.caption).foregroundStyle(.white)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+        } else if let notice = model.windowFrameNotice, notice.tile == id {
+            Button { model.clearWindowFrameNotice() } label: {
+                Label(notice.message, systemImage: notice.isError ? "exclamationmark.triangle" : "checkmark.circle")
+                    .font(.caption).foregroundStyle(.white).multilineTextAlignment(.leading)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(workspaceChip, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text("Dismisses this message."))
+            .accessibilityIdentifier("windowFrameNotice")
+        }
+    }
 }

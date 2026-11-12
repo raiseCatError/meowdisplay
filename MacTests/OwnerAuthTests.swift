@@ -93,6 +93,56 @@ final class OwnerAuthTests: XCTestCase {
         XCTAssertFalse(prompt.isAuthenticating)
     }
 
+    // The panel shows owner authentication as its own step, never as the
+    // unchanged code with a disabled button (the reported "stuck" dialog).
+    func testOwnerAuthIsAVisibleStepBetweenCodeAndWaiting() async {
+        let prompt = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let auth = FakeAuthenticator(); prompt.ownerAuthenticator = auth
+        let token = UUID()
+        let request = await showSAS(prompt, token: token, pending(.newPeer))
+        XCTAssertEqual(prompt.panelPhase, .confirmCode)
+        prompt.decide(accept: true); await settle()
+        XCTAssertEqual(prompt.panelPhase, .authenticatingOwner)
+        auth.finish(.success)
+        let accepted = await request.value
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(prompt.panelPhase, .waitingForPeer(canCancel: true))
+        prompt.attemptEnded(token: token)
+        XCTAssertEqual(prompt.panelPhase, .closed)
+    }
+
+    // Cancelling while the owner-auth step is showing closes the panel and
+    // invalidates the system prompt; nothing is approved.
+    func testCancelDuringTheOwnerAuthStepClosesWithoutApproving() async {
+        let prompt = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
+        let auth = FakeAuthenticator(); prompt.ownerAuthenticator = auth
+        let request = await showSAS(prompt, token: UUID(), pending(.newPeer))
+        prompt.decide(accept: true); await settle()
+        XCTAssertEqual(prompt.panelPhase, .authenticatingOwner)
+        prompt.decide(accept: false)
+        let accepted = await request.value
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(prompt.panelPhase, .closed)
+        XCTAssertNil(prompt.confirmedLocally)
+        auth.finish(.success)   // a late success must not revive it
+        await settle()
+        XCTAssertEqual(prompt.panelPhase, .closed)
+    }
+
+    // An owner-auth prompt nobody answers still ends at the prompt timeout,
+    // closed and not approved.
+    func testUnansweredOwnerAuthTimesOutClosed() async {
+        let prompt = PairingPromptModel(timeoutNanoseconds: 50_000_000)
+        let auth = FakeAuthenticator(); prompt.ownerAuthenticator = auth
+        let request = await showSAS(prompt, token: UUID(), pending(.newPeer))
+        prompt.decide(accept: true); await settle()
+        XCTAssertEqual(prompt.panelPhase, .authenticatingOwner)
+        let accepted = await request.value
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(prompt.panelPhase, .closed)
+        XCTAssertNil(prompt.confirmedLocally)
+    }
+
     // 2. auth failure → no local acceptance, attempt aborted through its real cancel path.
     func testAuthFailureSendsNoAcceptanceAndAbortsAttempt() async {
         let prompt = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)

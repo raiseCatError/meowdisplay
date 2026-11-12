@@ -206,7 +206,7 @@ fun StagePeekOverlay(
     controller: WorkspaceController,
     edge: StagePeekEdge,
     /** Compact: the stack stays in a fading band between the controls above and below. */
-    dock: StagePeekDockStyle = StagePeekDockStyle.Compact,
+    dock: StagePeekDockStyle = StagePeekDockStyle.Normal,
     frame: CGRect,
     safe: CGRect,
     avoiding: List<CGRect>,

@@ -115,8 +115,8 @@ enum WireProtocol {
     static let maxFPSWireVersion = 15
 
     /// Protocol version that introduced Mac-authoritative Streaming Priority:
-    /// `streamingPriorityState` (Mac -> receiver: confirmed Auto/Prefer FPS/
-    /// Prefer Latency selection) and `streamingPriorityRequest` (receiver ->
+    /// `streamingPriorityState` (Mac -> receiver: confirmed auto/preferFPS/
+    /// preferLatency selection, shown as Balanced/Smoothness/Latency) and `streamingPriorityRequest` (receiver ->
     /// Mac: request a different priority). A receiver MUST NOT send
     /// `streamingPriorityRequest`, and MUST NOT expect
     /// `streamingPriorityState`, when the peer is below this version — the
@@ -215,9 +215,19 @@ enum WireProtocol {
 /// Window workspaces (PROTOCOL.md 6.10): the receiver's hello field `ws`
 /// (its workspace version) and the Mac's welcome feature that turn them on.
 enum WindowWorkspaceWire {
+    /// The lowest `ws` that turns Window mode on (every receiver since 1.x sends at least this).
     static let version = 1
+    /// `ws` 2: the receiver understands floating panes. Sent by Apple receivers since the
+    /// floating-pane release; the Mac still accepts 1 exactly as before (Android 2.0 sends 1).
+    static let floatVersion = 2
     static let helloField = "ws"
     static let welcomeFeature = "window"
+    /// The Mac draws floating panes (`layer: "float"` tiles that may overlap, ordered by `z`).
+    static let floatFeature = "windowFloat"
+    /// The Mac leaves out a floating pane sent with `lift: true` (not drawn, not hit, its capture
+    /// kept running) while the receiver draws it under the finger during a move or resize, so
+    /// the float is never on screen twice. Without it the receiver never sends `lift`.
+    static let floatLiftFeature = "floatLift"
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }
@@ -263,6 +273,33 @@ enum WindowCloseWire {
     static let welcomeFeature = "windowClose"
 }
 
+/// Exact key modifiers (PROTOCOL.md `keyboard`): a `press`, `down` or `up` marked
+/// `exactModifiers: true` posts with exactly its own `modifiers`, never adding the ones this
+/// device holds down with `modifierDown`. The arrow keypad's own ⇧ ⌥ ⌘ use it, so they never
+/// mix with the tray's. Sent only to a Mac that lists `welcomeFeature`; without the field (an
+/// older receiver, the Mac Receiver, Android) a key still carries every held modifier.
+enum ExactKeyModifiersWire {
+    static let welcomeFeature = "exactKeyModifiers"
+    /// The additive `keyboard` field.
+    static let field = "exactModifiers"
+
+    /// A `keyboard` `press`/`down`/`up` message. `exactModifiers` adds the field; callers pass
+    /// true only for a Mac that advertised `welcomeFeature`.
+    static func keyMessage(action: String, usage: Int, modifiers: [String], isRepeat: Bool = false,
+                           exactModifiers: Bool) -> [String: Any] {
+        var message: [String: Any] = ["type": "keyboard", "action": action, "usage": usage, "modifiers": modifiers]
+        if isRepeat { message["repeat"] = true }
+        if exactModifiers { message[field] = true }
+        return message
+    }
+
+    /// Whether a received `keyboard` message asks for exact modifiers. Anything but `true`
+    /// (absent, malformed) keeps the default: held modifiers are added.
+    static func isExact(_ message: [String: Any]) -> Bool {
+        message[field] as? Bool == true
+    }
+}
+
 /// What the Mac reports after `windowClose`.
 enum WindowCloseResult: String, Sendable, CaseIterable {
     /// The window is gone.
@@ -284,6 +321,113 @@ enum WindowCloseResult: String, Sendable, CaseIterable {
 
     /// The card can go: the window is closed (or was already gone).
     var removesCard: Bool { self == .closed || self == .stale }
+}
+
+/// Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10): the only messages that
+/// change the size of a real Mac window. Window mode only, needs control (re-checked on the Mac
+/// right before it acts), and only ever sent from the pane's own explicit menu item: never from a
+/// gesture, a resize, a float or Fullscreen on This Device. Not macOS full screen (no new Space).
+enum WindowFrameWire {
+    static let welcomeFeature = "windowFrame"
+    static let request = "windowFrame"            // receiver -> Mac: {op, window, gen, req}
+    static let result = "windowFrameResult"       // Mac -> receiver: {op, window, req, result, restorable}
+    /// `workspaceState` tile key: true while the Mac can put that window back (Restore Previous Size).
+    static let tileRestorable = "restore"
+
+    static func requestMessage(_ op: WindowFrameOp, window: UInt32, generation: UInt64, req: Int) -> [String: Any] {
+        ["type": request, "op": op.rawValue, "window": Int(window), "gen": Int(generation), "req": req]
+    }
+
+    static func resultMessage(_ op: WindowFrameOp, window: UInt32, req: Int?, result: WindowFrameResult, restorable: Bool) -> [String: Any] {
+        var m: [String: Any] = ["type": Self.result, "op": op.rawValue, "window": Int(window), "result": result.rawValue,
+                                "restorable": restorable]
+        if let req { m["req"] = req }
+        return m
+    }
+}
+
+enum WindowFrameOp: String, Sendable, CaseIterable {
+    /// Fill the usable area of the window's current display (below the menu bar, clear of the Dock).
+    case fill
+    /// Put back the frame the window had before the last Fill.
+    case restore
+}
+
+/// One `windowFrame` request as the Mac reads it (bounded, defensive).
+struct WindowFrameRequest: Equatable, Sendable {
+    var op: WindowFrameOp
+    var windowID: UInt32
+    var generation: UInt64
+    var req: Int?
+
+    static func parse(_ obj: [String: Any]) -> WindowFrameRequest? {
+        guard let op = (obj["op"] as? String).flatMap(WindowFrameOp.init(rawValue:)),
+              let window = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
+              let gen = (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) else { return nil }
+        return WindowFrameRequest(op: op, windowID: window, generation: gen, req: obj["req"] as? Int)
+    }
+}
+
+/// What the Mac reports after `windowFrame`. Only the first four changed (or confirmed) the window.
+enum WindowFrameResult: String, Sendable, CaseIterable {
+    /// The window now fills its display's usable area (verified).
+    case filled
+    /// The window was resized, but the app kept it within its own minimum/maximum size (verified;
+    /// Restore puts it back).
+    case limited
+    /// It already filled that area: nothing was moved.
+    case alreadyFilled
+    /// The window is back at the frame it had before Fill (verified).
+    case restored
+    /// The Mac has no earlier size for this window (never filled from here, or already restored).
+    case nothingToRestore
+    /// The window was moved or resized on the Mac since Fill: nothing was moved, and the old size
+    /// is forgotten.
+    case changed
+    /// The display the window was on before Fill isn't connected now: nothing was moved.
+    case displayChanged
+    /// Not the listed window any more (closed, reopened, or the id was reused).
+    case stale
+    /// More than one window matched: nothing was moved.
+    case ambiguous
+    /// The app doesn't let this window be resized.
+    case notResizable
+    /// The window is in macOS full screen: leave full screen on the Mac first.
+    case fullScreen
+    /// Minimized, hidden or on another Space.
+    case offscreen
+    /// In Stage Manager's side strip.
+    case stageStrip
+    /// Mission Control is open on the Mac.
+    case missionControl
+    /// The Mac is asking for its password to remove the Privacy Shield.
+    case privacyShield
+    /// This device doesn't have control of the Mac.
+    case control
+    /// MeowDisplay needs Accessibility permission on the Mac.
+    case accessibility
+    /// The Mac tried, but the window didn't end up where it should.
+    case failed
+
+    var succeeded: Bool { self == .filled || self == .limited || self == .alreadyFilled || self == .restored }
+}
+
+/// One `windowFrameResult` as a receiver reads it.
+struct WindowFrameReply: Equatable, Sendable {
+    var op: WindowFrameOp
+    var windowID: UInt32
+    var req: Int?
+    var result: WindowFrameResult
+    var restorable: Bool
+
+    static func parse(_ obj: [String: Any]) -> WindowFrameReply? {
+        guard let op = (obj["op"] as? String).flatMap(WindowFrameOp.init(rawValue:)),
+              let window = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
+              let result = (obj["result"] as? String).map({ String($0.prefix(32)) }).flatMap(WindowFrameResult.init(rawValue:))
+        else { return nil }
+        return WindowFrameReply(op: op, windowID: window, req: obj["req"] as? Int, result: result,
+                                restorable: obj["restorable"] as? Bool ?? false)
+    }
 }
 
 enum WireMessage {
@@ -316,6 +460,7 @@ enum WireMessage {
     static let appLaunchResult = "appLaunchResult"             // Mac -> receiver: {bundle, ok}
     static let windowClose = "windowClose"                     // receiver -> Mac: {window, gen, req}: close one listed window (control)
     static let windowCloseResult = "windowCloseResult"         // Mac -> receiver: {window, req, result}
+    // Fill Window on Mac / Restore Previous Size on Mac: `WindowFrameWire.request` / `.result` (control, Window mode).
     static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
     static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
     static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)

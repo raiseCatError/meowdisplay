@@ -46,6 +46,8 @@ final class MetalVideoRenderer: @unchecked Sendable {
     private let renderQueue = DispatchQueue(label: "metal.render", qos: .userInteractive)
     private let lock = NSLock()
     private var pendingFrame: (buffer: CVPixelBuffer, captureMs: Double?)?
+    /// `renderQueue`: the layer shows black since `clear()`, and no frame has been drawn since.
+    private var cleared = false
 
     /// presentedTime (CACurrentMediaTime base) + the capture timestamp that
     /// was threaded through render(_:captureMs:).
@@ -180,5 +182,32 @@ final class MetalVideoRenderer: @unchecked Sendable {
         cmd.addCompletedHandler { _ in _ = textureLifetime }
         cmd.present(drawable)
         cmd.commit()
+        cleared = false
+    }
+
+    /// Shows black, so the last picture (for example the desktop from before the Mac locked)
+    /// doesn't stay on the layer after a video reset. Called on the main actor; returns at once.
+    /// A frame already waiting is drawn instead (it may be the first fresh one; the cover stays up
+    /// until `StreamReceiver.freshFrameSinceVideoReset`, and the next call clears again if needed).
+    func clear() {
+        renderQueue.async { [weak self] in
+            guard let self, !self.cleared else { return }
+            self.lock.lock()
+            let framePending = self.pendingFrame != nil
+            self.lock.unlock()
+            guard !framePending,
+                  let drawable = self.metalLayer.nextDrawable(),
+                  let cmd = self.commandQueue.makeCommandBuffer() else { return }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = drawable.texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+            encoder.endEncoding()
+            cmd.present(drawable)
+            cmd.commit()
+            self.cleared = true
+        }
     }
 }

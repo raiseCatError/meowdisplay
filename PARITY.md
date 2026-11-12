@@ -2,7 +2,7 @@
 
 **MeowDisplay 2.0 is the stable Mac and iPhone/iPad release.** The main Mac
 app shares and receives; the separate Receiver-only app remains available.
-Android 2.0 is in closed testing and requires Mac 2.0. Android requires Android 10+ and has no USB
+Android 2.0 is in closed testing and works with Mac 2.0 or later (it doesn't get the 2.1 features; see [COMPATIBILITY.md](COMPATIBILITY.md)). Android requires Android 10+ and has no USB
 transport. See [platform availability](README.md#platform-availability--november-2-2026).
 
 
@@ -43,7 +43,7 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | USB cable | Yes | No | — | Android has no USB transport yet; Help says so. Mac Receiver connects over the network |
 | Remote (another network, e.g. Tailscale) | Yes | Yes | Yes | Android physically tested over LTE + Tailscale. Typed addresses are supported. Automatic sharing of a paired peer's reported Tailscale address is implemented (#77/#82); **automatic dialing of reported addresses is currently enabled only for verified Android ↔ Mac IPv4 routes** (#81), not for every receiver or address family. No automatic tailnet-wide peer directory is implemented. |
 | Add Remote Mac: Pair over Remote, and an address for a paired Mac | Yes | Yes | Yes | Android: one Address field; the Mac must have Pair over Remote open for new pairs |
-| Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac |
+| Remote Connect asks the Mac, then the Mac dials back | Yes | Yes | Yes | Android: Connect shows Contacting your Mac, Waiting for your Mac to connect, Needs approval on your Mac. iOS: Contacting your Mac and Waiting for your Mac to connect; a timed-out Connect shows Android's failure reasons with what to check (unit-tested, physical check pending) |
 | Recovery after a lost Remote session | Yes | Yes | Yes | Android: automatic knocks, bounded, foreground only, never replaces a pin; seen working on a phone over LTE + Tailscale. A local Wi-Fi session that drops also falls back to Remote when the Mac has a saved address (knocks only once Bonjour no longer shows the Mac; unit-tested, not yet seen on a phone) |
 | Route shown in the performance overlay | Yes | Yes | — | iOS shows its transport tag. Android shows Remote (Tailscale) on a remote session and nothing on a local one; it names Tailscale only when a VPN network covers the Mac's address |
 | How to Connect on the home screen | Yes | Yes | — | |
@@ -65,7 +65,7 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Tiles: up to 9 on every receiver | Yes | Yes | Yes | Minimum pane size and available space decide what fits; existing 9-tile QA record is tests and the tablet emulator |
 | Swap, drag to split, dividers, maximize, undo | Yes | Yes | Yes | Android verified physically (one drag = one undo step) |
 | Per-tile rotation 0/90/180/270 | Yes | Yes | Yes | Android verified physically |
-| Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo simulator |
+| Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo: geometry unit tests only (CI has only run the folded cover screen) |
 | Mirror Display picker, Extend Shape, Use Full Display | Yes | Yes | Yes | Android controls depend on the connected Mac's advertised capabilities; source-inspected |
 | Video on/off, Streaming Profile, Priority, Maximum FPS, Resync | Yes | Yes | Yes | Android Display/Streaming controls and Audio Resync implemented; source-inspected, physical QA not added here |
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |

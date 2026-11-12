@@ -76,7 +76,7 @@
     "Back" : {
       "comment" : "Settings toolbar: go to the previously viewed page."
     },
-    "Balanced default." : {
+    "Balanced" : {
 
     },
     "Block" : {
@@ -268,10 +268,10 @@
     "FPS, bitrate, frame timing, and latency graphs at the bottom of the video window while streaming — the same HUD the iPhone app has." : {
 
     },
-    "Favors smooth, sustained frame rate, allowing a small amount of extra work in flight at a small cost to latency." : {
+    "Favors a smooth, steady frame rate, keeping a little more work in flight at a small cost in delay." : {
 
     },
-    "Favors the newest frame and bounded latency, accepting lower frame rate under pressure." : {
+    "Favors the newest frame and the lowest delay, accepting a lower frame rate under load." : {
 
     },
     "Forget" : {
@@ -320,6 +320,9 @@
 
     },
     "Keyboard" : {
+
+    },
+    "Latency" : {
 
     },
     "Left" : {
@@ -508,12 +511,6 @@
     "Port" : {
 
     },
-    "Prefer FPS" : {
-
-    },
-    "Prefer Latency" : {
-
-    },
     "Prioritize responsiveness, up to the receiver's supported refresh rate, capped at 120 FPS." : {
 
     },
@@ -643,6 +640,9 @@
     "Show Window" : {
 
     },
+    "Smoothness" : {
+
+    },
     "Software Updates" : {
 
     },
@@ -689,6 +689,9 @@
 
     },
     "The Mac ended this session." : {
+
+    },
+    "The default: a balance of smooth motion and low delay." : {
 
     },
     "The device is requesting to pair again." : {

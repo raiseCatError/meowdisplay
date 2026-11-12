@@ -18,6 +18,15 @@ on:
   schedule:
     - cron: '7,37 * * * *'
   workflow_dispatch:
+    inputs:
+      submit_ios:
+        description: >-
+          Authorize this run to submit the iOS build of exactly this version
+          (e.g. 2.1.0) to App Review, for a release whose config keeps
+          ios.submitForReview false. Leave empty otherwise.
+        required: false
+        default: ''
+        type: string
 
 permissions: {}
 
@@ -100,11 +109,19 @@ jobs:
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          # Only a dispatched run can carry it, and it names one exact version
+          # (Config#ios_submission_allowed?).
+          IOS_SUBMISSION_AUTHORIZED: ${{ github.event_name == 'workflow_dispatch' && inputs.submit_ios || '' }}
         run: |
           set -euo pipefail
           repo="https://github.com/$GITHUB_REPOSITORY"
           versions=$(git ls-remote "$repo" 'refs/heads/release/*' | sed -n 's#.*refs/heads/release/\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p')
           [ -n "$versions" ] || { echo "No release branches."; exit 0; }
+          if [ -n "$IOS_SUBMISSION_AUTHORIZED" ]; then
+            [[ $IOS_SUBMISSION_AUTHORIZED =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::submit_ios must be a version (X.Y.Z)"; exit 1; }
+            grep -qx "$IOS_SUBMISSION_AUTHORIZED" <<< "$versions" || { echo "::error::no release/$IOS_SUBMISSION_AUTHORIZED branch"; exit 1; }
+            echo "iOS App Review submission authorized for $IOS_SUBMISSION_AUTHORIZED in this run" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           for version in $versions; do
             head=$(git ls-remote "$repo" "refs/heads/release/$version" | cut -f1)
             git fetch -q --depth 1 origin "$head"

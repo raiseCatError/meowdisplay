@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Security
 import CoreImage
 import CoreMedia
 import Metal
@@ -314,6 +315,66 @@ final class WorkspaceCompositor {
 /// One receiver's window workspace. Thread model: state lives on `queue`;
 /// input mapping (called from the injector on the network queue) reads the
 /// targeting model under `inputLock`.
+/// When the Mac may bring back a minimized or hidden window for a tile: only when the person
+/// chose that window for the tile while it was already off screen, and only once. A window that
+/// was on screen when the tile first showed it is never restored by the Mac later, so Minimize on
+/// Mac (or minimizing it on the Mac itself) sticks, and showing the same tile again (a float
+/// un-tucked) never brings a window back. Show on Mac still restores it, on request.
+struct WorkspaceRestoreLedger {
+    struct Key: Hashable {
+        var tile: String
+        var window: UInt32
+        var generation: UInt64
+    }
+
+    private(set) var seen = Set<Key>()
+
+    /// Called for each assigned window at every listing. True only the first time this tile shows
+    /// this window, when it is off screen and its capture delivers nothing.
+    mutating func observe(tile: String, window: UInt32, generation: UInt64, offscreen: Bool, delivering: Bool) -> Bool {
+        seen.insert(Key(tile: tile, window: window, generation: generation)).inserted && offscreen && !delivering
+    }
+
+    /// Forgets windows that are no longer listed, keeping the ledger small. A tile that is only
+    /// hidden for now (a tucked float) keeps its entry while its window is still listed.
+    mutating func prune(keeping isListed: (Key) -> Bool) {
+        seen = seen.filter(isListed)
+    }
+}
+
+/// A tile the receiver chose by arranging its own view (a float moved, resized, tucked or docked,
+/// fullscreen on the device, a zoom) becomes the keyboard target without its Mac window coming
+/// forward: nothing changes on the Mac (no app activation, no Stage Manager or Space change).
+/// The window comes forward once, when the first authorized key for that tile arrives and the
+/// Mac's focus is elsewhere; a press in the tile does it as before. Keys still go only to a window
+/// that is really in front (`WorkspaceKeyboardGate`).
+struct WorkspaceDeferredRaise: Equatable {
+    private(set) var tile: String?
+
+    /// A focus request: `raiseNow` false defers the raise for `tile`; true (or another tile) drops it.
+    mutating func focused(_ tile: String?, raiseNow: Bool) {
+        self.tile = raiseNow ? nil : tile
+    }
+
+    /// A press brought a window forward: nothing is pending any more.
+    mutating func clear() { tile = nil }
+
+    /// Asked when a key for the active tile is checked. True once: raise the window now. Either way
+    /// the pending raise is used up, so a later change of focus on the Mac pauses typing as before.
+    mutating func takeForKey(active: String?, decision: WorkspaceKeyboardGate.Decision) -> Bool {
+        guard let pending = tile, pending == active else { return false }
+        tile = nil
+        return decision == .hostFocusElsewhere || decision == .otherWindowFocused
+    }
+
+    /// What the receiver is told: while the raise waits for the first key, typing will reach the
+    /// tile, so it shows no "typing paused" notice.
+    func reported(_ decision: WorkspaceKeyboardGate.Decision, active: String?) -> WorkspaceKeyboardGate.Decision {
+        guard let pending = tile, pending == active, decision == .hostFocusElsewhere || decision == .otherWindowFocused else { return decision }
+        return .deliver
+    }
+}
+
 final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// All receivers together: window streams this Mac will run at once.
     static let globalCaptureLimit = 16
@@ -324,6 +385,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private let queue = DispatchQueue(label: "meow.workspace.engine", qos: .userInteractive)
     /// When the last Stage Manager change a device asked for didn't take effect (sent as "failed" for a few seconds).
     private var stageManagerFailedAt: TimeInterval?
+    /// Stage Manager's one owner (counts Window-mode devices; tests pass a stand-in).
+    private let stageManager: any StageManagerCoordinating
+    /// This engine's place in that count, from start to stop.
+    private var stageManagerHold: StageManagerHold?
     /// Mission Control is open on the Mac: macOS pauses every window capture until it closes, so
     /// panes say so and nothing restarts (no reconnect loop); they resume when it closes.
     private var missionControlOpen = false
@@ -349,8 +414,27 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var sheetCaptures: [String: WindowTileCapture] = [:]
     private var sheetFrames: [UInt32: CGRect] = [:]
     private var sheetFailed = Set<UInt32>()
+    /// Sheets whose own capture shows their whole window (macOS 27): the window's capture already
+    /// draws them in place, so no second capture is started or drawn (`WindowCaptureExtent`).
+    private var sheetInTree = Set<UInt32>()
+    /// Windows whose capture showed more than the window at the last compose (their extents).
+    private var lastExtents: [UInt32: CGRect] = [:]
+    /// When a capture's content last didn't match its window or any known sheet (refresh asked).
+    private var unexplainedExtentAt: TimeInterval = 0
     /// Sheets that may cover a tiled window where a press lands: they are part of it (inputLock).
     private var sheetCovers: [UInt32: Set<UInt32>] = [:]
+    /// Sheets the app confirmed from the live window list that the latest listing doesn't have
+    /// yet, by window (inputLock). The listing can stay behind a sheet for as long as it's open
+    /// (Chrome's Open panel, QA 9000037: minutes), so its capture extent, its presses and typing
+    /// into it use these too. Replaced by each live look; ids aren't reused, so a closed one is inert.
+    private var liveSheets: [UInt32: [UInt32: CGRect]] = [:]
+    /// The latest listing's sheet frames by window (inputLock), for the keyboard check.
+    private var ownSheetFrames: [UInt32: [CGRect]] = [:]
+    /// `queue`: when each window's live sheets were last looked for (at most twice a second).
+    private var liveSheetLookAt: [UInt32: TimeInterval] = [:]
+    /// The listing `sheetCovers` came from (diagnostics for refused presses): when it was taken
+    /// and which windows it listed.
+    private var coversListing: (at: TimeInterval, listed: Set<UInt32>) = (0, [])
     /// Per pane: restarts so far, when the next may start, when macOS paused it. Reset when the
     /// pane shows another source or the receiver asks to retry.
     private struct Recovery {
@@ -378,8 +462,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private var lastStateSent: String = ""
     private var stopped = false
     private var keyboardDecision: WorkspaceKeyboardGate.Decision = .noActiveTile
+    /// The tile whose window comes forward at its first key (see `WorkspaceDeferredRaise`).
+    private var deferredRaise = WorkspaceDeferredRaise()
     private var keyboardCheckedAt: TimeInterval = 0
     private var topmostCache: [UInt32: (at: TimeInterval, rect: CGRect, ok: Bool)] = [:]
+    /// Display-wide surfaces already logged (`noteDisplayWideSurface`), under `inputLock`.
+    private var loggedSurfaces: Set<String> = []
+    /// Input checks already logged (`noteCover`), by target and verdict.
+    private var loggedCovers: Set<String> = []
 
     /// A composited frame (engine queue). The sender hops to its own queue.
     var deliverFrame: ((CVPixelBuffer) -> Void)?
@@ -392,12 +482,31 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// Release every held key/button on the Mac (source changed under it).
     var releaseHeldInput: (() -> Void)?
 
-    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService) {
+    /// The receiver speaks floating panes (`hello.ws` >= 2) and this Mac offers them: a tile
+    /// with `layer: "float"` may overlap. Fixed for the session.
+    let allowFloats: Bool
+
+    init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false,
+         stageManager: any StageManagerCoordinating = StageManagerController.shared) {
         self.hostID = hostID
         self.browser = browser
+        self.stageManager = stageManager
         self.canvas = canvas
         self.streamFPS = max(fps, 1)
+        self.allowFloats = allowFloats
         targeting.canvas = canvas
+    }
+
+    deinit {
+        // Dropped without stop(): still leave the count, or Stage Manager would never come back on.
+        if let hold = stageManagerHold { stageManager.windowModeEnded(hold) }
+    }
+
+    /// The capture rate for `a`: the shared budget, lower for a pane floats hide, at least the
+    /// float floor for a visible float.
+    private func budgetFPS(_ a: WorkspaceTileAssignment, active: String?, coverage: [String: Double], available: Bool) -> Int {
+        WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count, streamFPS: streamFPS,
+                                   available: available, covered: coverage[a.tileID] ?? 0, isFloat: a.isFloat)
     }
 
     // MARK: Lifecycle
@@ -411,11 +520,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     self?.queue.async { self?.missionControlChanged(open) }
                 }
             }
-            if StageManagerSwitch.offDuringWindowMode {
-                StageManagerSwitch.inBackground({ StageManagerSwitch.turnOffForWindowMode() }) { [weak self] in self?.queue.async { self?.refreshSoon() } }
-            } else {
-                StageManagerSwitch.inBackground { _ = StageManagerSwitch.shortcutsReady() }   // for the state message
-            }
+            // Counted: with the owner's setting on, only the first device turns Stage Manager off.
+            stageManagerHold = stageManager.windowModeStarted { [weak self] in self?.queue.async { self?.refreshSoon() } }
             compositor?.resize(to: canvas)
             browser.onSnapshot = { [weak self] snap in self?.queue.async { self?.apply(snap) } }
             browser.liveFrame = { [weak self] id in self?.liveWholeFrame(id) }
@@ -438,7 +544,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     func stop(completion: (@Sendable () -> Void)? = nil) {
         queue.async { [self] in
-            if running { StageManagerSwitch.inBackground { StageManagerSwitch.restoreIfTurnedOffByUs() } }
+            // The last device to leave restores it (after a grace period a new start cancels).
+            if let hold = stageManagerHold { stageManager.windowModeEnded(hold); stageManagerHold = nil }
             running = false
             stopped = true
             if let watch = missionControlWatch { MissionControlMonitor.shared.removeListener(watch); missionControlWatch = nil }
@@ -524,22 +631,35 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         guard dirty || now - lastComposeAt >= 1 else { return }
         dirty = false
         lastComposeAt = now
+        updateCaptureExtents(now: now)
         let targetingNow = inputLock.withLock { targeting }
         var drawn: [String: Int] = [:]
-        let items = assignments.map { a -> WorkspaceCompositor.Item in
+        var inTree: [(tile: String, sheet: UInt32)] = []
+        // A lifted float isn't drawn (the receiver draws it under the finger); its view is echoed
+        // once it is drawn again.
+        let items = assignments.filter(\.isOnCanvas).map { a -> WorkspaceCompositor.Item in
             let capture = captures[a.tileID]
             let frame = capture?.assignmentGeneration == a.assignmentGeneration ? capture?.latestFrame() : nil
             let state = tileState[a.tileID]
             var overlay: WorkspaceCompositor.Overlay?
             if let sheet = sheetCaptures[a.tileID], sheet.assignmentGeneration == a.assignmentGeneration,
-               let f = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.windowFrames[a.windowID] {
-                overlay = .init(frame: f.pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY), content: f.content)
+               let f = sheet.latestFrame(), let rect = sheetFrames[sheet.windowID], let parent = targetingNow.drawnFrame(a.windowID) {
+                if WindowCaptureExtent.isSheetOnly(sheet: rect.size, content: f.sourcePoints) {
+                    // Only while the sheet's stream is live: a closed sheet's stream turns suspended
+                    // and keeps its last frame (measured), which must not stay drawn.
+                    if Self.isLiveStatus(sheet.healthNow.lastStatus) {
+                        overlay = .init(frame: f.pixels, rect: rect.offsetBy(dx: -parent.minX, dy: -parent.minY), content: f.content)
+                    }
+                } else if f.sourcePoints != nil {
+                    inTree.append((a.tileID, sheet.windowID))
+                }
             }
             if frame != nil { drawn[a.tileID] = a.viewEpoch }
             return WorkspaceCompositor.Item(rect: a.rect, transform: targetingNow.transform(for: a), frame: frame?.pixels,
                                             sourceSize: .zero, dimmed: state == "offscreen" || state == "closed" || state == "paused",
                                             overlay: overlay, content: frame?.content)
         }
+        for (tile, sheet) in inTree { dropSheetInTree(tile: tile, sheet: sheet) }
         if let buffer = compositor.compose(items) {
             deliverFrame?(buffer)
             // The receiver holds its instant local zoom until a frame with its latest view is out.
@@ -562,9 +682,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 applyWorkspace(obj)
             case WireMessage.workspaceFocus:
                 let id = obj["tile"] as? String
-                inputLock.withLock { targeting.setActive(id); keyboardCheckedAt = 0 }
+                // `raise: false`: chosen by arranging the receiver's own view. The window stays
+                // where it is on the Mac until a key or a press for it needs it in front.
+                let raiseNow = obj["raise"] as? Bool ?? true
+                inputLock.withLock {
+                    targeting.setActive(id); keyboardCheckedAt = 0
+                    deferredRaise.focused(id, raiseNow: raiseNow)
+                }
                 retuneCaptures()
-                if inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
+                if raiseNow, inputGranted, let a = inputLock.withLock({ targeting.keyboardTarget }) {
                     activateBounded(a)
                 }
                 sendState(force: true)
@@ -599,10 +725,83 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
     }
 
+    // MARK: Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10)
+
+    /// Resizes the real Mac window shown in one of this receiver's panes, on that pane's explicit
+    /// menu item only. `inputGranted`: MacSender's gate when the message arrived. `stillAllowed`
+    /// (side-effect free) is asked again right before the first Accessibility write. Always answered.
+    func handleWindowFrame(_ obj: [String: Any], inputGranted: Bool, stillAllowed: @escaping @Sendable () -> Bool) {
+        queue.async { [self] in
+            guard !stopped, let r = WindowFrameRequest.parse(obj) else { return }
+            guard inputGranted else { return replyWindowFrame(r, pid: nil, .control) }
+            guard running else { return replyWindowFrame(r, pid: nil, .failed) }   // paused or Video Off
+            if missionControlOpen || MissionControlMonitor.shared.isOpen { return replyWindowFrame(r, pid: nil, .missionControl) }
+            // Exactly the window listed to this session (id + gen + owner), shown in one of this receiver's panes.
+            guard let entry = catalog[r.windowID], entry.generation == r.generation,
+                  browser.knows(windowID: r.windowID, generation: r.generation),
+                  assignments.contains(where: { $0.displayID == nil && $0.windowID == r.windowID && $0.windowGeneration == r.generation })
+            else { return replyWindowFrame(r, pid: nil, .stale) }
+            if entry.inStageStrip { return replyWindowFrame(r, pid: entry.pid, .stageStrip) }
+            if entry.availability == .offscreen { return replyWindowFrame(r, pid: entry.pid, .offscreen) }
+            let key = WindowFrameMemoryKey(windowID: r.windowID, pid: entry.pid)
+            if r.op == .restore, WindowFrameMemory.shared.entry(key) == nil { return replyWindowFrame(r, pid: entry.pid, .nothingToRestore) }
+            Log.info("workspace: \(r.op.rawValue) window \(r.windowID) on Mac requested by the device")
+            let job = WindowFrameSetter.Job(op: r.op, windowID: r.windowID, pid: entry.pid, title: entry.title, stillAllowed: stillAllowed)
+            WindowFrameSetter.perform(job) { [weak self] result in
+                self?.queue.async {
+                    guard let self, !self.stopped else { return }
+                    self.replyWindowFrame(r, pid: entry.pid, result)
+                    self.refreshSoon()
+                    self.sendState(force: true)   // the pane's `restore` flag
+                }
+            }
+        }
+    }
+
+    private func replyWindowFrame(_ r: WindowFrameRequest, pid: Int32?, _ result: WindowFrameResult) {
+        let restorable = pid.map { WindowFrameMemory.shared.entry(WindowFrameMemoryKey(windowID: r.windowID, pid: $0)) != nil } ?? false
+        sendMessage?(WindowFrameWire.resultMessage(r.op, window: r.windowID, req: r.req, result: result, restorable: restorable))
+    }
+
+    /// Forgets Fill's earlier frames for windows that closed (or whose id another app now has) and
+    /// for windows moved or resized on the Mac since: Restore never applies a stale size.
+    private func reconcileFrameMemory(_ snap: WindowCatalogSnapshot) {
+        let memory = WindowFrameMemory.shared
+        guard !memory.isEmpty else { return }
+        let listed = Dictionary(snap.windows.filter { $0.availability == .visible && !$0.inStageStrip }
+            .map { (WindowFrameMemoryKey(windowID: $0.windowID, pid: $0.pid), $0.frame) }, uniquingKeysWith: { a, _ in a })
+        memory.reconcile(existing: WindowFrameMemory.existingWindows(), listed: listed, listedAt: snap.takenAt)
+    }
+
     // MARK: Catalog
 
-    /// Assignment generations whose minimized/hidden window was already restored once.
-    private var restoreAttempted = Set<UInt64>()
+    /// When the Mac may bring back a tile's minimized or hidden window (see the ledger).
+    private var restoreLedger = WorkspaceRestoreLedger()
+
+    /// Windows the receiver holds but isn't showing now (other tabs, tucked or hidden floats), from
+    /// its last `workspaceRequest` (`watch`); with the shown ones, checked for closing on the Mac.
+    private var watchedByReceiver: Set<WindowGoneTracker.Watch> = []
+    private var goneTracker = WindowGoneTracker()
+
+    /// Every window the receiver holds, by the generation it holds it under (whole displays and
+    /// panes that follow an app aren't windows that close).
+    private var watchedWindows: Set<WindowGoneTracker.Watch> {
+        watchedByReceiver.union(assignments.compactMap { a in
+            a.displayID == nil && a.follow == .window ? WindowGoneTracker.Watch(window: a.windowID, generation: a.windowGeneration) : nil
+        })
+    }
+
+    /// Bounds what one request may ask to watch (8 tabs in each of the most panes, and floats).
+    static let maximumWatched = 128
+
+    static func parseWatch(_ raw: Any?) -> Set<WindowGoneTracker.Watch> {
+        let list = (raw as? [[String: Any]] ?? []).prefix(maximumWatched)
+        return Set(list.compactMap { w in
+            guard let id = (w["window"] as? Int).flatMap({ UInt32(exactly: $0) }), id != 0, !WorkspaceSource.isDisplayKey(id),
+                  let gen = (w["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) else { return nil }
+            return WindowGoneTracker.Watch(window: id, generation: gen)
+        })
+    }
 
     /// Listings come from the shared browser (one identity ledger for every mode).
     private func refresh(sendCatalog: Bool) {
@@ -613,9 +812,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func apply(_ snap: WindowCatalogSnapshot) {
         snapshot = snap
         catalog = Dictionary(snap.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+        reconcileFrameMemory(snap)
         followApps(snap)
         var frames: [UInt32: CGRect] = [:]
         let previousFrames = inputLock.withLock { targeting.windowFrames }
+        let previousStates = tileState
         let displayFrames = browser.displayFrames()
         for a in assignments {
             if let display = a.displayID {
@@ -642,11 +843,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // that isn't on screen is refused at press/hover time (isTopmost checks
             // the window's own current on-screen bounds).
             frames[a.windowID] = sourceFrame(a) ?? entry.frame
+            let restore = restoreLedger.observe(tile: a.tileID, window: a.windowID, generation: entry.generation,
+                                                offscreen: entry.availability == .offscreen, delivering: delivering)
             if entry.availability == .offscreen {
                 setState(a.tileID, delivering ? "live" : "offscreen")
-                // Chosen on the receiver: bring it back on the Mac without activating its app
-                // (ScreenCaptureKit can't capture a minimized window). Once per assignment.
-                if !delivering, restoreAttempted.insert(a.assignmentGeneration).inserted {
+                // Chosen on the receiver while minimized or hidden: bring it back on the Mac without
+                // activating its app (ScreenCaptureKit can't capture a minimized window). Only then:
+                // Minimize on Mac sticks, and an un-tucked float never restores a window.
+                if restore {
                     let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                     DispatchQueue.main.async { Self.restoreQuietly(pid: pid, frame: frame, title: title) }
                     refreshSoon()
@@ -655,10 +859,25 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 setState(a.tileID, captures[a.tileID]?.hasFrame == true ? "live" : "waiting")
             }
         }
+        restoreLedger.prune { catalog[$0.window]?.generation == $0.generation }
+        // Windows of this receiver's layout that closed on the Mac (reported with the state below).
+        let listed = Dictionary(snap.windows.map { ($0.windowID, (pid: $0.pid, generation: $0.generation)) }, uniquingKeysWith: { a, _ in a })
+        if goneTracker.observe(watched: watchedWindows, listed: listed, existing: snap.existing, now: snap.takenAt) {
+            Log.info("workspace: closed on Mac: \(goneTracker.gone.sorted().map { "\($0.window)/\($0.generation)" })")
+        }
         sheetFrames = Dictionary(snap.sheets.values.flatMap { $0.map { ($0.windowID, $0.frame) } }, uniquingKeysWith: { a, _ in a })
         let covers = snap.sheets.mapValues { Set($0.map(\.windowID)) }
-        inputLock.withLock { targeting.windowFrames = frames; sheetCovers = covers }
+        let listedIDs = Set(snap.windows.map(\.windowID))
+        let listedSheetFrames = snap.sheets.mapValues { $0.map(\.frame) }
+        inputLock.withLock {
+            targeting.windowFrames = frames; sheetCovers = covers; coversListing = (snap.takenAt, listedIDs)
+            ownSheetFrames = listedSheetFrames
+        }
         ensureCaptures()
+        if WorkspaceCaptureRetune.needed(oldFrames: previousFrames, newFrames: frames,
+                                         oldStates: previousStates, newStates: tileState) {
+            retuneCaptures()
+        }
         watchCaptures()
         sendState()
     }
@@ -690,9 +909,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let previous = Dictionary(assignments.map { ($0.tileID, $0) }, uniquingKeysWith: { a, _ in a })
         let displayFrames = browser.displayFrames()
         let result = WorkspaceRequestValidator.validate(tiles: raw, catalog: catalog, hostID: hostID, canvasPixels: canvas,
-                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames)
+                                                        previous: previous, nextGeneration: &nextGeneration, displays: displayFrames,
+                                                        allowFloats: allowFloats)
         assignments = result.assignments
         rejected = result.rejected
+        watchedByReceiver = Self.parseWatch(obj["watch"])
         let sources = WindowAudioSources.of(assignments)
         if sources != lastAudioSources { lastAudioSources = sources; onAudioSources?(sources) }
         for id in Array(tileState.keys) where !assignments.contains(where: { $0.tileID == id }) { tileState[id] = nil }
@@ -729,6 +950,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         let now = ProcessInfo.processInfo.systemUptime
         for a in assignments where captures[a.tileID] == nil && tileState[a.tileID] != "closed" {
             if let r = recovery[a.tileID], r.generation != a.assignmentGeneration { recovery[a.tileID] = nil }
@@ -794,9 +1016,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             captures[a.tileID] = capture
             setState(a.tileID, "waiting")
             let size = captureSize(for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
-            Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
+            Log.info("workspace: tile=\(a.tileID) capture start \(a.displayID.map { "display=\($0)" } ?? "window=\(a.windowID) app=\(a.bundleID)") size=\(Int(size.width))x\(Int(size.height)) srcPt=\(sourceFrame(a).map { "\(Int($0.width))x\(Int($0.height))" } ?? "?") canvas=\(Int(canvas.width))x\(Int(canvas.height)) fps=\(fps) attempt=\(recovery[a.tileID]?.attempts ?? 0)")
             Task { [weak self] in
                 do {
                     if let display = source.display {
@@ -832,6 +1053,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// One sheet per tiled window (the front-most), at the tile's pixels per point, while its window streams.
     private func ensureSheetCaptures() {
+        let listedSheets = Set((snapshot?.sheets.values.flatMap { $0.map(\.windowID) }) ?? [])
+        sheetInTree.formIntersection(listedSheets)
         for (id, capture) in sheetCaptures {
             let a = assignments.first { $0.tileID == id }
             let want = a.flatMap { snapshot?.sheets[$0.windowID]?.first?.windowID }
@@ -845,11 +1068,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard running else { return }
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments where a.displayID == nil && sheetCaptures[a.tileID] == nil && captures[a.tileID] != nil {
             guard let sheet = snapshot?.sheets[a.windowID]?.first, let window = sheet.scWindow,
-                  !sheetFailed.contains(sheet.windowID), Self.reserveBudget() else { continue }
+                  !sheetFailed.contains(sheet.windowID), !sheetInTree.contains(sheet.windowID),
+                  Self.reserveBudget() else { continue }
             let capture = WindowTileCapture(tileID: a.tileID, windowID: sheet.windowID, assignmentGeneration: a.assignmentGeneration)
             capture.onFrame = { [weak self] in self?.queue.async { self?.dirty = true } }
+            // A sheet closing suspends its stream (measured): redraw without it and relist now.
+            capture.onStatus = { [weak self] status in
+                guard !Self.isLiveStatus(status) else { return }
+                self?.queue.async { self?.dirty = true; self?.refreshSoon() }
+            }
             capture.onStop = { [weak self] _ in
                 self?.queue.async {
                     guard let self, self.sheetCaptures[a.tileID] === capture else { return }
@@ -860,8 +1090,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             }
             sheetCaptures[a.tileID] = capture
             let size = sheetCaptureSize(sheet.frame.size, for: a)
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: true)
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: true)
             let sheetID = sheet.windowID
             Task { [weak self] in
                 do {
@@ -897,10 +1126,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     private func retuneCaptures() {
         let active = inputLock.withLock { targeting.keyboardTarget?.tileID }
+        let coverage = WorkspaceCaptureBudget.coverage(assignments)
         for a in assignments {
             guard let capture = captures[a.tileID] else { continue }
-            let fps = WorkspaceCaptureBudget.fps(isActive: a.tileID == active, tileCount: assignments.count,
-                                                 streamFPS: streamFPS, available: tileState[a.tileID] != "offscreen")
+            let fps = budgetFPS(a, active: active, coverage: coverage, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
             Task { [weak self] in
                 if await capture.update(size: size, fps: max(fps, 1)) { self?.queue.async { self?.reconfigurations += 1 } }
@@ -914,7 +1143,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func sourceFrame(_ a: WorkspaceTileAssignment) -> CGRect? {
         if let d = a.displayID { return inputLock.withLock { targeting.windowFrames[a.windowID] } ?? CGDisplayBounds(d) }
         guard let frame = catalog[a.windowID]?.frame else { return nil }
-        if let real = captures[a.tileID]?.latestFrame()?.sourcePoints, real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
+        // Not while a sheet is open on it: then a larger capture is the window with its sheet
+        // (`WindowCaptureExtent`), not Stage Manager's thumbnail.
+        if snapshot?.sheets[a.windowID]?.isEmpty ?? true,
+           let real = captures[a.tileID]?.latestFrame()?.sourcePoints, real.width > frame.width * 1.5 || real.height > frame.height * 1.5 {
             return CGRect(origin: frame.origin, size: real)
         }
         return frame
@@ -922,15 +1154,29 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// The whole source, at the pixels the pane draws it with (zoom included), up to its own.
     private func captureSize(for a: WorkspaceTileAssignment) -> CGSize {
-        guard let frame = sourceFrame(a)?.size, frame.width > 0, frame.height > 0 else {
+        guard let sourceRect = sourceFrame(a), sourceRect.width > 0, sourceRect.height > 0 else {
             return CGSize(width: max(2, (a.rect.width * canvas.width).rounded()), height: max(2, (a.rect.height * canvas.height).rounded()))
         }
+        // A window shown with its sheet is captured whole (the sheet past its edge too).
+        let frame = lastExtents[a.windowID]?.size ?? sourceRect.size
         let tile = a.rect.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height))
         let t = TileContentTransform(tile: tile, source: WorkspaceSize(width: frame.width, height: frame.height),
                                      rotation: a.rotation, fit: a.fit, zoom: a.zoom)
-        let main = CGMainDisplayID(), points = CGDisplayBounds(main).width
-        let backing = points > 0 ? max(Double(CGDisplayPixelsWide(main)) / points, 1) : 2
+        let backing = WorkspaceCaptureSizing.backingScale(source: sourceRect, displays: Self.activeDisplayScales())
         return WorkspaceCaptureSizing.size(source: frame, drawScale: t.scale, backingScale: backing)
+    }
+
+    /// Every active display's bounds and mode, for `WorkspaceCaptureSizing.backingScale`.
+    private static func activeDisplayScales() -> [WorkspaceCaptureSizing.DisplayScale] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).compactMap { id in
+            guard let mode = CGDisplayCopyDisplayMode(id) else { return nil }
+            return WorkspaceCaptureSizing.DisplayScale(bounds: CGDisplayBounds(id), modeWidth: mode.width,
+                                                       modePixelWidth: mode.pixelWidth)
+        }
     }
 
     /// Health of every pane's capture (each refresh and on status changes): live, paused by
@@ -1064,7 +1310,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func setState(_ tile: String, _ state: String) { tileState[tile] = state }
 
     private func sendState(force: Bool = false) {
-        let (t, decision) = inputLock.withLock { (targeting, keyboardDecision) }
+        let (t, decision) = inputLock.withLock {
+            (targeting, deferredRaise.reported(keyboardDecision, active: targeting.keyboardTarget?.tileID))
+        }
         let tiles: [[String: Any]] = assignments.map { a in
             let entry = catalog[a.windowID]
             var tile: [String: Any] = [
@@ -1075,6 +1323,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             ]
             if let r = recovery[a.tileID], r.attempts > 0 { tile["attempt"] = r.attempts }
             if entry?.inStageStrip == true { tile["strip"] = true }
+            // Restore Previous Size on Mac is possible (Fill changed it from here and it hasn't moved since).
+            if let entry, a.displayID == nil, entry.generation == a.windowGeneration,
+               WindowFrameMemory.shared.entry(WindowFrameMemoryKey(windowID: a.windowID, pid: entry.pid)) != nil {
+                tile[WindowFrameWire.tileRestorable] = true
+            }
+            // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
+            if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
+            if a.isLifted { tile["lift"] = true }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"
@@ -1088,11 +1344,12 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             "limit": WorkspaceLayout.maximumTiles,
         ]
         // Stage Manager on or off: receivers offer Turn Off (owner-confirmed) and Turn On, control only.
-        let stageManagerOn = StageManagerSwitch.isOnRecently
+        let stageManagerOn = stageManager.isOnRecently
         msg["stageManagerState"] = stageManagerOn ? "on" : "off"
         if stageManagerOn { msg["stageManager"] = true }   // older receivers only read this
-        // "setup": the owner hasn't made the two shortcuts yet, so a device explains instead of offering it.
-        msg["stageManagerControl"] = StageManagerSwitch.shortcutsReadyKnown == true ? "ready" : "setup"
+        // "setup": the owner hasn't made the two shortcuts yet (or they need setting up again so they
+        // leave the Dock alone), so a device explains instead of offering it.
+        msg["stageManagerControl"] = stageManager.wireControl
         if let failed = stageManagerFailedAt, ProcessInfo.processInfo.systemUptime - failed < 8 { msg["stageManagerControl"] = "failed" }
         if StageStripAccess.isAvailable { msg["stageAddAvailable"] = true }
         // Receivers say video is paused and offer Exit Mission Control (control only).
@@ -1102,6 +1359,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         if let active = t.keyboardTarget?.tileID { msg["active"] = active }
         if !rejected.isEmpty { msg["rejected"] = rejected }
+        // Held windows that closed on the Mac: the receiver takes them out of its layout.
+        let gone = goneTracker.gone.intersection(watchedWindows).sorted()
+        if !gone.isEmpty { msg["gone"] = gone.map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         let key = (try? JSONSerialization.data(withJSONObject: msg, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? ""
         guard force || key != lastStateSent else { return }
         lastStateSent = key
@@ -1115,19 +1375,18 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         switch action {
         case "stageManager":
             // Confirmed on the device by a person with control (the caller checks the grant).
-            // Off: remembered and turned back on when Window mode ends. On: turns it on (from the
+            // Off: remembered and turned back on after Window mode ends. On: turns it on (from the
             // device's Settings), and then there is nothing left to restore.
             // Shortcuts take a moment: never on this queue. A change macOS didn't apply is reported.
             let off = obj["on"] as? Bool == false
-            StageManagerSwitch.inBackground({ [weak self] in
-                let ok = off ? StageManagerSwitch.turnOffForWindowMode() : StageManagerSwitch.turnOnFromDevice()
+            stageManager.deviceAsked(on: !off) { [weak self] ok in
                 self?.queue.async {
                     guard let self else { return }
                     self.stageManagerFailedAt = ok ? nil : ProcessInfo.processInfo.systemUptime
                     self.refreshSoon()
                     self.sendState(force: true)
                 }
-            })
+            }
         case "missionControl":
             // Exit Mission Control, asked by a person with control (the caller checks the grant).
             // The Mac checks it is open right now and only then sends Escape: never a blind toggle.
@@ -1263,6 +1522,74 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
     }
 
+    /// Each window's capture extent from the frame drawn now (`WindowCaptureExtent`), shared with
+    /// input under `inputLock`. A sheet closing shows here first (the next frame is the window
+    /// again, measured on the same frame the Mac drops it): cached cover verdicts for that window
+    /// are dropped and the catalog refreshed, so input follows the window at once.
+    private func updateCaptureExtents(now: TimeInterval) {
+        let frames = inputLock.withLock { targeting.windowFrames }
+        var extents: [UInt32: CGRect] = [:]
+        var unexplained = false
+        for a in assignments where a.displayID == nil {
+            guard let capture = captures[a.tileID], capture.assignmentGeneration == a.assignmentGeneration,
+                  let f = capture.latestFrame(), let window = frames[a.windowID] else { continue }
+            let listed = snapshot?.sheets[a.windowID]?.map(\.frame) ?? []
+            var live = Array(inputLock.withLock { liveSheets[a.windowID] ?? [:] }.values)
+            var e = WindowCaptureExtent.extent(window: window, children: listed + live, content: f.sourcePoints)
+            if e == nil, let c = f.sourcePoints, !WindowCaptureExtent.matches(c, window.size),
+               now - (liveSheetLookAt[a.windowID] ?? 0) > 0.5 {
+                // More than the window and no known sheet explains it: a sheet the listing hasn't
+                // caught up with. Look for it live (the app must confirm it).
+                liveSheetLookAt[a.windowID] = now
+                let found = Self.liveSheets(windowID: a.windowID, pid: a.pid, frame: window)
+                inputLock.withLock { liveSheets[a.windowID] = found }
+                live = Array(found.values)
+                e = WindowCaptureExtent.extent(window: window, children: listed + live, content: f.sourcePoints)
+            }
+            if let e {
+                extents[a.windowID] = e
+            } else if let c = f.sourcePoints, !WindowCaptureExtent.matches(c, window.size), c.width <= window.width * 1.5 + 1 {
+                unexplained = true   // a sheet the catalog hasn't listed yet (or one animating)
+            }
+        }
+        guard extents != lastExtents else {
+            if unexplained, now - unexplainedExtentAt > 1 { unexplainedExtentAt = now; refreshSoon() }
+            return
+        }
+        let changed = Set(extents.keys).symmetricDifference(lastExtents.keys)
+            .union(extents.keys.filter { lastExtents[$0] != nil && lastExtents[$0] != extents[$0] })
+        lastExtents = extents
+        inputLock.withLock {
+            targeting.contentExtents = extents
+            for w in changed { topmostCache[w] = nil }
+        }
+        if !changed.isEmpty {
+            Log.info("workspace: capture extent changed windows=\(changed.sorted()) now=\(extents.mapValues { "\(Int($0.width))x\(Int($0.height))" })")
+            refreshSoon()
+            retuneCaptures()
+            sendState(force: true)
+        }
+    }
+
+    /// A sheet capture that shows its whole window: stop it, its window's capture has the sheet.
+    private func dropSheetInTree(tile: String, sheet: UInt32) {
+        guard let capture = sheetCaptures[tile], capture.windowID == sheet else { return }
+        if sheetInTree.insert(sheet).inserted {
+            Log.info("workspace: sheet \(sheet) is drawn by its window's capture; no separate sheet capture")
+        }
+        sheetCaptures[tile] = nil
+        Self.releaseBudget(1)
+        dirty = true
+        Task { await capture.stop() }
+    }
+
+    static func isLiveStatus(_ status: SCFrameStatus?) -> Bool {
+        switch status {
+        case .complete?, .idle?, .started?, nil: return true
+        default: return false
+        }
+    }
+
     private func refreshSoon() {
         queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refresh(sendCatalog: true) }
         queue.asyncAfter(deadline: .now() + 1.6) { [weak self] in self?.refresh(sendCatalog: true) }
@@ -1312,6 +1639,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         if target.activates {
             Self.raise(pid: target.pid, frame: targeting.windowFrames[target.windowID] ?? .zero)
+            deferredRaise.clear()
             keyboardCheckedAt = 0
             queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
             // Bounded wait for the window to come to the front, so the press
@@ -1354,17 +1682,36 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let active = inputLock.withLock { targeting.keyboardTarget }
         if now - keyboardCheckedAt > 0.2 {
             keyboardCheckedAt = now
-            let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            var focusedID: UInt32?
-            var isChild = false
-            if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
-                isChild = info.isChild
-                focusedID = WorkspaceKeyboardGate.focusedTileWindow(
-                    active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
-                    frames: inputLock.withLock { targeting.windowFrames }, matches: Self.framesMatch)
+            func evaluate() -> WorkspaceKeyboardGate.Decision {
+                let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                var focusedID: UInt32?
+                var isChild = false
+                if let active, frontPID == active.pid, let info = Self.focusedWindow(pid: active.pid) {
+                    // The active window's own sheet (an Open or Save panel) has the focus: typing
+                    // goes to it, as part of the window (QA 9000037: Escape and Return were lost).
+                    let sheetFrames = (ownSheetFrames[active.windowID] ?? []) + Array((liveSheets[active.windowID] ?? [:]).values)
+                    isChild = info.isChild || WorkspaceKeyboardGate.focusIsOwnSheet(
+                        focusedFrame: info.frame, sheetFrames: sheetFrames, matches: Self.framesMatch)
+                    focusedID = WorkspaceKeyboardGate.focusedTileWindow(
+                        active: active.windowID, focusedFrame: info.frame, isChild: info.isChild,
+                        frames: targeting.windowFrames, matches: Self.framesMatch)
+                }
+                return WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
+                                                    focusedWindowIsChild: isChild)
             }
-            let decision = WorkspaceKeyboardGate.decide(active: active, frontmostPID: frontPID, focusedWindowID: focusedID,
-                                                        focusedWindowIsChild: isChild)
+            var decision = evaluate()
+            if let active, deferredRaise.takeForKey(active: active.tileID, decision: decision) {
+                // Chosen by arranging the receiver's view: this authorized key brings the window
+                // forward, and waits (bounded) until it really is, so it is typed once, into it.
+                Self.raise(pid: active.pid, frame: targeting.windowFrames[active.windowID] ?? .zero)
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+                while decision != .deliver, ProcessInfo.processInfo.systemUptime < deadline {
+                    usleep(10_000)
+                    decision = evaluate()
+                }
+                keyboardCheckedAt = ProcessInfo.processInfo.systemUptime
+                queue.async { [weak self] in self?.retuneCaptures(); self?.sendState(force: true) }
+            }
             if decision != keyboardDecision {
                 keyboardDecision = decision
                 queue.async { [weak self] in self?.sendState(force: true) }
@@ -1400,35 +1747,142 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// Is `windowID` the frontmost window at `point`? Windows above it that
-    /// contain the point (other apps, panels, menus, the Dock) mean no.
+    /// contain the point (other apps, panels, menus, the Dock strip) mean no.
+    /// See `WorkspaceInputCover` for the display-wide surfaces the window server decides.
     private func isTopmost(_ windowID: UInt32, at point: CGPoint, cached: Bool) -> Bool {
         let now = ProcessInfo.processInfo.systemUptime
         if cached, let c = topmostCache[windowID], now - c.at < 0.1, c.rect.contains(point) { return c.ok }
-        guard let above = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
-        var covering: CGRect?
-        let ownSheets = sheetCovers[windowID] ?? []
-        for info in above {
-            // The window's own sheet is part of it: a press on "Don't Save" goes through.
-            if let n = info[kCGWindowNumber as String] as? UInt32, ownSheets.contains(n) { continue }
-            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict),
-                  ((info[kCGWindowAlpha as String] as? Double) ?? 1) > 0.01,
-                  (info[kCGWindowOwnerName as String] as? String) != "Window Server" else { continue }
-            if bounds.contains(point) { covering = bounds; break }
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
+        let above = info.compactMap(WorkspaceInputCover.window(from:))
+        let displays = Self.activeDisplayBounds()
+        var asked: UInt32??
+        let targetFrame = Self.currentFrame(windowID)
+        var ownSheets = (sheetCovers[windowID] ?? []).union(Array((liveSheets[windowID] ?? [:]).keys))
+        // A sheet already on screen that the latest listing doesn't have yet: the live listing
+        // above the target finds it by shape and the app must confirm it (always, titled or not).
+        if let targetFrame, let pid = targeting.assignments.first(where: { $0.windowID == windowID })?.pid {
+            for c in WindowSheetMatcher.liveCandidates(targetPID: pid, targetFrame: targetFrame, aboveFrontToBack: above)
+            where !ownSheets.contains(c.id) && c.bounds.contains(point)
+                && SheetConfirmation.confirms(pid: pid, sheet: c.id, sheetFrame: c.bounds, window: windowID, windowFrame: targetFrame) {
+                ownSheets.insert(c.id)
+                liveSheets[windowID, default: [:]][c.id] = c.bounds
+                if loggedCovers.insert("live-sheet#\(c.id)").inserted {
+                    Log.info("workspace: sheet \(c.id) of \(windowID) confirmed from the live window list (not in the latest listing)")
+                }
+            }
         }
-        // The point must also be inside the target itself, on screen.
-        let ok = covering == nil && (Self.currentFrame(windowID)?.contains(point) ?? false)
-        let around = CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80)
-        // Cached only as "covered by this window" or "fine near here"; outside the
-        // target (or off screen) is never cached, so it is re-checked every time.
-        if ok {
-            topmostCache[windowID] = (now, around, true)
-        } else if let covering {
-            topmostCache[windowID] = (now, covering, false)
-        } else {
+        var panelServiceAsked = false
+        let verdict = WorkspaceInputCover.verdict(
+            target: windowID, targetFrame: targetFrame, at: point, above: above,
+            ownSheets: ownSheets, displays: displays,
+            isFilePanelService: { panelServiceAsked = true; return Self.isFilePanelService($0) },
+            hitTest: { let hit = Self.windowServerHit(at: point); asked = .some(hit); return hit })
+        if asked != nil, let surface = above.first(where: { $0.bounds.contains(point)
+                                                            && WorkspaceInputCover.isDisplayWideSurface($0, at: point, displays: displays) }) {
+            noteDisplayWideSurface(surface)
+        }
+        if panelServiceAsked || ({ if case .covered = verdict { return true }; return false })() {
+            noteCover(target: windowID, targetFrame: targetFrame, ownSheets: ownSheets, above: above, at: point, verdict: verdict)
+        }
+        // Cached only as "covered here" or "fine near here"; outside the target (or off
+        // screen) is never cached, so it is re-checked every time.
+        switch verdict {
+        case .clear:
+            topmostCache[windowID] = (now, CGRect(x: point.x - 40, y: point.y - 40, width: 80, height: 80), true)
+        case .covered(_, let rect):
+            topmostCache[windowID] = (now, rect, false)
+        case .outside:
             topmostCache[windowID] = nil
         }
-        return ok
+        return verdict == .clear
+    }
+
+    /// A process instance: its pid and start time, so a reused pid is a different instance.
+    private struct ProcessInstance: Hashable { var pid: Int32; var sec: UInt64; var usec: UInt64 }
+    private static let panelServiceLock = NSLock()
+    nonisolated(unsafe) private static var panelServiceVerdicts: [ProcessInstance: Bool] = [:]
+
+    /// Whether `pid` is the system Open/Save panel service: its executable is AppKit's copy on the
+    /// sealed system volume and its signature meets Apple's requirement for that identifier.
+    /// Remembered per process instance (pid and start time), and only when the instance is
+    /// unchanged after the check, so a pid reused meanwhile is never trusted.
+    static func isFilePanelService(_ pid: Int32) -> Bool {
+        guard pid > 0, let instance = processInstance(pid) else { return false }
+        if let known = panelServiceLock.withLock({ panelServiceVerdicts[instance] }) { return known }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        let path = length > 0 ? String(cString: buffer) : ""
+        let yes = WorkspaceInputCover.isFilePanelServicePath(path) && hasFilePanelServiceSignature(pid)
+        guard processInstance(pid) == instance else { return false }
+        panelServiceLock.withLock {
+            if panelServiceVerdicts.count > 64 { panelServiceVerdicts.removeAll() }
+            panelServiceVerdicts[instance] = yes
+        }
+        if yes { Log.info("workspace: pid \(pid) verified as the system Open/Save panel service") }
+        return yes
+    }
+
+    private static func processInstance(_ pid: Int32) -> ProcessInstance? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_pid == UInt32(pid) else { return nil }
+        return ProcessInstance(pid: pid, sec: info.pbi_start_tvsec, usec: info.pbi_start_tvusec)
+    }
+
+    private static func hasFilePanelServiceSignature(_ pid: Int32) -> Bool {
+        var code: SecCode?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid: pid] as CFDictionary, [], &code) == errSecSuccess,
+              let code else { return false }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(WorkspaceInputCover.filePanelServiceRequirement as CFString, [], &requirement)
+                == errSecSuccess, let requirement else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    /// Why a press was refused over a tiled window, or let into a panel-service window: logged
+    /// once per target and verdict, with window numbers, owners, layers and frames only (no titles
+    /// or contents), so a QA log shows the real window structure. Bounded.
+    private func noteCover(target: UInt32, targetFrame: CGRect?, ownSheets: Set<UInt32>,
+                           above: [WorkspaceInputCover.Window], at point: CGPoint, verdict: WorkspaceInputCover.Verdict) {
+        let key = "\(target)#\(verdict)"
+        guard !loggedCovers.contains(key) else { return }
+        if loggedCovers.count > 64 { loggedCovers.removeAll() }
+        loggedCovers.insert(key)
+        func r(_ f: CGRect?) -> String { f.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "nil" }
+        let near = above.suffix(6).map { "\($0.id)/\($0.owner)/pid\($0.pid)/L\($0.layer)/\(r($0.bounds))" }
+        let age = ProcessInfo.processInfo.systemUptime - coversListing.at
+        let listing = String(format: "listing age=%.1fs targetListed=%@", age, coversListing.listed.contains(target) ? "yes" : "no")
+        Log.info("workspace: input check target=\(target) frame=\(r(targetFrame)) sheets=\(ownSheets.sorted()) \(listing) "
+                 + "point=\(Int(point.x)),\(Int(point.y)) verdict=\(verdict) nearest-above(back last)=\(near)")
+    }
+
+    /// Each display-wide surface the window server decided for, logged once per owner and layer
+    /// (nothing else), so a QA log shows when that path is in use.
+    private func noteDisplayWideSurface(_ w: WorkspaceInputCover.Window) {
+        let key = "\(w.owner)#\(w.layer)"
+        guard !loggedSurfaces.contains(key) else { return }
+        loggedSurfaces.insert(key)
+        Log.info("workspace: display-wide surface owner=\(w.owner) layer=\(w.layer) over windows; input under it follows the window server's hit-test")
+    }
+
+    static func activeDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    /// The window a mouse-down at `point` (global, top-left origin) would hit, from the window
+    /// server (`+[NSWindow windowNumberAtPoint:belowWindowWithWindowNumber:]`, which knows each
+    /// window's real input shape: the Dock's display-wide window takes clicks only on the Dock).
+    /// Asked on the main thread, as AppKit expects, and bounded: nil, so "covered", when the main
+    /// thread doesn't answer in time or nothing is hit.
+    static func windowServerHit(at point: CGPoint, timeout: TimeInterval = 0.05) -> UInt32? {
+        let cocoa = WorkspaceInputCover.cocoaPoint(fromGlobal: point, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height)
+        guard let n = MainThreadQuery.run(timeout: timeout, { NSWindow.windowNumber(at: cocoa, belowWindowWithWindowNumber: 0) }),
+              n > 0, n <= Int(UInt32.max) else { return nil }
+        return UInt32(n)
     }
 
     // MARK: Accessibility helpers
@@ -1528,6 +1982,20 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
     }
 
+    /// Sheets of `windowID` on screen now that the app confirms through Accessibility, from the
+    /// live list of windows above it (`WindowSheetMatcher.liveCandidates`, `SheetConfirmation`).
+    private static func liveSheets(windowID: UInt32, pid: Int32, frame: CGRect) -> [UInt32: CGRect] {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return [:] }
+        let above = info.compactMap(WorkspaceInputCover.window(from:))
+        var found: [UInt32: CGRect] = [:]
+        for c in WindowSheetMatcher.liveCandidates(targetPID: pid, targetFrame: frame, aboveFrontToBack: above)
+        where SheetConfirmation.confirms(pid: pid, sheet: c.id, sheetFrame: c.bounds, window: windowID, windowFrame: frame) {
+            found[c.id] = c.bounds
+        }
+        if !found.isEmpty { Log.info("workspace: sheets \(found.keys.sorted()) of \(windowID) found live for its capture") }
+        return found
+    }
+
     private static func focusedWindow(pid: Int32) -> (frame: CGRect, isChild: Bool)? {
         guard AXIsProcessTrusted() else { return nil }
         let app = AXUIElementCreateApplication(pid)
@@ -1540,7 +2008,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         var subrole: CFTypeRef?
         AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
         let s = subrole as? String ?? ""
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role)
         let child = s == (kAXDialogSubrole as String) || s == (kAXSystemDialogSubrole as String) || s == (kAXFloatingWindowSubrole as String)
+            || (role as? String) == (kAXSheetRole as String)
         return (frame, child)
     }
 
@@ -1560,6 +2031,30 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 }
 
 private struct MenuItemsBox: @unchecked Sendable { let value: [[String: Any]] }
+
+/// Runs a short AppKit query on the main thread, as AppKit expects, for code on another queue
+/// that must not wait long: nil when the main thread doesn't run it within `timeout` (it still
+/// runs later and its answer is dropped). Called on the main thread, it just runs it.
+enum MainThreadQuery {
+    private final class Box<T: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: T?
+        func set(_ v: T) { lock.withLock { value = v } }
+        func get() -> T? { lock.withLock { value } }
+    }
+
+    static func run<T: Sendable>(timeout: TimeInterval, _ body: @escaping @MainActor @Sendable () -> T) -> T? {
+        if Thread.isMainThread { return MainActor.assumeIsolated { body() } }
+        let box = Box<T>()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            box.set(MainActor.assumeIsolated { body() })
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+        return box.get()
+    }
+}
 
 /// Window mode's audio (A1–A3): ScreenCaptureKit captures sound per app, not per window, so
 /// a pane's window brings its whole app's sound (every Chrome window shares Chrome's).

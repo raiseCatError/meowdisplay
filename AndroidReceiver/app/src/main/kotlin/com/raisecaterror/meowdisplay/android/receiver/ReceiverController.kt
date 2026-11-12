@@ -57,6 +57,8 @@ data class ReceiverViewState(
     val transform: RemoteViewportTransform = RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), CGRect.zero),
     val videoSize: CGSize = CGSize.zero,
     val videoEnabled: Boolean = true,
+    /** The Mac's lock screen is up (`macLockState`): an opaque cover, nothing of the Mac shown. */
+    val macLocked: Boolean = false,
     val paused: Boolean = false,
     val cursor: CursorState = CursorState(),
     val inputState: InputWireState = InputWireState.Off,
@@ -251,7 +253,24 @@ class ReceiverController(
                 lastCaretDisplayed = null
                 keyboardStateReported = false
                 setKeyboardRequested(false)
-                update { it.copy(cursor = CursorState(), prompt = null, inputResetGeneration = it.inputResetGeneration + 1) }
+                update { it.copy(cursor = CursorState(), prompt = null, macLocked = false, inputResetGeneration = it.inputResetGeneration + 1) }
+                refreshConfig()
+            }
+            is SessionEvent.MacLock -> {
+                if (event.notice.isLocked) {
+                    // Nothing held, typed or dragged reaches the lock screen; the last picture, cursor and caret go.
+                    surface.cancelAll()
+                    keyboard.releaseHeldKeys()
+                    inputView?.releaseHardwareInput()
+                    store.setMoveViewActive(false)
+                    setKeyboardRequested(false)
+                    retainedVideo = null
+                    caret = null
+                    lastCaretDisplayed = null
+                    update { it.copy(cursor = CursorState(), prompt = null, macLocked = true, inputResetGeneration = it.inputResetGeneration + 1) }
+                } else {
+                    update { it.copy(macLocked = false) }
+                }
                 refreshConfig()
             }
             is SessionEvent.VideoState -> {
@@ -583,7 +602,7 @@ class ReceiverController(
     private val SessionEvent.isDiagnostic: Boolean
         get() = this is SessionEvent.InputState || this is SessionEvent.Admitted || this is SessionEvent.Connected ||
             this is SessionEvent.Disconnected || this === SessionEvent.AdmissionWithdrawn || this is SessionEvent.DisplayPaused ||
-            this === SessionEvent.InputReset || this is SessionEvent.VideoState
+            this === SessionEvent.InputReset || this is SessionEvent.VideoState || this is SessionEvent.MacLock
 
     private val SessionEvent.summary: String
         get() = when (this) {
@@ -591,6 +610,7 @@ class ReceiverController(
             is SessionEvent.Disconnected -> reason.name
             is SessionEvent.DisplayPaused -> "paused=$paused"
             is SessionEvent.VideoState -> "enabled=$enabled"
+            is SessionEvent.MacLock -> "state=${notice.state.wire}"
             else -> ""
         }
 

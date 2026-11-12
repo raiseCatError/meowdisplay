@@ -40,6 +40,18 @@ struct HIDEventTapSink: SyntheticEventSink {
 /// move = drag, finger up = button up — i.e. the phone acts as a touchscreen.
 final class InputInjector {
 
+    /// The lock state input waits on (tests set their own; the app keeps `.shared` current).
+    var privacyGate: MacPrivacyGate = .shared
+    /// On while this connection's receiver shows the Mac's lock screen (`MacSender`): then, while
+    /// locked, only what the login window needs gets in (`LockScreenInputFilter`), and only input
+    /// `MacSender` hands over as that view's own (`perform(for:_:)`).
+    var lockScreenGate: LockScreenInputGate?
+    /// The episode the event being handled was made in (`perform(for:_:)`); the desktop unless
+    /// `MacSender` says otherwise. Under `inputLock`.
+    private var eventEpisode: InputEpisode = .desktop
+    /// The episode whatever is held now (keys, modifiers, buttons, the pen) was pressed in. Under
+    /// `inputLock`. Nil: nothing allowed since the last release of everything.
+    private var heldEpisode: InputEpisode?
     private let eventSink: SyntheticEventSink
     private let displayID: CGDirectDisplayID
     // This session's ephemeral input grant (per-device-session milestone) —
@@ -125,6 +137,19 @@ final class InputInjector {
         self.eventSink = eventSink
     }
 
+    /// Runs `body` (one or more `handle…` calls) as input made in `episode`: it acts only while the
+    /// Mac is in that episode (the unlocked desktop, or that lock screen view live). Checked under
+    /// the input lock, so an unlock or a new view landing between `MacSender`'s own check and the
+    /// post can't turn input meant for one into input for the other.
+    func perform(for episode: InputEpisode, _ body: () -> Void) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        let outer = eventEpisode
+        eventEpisode = episode
+        defer { eventEpisode = outer }
+        body()
+    }
+
     /// Release every synthetic contact when capture is paused, torn down,
     /// or input is disabled while a gesture is active.
     func cancelActiveInput() {
@@ -188,12 +213,16 @@ final class InputInjector {
         penClickSession = nil
         penLastClick = nil
 
+        // A key sent with exact modifiers goes up with the flags it went down
+        // with, never the held ones it was kept apart from.
+        let exactFlags = heldKeys.exactFlags
         for usage in heldKeys.releaseAll() {
-            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: heldModifiers.flags)
+            postKeyEvent(keyCode: usage.keyCode, keyDown: false, flags: exactFlags[usage] ?? heldModifiers.flags)
         }
         for modifier in heldModifiers.releaseAll() {
             postKeyEvent(keyCode: modifier.keyCode, keyDown: false, flags: heldModifiers.flags)
         }
+        heldEpisode = nil
     }
 
     static func ensureAccessibilityPermission() -> Bool {
@@ -210,7 +239,7 @@ final class InputInjector {
     func handleTouch(phase: String, x: Double, y: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.touch) else { return }
         let point: CGPoint
         if let mapper = targetMapper {
             let mapPhase: InputMapPhase = phase == "began" ? .down : (phase == "moved" ? (isDown ? .drag : .hover) : .up)
@@ -308,7 +337,7 @@ final class InputInjector {
     func handlePointerMove(x: Double, y: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerMove) else { return }
         if let mapper = targetMapper {
             guard let point = mapper.mapPointer(phase: pointerHeldButton == nil ? .hover : .drag, x: x, y: y, dx: 0, dy: 0) else { return }
             postPointerMotion(to: point)
@@ -325,7 +354,7 @@ final class InputInjector {
     func handlePointerMoveRelative(dx: Double, dy: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerMove) else { return }
         if let mapper = targetMapper {
             // The workspace pointer moves freely across tiles; the Mac pointer
             // follows only where that is safe (see WorkspaceInputTargeting).
@@ -366,7 +395,7 @@ final class InputInjector {
     func handlePointerDown(button: PointerButton, clickCount: Int) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed() else { return }
+        guard inputIsAllowed(.pointerButton(button)) else { return }
         guard pointerHeldButton == nil else { return }
         let cgButton: CGMouseButton = button == .left ? .left : .right
         let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
@@ -405,6 +434,8 @@ final class InputInjector {
         // Window mode: the release always ends the workspace's drag binding,
         // even when its press was refused (nothing was pressed on the Mac).
         let mapped = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
+        // Only the episode that pressed it releases it (an unlock in between released it already).
+        guard releaseIsAllowed() else { return }
         guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
         let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
         let point = mapped ?? currentCursor()
@@ -437,25 +468,26 @@ final class InputInjector {
     func handleKeyboardText(_ text: String) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
+        guard inputIsAllowed(.text(text)), keyboardTargetReady(), let units = KeyboardTextPlanner.plan(text) else { return }
         postUnicodeText(units)
     }
 
     /// An atomic special key from the software keyboard (no held state to
-    /// track — down and up post back to back).
-    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = []) {
+    /// track — down and up post back to back). `exactModifiers`: post with
+    /// exactly `modifiers`, never adding the held ones (`KeyEventFlags`).
+    func handleKeyboardPress(_ usage: HIDKeyUsage, modifiers: [String] = [], exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady() else { return }
-        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        guard inputIsAllowed(.key(usage, modifiers: modifiers)), keyboardTargetReady() else { return }
+        let flags = KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: exactModifiers)
         #if DEBUG
-        if usage == .deleteOrBackspace {
+        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
             Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) down")
         }
         #endif
         postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
         #if DEBUG
-        if usage == .deleteOrBackspace {
+        if usage == .deleteOrBackspace, privacyGate.allowsInput {   // nothing typed on the lock screen is logged
             Log.info("keyboardDebug: posting usage=42 keyCode=\(usage.keyCode) up")
         }
         #endif
@@ -465,7 +497,7 @@ final class InputInjector {
     func handleModifier(name: String, down: Bool) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), let modifier = ControlModifier(rawValue: name) else { return }
+        guard inputIsAllowed(down ? .modifier(name) : .release), let modifier = ControlModifier(rawValue: name) else { return }
         if down {
             guard keyboardTargetReady(), heldModifiers.down(modifier) else { return }
             postKeyEvent(keyCode: modifier.keyCode, keyDown: true, flags: heldModifiers.flags)
@@ -479,28 +511,41 @@ final class InputInjector {
     /// is ignored rather than re-posted — unless it is marked `repeat` (a
     /// receiving Mac's own key repeat), which posts an auto-repeat key-down
     /// for the held key.
-    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false) {
+    ///
+    /// `exactModifiers`: the key posts with exactly `modifiers`, never adding
+    /// the held ones, and keeps those flags for its repeats and its up (and a
+    /// cancellation) whatever those messages say, so a modifier latched or
+    /// released mid-hold can't change it.
+    func handleKeyboardDown(usage: HIDKeyUsage, modifiers: [String], isRepeat: Bool = false,
+                            exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
-        guard inputIsAllowed(), keyboardTargetReady() else { return }
-        let flags = KeyModifier.flags(named: modifiers).union(heldModifiers.flags)
+        guard inputIsAllowed(.key(usage, modifiers: modifiers)), keyboardTargetReady() else { return }
         if isRepeat {
             guard heldKeys.allowsRepeat(usage) else { return }
+            let flags = heldKeys.exactFlags(for: usage)
+                ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: exactModifiers)
             postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags, autorepeat: true)
             return
         }
-        guard heldKeys.down(usage) else { return }
-        postKeyEvent(keyCode: usage.keyCode, keyDown: true, flags: flags)
+        let exact = exactModifiers ? KeyModifier.flags(named: modifiers) : nil
+        guard heldKeys.down(usage, exactFlags: exact) else { return }
+        postKeyEvent(keyCode: usage.keyCode, keyDown: true,
+                     flags: exact ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags, exact: false))
     }
 
     /// The matching release. A spurious up for a key that isn't held (e.g.
-    /// after cancellation already released it) is ignored.
-    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String]) {
+    /// after cancellation already released it) is ignored. A key that went
+    /// down with exact modifiers goes up with the same flags.
+    func handleKeyboardUp(usage: HIDKeyUsage, modifiers: [String], exactModifiers: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
+        guard releaseIsAllowed() else { return }
+        let stored = heldKeys.exactFlags(for: usage)
         guard heldKeys.up(usage) else { return }
         postKeyEvent(keyCode: usage.keyCode, keyDown: false,
-                     flags: KeyModifier.flags(named: modifiers).union(heldModifiers.flags))
+                     flags: stored ?? KeyEventFlags.compose(named: modifiers, held: heldModifiers.flags,
+                                                            exact: exactModifiers))
     }
 
     private func postKeyEvent(keyCode: CGKeyCode, keyDown: Bool, flags: CGEventFlags, autorepeat: Bool = false) {
@@ -548,14 +593,50 @@ final class InputInjector {
     /// OFF transition cannot race an event that already passed its outer gate.
     /// A login session that is switched out (Fast User Switching) never
     /// injects: someone else is using the Mac (`LoginSessionConsole`).
-    private func inputIsAllowed() -> Bool {
+    /// `event`: what this is, for the lock screen view's filter (anything not named is `.other`).
+    private func inputIsAllowed(_ event: LockScreenInputEvent = .other) -> Bool {
         guard EffectiveInputAuthorization.allowed(masterEnabled: InputPolicy.allowsInput(),
                                                    sessionGranted: sessionInputGrant.get()),
               LoginSessionConsole.shared.isOnConsole else {
             cancelActiveInputLocked()
             return false
         }
+        // Locked (or can't tell): nothing reaches the lock screen or a window behind it, whatever
+        // the grant (`MacPrivacyGate`), except, while this receiver shows the lock screen and the
+        // Mac says it's locked, that view's own input, and only what the login window needs.
+        guard let episode = currentEpisode() else {
+            cancelActiveInputLocked()
+            return false
+        }
+        releaseHeldInputFromAnotherEpisode(episode)
+        // Made in another episode (typed for a lock screen view that has ended, or desktop input
+        // while a view is live): never acts here.
+        guard eventEpisode == episode else { return false }
+        if case .lockScreen = episode, !LockScreenInputFilter.allows(event) { return false }
+        heldEpisode = episode
         return true
+    }
+
+    /// The episode the Mac is in now: the desktop (unlocked), the live lock screen view (locked,
+    /// this receiver showing it), or none (locked otherwise: nothing goes).
+    private func currentEpisode() -> InputEpisode? {
+        if privacyGate.allowsInput { return .desktop }
+        guard privacyGate.state == .locked, let view = lockScreenGate?.view else { return nil }
+        return .lockScreen(view: view)
+    }
+
+    /// Held input pressed in one episode is released before anything of another acts: a key, a
+    /// modifier or a drag from the lock screen never carries over into the unlocked desktop, and
+    /// none from the desktop into the lock screen. Releases go with click count 0 where it has one.
+    private func releaseHeldInputFromAnotherEpisode(_ episode: InputEpisode?) {
+        if let held = heldEpisode, held != episode { cancelActiveInputLocked() }
+    }
+
+    /// Releases (key up, button up): only the episode that pressed it releases it, and only while
+    /// the Mac is still in that episode; otherwise the episode change has released it already.
+    private func releaseIsAllowed() -> Bool {
+        releaseHeldInputFromAnotherEpisode(currentEpisode())
+        return heldEpisode != nil && heldEpisode == eventEpisode
     }
 
     func handlePencil(phase: String, x: Double, y: Double,

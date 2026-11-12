@@ -37,6 +37,8 @@ struct ReceiverPictureInPictureConditions: Equatable {
     var sessionPhase: ReceiverSessionPhase
     /// Mac-confirmed Video On/Off.
     var videoEnabled: Bool
+    /// Home is in front with the session kept behind it (#121).
+    var sessionOnHome = false
 
     static let inactive = ReceiverPictureInPictureConditions(
         preferenceEnabled: false, systemSupported: false, rendersThroughDisplayLayer: false,
@@ -53,6 +55,12 @@ struct ReceiverPictureInPictureConditions: Equatable {
     var showsLiveVideo: Bool {
         sessionPhase == .connected && videoEnabled
     }
+
+    /// Leaving the app may carry the picture into a window on its own only
+    /// from the session itself. From Home the person chose not to watch, so a
+    /// window appearing on the way out would be a surprise; one already up
+    /// stays (`sustainsActiveWindow`).
+    var startsAutomaticallyFromInline: Bool { showsLiveVideo && !sessionOnHome }
 
     /// Whether an already-running Picture in Picture window stays up. A pause
     /// or an automatic recovery (including a transport migration passing
@@ -206,23 +214,50 @@ struct ReceiverLocalAudioSuspension: Equatable {
     }
 
     private(set) var isSuspended = false
+    /// The system interrupted the audio session (a call, Siri, an alarm) and
+    /// playback may not resume yet. Packets are dropped meanwhile: each one
+    /// would otherwise decode and try to start a playback engine the system
+    /// won't run, dozens of times a second.
+    private(set) var isInterrupted = false
 
     mutating func setSuspended(_ suspended: Bool, hasAudioFormat: Bool) -> Change {
         guard suspended != isSuspended else { return .none }
         isSuspended = suspended
+        // Interrupted: playback is already stopped, and resumes when the
+        // interruption clears.
+        guard !isInterrupted else { return .none }
         return suspended ? .stopPlayback : .resumePlayback(rebuildChain: hasAudioFormat)
     }
 
+    /// An audio session interruption began. The system has already silenced
+    /// the session.
+    mutating func interruptionBegan() -> Change {
+        guard !isInterrupted else { return .none }
+        isInterrupted = true
+        return isSuspended ? .none : .stopPlayback
+    }
+
+    /// Playback may resume after an interruption: the system said so when it
+    /// ended (`shouldResume`), or the person came back to the app or turned
+    /// Audio on. An interruption that ends without `shouldResume` is never
+    /// resumed by itself (Apple: "Handling audio interruptions").
+    mutating func interruptionCleared(hasAudioFormat: Bool) -> Change {
+        guard isInterrupted else { return .none }
+        isInterrupted = false
+        return isSuspended ? .none : .resumePlayback(rebuildChain: hasAudioFormat)
+    }
+
     /// Whether an arriving audio packet may be played.
-    var admitsPackets: Bool { !isSuspended }
+    var admitsPackets: Bool { !isSuspended && !isInterrupted }
 
     /// Whether a playback chain may be built and the session activated (a
-    /// config frame arriving while suspended only records the format).
-    var mayStartPlayback: Bool { !isSuspended }
+    /// config frame arriving while suspended or interrupted only records the
+    /// format).
+    var mayStartPlayback: Bool { !isSuspended && !isInterrupted }
 
-    /// Interruption/route-change recovery may reactivate the session only
-    /// while playback isn't deliberately suspended.
+    /// Route-change recovery may reactivate the session only while playback
+    /// isn't deliberately suspended or interrupted.
     func reactivatesSession(afterDisruption requested: Bool) -> Bool {
-        requested && !isSuspended
+        requested && !isSuspended && !isInterrupted
     }
 }

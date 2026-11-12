@@ -29,12 +29,16 @@ struct StagePeekOverlay: View {
     let frame: CGRect
     /// The safe part of `frame`, in overlay coordinates.
     let safe: CGRect
-    /// Controls and hinges the strip must stay clear of, in overlay coordinates.
+    /// Controls and hinges the strip must stay clear of, in overlay coordinates. Tucked floats'
+    /// handles aren't among them: they keep clear of the strip (`StagePeekLayout.strip` with these
+    /// same inputs is what the app reserves for it), never the other way round, so the two never
+    /// chase each other along the edge.
     let avoiding: [CGRect]
     let hapticsEnabled: Bool
     var naturalScrolling = true
     /// Compact: the stack stays in a fading band between the controls above and below.
-    var dock: StagePeekDockStyle = .compact
+    /// Normal by default (issue #130), like `ReceiverControlPreferences.stagePeekDock` and Android.
+    var dock: StagePeekDockStyle = .normal
     /// Whether this session may change the Mac ("Open on Mac", Close Window).
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
@@ -64,6 +68,7 @@ struct StagePeekOverlay: View {
     @State private var haptics = StagePeekHaptics()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     /// The compact stack's windows: the chosen app's, matching the search.
     private var windows: [CatalogWindowItem] {
@@ -121,7 +126,9 @@ struct StagePeekOverlay: View {
                 }
                 if machine.expansion > 0.001 {
                     gallery
-                        .opacity(model.drag != nil ? 0 : machine.expansion)
+                        // A card dragged from here (search results too) carries the finger's
+                        // gesture: barely there, never 0 or removed, so the drag keeps its view.
+                        .opacity(model.drag != nil ? 0.001 : machine.expansion)
                         .allowsHitTesting(machine.expanded)
                 }
                 toolbar(cards: cards)
@@ -131,7 +138,7 @@ struct StagePeekOverlay: View {
                     closeToast(notice)
                 }
                 topControls
-                    .opacity(model.drag != nil ? 0 : 1)
+                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
                     .transition(.opacity)
             }
             if launchpad {
@@ -144,7 +151,9 @@ struct StagePeekOverlay: View {
                 // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
                 // (Window mode: the pane view draws them. Drawing them here too showed two
                 // "Drop Here to Cancel" zones, owner report 2026-10-31.)
-                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size)).zIndex(55)
+                // Its chip below the Dynamic Island, its bar above the Home indicator and the controls.
+                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size),
+                                     safeArea: safe, controls: avoiding).zIndex(55)
             }
             if let d = model.drag, case .window(let w) = d.item {
                 // The card under the finger while the peek steps aside to show the panes.
@@ -179,6 +188,12 @@ struct StagePeekOverlay: View {
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.
         .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
+        // An app dropped from here is opening: its progress, then its window, show in the layout.
+        .onChange(of: model.stagePeekCloseRequest) { _ in
+            searchFocused = false
+            launchpad = false
+            if machine.isVisible { animate { cancelAll() } }
+        }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
         .onChange(of: model.currentWindowID) { _ in syncItems() }
@@ -287,7 +302,7 @@ struct StagePeekOverlay: View {
             Text(notice.message).font(.footnote).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .legibleGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: min(460, safe.width - 32))
         .position(x: safe.midX, y: max(toolbarY(safe.midX) - 64, safe.minY + 160))
         .transition(.opacity)
@@ -359,15 +374,14 @@ struct StagePeekOverlay: View {
                 .foregroundStyle(.white)
             } else if let thumbnail {
                 Image(decorative: thumbnail, scale: 1).resizable().scaledToFill()
-            } else if let icon {
-                Image(decorative: icon, scale: 1).resizable().frame(width: 44, height: 44)
+            } else if let window {
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 44)
             } else {
                 Image(systemName: "macwindow").font(.title2).foregroundStyle(Color.white.opacity(0.6))
             }
-            if let icon, thumbnail != nil {
+            if let window, thumbnail != nil {
                 // The app's icon at the card's bottom-left, like Stage Manager.
-                Image(decorative: icon, scale: 1).resizable()
-                    .frame(width: roomy ? 30 : 24, height: roomy ? 30 : 24)
+                WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: roomy ? 30 : 24)
                     .shadow(color: .black.opacity(0.5), radius: 3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
@@ -461,7 +475,14 @@ struct StagePeekOverlay: View {
                          onSearchFiles: model.files.available ? { q in searchFocused = false; model.files.open(query: q) } : nil,
                          // A flick toward the edge (off the cards) compacts the gallery again.
                          edge: edge, onCompact: { animate { machine.compact() } },
-                         onEmptyTap: { searchFocused = false; finish(machine.dismiss()) }, height: height)
+                         onEmptyTap: { searchFocused = false; finish(machine.dismiss()) }, height: height,
+                         onFloat: { w in
+                             haptics.play(.select, enabled: hapticsEnabled)
+                             searchFocused = false
+                             animate { machine.cancelAll() }
+                             model.stagePeekOpen = false
+                             model.openFloating(w)
+                         })
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)
@@ -610,7 +631,7 @@ struct StagePeekOverlay: View {
         let icon = window.flatMap { model.icons[$0.bundleID] }
         let width = min(200, safe.width - 24)
         return HStack(spacing: 8) {
-            if let icon { Image(decorative: icon, scale: 1).resizable().frame(width: 22, height: 22) }
+            if let window { WorkspaceAppIcon(icon: icon, name: window.app, bundleID: window.bundleID, size: 22) }
             VStack(alignment: .leading, spacing: 1) {
                 Text(window?.app ?? String(localized: "Full Desktop")).font(.footnote.weight(.semibold)).lineLimit(1)
                 if window == nil {
@@ -673,9 +694,16 @@ struct StagePeekOverlay: View {
         }
         .font(.footnote.weight(.semibold))
         .labelStyle(.titleAndIcon)
-        .buttonStyle(.bordered)
+        // A filled dark capsule, not `.bordered` with a white tint: that
+        // drew white labels on a translucent white fill, unreadable over a
+        // bright window (see `StagePeekLegibility`).
+        .buttonStyle(.borderedProminent)
         .buttonBorderShape(.capsule)
-        .tint(.white)
+        // Reduce Transparency / Increase Contrast: the same dense fill as `GlassSurface`.
+        .tint(reduceTransparency || colorSchemeContrast == .increased
+              ? Color(white: 0.13).opacity(0.95)
+              : Color.black.opacity(StagePeekLegibility.minimumScrimOpacity))
+        .foregroundStyle(.white)
         .environment(\.colorScheme, .dark)
         .fixedSize()
         .position(x: toolbarX(column), y: toolbarY(column))

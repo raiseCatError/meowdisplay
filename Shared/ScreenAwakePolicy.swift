@@ -1,10 +1,10 @@
 import Foundation
 
 /// When an iPhone or iPad keeps its screen awake (iOS's Auto-Lock held off): only while a Mac's
-/// picture (Mirror, Extend or Window mode) is being watched in the foreground. On Home, in
-/// Settings, in the background, in the demo, or once a lost connection hasn't come back within
-/// the grace, Auto-Lock works as usual. Matches Android, which keeps the screen on only while
-/// the video surface shows. Pure, so it is tested (ScreenAwakePolicyTests).
+/// picture (Mirror, Extend or Window mode) is being watched in the foreground, or a session is
+/// kept behind Home (iOS #121: a lock would end it). On plain Home, in Settings, in the
+/// background, in the demo, or once a lost connection hasn't come back within the grace,
+/// Auto-Lock works as usual. Pure, so it is tested (ScreenAwakePolicyTests).
 enum ScreenAwakePolicy {
     /// Settings ▸ General ▸ Keep Screen Awake While Streaming. On by default.
     static let preferenceKey = "keepScreenAwakeWhileStreaming"

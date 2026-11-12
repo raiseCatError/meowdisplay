@@ -1,21 +1,29 @@
 # Release process
 
-## Platform availability — November 2, 2026
+## Platform availability — MeowDisplay 2.1.0
 
 | Platform | Available version | Get it |
 | --- | --- | --- |
-| Mac app · macOS 14+ · share or receive | **2.0.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.0.0) |
-| Receiver-only Mac app · macOS 12+ | **2.0.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplayReceiver.dmg) |
-| iPhone / iPad · iOS / iPadOS 16.4+ | **2.0.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
-| Android · Android 10+ | **2.0 closed beta** | [Request early access](https://meowdisplay.app/android/early-access) |
+| Mac app · macOS 14+ · share or receive | **2.1.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.1.0) |
+| Receiver-only Mac app · macOS 12+ | **2.1.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplayReceiver.dmg) |
+| iPhone / iPad · iOS / iPadOS 16.4+ | **2.1.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
+| Android · Android 10+ | **2.0 closed testing** (not part of 2.1) | [Join closed testing](https://meowdisplay.app/android/early-access) · Mac companion [2.0.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.0.0/MeowDisplay.dmg) |
 
 The main Mac app includes both sharing and receiving: share this Mac's display,
 or use this Mac as another Mac's display. The separate Receiver-only app is
-also available for Macs running macOS 12 or later. Android 2.0 requires the
-Mac 2.0 app.
+also available for Macs running macOS 12 or later. Android 2.0 works with the
+Mac app 2.0 and 2.1 (without the 2.1 features); see
+[COMPATIBILITY.md](COMPATIBILITY.md). The Mac 2.0 downloads stay at their
+`v2.0.0` URLs.
 
+This table and the README describe 2.1.0 as released. They reach `main`
+only through the promotion PR that `release-publish` opens after the Mac
+release is Latest and the stores step has run. `RELEASE_AUTO_PROMOTE` stays
+unset for 2.1.0: merge that PR by hand only once `v2.1.0` is the Latest
+GitHub release and 2.1.0 is live on the App Store (the stores step can finish
+while iOS is still waiting).
 
-MeowDisplay 2.0 is the stable release. The main Mac app includes sender and
+MeowDisplay 2.0 was the previous stable release. The main Mac app includes sender and
 receiver roles; the separate Receiver-only app remains available. The
 publication gate and historical release process are documented below.
 
@@ -107,6 +115,27 @@ gate could never have opened.
 | Mac and iOS stable, Android testing (the default on `dev`) | `crossPlatformReady: false`, `android.reviewTrack: alpha` | Mac and iOS pass the gate and publish. The Android candidate is built, signed and uploaded to internal testing. The monitor sends it to the `alpha` (closed testing) review track and follows Play review. It never holds Mac/iOS publication and never appears on the website as public. Missing Play credentials or a Play error is reported and doesn't stop the pass. |
 | Android production, released with Mac and iOS | `crossPlatformReady: true`, `android.reviewTrack: production`, `android.productionRelease: "<version>"`, plus the operator's `ANDROID_PRODUCTION_AUTHORIZED=<version>` | Android must be approved for the same commit before anything publishes. No workflow sets `ANDROID_PRODUCTION_AUTHORIZED` yet, so Android's first production release needs its own reviewed workflow change. |
 | Android required on a testing track | `crossPlatformReady: true` with `internal`/`alpha`/`beta` | Refused when the release or candidate starts |
+| Mac and iOS only, Android left out entirely (2.1.0) | `"excludedPlatforms": ["android"]`, `requiredPlatforms: ["mac", "ios"]`, `crossPlatformReady: false` | No Android job runs in the candidate (`release-candidate.yml` skips it, and `release-android.yml` refuses on its own); no Android build, signing or Google Play upload; the monitor never calls Google Play; the dry run doesn't check Android credentials; the release state refuses any Android record; publication and `release.json` never list Android. Refused if it contradicts `crossPlatformReady` or `requiredPlatforms`. Mac and iOS can't be excluded. Repository CI (the `android` check on PRs) is unchanged. |
+
+**Excluding Android from one release.** Set `excludedPlatforms` on
+`release/<version>` only, and leave `android.uploadTrack` and
+`android.reviewTrack` out of that branch's config too: the scheduled monitor
+runs the release library from `main`, and without a review track even a
+`main` that predates `excludedPlatforms` doesn't follow Android
+(`Config#android_testing_release?`). `meow-release builds android --config
+.github/release-config.json` prints whether a config builds Android.
+
+**Submitting iOS only when a person says so.** With `ios.submitForReview:
+false` the monitor never submits: a processed build is reported as "ready:
+submit it for review in App Store Connect, or authorize it". To submit
+through the pipeline, dispatch the monitor from the release branch with the
+exact version:
+`gh workflow run release-monitor.yml --ref release/<version> -f submit_ios=<version>`.
+That run still needs the `release-stores` approval, sets the version to
+manual release and reads it back before submitting, and authorizes only that
+run and that version; scheduled runs can't carry it (`check-release-workflows.rb`).
+Dispatching from `release/<version>` also runs that branch's release library
+rather than `main`'s.
 
 ### Before the next release: what the pipeline still lacks
 
@@ -130,6 +159,10 @@ branches and are now disabled in Actions. Before CI can release, the owner:
    anything still missing without building or publishing.
 
 Until all three are done, use the [manual path](#manual-path-without-ci-credentials).
+
+Status on 2026-11-09: 1 is proven (Release state access check passed from
+`main`). 2 is done: every environment holds its secrets and the repository
+has no repository-level secrets left. 3 needs `release/2.1.0`.
 
 **Scheduled workflows** (`release-monitor`, `repository-guard`, `reference-sync`)
 run only from the default branch, `main`, and only while their repository
@@ -235,12 +268,11 @@ repository by pull request with auto-merge; the site's own checks and
 Cloudflare Pages deploy run as always, and the step waits until
 `https://meowdisplay.app/release.json` serves the new version.
 
-**One-time website change (not made yet):** the website repository's
-`scripts/package.py` must copy `release.json` into `dist/`, and its pages
-should read version text and store links from it (the DMG links already
-use the stable `latest/download` URLs, which switch with the GitHub
-Release). Until that change lands, `update-website.sh` refuses and the
-website step reports a blocker; nothing else is affected.
+**Website packaging:** the website repository's `scripts/package.py`
+validates `release.json` (`scripts/release_manifest.py`) and copies it into
+`dist/`. Its pages don't read version text from it: version text and the
+Android pages' version-pinned Mac links are ordinary page text, changed by
+the website's own release PR, merged when the release is live.
 
 ## Homebrew
 
@@ -309,6 +341,14 @@ inputs ask for, so the state token can't open PRs even though the App can.
   allows `main` only and holds nothing but the App key. Run it after changing
   the App, its installation or the ruleset:
   `gh workflow run release-state-access.yml --ref main`.
+- **Release dry run**'s `website-update` job does the same for the website App,
+  read-only (`scripts/release/check-website-app-access.sh`). It mints the
+  website token exactly as the publish step does (Contents and Pull requests
+  write, `MeowDisplayWebsite` only; GitHub refuses permissions the installation
+  lacks), checks that the installation reaches `MeowDisplayWebsite` only, reads
+  the repository, its `main` branch and its pull requests, and checks that the
+  site deploys `release.json`. It pushes nothing and opens no PR, so the publish
+  path itself (push, PR, auto-merge, deploy) is first exercised by a release.
 
 ## Credentials
 

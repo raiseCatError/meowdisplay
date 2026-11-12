@@ -519,7 +519,10 @@ private struct DisplaySettingsPage: View {
 
     @ViewBuilder
     private var streamingProfileSection: some View {
-        Section("Streaming") {
+        // In Automatic the Mac applies a fixed profile and priority, so these
+        // pickers couldn't change anything (issue #142).
+        let macAutomatic = receiver.macStreamingMode == .automatic
+        Section {
             let profileBinding = Binding<StreamingProfile>(
                 get: { receiver.streamingProfile },
                 set: { receiver.requestStreamingProfile($0, customFrameRate: receiver.customFrameRate) })
@@ -528,6 +531,7 @@ private struct DisplaySettingsPage: View {
                     Text(profile.label).tag(profile)
                 }
             }
+            .disabled(macAutomatic)
             .settingsAnchor("streamingProfile")
             Text(receiver.streamingProfile.explanation).font(.footnote).foregroundStyle(.secondary)
             if receiver.streamingProfile == .custom {
@@ -539,16 +543,31 @@ private struct DisplaySettingsPage: View {
                         Text(frameRate.label).tag(frameRate)
                     }
                 }
+                .disabled(macAutomatic)
             }
             let priorityBinding = Binding<StreamingPriority>(
                 get: { receiver.streamingPriority },
                 set: { receiver.requestStreamingPriority($0) })
-            Picker("Streaming Priority", selection: priorityBinding) {
-                ForEach(StreamingPriority.allCases) { priority in
-                    Text(priority.label).tag(priority)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Streaming Priority")
+                    .accessibilityHidden(true)   // the picker carries the same label
+                Picker("Streaming Priority", selection: priorityBinding) {
+                    ForEach(StreamingPriority.pickerOrder) { priority in
+                        Text(priority.label).tag(priority)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
+            .disabled(macAutomatic)
+            .settingsAnchor("streamingPriority")
             Text(receiver.streamingPriority.explanation).font(.footnote).foregroundStyle(.secondary)
+        } header: {
+            Text("Streaming")
+        } footer: {
+            if let note = ReceiverStreamingModeNote.text(for: receiver.macStreamingMode) {
+                Text(note)
+            }
         }
     }
 
@@ -849,6 +868,8 @@ private struct GestureSettingsPage: View {
 private struct ControlSettingsPage: View {
     @AppStorage(WorkspaceModel.bringStripWindowsForwardKey) private var bringStripWindowsForward = false
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
+    @AppStorage(WorkspaceModel.defaultPlacementKey) private var defaultPlacement = WorkspacePlacement.pane.rawValue
+    @AppStorage(WorkspaceModel.floatingWindowsKey) private var floatingWindowsEnabled = true
     @ObservedObject var controlStore: ReceiverControlStore
     let haptics: ReceiverHaptics
     @State private var confirmingReset = false
@@ -881,12 +902,31 @@ private struct ControlSettingsPage: View {
                 Toggle("Collapse Control Tray", isOn: preferenceBinding(controlStore, \.trayCollapsed))
                 Toggle("Auto-hide Control Trays", isOn: preferenceBinding(controlStore, \.autoHideEnabled))
                     .settingsAnchor("autoHide")
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Hold Response", selection: preferenceBinding(controlStore, \.modifierHoldResponse)) {
+                        ForEach(ModifierHoldResponse.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    SettingNote("How long to touch ⌘ ⌥ ⌃ ⇧ before their shortcuts appear. A quick tap still latches the key; sliding opens the shortcuts at once. Standard is the default.")
+                }
+                .settingsAnchor("holdResponse")
                 if visibility.showsPhoneTrayPlacement {
                     Picker("Landscape Tray Side", selection: preferenceBinding(controlStore, \.preferredLandscapeSide)) {
                         ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .settingsAnchor("trayPlacement")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Show Arrow Keys", isOn: preferenceBinding(controlStore, \.arrowKeysEnabled))
+                        SettingNote("Tap the arrow button for ↑ ← ↓ →, or swipe it for one press.")
+                    }
+                    .settingsAnchor("arrowKeys")
+                    if controlStore.preferences.arrowKeysEnabled {
+                        Picker("Arrow Keys Side", selection: preferenceBinding(controlStore, \.arrowKeysSide)) {
+                            ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("Avoid Notch", isOn: preferenceBinding(controlStore, \.avoidNotch))
                         SettingNote("Keeps controls clear of the iPhone's notch or Dynamic Island in landscape.")
@@ -925,6 +965,24 @@ private struct ControlSettingsPage: View {
                 }
                 Toggle("Bring Stage Manager Windows Forward", isOn: $bringStripWindowsForward)
                     .accessibilityIdentifier("bringStripWindowsForward")
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Enable Floating Windows", isOn: $floatingWindowsEnabled)
+                        .accessibilityIdentifier("enableFloatingWindowsToggle")
+                    SettingNote(floatingWindowsEnabled
+                                ? "Windows can float over the layout in Window view."
+                                : "Windows open as panes or tabs. Windows that were floating are now in the layout.")
+                }
+                .settingsAnchor("enableFloatingWindows")
+                // Off: shows Pane, which is used; the saved choice comes back when it's on again.
+                Picker("Default Window Placement", selection: Binding(
+                    get: { floatingWindowsEnabled ? defaultPlacement : WorkspacePlacement.pane.rawValue },
+                    set: { defaultPlacement = $0 })) {
+                    Text("Pane").tag(WorkspacePlacement.pane.rawValue)
+                    Text("Floating").tag(WorkspacePlacement.float.rawValue)
+                }
+                .disabled(!floatingWindowsEnabled)
+                .settingsAnchor("defaultWindowPlacement")
+                .accessibilityIdentifier("defaultWindowPlacementPicker")
             } header: {
                 Text("Window Switcher")
             } footer: {
@@ -934,7 +992,8 @@ private struct ControlSettingsPage: View {
                         ? " " + (controlStore.preferences.stagePeekDock == .compact
                                  ? String(localized: "Compact keeps the windows between the search bar and the buttons below.")
                                  : String(localized: "Normal uses the whole edge.")) : "")
-                     + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane."))
+                     + " " + String(localized: "Bring Stage Manager Windows Forward: macOS pauses windows in Stage Manager's side strip; with this on, choosing one also brings it forward on the Mac (its stage changes) so it shows live. Needs control. Off: tap Show on Mac in its pane.")
+                     + " " + String(localized: "Default Window Placement: where a window you open from Stage Peek goes, as a pane in the layout or floating over it. Windows already open stay where they are. While dragging a window, draw a circle with it (about a second) to switch between the two, or release it on Float."))
             }
             Section {
                 Picker("Control Profile", selection: Binding(
@@ -1181,6 +1240,7 @@ private struct AudioSettingsPage: View {
 
 private struct ConnectionSettingsPage: View {
     @ObservedObject var receiver: StreamReceiver
+    @Environment(\.keepSessionOnHome) private var keepSessionOnHome
 
     var body: some View {
         SettingsForm {
@@ -1191,6 +1251,13 @@ private struct ConnectionSettingsPage: View {
                 if receiver.videoSize != .zero {
                     LabeledContent("Stream",
                                    value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
+                }
+                if let keepSessionOnHome {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button("Back to Home — Keep Connected") { keepSessionOnHome() }
+                            .accessibilityIdentifier("homeKeepConnected")
+                        SettingNote("The Mac keeps this display while you're on Home. Resume from Home.")
+                    }
                 }
                 if receiver.connected {
                     Button("Disconnect", role: .destructive) {
@@ -1203,6 +1270,8 @@ private struct ConnectionSettingsPage: View {
                       systemImage: "cable.connector")
                 Label("Wi-Fi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
                       systemImage: "wifi")
+                Label("Remote: on another network, turn on Tailscale on both devices and save the Mac's address in Remote Access.",
+                      systemImage: "network")
                 Label("Rotate the \(deviceKind) for a vertical second monitor.",
                       systemImage: "rectangle.portrait.rotate")
                 Label("Touch: tap to click, swipe to scroll, press and move to drag, hold to right-click.",
@@ -1333,21 +1402,13 @@ private struct RequestInputAutomaticallyToggle: View {
 
 // MARK: - Remote Access
 
+/// The same page with or without a paired Mac: before one is paired it still
+/// shows what to set up and how to pair over Remote, not a dead end.
 private struct RemoteAccessSettingsPage: View {
     let receiver: StreamReceiver
 
     var body: some View {
-        if TrustStore.shared.pinnedPeers().isEmpty {
-            SettingsForm {
-                Section {
-                    Text("Pair with a Mac first, then set up Remote Access for it here.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle(MobileSettingsCategory.remoteAccess.title)
-        } else {
-            RemoteAccessSettingsView(receiver: receiver)
-        }
+        RemoteAccessSettingsView(receiver: receiver)
     }
 }
 
@@ -1434,20 +1495,24 @@ private struct AboutSettingsPage: View {
         CatMode.resolveEnabled(requestedEnabled: catModeEnabledStorage, unlocked: catModeUnlocked)
     }
 
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
     var body: some View {
         SettingsForm {
             Section {
-                LabeledContent("Version", value: version)
+                LabeledContent("Version", value: AppVersion.current)
                     .settingsAnchor("version")
                     // Hidden unlock gesture: nine taps here (a cat's nine
                     // lives) reveals Cat Mode below. No visible affordance
                     // before unlock.
                     .contentShape(Rectangle())
                     .onTapGesture { registerCatModeTap() }
+                if let review = AppStore.writeReviewURL {
+                    // Opens the App Store's review page. Nothing is asked for
+                    // in the app and nothing remembers whether you rated.
+                    Link(destination: review) {
+                        Label("Rate MeowDisplay", systemImage: "star")
+                    }
+                    .settingsAnchor("rate")
+                }
                 Link(destination: ProjectLinks.gitHub) {
                     Label("MeowDisplay on GitHub", systemImage: "link")
                 }
@@ -1606,6 +1671,17 @@ private struct DeveloperSettingsPage: View {
 }
 #endif
 
+/// Back to Home — Keep Connected (#121): set only while a real session is on screen.
+private struct KeepSessionOnHomeKey: EnvironmentKey {
+    static let defaultValue: (@MainActor () -> Void)? = nil
+}
+extension EnvironmentValues {
+    var keepSessionOnHome: (@MainActor () -> Void)? {
+        get { self[KeepSessionOnHomeKey.self] }
+        set { self[KeepSessionOnHomeKey.self] = newValue }
+    }
+}
+
 /// The connected Mac's client, for Lock This Mac in Settings (absent in the demo).
 private struct LockMacClientKey: EnvironmentKey { static let defaultValue: WorkspaceModel? = nil }
 extension EnvironmentValues {
@@ -1685,41 +1761,32 @@ extension StageManagerSection {
 }
 
 /// Lock This Mac: macOS's own lock screen on the Mac, so its login password is needed to go on.
-/// Needs control; shows what the Mac reports, never assumes it worked.
+/// Needs control: without it, the confirmation offers Request Control & Lock Mac, which locks
+/// only after the Mac allows control (`LockMacFlow`). Shows what the Mac reports, never assumes it worked.
 private struct LockMacSection: View {
     @ObservedObject var workspace: WorkspaceModel
-    @State private var confirming = false
 
     var body: some View {
         if workspace.canLockMac {
             Section {
                 Button(workspace.lockMacStatus == .locking ? String(localized: "Locking…") : String(localized: "Lock Mac")) {
-                    workspace.clearLockMacStatus()
-                    confirming = true
+                    workspace.beginLockMac()
                 }
-                .disabled(workspace.lockMacStatus == .locking)
+                .disabled(workspace.lockMacBusy)
                 .accessibilityIdentifier("lockMac")
-                if case .done(let result)? = workspace.lockMacStatus {
-                    Text(Self.text(result)).font(.footnote).foregroundStyle(result == .locked ? .primary : .secondary)
+                if workspace.lockFlow.isAwaiting {
+                    Button("Stop Waiting") { workspace.cancelLockMac() }
+                        .accessibilityHint("Stops waiting for the Mac. Nothing is locked.")
+                }
+                if let line = workspace.lockMacStatusLine {
+                    Text(line).font(.footnote)
+                        .foregroundStyle(workspace.lockMacStatus == .done(.locked) ? .primary : .secondary)
+                        .accessibilityIdentifier("lockMacStatus")
                 }
             } footer: {
-                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Needs control of the Mac.")
+                Text("Shows the Mac's lock screen. To use it again, type the Mac's login password. Without control of the Mac, you're offered Request Control first.")
             }
-            .confirmationDialog("Lock the Mac?", isPresented: $confirming, titleVisibility: .visible) {
-                Button("Lock Mac") { workspace.lockMac() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Anyone at the Mac will need its login password.")
-            }
-        }
-    }
-
-    static func text(_ result: LockMacResult) -> String {
-        switch result {
-        case .locked: String(localized: "The Mac is locked.")
-        case .control: String(localized: "Locking needs control of the Mac. Request Control first.")
-        case .accessibility: String(localized: "The Mac can't lock: turn on MeowDisplay in System Settings ▸ Privacy & Security ▸ Accessibility on the Mac.")
-        case .failed: String(localized: "The Mac didn't lock. Its Lock Screen shortcut (Control-Command-Q) may be changed or off.")
+            .lockMacConfirmation(workspace)
         }
     }
 }
