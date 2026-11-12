@@ -1,8 +1,7 @@
 name: Diagnose meowdisplay.app 403 (temporary, do not merge)
 
-# Read-only: no secrets, no tokens, no checkout. Captures what GitHub-hosted
-# runners receive from meowdisplay.app so the 2.1.0 finish failure
-# (run 43125145760: HTTP 403 on /release.json) can be attributed.
+# Read-only: no secrets, no checkout. Which ways can a runner read the
+# public website repository's HEAD, check runs and files?
 on:
   pull_request:
     paths: ['.github/workflows/diag-cloudflare-403.yml']
@@ -10,41 +9,25 @@ on:
 permissions: {}
 
 jobs:
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [xcode-27, ubuntu-latest]
-    runs-on: ${{ matrix.runner }}
-    permissions: {}
+  site-api:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Probe
+      - name: Probe website repository access
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          echo "## Cloudflare trace (edge view of this runner)"
-          curl -s --max-time 20 https://meowdisplay.app/cdn-cgi/trace | grep -E '^(ip|colo|loc|http|tls|warp|gateway|kex)=' || true
-          probe() {
-            local label=$1 url=$2; shift 2
-            for n in 1 2 3; do
-              echo "## $label (attempt $n): $url $*"
-              curl -s --max-time 30 -o body.txt -D headers.txt -w 'status=%{http_code} size=%{size_download} remote=%{remote_ip}\n' "$@" "$url" || echo "curl exit $?"
-              grep -iE '^(HTTP/|server:|cf-ray:|cf-mitigated:|cf-cache-status:|content-type:|location:|cache-control:|x-content-type|age:|cf-chl|critical-ch|report-to:)' headers.txt | sed 's/\r$//' || true
-              grep -i '^set-cookie:' headers.txt | sed -E 's/^([Ss]et-[Cc]ookie: [^=]+)=.*/\1=<redacted>/' || true
-              printf 'body: '; head -c 400 body.txt | tr '\n' ' ' | sed -E 's/<script.*//'; echo
-              grep -oE '<title>[^<]*</title>|Error code:? *[0-9]+|error code: *[0-9]+|Ray ID: *<?[a-z /="<>]*[0-9a-f]{16}|cf-error-code[^0-9]*[0-9]+|data-translate="[a-z_]+"' body.txt | sort -u | head -8 || true
-              sleep 2
-            done
-          }
-          probe "release.json"           "https://meowdisplay.app/release.json"
-          probe "release.json ?ts"       "https://meowdisplay.app/release.json?ts=$(date +%s)"
-          probe "release.json browser-accept" "https://meowdisplay.app/release.json" -H 'Accept: application/json'
-          probe "home page"              "https://meowdisplay.app/"
-          probe "llms.txt"               "https://meowdisplay.app/llms.txt"
-          probe "appcast.xml (no follow)" "https://meowdisplay.app/appcast.xml"
-          probe "pages.dev release.json (no follow)" "https://meowdisplay.pages.dev/release.json"
-          probe "robots.txt"             "https://meowdisplay.app/robots.txt"
-          probe "sitemap.xml"            "https://meowdisplay.app/sitemap.xml"
-          probe "site.js"                "https://meowdisplay.app/site.js"
-          probe "prod deployment release.json" "https://e3a2b883.meowdisplay.pages.dev/release.json"
-          probe "prod deployment llms.txt"     "https://e3a2b883.meowdisplay.pages.dev/llms.txt"
+          S=raiseCatError/MeowDisplayWebsite
+          echo "## gh api with GITHUB_TOKEN"
+          gh api "repos/$S/commits/main" --jq .sha || echo "-> failed"
+          gh api "repos/$S/commits/main/check-runs?app_id=85455" --jq '.total_count' || echo "-> failed"
+          echo "## unauthenticated REST"
+          curl -sS -o /dev/null -w 'commits %{http_code}\n' "https://api.github.com/repos/$S/commits/main"
+          curl -sS -w '\n' "https://api.github.com/repos/$S/commits/main/check-runs?app_id=85455&check_name=Cloudflare%20Pages&filter=latest" | jq -c '[.check_runs[]? | {app: .app.id, conclusion, head_sha}], .message' || true
+          curl -sSI https://api.github.com/rate_limit | grep -i '^x-ratelimit-\(limit\|remaining\)'
+          echo "## git and raw"
+          git ls-remote "https://github.com/$S" refs/heads/main
+          curl -sS -o /dev/null -w 'raw %{http_code}\n' "https://raw.githubusercontent.com/$S/main/release.json"
