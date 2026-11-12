@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="184" height="44" viewBox="0 0 184 44" role="img" aria-labelledby="t">
+  <title id="t">Join closed testing on Google Play</title>
+  <!-- Matches the website's .google-play-badge.store-badge (meowdisplay.app). -->
+  <rect x="0.5" y="0.5" width="183" height="43" rx="8.5" fill="#000" stroke="#a6a6a6"/>
+  <g transform="translate(11 10) scale(0.75)">
+    <path d="M4 2v28l14-14z" fill="#29b6f6"/>
+    <path d="m4 2 22 12-8 2z" fill="#22c55e"/>
+    <path d="m18 16 8-2 4 2-4 2z" fill="#fbbf24"/>
+    <path d="m4 30 22-12-8-2z" fill="#fb7185"/>
+  </g>
+  <g fill="#fff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="45" y="15.4" font-size="8.5" font-weight="600" textLength="123.5" lengthAdjust="spacing">JOIN CLOSED TESTING ON</text>
+    <text x="45" y="32.6" font-size="17.5" font-weight="500" letter-spacing="-0.2">Google Play</text>
+  </g>
+</svg>
