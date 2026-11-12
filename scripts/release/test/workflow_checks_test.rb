@@ -134,6 +134,8 @@ class WorkflowChecksTest < Minitest::Test
                   "release-publish.yml" => ['--draft --target "$SHA"', '--target "$SHA"'])
     assert_caught("publish-mac must verify the draft's assets before Latest",
                   "release-publish.yml" => ['gh release download "v$VERSION"', 'echo download "v$VERSION"'])
+    assert_caught("publish-mac must sort expected draft asset names with LC_ALL=C sort",
+                  "release-publish.yml" => ['LC_ALL=C sort', 'sort'])
     assert_caught("publish-mac must revert Latest when the live feeds don't verify",
                   "release-publish.yml" => ['--draft=true', '--draft=false-ish'])
     assert_caught("publish-mac must open the gate (publish start) before publishing",

@@ -329,6 +329,7 @@ if (doc = load("release-publish.yml"))
     err(name, "publish-mac must open the gate (publish start) before publishing") unless gate && first_publish && gate < first_publish
     err(name, "publish-mac must create the release as a draft first") unless draft && draft == first_publish
     err(name, "publish-mac must verify the draft's assets before Latest") unless draft && verify && live && draft < verify && verify < live
+    err(name, "publish-mac must sort expected draft asset names with LC_ALL=C sort") unless s.any? { |x| run_text(x).include?("LC_ALL=C sort") }
     err(name, "publish-mac must revert Latest when the live feeds don't verify") unless live && revert && live < revert
   end
   # The release state is written by GitHub Actions and is not evidence by
