@@ -87,7 +87,10 @@
     }
   },
   "website": {
-    "stage": "pending"
+    "stage": "published",
+    "url": "https://meowdisplay.app/release.json",
+    "blockers": [],
+    "updatedAt": "2026-11-12T01:25:15Z"
   },
   "publication": {
     "stage": "in-progress",
@@ -211,6 +214,11 @@
       "event": "platform",
       "platform": "mac",
       "from": "approved",
+      "to": "published"
+    },
+    {
+      "at": "2026-11-12T01:25:15Z",
+      "event": "website",
       "to": "published"
     }
   ]
