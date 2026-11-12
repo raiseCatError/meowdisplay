@@ -6460,6 +6460,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingPromoteGeneration = nil
         if promote { performInteractiveWakePromotion() }
         sendRemoteEndpointsIfSupported(generation: generation)
+        // Locked: say so now (#255). The lock state goes only to an admitted
+        // connection, and the two earlier chances on a new connection, the
+        // welcome and this device's permit (`onHello`), usually come just
+        // before the receiver accepts the invitation. Both were dropped then,
+        // so the receiver never learned the Mac was locked: it showed the
+        // video-off trackpad, or waited on "Switching to Full Desktop…".
+        if !privacyGate.allowsContent { sendLockState() }
     }
 
     /// On `queue`, admitted connections only: this Mac's Tailscale addresses (PROTOCOL.md 6.17),
@@ -8153,6 +8160,39 @@ extension MacSender {
     /// A control message from the receiver on the live connection.
     func receiveControlForTesting(_ payload: Data) async throws {
         try await onQueue { $0.handleCurrentConnectionControl(payload) }
+    }
+
+    /// Like `admitConnectionForTesting`, but stops before the receiver accepts the session
+    /// invitation: the hello is verified, the connection isn't admitted yet. Finish it with
+    /// `acceptInvitationForTesting`, the real admission path.
+    func helloWithoutAdmissionForTesting(helloJSON: Data, pinnedSPKI: Data,
+                                         eventSink: SyntheticEventSink,
+                                         sent: @escaping @Sendable (String) -> Void) async throws -> UInt64 {
+        try await onQueue { sender in
+            sender.inputEventSink = eventSink
+            sender.sentControlObserverForTesting = sent
+            let generation = sender.authenticatedSession.beginTransport()
+            sender.activeConnectionGeneration = generation
+            sender.connectionAuthorityEnded(dropped: sender.sessionAuthorization.transportBegan(generation: generation))
+            let info = try JSONDecoder().decode(PhoneInfo.self, from: helloJSON)
+            let outcome = sender.sessionAuthorization.acceptHello(
+                generation: generation, intendedPeerID: sender.transport.tls.peerID, claimedPeerID: info.id,
+                authenticatedSPKI: pinnedSPKI, currentPinnedSPKI: pinnedSPKI,
+                receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                needsSenderApproval: false)
+            if case .rejected = outcome { throw InputHarnessError.helloRejected }
+            _ = sender.authenticatedSession.markApplicationReady(generation: generation)
+            sender.lastHello = info
+            return generation
+        }
+    }
+
+    /// The receiver accepts the session invitation on the live connection (`sessionInviteResponse`).
+    func acceptInvitationForTesting() async throws {
+        try await onQueue { sender in
+            sender.sessionAuthorization.receiverResponded(.accepted, generation: sender.activeConnectionGeneration)
+            sender.evaluateSessionAdmission()
+        }
     }
 
     /// The live connection ended (the receiver's control stream hit EOF).
