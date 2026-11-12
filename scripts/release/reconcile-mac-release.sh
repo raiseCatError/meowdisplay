@@ -252,6 +252,79 @@ verify_live_release() {
   echo "✓ v$VERSION is public and Latest at $CANDIDATE_SHA with exactly the five recorded assets"
 }
 
+# Bot Fight Mode challenges GitHub-hosted runners on the site's HTML, JSON and
+# XML (Cloudflare Security Events, run 43125145760); WAF skip rules cannot
+# exempt a path from it. Only after such a challenge, production is proven by
+# evidence the runner CAN observe. Every link is required:
+#  1. Cloudflare's own GitHub App (id 85455) reports a successful "Cloudflare
+#     Pages" build of the site branch's current HEAD; its details URL names the
+#     deployment, reachable at https://<id>.<project>.pages.dev.
+#  2. That deployment's manifest is byte-identical to the branch's file, and
+#     its content is exactly what release-state generates (publishedAt aside).
+#  3. The PRODUCTION origin serves files Bot Fight Mode does not challenge
+#     (llms.txt, site.js) byte-identical to that deployment and to the branch:
+#     production serves this deployment, not an older or rolled-back one.
+#  4. LIVE_RELEASE_SHA256: the approver's own fetch of the production manifest
+#     (shasum -a 256) equals the deployment's manifest.
+# Sets live_version. Anything missing or different stops before any write.
+readonly PAGES_APP_ID="85455"
+readonly PAGES_APP_SLUG="cloudflare-workers-and-pages"
+readonly PAGES_PROJECT="meowdisplay"
+readonly PRODUCTION_PROBES="llms.txt site.js"
+verify_site_via_production_deployment() {
+  local site_repo site_branch head details short deploy want got f
+  [[ ${LIVE_RELEASE_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || {
+    echo "::error::live_release_sha256 is required here: fetch $live_url yourself and pass its sha256 (curl -fsSL $live_url | shasum -a 256); nothing recorded"
+    exit 1
+  }
+  site_repo=$(jq -r .website.repository "$candidate_config")
+  site_branch=$(jq -r '.website.branch // "main"' "$candidate_config")
+  [[ $site_repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $site_branch =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::bad website repository/branch"; exit 1; }
+  head=$(gh api "repos/$site_repo/commits/$site_branch" --jq .sha)
+  [[ $head =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve $site_repo $site_branch"; exit 1; }
+
+  gh api "repos/$site_repo/commits/$head/check-runs?app_id=$PAGES_APP_ID&check_name=Cloudflare%20Pages&filter=latest" > "$work/pages-checks.json"
+  details=$(jq -r --arg head "$head" --argjson app "$PAGES_APP_ID" --arg slug "$PAGES_APP_SLUG" '
+    [.check_runs[] | select(.app.id == $app and .app.slug == $slug and .head_sha == $head and .name == "Cloudflare Pages")]
+    | sort_by(.completed_at // "") | last // {} | select(.conclusion == "success") | .details_url // empty' "$work/pages-checks.json")
+  [[ $details =~ /pages/view/$PAGES_PROJECT/([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+    echo "::error::no successful Cloudflare Pages deployment (app $PAGES_APP_ID) of $site_repo@$head; nothing recorded"
+    exit 1
+  }
+  short=${BASH_REMATCH[1]}
+  deploy="https://$short.$PAGES_PROJECT.pages.dev"
+  echo "   Cloudflare Pages deployment $short built $site_repo@$head ($site_branch HEAD)"
+
+  site_file() { gh api -H "Accept: application/vnd.github.raw" "repos/$site_repo/contents/$1?ref=$head" > "$2"; }
+  site_file "$manifest_path" "$work/site-manifest.json"
+  curl -fsS --max-time 30 -o "$work/deploy-manifest.json" "$deploy/$manifest_path"
+  cmp -s "$work/site-manifest.json" "$work/deploy-manifest.json" || { echo "::error::$deploy/$manifest_path differs from $site_repo@$head; nothing recorded"; exit 1; }
+  "$state_cmd" "$VERSION" publish website-manifest STATE --config "$candidate_config" --out "$work/expected-manifest.json" >/dev/null
+  [ "$(jq -S 'del(.publishedAt)' "$work/deploy-manifest.json")" = "$(jq -S 'del(.publishedAt)' "$work/expected-manifest.json")" ] || {
+    echo "::error::the deployed manifest is not what release-state describes; nothing recorded"
+    exit 1
+  }
+  want=$(shasum -a 256 "$work/deploy-manifest.json" | cut -c1-64)
+  [ "$want" = "$LIVE_RELEASE_SHA256" ] || {
+    echo "::error::your production $manifest_path sha256 $LIVE_RELEASE_SHA256 is not the deployment's $want; nothing recorded"
+    exit 1
+  }
+  echo "   ✓ deployment manifest = $site_branch's file = release-state's manifest; sha256 $want = your production fetch"
+
+  for f in $PRODUCTION_PROBES; do
+    site_file "$f" "$work/site-$f"
+    curl -fsS --max-time 30 -o "$work/deploy-$f" "$deploy/$f"
+    got=$(curl -sS --max-time 30 -o "$work/prod-$f" -w '%{http_code}' "$live_origin/$f?ts=$(date +%s)") || got=000
+    [ "$got" = 200 ] || { echo "::error::production $live_origin/$f answered HTTP $got; production unverified, nothing recorded"; exit 1; }
+    cmp -s "$work/prod-$f" "$work/deploy-$f" && cmp -s "$work/deploy-$f" "$work/site-$f" || {
+      echo "::error::production $live_origin/$f is not deployment $short's (production serves another deployment?); nothing recorded"
+      exit 1
+    }
+    echo "   ✓ production $live_origin/$f = deployment $short = $site_branch@${head:0:12}"
+  done
+  live_version=$(jq -r .version "$work/deploy-manifest.json")
+}
+
 # Mode: finish (mutating): the website serves this version's release.json.
 if [ "$mode" = "finish" ]; then
   verify_live_release
@@ -266,8 +339,20 @@ if [ "$mode" = "finish" ]; then
   }
   [[ ${PROMOTION_PR:-} =~ ^[0-9]*$ ]] || { echo "::error::PROMOTION_PR must be a pull request number"; exit 1; }
   live_url=$(jq -r .website.liveUrl "$candidate_config")
-  [[ $live_url =~ ^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+\.json$ ]] || { echo "::error::bad website.liveUrl '$live_url'"; exit 1; }
-  live_version=$(curl -fsSL --max-time 30 "$live_url?ts=$(date +%s)" | jq -r .version 2>/dev/null || echo none)
+  [[ $live_url =~ ^(https://[A-Za-z0-9.-]+)/([A-Za-z0-9._/-]+\.json)$ ]] || { echo "::error::bad website.liveUrl '$live_url'"; exit 1; }
+  live_origin=${BASH_REMATCH[1]}
+  manifest_path=${BASH_REMATCH[2]}
+  code=$(curl -sS --max-time 30 -D "$work/live.headers" -o "$work/live.json" -w '%{http_code}' "$live_url?ts=$(date +%s)") || code=000
+  if [ "$code" = 200 ]; then
+    live_version=$(jq -r .version "$work/live.json" 2>/dev/null || echo none)
+    echo "✓ $live_url fetched directly (version $live_version)"
+  elif [ "$code" = 403 ] && grep -qiE '^cf-mitigated:[[:space:]]*challenge' "$work/live.headers"; then
+    echo "$live_url answered this runner with a Cloudflare challenge (Bot Fight Mode cannot be skipped for it)."
+    verify_site_via_production_deployment
+  else
+    echo "::error::$live_url answered HTTP $code without a Cloudflare challenge; nothing recorded"
+    exit 1
+  fi
   [ "$live_version" = "$VERSION" ] || {
     echo "::error::$live_url serves version '$live_version', not $VERSION; deploy the website first (nothing recorded)"
     exit 1
