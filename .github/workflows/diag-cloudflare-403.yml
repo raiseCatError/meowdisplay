@@ -1,0 +1,45 @@
+name: Diagnose meowdisplay.app 403 (temporary, do not merge)
+
+# Read-only: no secrets, no tokens, no checkout. Captures what GitHub-hosted
+# runners receive from meowdisplay.app so the 2.1.0 finish failure
+# (run 43125145760: HTTP 403 on /release.json) can be attributed.
+on:
+  pull_request:
+    paths: ['.github/workflows/diag-cloudflare-403.yml']
+
+permissions: {}
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
+    permissions: {}
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "## Cloudflare trace (edge view of this runner)"
+          curl -s --max-time 20 https://meowdisplay.app/cdn-cgi/trace | grep -E '^(ip|colo|loc|http|tls|warp|gateway|kex)=' || true
+          probe() {
+            local label=$1 url=$2; shift 2
+            for n in 1 2 3; do
+              echo "## $label (attempt $n): $url $*"
+              curl -s --max-time 30 -o body.txt -D headers.txt -w 'status=%{http_code} size=%{size_download} remote=%{remote_ip}\n' "$@" "$url" || echo "curl exit $?"
+              grep -iE '^(HTTP/|server:|cf-ray:|cf-mitigated:|cf-cache-status:|content-type:|location:|cache-control:|x-content-type|age:|cf-chl|critical-ch|report-to:)' headers.txt | sed 's/\r$//' || true
+              grep -i '^set-cookie:' headers.txt | sed -E 's/^([Ss]et-[Cc]ookie: [^=]+)=.*/\1=<redacted>/' || true
+              printf 'body: '; head -c 400 body.txt | tr '\n' ' ' | sed -E 's/<script.*//'; echo
+              grep -oE '<title>[^<]*</title>|Error code:? *[0-9]+|error code: *[0-9]+|Ray ID: *<?[a-z /="<>]*[0-9a-f]{16}|cf-error-code[^0-9]*[0-9]+|data-translate="[a-z_]+"' body.txt | sort -u | head -8 || true
+              sleep 2
+            done
+          }
+          probe "release.json"           "https://meowdisplay.app/release.json"
+          probe "release.json ?ts"       "https://meowdisplay.app/release.json?ts=$(date +%s)"
+          probe "release.json browser-accept" "https://meowdisplay.app/release.json" -H 'Accept: application/json'
+          probe "home page"              "https://meowdisplay.app/"
+          probe "llms.txt"               "https://meowdisplay.app/llms.txt"
+          probe "appcast.xml (no follow)" "https://meowdisplay.app/appcast.xml"
+          probe "pages.dev release.json (no follow)" "https://meowdisplay.pages.dev/release.json"
