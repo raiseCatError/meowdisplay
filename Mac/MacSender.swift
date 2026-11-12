@@ -1692,6 +1692,47 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("lockScreen: shown on \(endpointName)")
         sendLockState()
         sendVideoState()
+        ensureLockScreenCapture(view: view)
+    }
+
+    /// `queue` (#255): the view needs a picture of the login window made after it began. Capture
+    /// on Automatic moves to the main display, where macOS draws the login window; a stream that
+    /// sends nothing new (a still login window) is rebuilt; a capture that is down recovers now
+    /// rather than after an unlock. Every frame still passes `LockScreenFrameGate`.
+    private func ensureLockScreenCapture(view: Int) {
+        let main = CGMainDisplayID()
+        let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+        if mode == .mirror, LockScreenCapturePolicy.shouldMoveToMain(
+            selectedUUID: mirrorDisplayUUID, captureDisplayID: captureDisplayID, main: main,
+            mainUsable: DisplayHealth.isUsable(main), meowDisplayIDs: meowIDs) {
+            Log.info("lockScreen: capturing display \(captureDisplayID), login window is on main \(main) — moving")
+            scheduleWakeCaptureRecovery(reason: "lockScreenMainDisplay")
+        }
+        if captureOwnership.liveStream == nil {
+            scheduleCaptureRecovery()
+        }
+        let selfBox = self.selfBox
+        for (index, delay) in LockScreenCapturePolicy.freshFrameChecks.enumerated() {
+            queue.asyncAfter(deadline: .now() + delay) {
+                guard let self = selfBox.currentOnQueue() else { return }
+                let action = LockScreenCapturePolicy.freshFrameAction(
+                    viewStillLive: self.lockScreenLive && self.lockScreenView == view,
+                    keyframeSent: self.lockScreenFrames.keyframeSent,
+                    captureLive: self.captureOwnership.liveStream != nil, mirror: self.mode == .mirror)
+                switch action {
+                case .none:
+                    return
+                case .recoverCapture:
+                    Log.info("lockScreen: no picture after \(delay)s, capture is down — recovering (check \(index + 1))")
+                    self.scheduleCaptureRecovery()
+                case .rebuildCapture:
+                    Log.info("lockScreen: no new picture after \(delay)s — rebuilding capture (check \(index + 1)) "
+                        + "display=\(self.captureDisplayID) main=\(CGMainDisplayID()) "
+                        + "mainAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0)")
+                    self.scheduleWakeCaptureRecovery(reason: "lockScreenNoFreshFrame")
+                }
+            }
+        }
     }
 
     /// `queue`. Held keys and buttons are released; the picture stops again while locked. The
@@ -4375,8 +4416,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// capturable displays while the main display sleeps or the screen is
     /// locked (display sleep drops capture seconds before the lock engages),
     /// so attempts then are doomed and must not count against the budget.
+    /// The exception is a receiver showing the lock screen (#255): the view
+    /// is the one case the lock screen may leave this Mac, and recovery used
+    /// to wait for the unlock the view itself was needed for. `queue`.
     private var consoleCanCapture: Bool {
-        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+        LockScreenCapturePolicy.consoleCanCapture(
+            interactive: consoleIsInteractive, lockScreenViewLive: lockScreenLive,
+            mainDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            captureDisplayAwake: captureDisplayID != 0 && CGDisplayIsAsleep(captureDisplayID) == 0)
     }
 
     /// On `queue`: after a recovery round, re-arm the loop while capture is
@@ -4388,6 +4435,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard videoEnabled, captureStateSnapshot().shouldRetryCapture else { return }
         guard stream == nil else {
             captureRecoveryBudget.reset()
+            return
+        }
+        // A round run only for the lock screen view (#255) doesn't count: if
+        // ScreenCaptureKit can't capture this locked console, the session must
+        // not end for it. The view itself is bounded (idle timeout, unlock).
+        if !consoleIsInteractive {
+            scheduleCaptureRecovery()
             return
         }
         let shouldRetry = captureRecoveryBudget.recordFailure()
@@ -4629,10 +4683,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             // Auto mode: the first display, skipping other devices'
             // MeowDisplay virtual displays (issue #20).
-            Log.info("wakeCapture: selectedUUID=none(Auto)")
-            let automaticID = MirrorSourceResolver.automatic(
-                in: Self.mirrorSourceCandidates(content.displays),
-                excluding: VirtualDisplayRegistry.shared.displayIDs)
+            // While a receiver shows the lock screen: the main display, where
+            // macOS draws the login window (#255).
+            let showingLockScreen = (try? await onQueue { sender in sender.lockScreenLive }) ?? false
+            Log.info("wakeCapture: selectedUUID=none(Auto) lockScreenView=\(showingLockScreen)")
+            let candidates = Self.mirrorSourceCandidates(content.displays)
+            let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+            let automaticID = showingLockScreen
+                ? LockScreenCapturePolicy.automaticDisplay(in: candidates, excluding: meowIDs, main: mainID)
+                : MirrorSourceResolver.automatic(in: candidates, excluding: meowIDs)
             resolvedDisplay = automaticID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         }
         guard let display = resolvedDisplay else {
