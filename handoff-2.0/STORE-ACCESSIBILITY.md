@@ -1,3 +1,5 @@
+> **Historical, not maintained (marked 2026-11-12).** What was verified for the 2.0 store accessibility declarations (2026-10-30). There is no maintained replacement: check App Store Connect and Google Play Console before the next submission; store listing text is in [fastlane/APP_STORE_LISTING.md](../fastlane/APP_STORE_LISTING.md). [Archive index](../docs/archive/README.md).
+
 <!-- Sanitized copy of the integration folder's STORE-ACCESSIBILITY-2026-10-30.md (2026-10-31). Local paths and personal names removed; the integration folder holds the original and evidence. -->
 
 # Store accessibility: what to declare for MeowDisplay 2.0 (2026-10-30)

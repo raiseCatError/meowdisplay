@@ -1,10 +1,12 @@
+> **Archived 2026-11-12 — historical, not maintained.** The 1.20.0 screenshot and asset plan. Current: README images in `assets/readme/`, store listing in [fastlane/APP_STORE_LISTING.md](../../../fastlane/APP_STORE_LISTING.md), press kit in [tools/press-kit/README.md](../../../tools/press-kit/README.md). [Archive index](../README.md).
+
 # Release screenshots and assets checklist
 
 **Historical asset plan.** This checklist records the original repository
 and 1.20.0 submission preparation. Its outstanding capture notes are not the
 current App Store submission status: iPhone/iPad **2.0.0 is publicly released**
 as of November 2, 2026. Check App Store Connect before replacing store assets;
-see [README.md](README.md#platform-availability--november-2-2026) for current availability.
+see [README.md](../../../README.md#platform-availability) for current availability.
 
 
 What's already in place, and what still needs physical capture. Two
@@ -57,7 +59,7 @@ presentation.
 the README captures above must not be submitted as App Store assets.
 
 - The planned set (six real captures, iPhone and iPad) is in
-  [`fastlane/APP_STORE_LISTING.md` § Screenshot plan](fastlane/APP_STORE_LISTING.md#screenshot-plan).
+  [`fastlane/APP_STORE_LISTING.md` § Screenshot plan](../../../fastlane/APP_STORE_LISTING.md#screenshot-plan).
 - Required iPhone and iPad sizes must be confirmed in App Store Connect at
   upload time; they aren't recorded here to avoid going stale.
 - Screenshots are uploaded by hand — `fastlane ios release` skips them.

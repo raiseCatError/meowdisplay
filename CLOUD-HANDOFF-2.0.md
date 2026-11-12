@@ -1,3 +1,5 @@
+> **Historical, not maintained (marked 2026-11-12).** The 2.0 local-to-cloud handoff of 2026-10-31. 2.0.0 shipped on November 2, 2026; the branch model, release-pipeline audit and toolchain below describe that moment, not today. Current: [BRANCHING.md](BRANCHING.md), [RELEASE.md](RELEASE.md), [ARCHITECTURE.md](ARCHITECTURE.md), [SETUP.md](SETUP.md), [CHANGELOG.md](CHANGELOG.md). [Archive index](docs/archive/README.md).
+
 # MeowDisplay 2.0 — cloud handoff
 
 Written 2026-10-31 at the end of local development. Local work stops here; what remains runs in

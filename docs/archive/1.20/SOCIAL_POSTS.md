@@ -1,3 +1,5 @@
+> **Archived 2026-11-12 — historical, not maintained.** Unposted social drafts for the 1.20.0 launch (October 25, 2026); their feature list and links predate 2.0.0. Current availability: [README.md](../../../README.md) and [CHANGELOG.md](../../../CHANGELOG.md). [Archive index](../README.md).
+
 # Launch posts: drafts, not posted
 
 Ready-to-publish copy for the MeowDisplay launch (October 25, 2026): the
