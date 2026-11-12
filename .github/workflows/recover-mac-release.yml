@@ -19,13 +19,25 @@ on:
         type: string
         default: '442117184'
       action:
-        description: 'Recovery action: verify (read-only draft check) or publish (publish Latest and reconcile release-state)'
+        description: 'verify (read-only preflight) | publish (protected: verify draft, publish, reconcile) | reconcile (protected: release already public, record it) | finish (protected: website live, finish publication)'
         required: true
         type: choice
         options:
           - verify
           - publish
+          - reconcile
+          - finish
         default: verify
+      promotion_pr:
+        description: 'finish only: number of the release/2.1.0 -> main promotion PR (optional)'
+        required: false
+        type: string
+        default: ''
+      live_release_sha256:
+        description: 'finish only, needed when Cloudflare challenges the runner: sha256 of https://meowdisplay.app/release.json as YOU fetched it'
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -44,7 +56,13 @@ jobs:
           persist-credentials: false
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
-      - name: Verify Mac release candidate draft
+      # Read-only GITHUB_TOKEN cannot inspect an unpublished GitHub Release.
+      # Do not grant an unprotected job write access. The protected publish job
+      # runs recover-mac-release.sh --publish, which verifies every draft asset,
+      # notarization and Sparkle signature BEFORE editing the release.
+      # The repository is public: the script's git fetches of release/2.1.0
+      # and release-state need no credential, so none is persisted.
+      - name: Preflight frozen candidate and release-state (read-only)
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -52,13 +70,63 @@ jobs:
           DRAFT_ID: ${{ inputs.draft_id }}
         run: |
           set -euo pipefail
-          scripts/release/recover-mac-release.sh --verify
-          # Verify reconciliation can start BEFORE Mac becomes public.
           scripts/release/reconcile-mac-release.sh --preflight
 
-  publish:
+  # finish only: the website repository is private, so its branch HEAD and
+  # the files production is compared with are read here, with the website
+  # App's contents:read token from website-update (where its key lives),
+  # and handed to the protected job. Nothing is written.
+  site-evidence:
     needs: verify
-    if: ${{ inputs.action == 'publish' }}
+    if: ${{ inputs.action == 'finish' }}
+    runs-on: ubuntu-latest
+    environment: website-update
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/check-environment.sh website-update
+      - name: Website read token (website App, contents read only)
+        id: site-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.WEBSITE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+          owner: raiseCatError
+          repositories: MeowDisplayWebsite
+          permission-contents: read
+      - name: Save the website's branch HEAD files (read-only)
+        env:
+          GH_TOKEN: ${{ steps.site-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          scripts/release/reconcile-mac-release.sh --site-evidence "$RUNNER_TEMP/site-evidence"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-evidence
+          path: ${{ runner.temp }}/site-evidence
+          retention-days: 1
+          if-no-files-found: error
+
+  # One protected job for every mutating action. publish is the only action
+  # that edits the GitHub Release; reconcile and finish refuse to write
+  # anything unless the release is already public, Latest, tagged at the
+  # candidate and carrying exactly the recorded assets. After a run whose
+  # release went public but whose reconciliation failed, re-run with
+  # action=reconcile, never publish (publish refuses a non-draft release).
+  publish:
+    needs: [verify, site-evidence]
+    if: >-
+      ${{ !cancelled() && needs.verify.result == 'success' &&
+          (inputs.action == 'publish' || inputs.action == 'reconcile' ||
+           (inputs.action == 'finish' && needs.site-evidence.result == 'success')) }}
     runs-on: xcode-27
     environment: release-publish
     permissions:
@@ -92,7 +160,8 @@ jobs:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
-      - name: Publish Mac release as Latest
+      - name: Verify protected draft and publish Mac release as Latest
+        if: ${{ inputs.action == 'publish' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -102,6 +171,7 @@ jobs:
           set -euo pipefail
           scripts/release/recover-mac-release.sh --publish
       - name: Reconcile release state
+        if: ${{ inputs.action == 'publish' || inputs.action == 'reconcile' }}
         env:
           RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
           GH_TOKEN: ${{ github.token }}
@@ -110,3 +180,21 @@ jobs:
         run: |
           set -euo pipefail
           scripts/release/reconcile-mac-release.sh --execute
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ inputs.action == 'finish' }}
+        with:
+          name: site-evidence
+          path: ${{ runner.temp }}/site-evidence
+      - name: Finish publication (website serves release.json)
+        if: ${{ inputs.action == 'finish' }}
+        env:
+          SITE_EVIDENCE_DIR: ${{ runner.temp }}/site-evidence
+          RELEASE_STATE_TOKEN: ${{ steps.state-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          PROMOTION_PR: ${{ inputs.promotion_pr }}
+          LIVE_RELEASE_SHA256: ${{ inputs.live_release_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/release/reconcile-mac-release.sh --finish

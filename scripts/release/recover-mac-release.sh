@@ -22,6 +22,10 @@
 #   - Enforces external T7 scratch storage (/Volumes/T7Tmp/ai-dev) for local runs; never defaults to /tmp.
 #   - Verified rollback: if publication occurs but live feeds fail to propagate within 5 minutes,
 #     Latest is restored to previous release and v2.1.0 is returned to draft, verifying both actions.
+#     Rollback limits: the v2.1.0 tag created at publication stays (the tag ruleset forbids
+#     deletion), and clients that fetched the feed while it was live may already have updated.
+#   - A release that is already public is never published or rolled back again from here:
+#     the workflow's action=reconcile verifies it live and records it.
 #   - Release-state reconciliation: requires the authorized release App token (contents: write).
 set -euo pipefail
 
@@ -171,13 +175,21 @@ is_draft=$(jq -r .draft "$work/draft.json")
 target_commitish=$(jq -r .target_commitish "$work/draft.json")
 
 [ "$tag_name" = "v$VERSION" ] || { echo "::error::draft tag is '$tag_name', expected 'v$VERSION'"; exit 1; }
+if [ "$is_draft" = "false" ]; then
+  # Post-publication, not pre-publication: never publish or roll back again
+  # from here. Reconcile verifies the live release before recording it.
+  echo "::error::release $DRAFT_ID (v$VERSION) is already public (draft=false). Do not re-run publish: run this workflow with action=reconcile, which verifies the live release and records it in release-state."
+  exit 1
+fi
 [ "$is_draft" = "true" ] || { echo "::error::release $DRAFT_ID is not a draft (draft=$is_draft)"; exit 1; }
 [ "$target_commitish" = "$CANDIDATE_SHA" ] || { echo "::error::target_commitish is '$target_commitish', expected '$CANDIDATE_SHA'"; exit 1; }
 echo "✓ Draft $DRAFT_ID targets approved candidate $CANDIDATE_SHA"
 
 # 2. Confirm iOS is already published (fail-closed on fetch failure, no stale state)
 echo "2. Confirming iOS release status in release-state..."
-git -C "$here/../.." fetch -q origin release-state || {
+# Explicit refspec: updates origin/release-state whatever fetch refspec the
+# checkout configured. The repository is public; no credential is needed.
+git -C "$here/../.." fetch -q --no-tags origin "+refs/heads/release-state:refs/remotes/origin/release-state" || {
   echo "::error::Failed to fetch origin/release-state from remote. Relying on stale local state is prohibited."
   exit 1
 }
@@ -332,10 +344,13 @@ gh release edit "v$VERSION" --draft=false --latest -R "$REPO"
 
 echo "7. Verifying published tag and Latest status..."
 tagged_sha=$(gh api "repos/$REPO/commits/v$VERSION" --jq .sha)
-[ "$tagged_sha" = "$CANDIDATE_SHA" ] || { echo "::error::tag v$VERSION points to $tagged_sha, not $CANDIDATE_SHA"; exit 1; }
+# Every failure from here on happens AFTER the release went public: each one
+# goes through rollback (a bare `exit` would skip the ERR trap and leave an
+# unverified release as Latest).
+[ "$tagged_sha" = "$CANDIDATE_SHA" ] || { echo "::error::tag v$VERSION points to $tagged_sha, not $CANDIDATE_SHA"; rollback; }
 
 latest_tag=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
-[ "$latest_tag" = "v$VERSION" ] || { echo "::error::Latest is $latest_tag, expected v$VERSION"; exit 1; }
+[ "$latest_tag" = "v$VERSION" ] || { echo "::error::Latest is $latest_tag, expected v$VERSION"; rollback; }
 
 echo "8. Verifying live feeds serve v$VERSION..."
 live_ok() {
