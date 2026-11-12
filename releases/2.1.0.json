@@ -44,7 +44,7 @@
   ],
   "platforms": {
     "mac": {
-      "stage": "approved",
+      "stage": "published",
       "sha": "94c796fc34fd699776764d67d2f26013909a308e",
       "build": "2.1.0",
       "runId": 42720735729,
@@ -67,7 +67,8 @@
         }
       ],
       "blockers": [],
-      "updatedAt": "2026-11-09T23:46:00Z"
+      "updatedAt": "2026-11-12T00:01:03Z",
+      "releaseUrl": "https://github.com/raiseCatError/meowdisplay/releases/tag/v2.1.0"
     },
     "ios": {
       "stage": "published",
@@ -204,6 +205,13 @@
       "at": "2026-11-12T00:01:01Z",
       "event": "publication",
       "to": "in-progress"
+    },
+    {
+      "at": "2026-11-12T00:01:03Z",
+      "event": "platform",
+      "platform": "mac",
+      "from": "approved",
+      "to": "published"
     }
   ]
 }
