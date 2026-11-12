@@ -546,7 +546,7 @@ display needs Screen Recording.
 
 These are the minimum versions each app is built for. Which versions have
 actually been tested, and known issues such as
-[#219 on macOS 15](https://github.com/raiseCatError/meowdisplay/issues/219), are in
+[#219 on macOS 14 and 15](https://github.com/raiseCatError/meowdisplay/issues/219), are in
 [COMPATIBILITY.md](COMPATIBILITY.md#operating-systems-minimum-and-tested).
 
 ## Install
