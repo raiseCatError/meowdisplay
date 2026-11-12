@@ -93,12 +93,14 @@
     "updatedAt": "2026-11-12T01:25:15Z"
   },
   "publication": {
-    "stage": "in-progress",
+    "stage": "published",
     "sha": "94c796fc34fd699776764d67d2f26013909a308e",
     "startedAt": "2026-11-12T00:01:01Z",
-    "updatedAt": "2026-11-12T00:01:01Z",
+    "updatedAt": "2026-11-12T01:25:17Z",
     "reason": "Mac publication stopped before going live (run 43085872196)",
-    "reverted": false
+    "reverted": false,
+    "promotionPr": null,
+    "finishedAt": "2026-11-12T01:25:17Z"
   },
   "events": [
     {
@@ -219,6 +221,11 @@
     {
       "at": "2026-11-12T01:25:15Z",
       "event": "website",
+      "to": "published"
+    },
+    {
+      "at": "2026-11-12T01:25:17Z",
+      "event": "publication",
       "to": "published"
     }
   ]
