@@ -393,15 +393,45 @@ final class LockScreenControlTests: XCTestCase {
 
     func testAViewWithoutAFreshPictureRecoversOrRebuildsCapture() {
         typealias P = LockScreenCapturePolicy
-        XCTAssertEqual(P.freshFrameAction(viewStillLive: true, keyframeSent: false, captureLive: true, mirror: true),
-                       .rebuildCapture, "a still login window sends nothing new: rebuild for a complete frame")
-        XCTAssertEqual(P.freshFrameAction(viewStillLive: true, keyframeSent: false, captureLive: false, mirror: true),
-                       .recoverCapture)
-        XCTAssertEqual(P.freshFrameAction(viewStillLive: true, keyframeSent: true, captureLive: true, mirror: true), .none)
-        XCTAssertEqual(P.freshFrameAction(viewStillLive: false, keyframeSent: false, captureLive: true, mirror: true),
-                       .none, "a view that ended, or was replaced, rebuilds nothing")
-        XCTAssertEqual(P.freshFrameAction(viewStillLive: true, keyframeSent: false, captureLive: true, mirror: false), .none)
+        func action(live: Bool = true, sent: Bool = false, capturing: Bool, established: Bool = true,
+                    mirror: Bool = true) -> P.FreshFrameAction {
+            P.freshFrameAction(viewStillLive: live, keyframeSent: sent, captureLive: capturing,
+                               captureEstablished: established, mirror: mirror)
+        }
+        XCTAssertEqual(action(capturing: true), .rebuildCapture,
+                       "a still login window sends nothing new: rebuild for a complete frame")
+        XCTAssertEqual(action(capturing: false), .recoverCapture)
+        XCTAssertEqual(action(capturing: false, established: false), .none,
+                       "before the first capture start (Mirror waiting for a display, the Extend offer), "
+                       + "startup owns that start: the view never races it")
+        XCTAssertEqual(action(sent: true, capturing: true), .none)
+        XCTAssertEqual(action(live: false, capturing: true), .none, "a view that ended, or was replaced, rebuilds nothing")
+        XCTAssertEqual(action(live: false, capturing: false), .none)
+        XCTAssertEqual(action(capturing: true, mirror: false), .none)
         XCTAssertEqual(P.freshFrameChecks.count, 2, "bounded")
+    }
+
+    /// Recovery for the view can't outlive it. Ticks at the 3 s recovery cadence across a lock:
+    /// rounds run only while the view is live (or after the unlock), a failed round while locked
+    /// never counts toward ending the session, and once the view ends, a locked Mac only waits.
+    func testLockedRecoveryStopsWhenTheViewEnds() {
+        typealias P = LockScreenCapturePolicy
+        struct Tick { let interactive: Bool; let viewLive: Bool; let runs: Bool }
+        let timeline = [
+            Tick(interactive: false, viewLive: false, runs: false),   // locked, nobody viewing
+            Tick(interactive: false, viewLive: true, runs: true),     // view shown
+            Tick(interactive: false, viewLive: true, runs: true),
+            Tick(interactive: false, viewLive: false, runs: false),   // view hidden / idle / revoked
+            Tick(interactive: false, viewLive: false, runs: false),
+            Tick(interactive: false, viewLive: false, runs: false),
+            Tick(interactive: true, viewLive: false, runs: true),     // unlocked: ordinary recovery
+        ]
+        for (i, t) in timeline.enumerated() {
+            XCTAssertEqual(P.consoleCanCapture(interactive: t.interactive, lockScreenViewLive: t.viewLive,
+                                               mainDisplayAsleep: false, captureDisplayAwake: true), t.runs, "tick \(i)")
+        }
+        XCTAssertFalse(P.failedRoundCounts(interactive: false), "a locked round never ends the session")
+        XCTAssertTrue(P.failedRoundCounts(interactive: true), "unlocked rounds keep the usual budget")
     }
 
     func testAutomaticMirrorShowsTheLoginWindowsMainDisplay() {

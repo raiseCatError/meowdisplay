@@ -1708,7 +1708,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             Log.info("lockScreen: capturing display \(captureDisplayID), login window is on main \(main) — moving")
             scheduleWakeCaptureRecovery(reason: "lockScreenMainDisplay")
         }
-        if captureOwnership.liveStream == nil {
+        if captureOwnership.liveStream == nil, captureDisplayID != 0 {
             scheduleCaptureRecovery()
         }
         let selfBox = self.selfBox
@@ -1718,7 +1718,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let action = LockScreenCapturePolicy.freshFrameAction(
                     viewStillLive: self.lockScreenLive && self.lockScreenView == view,
                     keyframeSent: self.lockScreenFrames.keyframeSent,
-                    captureLive: self.captureOwnership.liveStream != nil, mirror: self.mode == .mirror)
+                    captureLive: self.captureOwnership.liveStream != nil,
+                    captureEstablished: self.captureDisplayID != 0, mirror: self.mode == .mirror)
                 switch action {
                 case .none:
                     return
@@ -4419,9 +4420,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// The exception is a receiver showing the lock screen (#255): the view
     /// is the one case the lock screen may leave this Mac, and recovery used
     /// to wait for the unlock the view itself was needed for. `queue`.
+    /// `queue`: capture may be recovered for the lock screen view: the view is
+    /// live on this connection, and capture was established for this session
+    /// (`captureDisplayID`). Before the first capture start (Mirror waiting for
+    /// a display, or its Extend offer), startup owns that start and the view
+    /// never races it. False the moment the view ends (hidden, idle, unlock,
+    /// revocation, another user, a new connection).
+    private var lockScreenViewNeedsCapture: Bool { lockScreenLive && captureDisplayID != 0 }
+
     private var consoleCanCapture: Bool {
         LockScreenCapturePolicy.consoleCanCapture(
-            interactive: consoleIsInteractive, lockScreenViewLive: lockScreenLive,
+            interactive: consoleIsInteractive, lockScreenViewLive: lockScreenViewNeedsCapture,
             mainDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
             captureDisplayAwake: captureDisplayID != 0 && CGDisplayIsAsleep(captureDisplayID) == 0)
     }
@@ -4440,7 +4449,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // A round run only for the lock screen view (#255) doesn't count: if
         // ScreenCaptureKit can't capture this locked console, the session must
         // not end for it. The view itself is bounded (idle timeout, unlock).
-        if !consoleIsInteractive {
+        if !LockScreenCapturePolicy.failedRoundCounts(interactive: consoleIsInteractive) {
             scheduleCaptureRecovery()
             return
         }
@@ -4717,6 +4726,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
             Log.info("wakeCapture: startCaptureSucceeded")
+        } catch is CancellationError {
+            // Superseded by a newer start (Mirror startup, another recovery), a
+            // stop, a pause or the session ending: whoever won owns capture now.
+            // Marking an unexpected stop here would put a healthy new capture
+            // back into recovery, where keyboard input is refused.
+            Log.info("wakeCapture: startCaptureSuperseded")
+            wakeCaptureAwaitingFirstFrameGeneration = nil
+            wakeCaptureAwaitingEncodedFrameGeneration = nil
         } catch {
             Log.info("wakeCapture: startCaptureFailed error=\(error)")
             wakeCaptureAwaitingFirstFrameGeneration = nil
@@ -8168,6 +8185,16 @@ extension MacSender {
 
     var lockScreenWakeCountForTesting: Int {
         get async throws { try await onQueue { $0.lockScreenWakeCount } }
+    }
+
+    /// Whether the lock screen view may drive capture recovery now (#255).
+    var lockScreenViewNeedsCaptureForTesting: Bool {
+        get async throws { try await onQueue { $0.lockScreenViewNeedsCapture } }
+    }
+
+    /// Stands in for a capture established on `displayID` (0: none yet).
+    func setCaptureDisplayForTesting(_ displayID: CGDirectDisplayID) async throws {
+        try await onQueue { $0.captureDisplayID = displayID }
     }
 
     /// Whether the encoder output would hand a fresh lock-screen keyframe to `sendFramed` now.

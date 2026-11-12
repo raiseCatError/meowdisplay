@@ -521,6 +521,56 @@ final class MacSenderInputRevocationTests: XCTestCase {
         XCTAssertEqual(wakesAfter, 1)
     }
 
+    /// #255: the view may drive capture recovery only while it is live, and only once capture
+    /// was established for the session. Before that, Mirror startup (waiting for a display, or its
+    /// Extend offer) owns the first start. Every way the view ends stops it at once.
+    func testTheViewDrivesCaptureRecoveryOnlyWhileLiveAndAfterCaptureStarted() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await lockWithPermit(sender)
+        try await showLockScreen(sender)
+        XCTAssertEqual(sent.lastLockScreen, "active")
+        var needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertFalse(needs, "no capture established yet: startup's start, not the view's")
+
+        // The main display, so the view's own move-to-main rebuild stays out of this test.
+        try await sender.setCaptureDisplayForTesting(CGMainDisplayID())
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertTrue(needs)
+
+        try await showLockScreen(sender, false)
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertFalse(needs, "hidden: recovery for it stops")
+
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertTrue(needs)
+        try await sender.setLockScreenPermitWithoutReviewForTesting(policy: .neverAllow, allowed: false)
+        sender.setLockScreenPermit(policy: .neverAllow, allowed: false)
+        try await sender.settleForTesting()
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertFalse(needs, "revoked: recovery for it stops")
+
+        sender.setLockScreenPermit(policy: .alwaysAllow, allowed: true)
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertTrue(needs)
+        privacyGate.set(.switchedOut)
+        sender.macPrivacyChanged(.switchedOut)
+        try await sender.settleForTesting()
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertFalse(needs, "another user on the console: never")
+
+        privacyGate.set(.locked)
+        sender.macPrivacyChanged(.locked)
+        try await sender.resetLockScreenShowLimitForTesting()
+        try await showLockScreen(sender)
+        try await sender.loseConnectionForTesting()
+        needs = try await sender.lockScreenViewNeedsCaptureForTesting
+        XCTAssertFalse(needs, "connection gone: never")
+    }
+
     /// A view-only Ask device (no control granted before the lock), a device set to Never Allow,
     /// one with the switch off, and one the app hasn't vouched for yet are never shown it.
     func testOnlyAPreAuthorizedDeviceIsShownTheLockScreen() async throws {

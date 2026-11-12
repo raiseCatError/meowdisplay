@@ -461,11 +461,21 @@ enum LockScreenCapturePolicy {
         case rebuildCapture
     }
 
+    /// `captureEstablished`: a capture was started for this session. Before that (Mirror still
+    /// waiting for a display, or its Extend offer pending) startup owns the first start, and the
+    /// view never starts a competing one.
     static func freshFrameAction(viewStillLive: Bool, keyframeSent: Bool, captureLive: Bool,
-                                 mirror: Bool) -> FreshFrameAction {
+                                 captureEstablished: Bool, mirror: Bool) -> FreshFrameAction {
         guard viewStillLive, mirror, !keyframeSent else { return .none }
-        return captureLive ? .rebuildCapture : .recoverCapture
+        if captureLive { return .rebuildCapture }
+        return captureEstablished ? .recoverCapture : .none
     }
+
+    /// Whether a failed recovery round counts against the session's budget. Rounds while the
+    /// console is locked ran only for a live view: they don't, so a capture ScreenCaptureKit
+    /// can't make while locked never ends the session. They also never run on their own: the
+    /// next round waits for `consoleCanCapture` (a live view or an unlock) again.
+    static func failedRoundCounts(interactive: Bool) -> Bool { interactive }
 
     /// Automatic Mirror while the lock screen is shown: macOS draws the login window on the main
     /// display, so prefer it when it can be captured and isn't a MeowDisplay virtual display.
