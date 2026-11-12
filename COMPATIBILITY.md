@@ -72,7 +72,7 @@ with your macOS or iOS version.
 
 **Known issues**
 
-- **Mac app quits after approving pairing on macOS 15**
+- **Mac app quits after approving pairing on macOS 14 and 15**
   ([#219](https://github.com/raiseCatError/meowdisplay/issues/219)). Reported
   with Mac 2.0.0 on macOS 15.7.7 and an iPhone on the same Wi-Fi. Right after
   pairing, the Mac sets up QUIC from the iPhone's Bonjour service, and macOS 15
@@ -81,9 +81,11 @@ with your macOS or iOS version.
   includes a proposed fix ([#226](https://github.com/raiseCatError/meowdisplay/pull/226)):
   the service is resolved to an address first, and if that doesn't work, Auto
   uses the secure TCP connection instead. It's tested on macOS 27 only and
-  **not yet verified on a Mac running macOS 15**. The reporter saw the same
+  **not yet verified on a Mac running macOS 14 or 15**. The reporter saw the same
   failure over Tailscale; that route dials an address directly, so this cause
-  doesn't explain it, and the Tailscale failure remains unexplained.
+  doesn't explain it, and the Tailscale failure remains unexplained. A second
+  user reported the same quit on an Intel Mac running macOS 14.8.9 (before 2.1,
+  app version not stated); no logs yet, so it's not confirmed to be the same cause.
 
 ---
 
