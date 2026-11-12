@@ -74,6 +74,20 @@ final class WakeConnectAttemptTests: XCTestCase {
     /// in `recordWOLSent()` silently capped every burst at 1 packet instead
     /// of the intended 3 — this reproduces the coordinator's exact call
     /// sequence and asserts the full burst actually lands.
+    /// #255: with no saved wake details the coordinator sends no packet.
+    /// The attempt must still connect to an awake Mac (and its label then
+    /// says Connecting…, from `wolBurstsSent == 0`), never wait out the timeout.
+    func testNoWakePacketStillConnects() {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        XCTAssertEqual(attempt.wolBurstsSent, 0)
+        XCTAssertTrue(attempt.transportReady(), "a Mac that dials in is adopted without any wake packet")
+        XCTAssertEqual(attempt.stage, .authenticating)
+        XCTAssertTrue(attempt.applicationAuthenticated(generation: 1, peerID: "peer-1"))
+        XCTAssertEqual(attempt.stage, .promoting, "the display is still asked to wake after authentication")
+    }
+
     func testWOLBurstSendsTheFullBoundedBurstAcrossTheStageTransition() {
         var attempt = WakeConnectAttempt()
         _ = attempt.begin(peerID: "peer-1")

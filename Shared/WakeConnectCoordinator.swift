@@ -75,7 +75,11 @@ final class WakeConnectCoordinator: ObservableObject {
     var statusLabel: String {
         switch attempt.stage {
         case .idle, .failed: return ""
-        case .preparing, .waking, .waitingForConnection: return String(localized: "Waking…")
+        case .preparing: return String(localized: "Waking…")
+        // No wake packet could be sent (no saved wake details for this Mac):
+        // say what is actually happening (#255).
+        case .waking, .waitingForConnection:
+            return attempt.wolBurstsSent > 0 ? String(localized: "Waking…") : String(localized: "Connecting…")
         case .authenticating: return String(localized: "Connecting…")
         case .promoting: return String(localized: "Waking display…")
         case .waitingForVideo: return String(localized: "Starting video…")
@@ -134,9 +138,19 @@ final class WakeConnectCoordinator: ObservableObject {
     // MARK: - WoL
 
     private func sendWOLBurst() {
-        guard let peerID = activePeerID,
-              let metadata = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole),
-              let broadcast = metadata.broadcastAddress else { return }
+        guard let peerID = activePeerID else { return }
+        // Without the Mac's wake details no magic packet can go: connect
+        // anyway (an awake Mac still answers), but say so in the log rather
+        // than fail silently (#255). The details arrive from the Mac
+        // (`wakeInfo`) on a connection while it is awake.
+        guard let metadata = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole) else {
+            Log.info("wakeConnect: noWakePacket reason=noWakeMetadata — connecting without waking")
+            return
+        }
+        guard let broadcast = metadata.broadcastAddress else {
+            Log.info("wakeConnect: noWakePacket reason=noBroadcastAddress — connecting without waking")
+            return
+        }
         func sendOne() {
             guard attempt.recordWOLSent() else { return }
             let result = WakeOnLAN.send(macAddress: metadata.macAddress, broadcastAddress: broadcast)
