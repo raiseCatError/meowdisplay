@@ -285,4 +285,15 @@ class WorkflowChecksTest < Minitest::Test
     assert_caught("publish job must use the release-publish environment",
                   f => ["    environment: release-publish\n", "    environment: release-elsewhere\n"])
   end
+
+  def test_recovery_site_evidence_stays_read_only
+    f = "recover-mac-release.yml"
+    assert_caught("site-evidence must stay read-only",
+                  f => ["          repositories: MeowDisplayWebsite\n          permission-contents: read",
+                        "          repositories: MeowDisplayWebsite\n          permission-contents: write"])
+    assert_caught("site-evidence must stay read-only",
+                  f => ["    environment: website-update\n", "    environment: release-state\n"])
+    assert_caught("job site-evidence must run check-environment.sh website-update before using secrets",
+                  f => ["        run: scripts/release/check-environment.sh website-update\n", "        run: true\n"])
+  end
 end
