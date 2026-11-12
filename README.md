@@ -18,7 +18,7 @@ is available through closed testing.
 [Privacy](https://meowdisplay.app/privacy.html) ·
 [Support on Ko-fi](https://ko-fi.com/raisecaterror)
 
-**[Download MeowDisplay 2.1 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a>
+**[Download MeowDisplay 2.1 for Mac](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg)** · <a href="https://apps.apple.com/us/app/meowdisplay/id6817552864"><img src="assets/readme/app-store-badge.svg" alt="Download on the App Store" height="44" align="center"></a> · <a href="https://meowdisplay.app/android/early-access"><img src="assets/readme/google-play-closed-testing-badge.svg" alt="Join closed testing on Google Play" height="44" align="center"></a>
 
 <sub>Mac 2.1.0 stable, shares and receives (macOS 14+) · [Mac Receiver 2.1.0](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplayReceiver.dmg) (macOS 12+) · iPhone/iPad 2.1.0 on the App Store · Android 2.0 in Google Play closed testing, not yet public · [All downloads](https://meowdisplay.app/downloads)</sub>
 
@@ -57,11 +57,12 @@ closed testing. Distribution differs by platform as shown below.
 | Mac app · macOS 14+ · share or receive | **2.1.0 stable** | [Download MeowDisplay](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplay.dmg) · [release notes](https://github.com/raiseCatError/meowdisplay/releases/tag/v2.1.0) |
 | Receiver-only Mac app · macOS 12+ | **2.1.0 stable** | [Download MeowDisplay Receiver](https://github.com/raiseCatError/meowdisplay/releases/download/v2.1.0/MeowDisplayReceiver.dmg) |
 | iPhone / iPad · iOS / iPadOS 16.4+ | **2.1.0 on the App Store** | [App Store](https://apps.apple.com/us/app/meowdisplay/id6817552864) |
-| Android · Android 10+ | **2.0 closed testing** | [Request early access](https://meowdisplay.app/android/early-access) |
+| Android · Android 10+ | **2.0 Google Play closed testing** (not yet public) | [Join closed testing](https://meowdisplay.app/android/early-access) |
 
 The main Mac app includes both sharing and receiving: share this Mac's display,
 or use this Mac as another Mac's display. The separate Receiver-only app is
-also available for Macs running macOS 12 or later.
+also available for Macs running macOS 12 or later. Checksums and every official
+download are on [meowdisplay.app/downloads](https://meowdisplay.app/downloads).
 
 Android 2.0 works with the Mac app 2.0 and later, including 2.1. The 2.1
 features below are on iPhone and iPad only for now, and with Mac 2.1 a locked
