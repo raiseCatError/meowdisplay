@@ -956,16 +956,23 @@ struct ReceiverScreen: View {
         // the only place the choice can be made. "Use Extend" sends the
         // EXISTING `displayModeRequest`; the Mac remains authoritative for
         // the actual mode change.
-        .alert("Mirror isn't available",
+        .alert("Mirror isn't available yet",
                isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
-            Button("Cancel", role: .cancel) {
-                model.receiver.declineMirrorUnavailableOffer()
-            }
             Button("Use Extend") {
                 model.receiver.acceptMirrorUnavailableOffer()
             }
+            // Keeps the session: the Mac goes on watching for its display and
+            // starts Mirror by itself when one is back (#255).
+            Button("Wait", role: .cancel) {
+                model.receiver.waitForMirrorDisplay()
+            }
+            Button("Disconnect", role: .destructive) {
+                model.receiver.declineMirrorUnavailableOffer()
+            }
         } message: {
-            Text("This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?")
+            // Says only what the Mac reported: no usable display. It can be asleep,
+            // still waking or switched off, not only a closed lid (#255).
+            Text("The Mac hasn't reported a usable display. You can wait for it to become available or use Extend.")
         }
         // Distinct from the offer above: this fires when Mirror was
         // requested while ALREADY confirmed extending — the user is
@@ -1729,7 +1736,10 @@ struct IdleView: View {
             default: return String(localized: "Ready to connect")
             }
         case .connecting: return String(localized: "Connecting…")
-        case .connected: return String(localized: "Connected")
+        case .connected:
+            // Connected, but Mirror has no display yet and the user chose to wait (#255).
+            return receiver.awaitingMirrorDisplay
+                ? String(localized: "Waiting for the Mac's display…") : String(localized: "Connected")
         case .paused: return String(localized: "Paused")
         case .reconnecting: return String(localized: "Reconnecting…")
         case .reconnectFailed: return String(localized: "Connection lost")

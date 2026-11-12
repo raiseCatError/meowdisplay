@@ -808,6 +808,11 @@ final class StreamReceiver: ObservableObject {
     /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
     /// the user acts on it.
     @MainActor @Published private(set) var mirrorUnavailable = false
+    /// The user chose Wait on the Mirror-unavailable offer (#255): the session
+    /// stays, and the Mac keeps watching for its display, resuming Mirror on
+    /// its own. Cleared by any confirmed mode, accepting Extend, or the end of
+    /// the connection. Only changes what the connection headline says.
+    @MainActor @Published private(set) var awaitingMirrorDisplay = false
     /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
     /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
     @MainActor @Published private(set) var macLock: MacLockNotice?
@@ -893,7 +898,9 @@ final class StreamReceiver: ObservableObject {
     /// re-deriving it from `connected` alone, which used to miss states
     /// like reconnecting/paused.
     @MainActor var canonicalPhaseTitle: String {
-        session.interruption?.title ?? (session.phase == .connected ? String(localized: "Connected") : String(localized: "Waiting for a Mac…"))
+        session.interruption?.title ?? (session.phase == .connected
+            ? (awaitingMirrorDisplay ? String(localized: "Waiting for the Mac's display…") : String(localized: "Connected"))
+            : String(localized: "Waiting for a Mac…"))
     }
     /// Auto-Reconnect preference (Settings/Home toggle) — this receiver's own
     /// local setting, independent of the paired Mac's and not synced with
@@ -3675,7 +3682,19 @@ final class StreamReceiver: ObservableObject {
     @MainActor
     func acceptMirrorUnavailableOffer() {
         mirrorUnavailable = false
+        awaitingMirrorDisplay = false
         requestDisplayMode(.extend)
+    }
+
+    /// "Wait" from the Mirror-unavailable offer (#255): keep this session.
+    /// The Mac goes on watching for a usable display and starts Mirror by
+    /// itself when one is stably back (`offerExtendOrFailMirror`); nothing
+    /// goes on the wire. If none comes back in the Mac's bounded wait, the
+    /// Mac ends the attempt as before.
+    @MainActor
+    func waitForMirrorDisplay() {
+        mirrorUnavailable = false
+        awaitingMirrorDisplay = true
     }
 
     /// "Cancel" from the Mirror-unavailable offer: deliberately end this
@@ -3733,6 +3752,7 @@ final class StreamReceiver: ObservableObject {
         // longer reach a "Use Extend" button that isn't there anymore.
         mirrorUnavailable = false
         mirrorRejectedWhileExtending = false
+        awaitingMirrorDisplay = false
     }
 
     /// Requests an Extend display shape change without predicting its
@@ -6112,6 +6132,7 @@ final class StreamReceiver: ObservableObject {
             // a fresh one arrives on the Mac's own next attempt, if any.
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
+            self.awaitingMirrorDisplay = false
             self.macLock = nil
             self.setLockScreenInputTag(LockScreenInputTagState())
         }
@@ -6249,6 +6270,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyMirrorUnavailableClear() {
         mirrorUnavailable = false
+        awaitingMirrorDisplay = false
     }
 
     @MainActor func applyMirrorRejectionClear() {

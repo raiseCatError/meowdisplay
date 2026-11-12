@@ -973,7 +973,11 @@ reconnect, and SHOULD retire it on a local deadline rather than wait forever.
 
 **`mirrorUnavailable`** (Mac → receiver, pv 17): sent instead of immediately
 failing the session when `mode` is `mirror` and the Mac has no usable
-physical display (e.g. lid closed, no external monitor). This is purely
+physical display (e.g. lid closed, no external monitor, or displays still
+asleep after a wake). Before sending it the Mac asks macOS once to wake its
+displays (the public user-activity call Wake & Connect also uses) and waits
+up to 8s for a physical display to become stably usable; if one does, Mirror
+starts and no offer is sent. This is purely
 additive UX around a known limitation — it does not add a new mode-switch
 mechanism. A receiver that understands it MAY present an offer to switch to
 Extend; accepting sends the EXISTING `displayModeRequest` (`mode: extend`)
@@ -982,8 +986,11 @@ The Mac holds the authenticated connection open for a bounded window
 (currently 30s) waiting for that request before failing Mirror with its
 normal error; a receiver that declines, disconnects, or simply never
 responds gets the exact same outcome a receiver that never saw the offer at
-all would. Receivers below pv 17 are never sent this message and see
-today's immediate Mirror failure.
+all would. If a physical display becomes stably usable during that window,
+the Mac starts Mirror by itself and sends `displayModeState`, so a receiver
+MAY let the user wait instead of choosing (the offer is then moot).
+Receivers below pv 17 are never sent this message and see today's immediate
+Mirror failure (after the same bounded wait for a display).
 
 **`videoRequest` / `videoState`** (pv 9) control video production without
 changing the logical session. When disabled, the sender stops capture,

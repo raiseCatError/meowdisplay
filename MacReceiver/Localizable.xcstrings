@@ -700,7 +700,16 @@
     "The other Mac decides what is actually applied and reports it back. Automatic/Custom mode and the codec choice (Auto, H.264, HEVC) are set in MeowDisplay on that Mac." : {
 
     },
-    "The other Mac has no active physical display, for example its lid is closed. Use Extend to create a virtual display instead?" : {
+    "Mirror isn't available yet" : {
+
+    },
+    "The other Mac hasn't reported a usable display. You can wait for it to become available or use Extend." : {
+
+    },
+    "Wait" : {
+
+    },
+    "Waiting for the Mac's display…" : {
 
     },
     "The other Mac's version of MeowDisplay doesn't support audio." : {

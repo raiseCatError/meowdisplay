@@ -2166,6 +2166,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case .mirror:
             if DisplayHealth.hasUsablePhysicalDisplay(excluding: nil) {
                 try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
+            } else if try await awaitMirrorDisplayReadiness(sessionGeneration: admittedGeneration) {
+                try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
             } else {
                 try await offerExtendOrFailMirror(info: admitted.info, sessionGeneration: admittedGeneration)
             }
@@ -2287,6 +2289,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// alone changes nothing here — the receiver's own "Use Extend" tap (if
     /// it still arrives) remains a perfectly valid request regardless of
     /// what the physical topology looks like by then.
+    /// Mirror found no usable physical display at admission (#255). Right
+    /// after a sleep or a network wake that is usually a display still
+    /// asleep or still coming up, not one that is gone: ask macOS once to
+    /// wake its displays (the same public user-activity call Wake & Connect
+    /// makes, for this admitted session) and give the topology a bounded
+    /// `MirrorUnavailableOfferPolicy.readinessGrace` to settle. True once a
+    /// physical display is stably usable; false sends the Extend offer. Not
+    /// reached when a display is already usable, so it adds no wait then.
+    private func awaitMirrorDisplayReadiness(sessionGeneration: UInt64) async throws -> Bool {
+        guard authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+        let grace = MirrorUnavailableOfferPolicy.readinessGrace
+        let promotion = InteractiveWakePromotion.promote(reason: "MEOW Mirror Display")
+        Log.info("displayDebug: mirrorReadiness no usable display yet — waiting up to \(Int(grace))s "
+            + "promoteResult=\(promotion.result)")
+        let start = ContinuousClock.now
+        var stability = DisplayStabilityTracker()
+        while ContinuousClock.now - start < .seconds(grace) {
+            try await Task.sleep(for: .milliseconds(500))
+            guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+            if stability.recordSample(usable: DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)) {
+                Log.info("displayDebug: mirrorReadiness display ready after \(ContinuousClock.now - start)")
+                return true
+            }
+        }
+        Log.info("displayDebug: mirrorReadiness no usable display after \(Int(grace))s — offering Extend")
+        return false
+    }
+
     private func offerExtendOrFailMirror(info: PhoneInfo, sessionGeneration: UInt64) async throws {
         guard MirrorUnavailableOfferPolicy.shouldOffer(
             hasUsablePhysicalDisplay: false, receiverProtocolVersion: info.protocolVersion
