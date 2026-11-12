@@ -9,6 +9,10 @@ struct MacLockedCover: View {
     let notice: MacLockNotice
     let macName: String
     var lockFlow = LockScreenFlow()
+    /// Local actions that never need control of the Mac (#255): the cover takes every touch, so
+    /// they have to be on it. Nil hides one.
+    var onSettings: (() -> Void)?
+    var onBackToHome: (() -> Void)?
     var onShowLockScreen: () -> Void = {}
     var onHideLockScreen: () -> Void = {}
     let onDisconnect: () -> Void
@@ -120,9 +124,22 @@ struct MacLockedCover: View {
             Text("Your layout comes back when it’s unlocked.")
                 .font(.footnote).foregroundStyle(.white.opacity(0.55)).multilineTextAlignment(.center)
             if notice.state == .locked || lockFlow.isWaiting || lockFlowFailed { lockScreenControls }
+            HStack(spacing: 10) {
+                if let onBackToHome {
+                    Button(action: onBackToHome) { Label("Back to Home", systemImage: "house") }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("macLockedBackToHome")
+                }
+                if let onSettings {
+                    Button(action: onSettings) { Label("Settings", systemImage: "gearshape") }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("macLockedSettings")
+                }
+            }
+            .tint(.white)
+            .padding(.top, 6)
             Button("Disconnect", role: .destructive, action: onDisconnect)
                 .buttonStyle(.bordered)
-                .padding(.top, 6)
                 .accessibilityIdentifier("macLockedDisconnect")
         }
         .padding(.horizontal, 20)

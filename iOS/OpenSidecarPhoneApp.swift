@@ -160,6 +160,21 @@ struct ReceiverScreen: View {
         model.showHomeKeepingSession()
     }
 
+    /// Back to Home from the locked cover: the same as Session Actions' (which the cover hides),
+    /// so only while there is a surface to come back to.
+    private var lockedCoverHomeAvailable: Bool {
+        model.receiver.connected && route == .receiver
+            && ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
+                                                    presentation: model.presentation).contains(.backToHome)
+    }
+
+    /// Nothing of the lock screen keeps playing behind Home: a shown one is hidden first.
+    private func leaveLockedCoverForHome() {
+        keyboardActive = false
+        if model.lockScreenFlow.isShowing { model.hideLockScreen() }
+        showHomeKeepingSession()
+    }
+
     /// Offered in Settings ▸ Connections only while a real session is on screen.
     private var keepSessionOnHomeAction: (@MainActor () -> Void)? {
         guard route == .receiver else { return nil }
@@ -185,6 +200,8 @@ struct ReceiverScreen: View {
     /// Control Center, a call), so no picture of it (its password dots) is kept or shown there.
     private var macLockedCoverShowing: Bool {
         if scenePhase != .active, model.receiver.macLock != nil { return true }
+        // Home (opaque) covers the kept session; Resume brings the cover back.
+        if route == .sessionHome { return false }
         return MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
                                         videoEnabled: model.receiver.videoEnabled,
                                         freshFrame: model.receiver.freshFrameSinceVideoReset)
@@ -277,6 +294,23 @@ struct ReceiverScreen: View {
                                                   macPV: model.receiver.macProtocolVersion,
                                                   macState: controlStore.sessionInputState,
                                                   surfaceInteractive: localInputSurfaceOpen)
+    }
+
+    /// A live, unlocked session on a Mac that reports its control decision, settled without
+    /// control and without this device having turned input off: Request Control is offered.
+    private var viewOnlyOfferPending: Bool {
+        ReceiverInputPrompt.offersViewOnly(sessionLive: model.receiver.session.allowsLiveInput,
+                                           macPV: model.receiver.macProtocolVersion,
+                                           macState: controlStore.sessionInputState,
+                                           macLocked: model.receiver.macLock != nil,
+                                           userTurnedOff: controlStore.userTurnedOffInput)
+            && localInputSurfaceOpen
+    }
+
+    /// Video is off on a live, unlocked session (the cover owns a locked Mac).
+    private var videoOffStatusShown: Bool {
+        !model.receiver.videoEnabled && model.receiver.session.allowsLiveInput
+            && model.receiver.macLock == nil && model.receiver.macSupportsVideoControl
     }
 
     /// Whether the receiver surface can be used at all: the app is active,
@@ -490,7 +524,9 @@ struct ReceiverScreen: View {
                                    touchStyle: controlStore.preferences.touchStyle,
                                    allowInput: inputReachesMac,
                                    videoEnabled: model.receiver.videoEnabled,
-                                   showSurfaceGrid: controlStore.preferences.showSurfaceGrid,
+                                   // The dotted trackpad only while touches reach the Mac: with video
+                                   // and control both unavailable, nothing suggests a working pad.
+                                   showSurfaceGrid: controlStore.preferences.showSurfaceGrid && inputReachesMac,
                                    pinchTarget: controlStore.preferences.pinchTarget,
                                    rotateTarget: controlStore.preferences.rotateTarget,
                                    snapRotation: controlStore.preferences.snapRotation,
@@ -678,7 +714,16 @@ struct ReceiverScreen: View {
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                     }
-                    if inputReachesMac, controlStore.preferences.inputMode == .direct,
+                    if videoOffStatusShown {
+                        // Video off is the user's choice: one quiet line saying so, with the way back.
+                        // Control is its own state (the prompt above), never implied by this.
+                        VideoOffStatus(onTurnOn: { model.receiver.requestVideoEnabled(true) })
+                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
+                                                   size: CGSize(width: 300, height: 44), container: geo.size,
+                                                   regions: reservedRegions))
+                            .transition(slideTransition(from: .top))
+                    }
+                    if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
                        !controlStore.preferences.naturalTouchHintShown, !showSettings {
                         // Narrower than a Duo half, so it fits beside the crease.
@@ -713,7 +758,7 @@ struct ReceiverScreen: View {
                         .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
-                       !showSettings, !model.workspace.overviewOpen {
+                       !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown {
                         // Full-desktop view: offer Window mode once per launch, never forced.
                         WindowModePrompt(
                             extending: model.receiver.confirmedDisplayMode == .extend,
@@ -872,6 +917,8 @@ struct ReceiverScreen: View {
                 MacLockedCover(notice: MacLockedCoverPolicy.coverNotice(model.receiver.macLock),
                                macName: model.workspace.hostName,
                                lockFlow: model.lockScreenFlow,
+                               onSettings: { keyboardActive = false; showSettings = true },
+                               onBackToHome: lockedCoverHomeAvailable ? { leaveLockedCoverForHome() } : nil,
                                onShowLockScreen: { model.showLockScreen() },
                                onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
                                onDisconnect: { model.receiver.disconnect() })
@@ -880,7 +927,7 @@ struct ReceiverScreen: View {
         }
         // The Mac said its own lock screen is up here: the picture shows (fresh frames), plus this.
         .overlay(alignment: .top) {
-            if lockScreenShowing {
+            if lockScreenShowing, route != .sessionHome {
                 LockScreenBanner(keyboardAvailable: keyboardAvailable && inputReachesMac,
                                  onKeyboard: { if keyboardAvailable, inputReachesMac { keyboardActive.toggle() } },
                                  onHide: { keyboardActive = false; model.hideLockScreen() })
@@ -1059,11 +1106,21 @@ struct ReceiverScreen: View {
         .onChange(of: controlStore.sessionInputState) { state in
             withAnimation { inputPrompt.inputStateChanged(state, now: uptime) }
         }
+        // A live session that settles view only offers Request Control once, without waiting
+        // for a blocked touch (#255). The pause lets an Always Allow grant arrive first.
+        .task(id: viewOnlyOfferPending) {
+            guard viewOnlyOfferPending else { return }
+            try? await Task.sleep(nanoseconds: UInt64(ReceiverInputPrompt.viewOnlyOfferDelay * 1_000_000_000))
+            guard !Task.isCancelled, viewOnlyOfferPending else { return }
+            withAnimation(.easeOut(duration: 0.2)) {
+                _ = inputPrompt.offerForViewOnlySession(userTurnedOff: controlStore.userTurnedOffInput)
+            }
+        }
         // Fades the prompt once its time is up; each new attempt moves the
-        // deadline and restarts this.
+        // deadline and restarts this. An offer that waits for an answer has no deadline.
         .task(id: inputPrompt.visibleUntil) {
             let delay = inputPrompt.visibleUntil - uptime
-            guard inputPrompt.kind != nil else { return }
+            guard inputPrompt.kind != nil, delay.isFinite else { return }
             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64((delay + 0.05) * 1_000_000_000)) }
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.35)) { inputPrompt.tick(now: uptime) }
@@ -6254,6 +6311,34 @@ private struct InputPromptButton: View {
     }
 }
 
+/// "Video is off" on a live session, with the way to turn it back on (#255). Control is the
+/// Request Control prompt's own state, never implied here: with control the dotted trackpad shows,
+/// without it the surface stays plain.
+private struct VideoOffStatus: View {
+    let onTurnOn: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(String(localized: "Video is off"), systemImage: "video.slash.fill")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+            Button(String(localized: "Turn Video On"), action: onTurnOn)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .accessibilityIdentifier("videoOffTurnOn")
+        }
+        .foregroundStyle(.white)
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("videoOffStatus")
+    }
+}
 
 /// One-time note after Natural Touch became the default: what changed and
 /// where Classic is. Shown once; dismissed by the button or after a while.

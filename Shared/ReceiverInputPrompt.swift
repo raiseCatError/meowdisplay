@@ -31,19 +31,54 @@ struct ReceiverInputPrompt: Equatable {
     static let minimumAutomaticInterval: TimeInterval = 8
     /// A tapped request can't be re-sent faster than this.
     static let minimumTappedInterval: TimeInterval = 1.5
+    /// How long a live session must stay view only before Request Control is offered unasked:
+    /// an Always Allow grant arrives well within it, so it never flashes up for nothing.
+    static let viewOnlyOfferDelay: TimeInterval = 1.5
+
+    /// Whether a live session is in the state that gets the unasked offer: a Mac that reports its
+    /// decision (pv 8+, older Macs say nothing to answer), no decision yet (`off`: not declined,
+    /// not requesting, not Never Allow), not locked (the locked cover has its own steps), and this
+    /// device didn't turn input off itself.
+    static func offersViewOnly(sessionLive: Bool, macPV: Int, macState: SessionInputWireState,
+                               macLocked: Bool, userTurnedOff: Bool) -> Bool {
+        sessionLive && !macLocked && !userTurnedOff
+            && macPV >= WireProtocol.allowInputWireVersion && macState == .off
+    }
 
     private(set) var kind: Kind?
     private(set) var visibleUntil: TimeInterval = 0
     private(set) var lastRequestAt: TimeInterval?
     private var state: SessionInputWireState = .off
     private var sessionLive = false
+    /// Request Control was already offered on this live session without a blocked touch.
+    private var offeredForViewOnly = false
+
+    /// Shown until the first blocked touch, a tap or the Mac's next answer (`offerForViewOnlySession`).
+    var isUntilAnswered: Bool { kind != nil && visibleUntil == .infinity }
 
     func isVisible(at now: TimeInterval) -> Bool { kind != nil && now < visibleUntil }
 
     /// The live session came or went. No prompt without a live session.
     mutating func setSessionLive(_ live: Bool) {
         sessionLive = live
-        if !live { kind = nil }
+        if !live {
+            kind = nil
+            offeredForViewOnly = false
+        }
+    }
+
+    /// The live session settled view only, with no decision yet (#255): offer Request Control
+    /// once, before the user has to discover it by touching. It stays until the first blocked
+    /// touch (which then fades it as usual), a tap, or the Mac's answer. Never sends anything:
+    /// only a tap (or Request Control Automatically on a blocked touch) asks. Not after the Mac
+    /// declined, while a request waits, under Never Allow, or when this device turned input off.
+    @discardableResult
+    mutating func offerForViewOnlySession(userTurnedOff: Bool) -> Bool {
+        guard sessionLive, state == .off, kind == nil, !offeredForViewOnly, !userTurnedOff else { return false }
+        offeredForViewOnly = true
+        kind = .requestInput
+        visibleUntil = .infinity
+        return true
     }
 
     /// The Mac-confirmed input state changed.
@@ -51,6 +86,8 @@ struct ReceiverInputPrompt: Equatable {
         let previous = state
         state = newState
         guard kind != nil, now < visibleUntil || kind == .requesting else { return }
+        // An offer that waited for an answer now fades like any other prompt.
+        if visibleUntil == .infinity, newState != .off { visibleUntil = now + Self.visibleDuration }
         switch newState {
         case .allowed where previous != .allowed:
             kind = .enabled
