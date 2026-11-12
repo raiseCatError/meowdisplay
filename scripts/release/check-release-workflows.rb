@@ -387,6 +387,13 @@ if (doc = load("release-dry-run.yml"))
   unless rs && env_name(rs) == "release-state" && steps(rs).any? { |s| run_text(s).include?("check-release-state-access.sh") }
     err(name, "must prove in a release-state job that only the release App writes release-state")
   end
+  # Signing needs the private key, not just the certificate: import match into a
+  # throwaway keychain and require a valid Developer ID identity there.
+  rb = doc.dig("jobs", "release-build")
+  unless rb && env_name(rb) == "release-build" &&
+         steps(rb).any? { |s| run_text(s).strip == "scripts/release/check-developer-id-identity.sh" }
+    err(name, "must prove in a release-build job that the Developer ID identity in match imports with its private key")
+  end
   # The website App: minted as release-publish.yml mints it, then used read-only.
   wu = doc.dig("jobs", "website-update")
   site = wu && steps(wu).find { |s| s["id"] == "site-token" }

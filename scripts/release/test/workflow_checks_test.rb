@@ -56,6 +56,14 @@ class WorkflowChecksTest < Minitest::Test
                   "release-dry-run.yml" => ["run: scripts/release/check-release-state-access.sh", "run: true"])
   end
 
+  def test_the_dry_run_must_prove_the_developer_id_private_key_imports
+    msg = "must prove in a release-build job that the Developer ID identity in match imports with its private key"
+    f = "release-dry-run.yml"
+    assert_caught(msg, f => ["run: scripts/release/check-developer-id-identity.sh",
+                             "run: bundle exec fastlane run match type:developer_id readonly:true"])
+    assert_caught(msg, f => ["run: scripts/release/check-developer-id-identity.sh", "run: true"])
+  end
+
   def test_the_dry_run_checks_the_website_app_without_publishing
     msg = "must prove in a website-update job that the website App's publish token can be minted"
     f = "release-dry-run.yml"
