@@ -109,6 +109,11 @@ body:
         - Sometimes
         - Once
         - Unknown
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact, workaround or last known working version (optional)
+      description: Who/what is blocked? Is there an alternative? Name an older working version only if you actually tested it. No measurements or device logs are required.
   - type: dropdown
     id: evidence
     attributes:

@@ -218,7 +218,26 @@ if (doc = load("release-candidate.yml"))
     err(name, "job #{p} must call release-#{p}.yml after plan") unless job && job["uses"] == "./.github/workflows/release-#{p}.yml" && needs(job).include?("plan")
   end
   err(name, "a newer push must cancel the older candidate's run") unless doc.dig("concurrency", "cancel-in-progress") == true
+  # A platform the release config excludes (excludedPlatforms) is never built
+  # or uploaded: the plan asks the release library, and the job is skipped.
+  plan_text = plan ? steps(plan).map { |s| run_text(s) }.join("\n") : ""
+  unless plan_text.include?("meow-release builds android --config .github/release-config.json") &&
+         plan&.dig("outputs", "android").to_s.include?("steps.plan.outputs.android")
+    err(name, "plan must export whether the release config builds Android (meow-release builds android)")
+  end
+  unless doc.dig("jobs", "android", "if").to_s.strip == "needs.plan.outputs.android == 'true'"
+    err(name, "the android job must be skipped when the release config excludes Android")
+  end
   no_publishing(name, doc)
+end
+
+# release-android.yml refuses an excluded release itself, before any token,
+# secret or build, whoever calls it.
+if (doc = load("release-android.yml"))
+  first = steps(doc.dig("jobs", "check") || {}).find { |s| s["run"] || s["uses"].to_s.include?("create-github-app-token") }
+  unless first && run_text(first).include?("meow-release builds android") && run_text(first).include?("exit 1")
+    err("release-android.yml", "check must refuse a release that excludes Android before anything else")
+  end
 end
 
 { "release-mac.yml" => %w[release-build release-state], "release-ios.yml" => %w[ios-upload release-state],
@@ -389,6 +408,20 @@ if (doc = load("release-dry-run.yml"))
   unless rs && env_name(rs) == "release-state" && steps(rs).any? { |s| run_text(s).include?("check-release-state-access.sh") }
     err(name, "must prove in a release-state job that only the release App writes release-state")
   end
+  # The website App: minted as release-publish.yml mints it, then used read-only.
+  wu = doc.dig("jobs", "website-update")
+  site = wu && steps(wu).find { |s| s["id"] == "site-token" }
+  unless wu && env_name(wu) == "website-update" && steps(wu).any? { |s| run_text(s).include?("check-website-app-access.sh") } &&
+         site && site["uses"].to_s.start_with?("actions/create-github-app-token@") &&
+         site["with"] == { "client-id" => "${{ vars.WEBSITE_APP_CLIENT_ID }}",
+                           "private-key" => "${{ secrets.WEBSITE_APP_PRIVATE_KEY }}",
+                           "owner" => "raiseCatError", "repositories" => "MeowDisplayWebsite",
+                           "permission-contents" => "write", "permission-pull-requests" => "write" }
+    err(name, "must prove in a website-update job that the website App's publish token can be minted (check-website-app-access.sh)")
+  end
+  if doc.to_s.include?("update-website.sh")
+    err(name, "must not run update-website.sh: the dry run never publishes to the website")
+  end
 end
 
 # The access check runs one job, from the default branch, in its own environment, whose
@@ -445,6 +478,24 @@ if (doc = load("release-monitor.yml"))
   monitor = doc.dig("jobs", "monitor") || {}
   unless needs(monitor).include?("pending") && monitor["if"].to_s.include?("needs.pending.outputs.versions != ''")
     err("release-monitor.yml", "the monitor job must run only when the pending job found an unfinished release")
+  end
+  # An App Review submission authorized per run comes only from a person's
+  # dispatch input, never from a scheduled run.
+  steps(monitor).each do |s|
+    value = s.dig("env", "IOS_SUBMISSION_AUTHORIZED")
+    next if value.nil?
+
+    unless value.to_s.include?("github.event_name == 'workflow_dispatch' && inputs.submit_ios")
+      err("release-monitor.yml", "IOS_SUBMISSION_AUTHORIZED may come only from a dispatched run's submit_ios input")
+    end
+  end
+end
+
+# The dry run doesn't check credentials of a platform the release excludes.
+if (doc = load("release-dry-run.yml"))
+  android = doc.dig("jobs", "android-upload") || {}
+  unless needs(android).include?("platforms") && android["if"].to_s.strip == "needs.platforms.outputs.android == 'true'"
+    err("release-dry-run.yml", "android-upload must be skipped when the release config excludes Android")
   end
 end
 

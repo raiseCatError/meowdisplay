@@ -880,7 +880,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// windows below (like a feed). Off: the older scrub-wheel direction.
     var stagePeekNaturalScrolling = true
     /// Compact (a bounded, fading column between the controls) or Normal (the open column).
-    var stagePeekDock = StagePeekDockStyle.compact
+    /// Normal for new installs (issue #130): Compact's band fades and clips so tightly on a
+    /// phone in landscape that about one window shows. A stored choice, Compact included,
+    /// is kept: every saved blob carries this key.
+    var stagePeekDock = StagePeekDockStyle.normal
     /// Smart Touch (Experimental): lets a one-finger Direct Touch swipe
     /// scroll when the Mac confirms the touched element is scrollable.
     /// No effect in Trackpad mode. Defaults on (schema 16).
@@ -904,6 +907,16 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// earlier `.sameSide` (see `init(from:)`).
     var functionTrayPosition = FunctionTrayPosition.oppositeSide
     var functionTrayProfiles: [FunctionTrayProfile]
+    /// How long a modifier is touched before its shortcuts appear (#131).
+    var modifierHoldResponse = ModifierHoldResponse.standard
+    /// The compact arrow button and its keypad (#179) on iPhone and compact
+    /// windows. Its own switch, like the Function Tray's; only Allow Input
+    /// and the keyboard wire also gate it. On for everyone, upgraded
+    /// installs included: it is part of the default layout.
+    var arrowKeysEnabled = true
+    /// Which side the arrow button sits on: the lower-right corner area by
+    /// default, or the lower left.
+    var arrowKeysSide = LandscapeTraySide.trailing
     /// Global (never profile-specific) layout preference: whether tray/
     /// control geometry conditionally shifts inward to clear the notch/
     /// Dynamic Island/home-indicator strip when a frame would actually
@@ -980,6 +993,12 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// creates one — see `createCustomLayout`.
     var customLayouts: [CustomControlLayout] = []
     var activeCustomLayoutID: String?
+    /// The receiver-local Calculator's button (iPhone, and the iPad Strip
+    /// and Overlay), added from the Function Tray editor. Off until the
+    /// person adds it; a Custom layout places its own. Not a Function Tray
+    /// item: it sends nothing to the Mac, so it lives beside the profiles
+    /// rather than in them, and older builds see only a key they ignore.
+    var showsCalculatorButton = false
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -1045,6 +1064,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // Older saves predate the opposite-side default: keep what they had.
         functionTrayPosition = try value(.functionTrayPosition, FunctionTrayPosition.sameSide)
         functionTrayProfiles = try value(.functionTrayProfiles, fallback.functionTrayProfiles)
+        // Absent (added 2026-11-05): Standard. No schema bump.
+        // Lenient: a value a later build adds falls back here instead of
+        // failing the whole blob.
+        modifierHoldResponse = (try? value(.modifierHoldResponse, fallback.modifierHoldResponse))
+            ?? fallback.modifierHoldResponse
+        // Absent (added 2026-11-05): a new install's values. No schema bump.
+        arrowKeysEnabled = try value(.arrowKeysEnabled, fallback.arrowKeysEnabled)
+        arrowKeysSide = try value(.arrowKeysSide, fallback.arrowKeysSide)
         // Absent (schema < 7) means "written before Avoid Notch existed" —
         // default true, matching a brand-new install (and the explicit
         // "old settings migrate to ON" requirement).
@@ -1099,6 +1126,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
             .elements.prefix(CustomControlLayout.maximumCount))
         activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
+        // Absent (added 2026-11-05): not shown. Nothing to migrate.
+        showsCalculatorButton = try value(.showsCalculatorButton, fallback.showsCalculatorButton)
     }
 
     private enum LegacyCodingKeys: String, CodingKey {

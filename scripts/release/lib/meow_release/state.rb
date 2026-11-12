@@ -64,11 +64,12 @@ module MeowRelease
 
     attr_reader :data
 
-    def self.fresh(version:, mode:, required_platforms:, now: Time.now.utc)
+    def self.fresh(version:, mode:, required_platforms:, excluded_platforms: [], now: Time.now.utc)
       raise Error, "unknown mode #{mode}" unless MODES.include?(mode)
 
-      unknown = required_platforms - PLATFORMS
+      unknown = (required_platforms + excluded_platforms) - PLATFORMS
       raise Error, "unknown platforms #{unknown}" unless unknown.empty?
+      raise Error, "a platform can't be both required and excluded" unless (required_platforms & excluded_platforms).empty?
 
       v = Version.parse(version)
       new(
@@ -77,6 +78,7 @@ module MeowRelease
         "branch" => v.branch,
         "mode" => mode,
         "requiredPlatforms" => required_platforms,
+        "excludedPlatforms" => excluded_platforms,
         "candidate" => nil,
         "superseded" => [],
         "platforms" => PLATFORMS.map { |p| [p, { "stage" => "pending" }] }.to_h,
@@ -113,6 +115,12 @@ module MeowRelease
       @data["requiredPlatforms"]
     end
 
+    # Platforms the release config leaves out of this candidate. Records
+    # written before this field existed have none.
+    def excluded_platforms
+      @data.fetch("excludedPlatforms", [])
+    end
+
     def candidate_sha
       @data.dig("candidate", "sha")
     end
@@ -142,7 +150,7 @@ module MeowRelease
     # `required_platforms` (from the release config) is adopted only by a
     # new candidate: a running candidate's platforms never change under it,
     # and a mismatch is refused by Coordinator and Publisher instead.
-    def begin_candidate(sha, run_id:, now: Time.now.utc, required_platforms: nil)
+    def begin_candidate(sha, run_id:, now: Time.now.utc, required_platforms: nil, excluded_platforms: nil)
       raise Error, "candidate SHA must be 40 hex digits" unless sha.to_s.match?(/\A[0-9a-f]{40}\z/)
       return false if candidate_sha == sha
       raise Error, "#{version} is already published from #{candidate_sha}" if publication_stage == "published"
@@ -158,6 +166,16 @@ module MeowRelease
 
         log("platforms", now: now, from: self.required_platforms, to: required_platforms)
         @data["requiredPlatforms"] = required_platforms
+      end
+      if excluded_platforms && excluded_platforms.sort != self.excluded_platforms.sort
+        unknown = excluded_platforms - PLATFORMS
+        raise Error, "unknown platforms #{unknown.join(', ')}" unless unknown.empty?
+
+        log("excluded", now: now, from: self.excluded_platforms, to: excluded_platforms)
+        @data["excludedPlatforms"] = excluded_platforms
+      end
+      unless (self.required_platforms & self.excluded_platforms).empty?
+        raise Error, "a platform can't be both required and excluded"
       end
       @data["candidate"] = { "sha" => sha, "runId" => run_id, "createdAt" => now.iso8601 }
       PLATFORMS.each { |p| @data["platforms"][p] = { "stage" => "pending", "sha" => sha } }
@@ -181,6 +199,7 @@ module MeowRelease
     # numbers, checksums, store ids, blockers).
     def advance(name, to, sha:, now: Time.now.utc, **details)
       raise Error, "unknown platform #{name}" unless PLATFORMS.include?(name)
+      raise Error, "#{name} is excluded from #{version}: nothing may be recorded for it" if excluded_platforms.include?(name)
       raise Error, "#{name}: result for #{sha.to_s[0, 12]} but the candidate is #{candidate_sha.to_s[0, 12]}" unless sha == candidate_sha
 
       from = stage(name)

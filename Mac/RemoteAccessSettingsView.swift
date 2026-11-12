@@ -205,7 +205,7 @@ struct RemoteEndpointEditorView: View {
     }
 
     private func connect() {
-        controller.connect(to: .remote(peerID: peerID), userInitiated: true)
+        controller.explicitConnect(to: .remote(peerID: peerID))
     }
 }
 

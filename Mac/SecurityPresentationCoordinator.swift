@@ -12,6 +12,11 @@ import SwiftUI
 /// never by whichever settings view instance happens to exist.
 @MainActor
 enum SecurityPresentationCoordinator {
+    /// The displays MeowDisplay is streaming to devices as virtual displays.
+    /// Request panels never open on one while the Mac has another display.
+    /// Set once by the controller that owns the sessions.
+    static var streamedDisplays: @MainActor () -> Set<CGDirectDisplayID> = { [] }
+
     // MARK: - Pairing (SAS confirmation)
 
     private static var pairingPanel: NSPanel?
@@ -30,18 +35,8 @@ enum SecurityPresentationCoordinator {
         if let existing = pairingPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Pairing Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            // A security decision must stay visible even if the user clicks
-            // elsewhere — it may only close through explicit accept/reject
-            // or the model's own timeout, never by losing focus.
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Pairing Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 240))
             pairingPanel = panel
             Log.info("uiDebug: pairing panel created id=\(ObjectIdentifier(panel))")
         }
@@ -55,12 +50,13 @@ enum SecurityPresentationCoordinator {
         let delegate = PairingPanelWindowDelegate(prompt: prompt)
         pairingPanelDelegate = delegate
         panel.delegate = delegate
-        panel.contentView = NSHostingView(rootView: PairingPanelView(prompt: prompt, onResolved: {
+        let hostingController = NSHostingController(rootView: PairingPanelView(prompt: prompt, onResolved: {
             Log.info("uiDebug: pairing panel closed reason=resolved")
             panel.orderOut(nil)
         }))
-        panel.center()
-        panel.orderFrontRegardless()
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
         Log.info("uiDebug: pairing panel orderedFront visible=\(panel.isVisible) keyWindow=\(panel.isKeyWindow)")
     }
 
@@ -78,18 +74,8 @@ enum SecurityPresentationCoordinator {
         if let existing = inputControlPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Control Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            // Same rationale as the pairing panel: a security decision must
-            // stay visible until explicit action or timeout, never dismiss
-            // itself on a focus change.
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Control Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
             inputControlPanel = panel
         }
         let delegate = InputControlPanelWindowDelegate(prompt: prompt)
@@ -107,8 +93,7 @@ enum SecurityPresentationCoordinator {
         // truncates or leaves the panel oddly oversized.
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Remote Finder ("<Device Name> wants to browse your approved folders")
@@ -182,15 +167,8 @@ enum SecurityPresentationCoordinator {
         let request = filesConsentQueue.removeFirst()
         filesConsentShown = request
         // A fresh panel per question.
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-            styleMask: [.titled, .closable, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.title = String(localized: "Files Request")
-        panel.isFloatingPanel = true
-        panel.level = .modalPanel
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
+        let panel = SecurityPanelPlacement.makePanel(
+            title: String(localized: "Files Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
         filesConsentPanel = panel
         let delegate = FilesConsentPanelWindowDelegate()
         filesConsentPanelDelegate = delegate
@@ -201,8 +179,7 @@ enum SecurityPresentationCoordinator {
         })
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Session request ("<Device Name> wants to use this Mac as a display source")
@@ -219,15 +196,8 @@ enum SecurityPresentationCoordinator {
         if let existing = sessionApprovalPanel {
             panel = existing
         } else {
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 1),
-                styleMask: [.titled, .closable, .nonactivatingPanel],
-                backing: .buffered, defer: false)
-            panel.title = String(localized: "Display Request")
-            panel.isFloatingPanel = true
-            panel.level = .modalPanel
-            panel.hidesOnDeactivate = false
-            panel.isReleasedWhenClosed = false
+            panel = SecurityPanelPlacement.makePanel(
+                title: String(localized: "Display Request"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
             sessionApprovalPanel = panel
         }
         let delegate = SessionApprovalPanelWindowDelegate(prompt: prompt)
@@ -238,8 +208,7 @@ enum SecurityPresentationCoordinator {
         }))
         hostingController.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hostingController
-        panel.center()
-        panel.orderFrontRegardless()
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
     // MARK: - Forget Device
@@ -303,6 +272,9 @@ private struct PairingPanelView: View {
     @ObservedObject var prompt: PairingPromptModel
     let onResolved: () -> Void
     @State private var armed = false
+    private static var refusedGrantMessage: String {
+        String(localized: "Approval was blocked because the click came from software, such as Screen Sharing. Use a physical mouse or trackpad connected to this Mac, or a hardware KVM, then try again.")
+    }
 
     var body: some View {
         Group {
@@ -328,11 +300,44 @@ private struct PairingPanelView: View {
                         Text(PairingCopy.sasHelper).font(.caption).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
+                    if prompt.grantRefused {
+                        Text(Self.refusedGrantMessage)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if prompt.panelPhase == .authenticatingOwner {
+                        // The system's Touch ID / password prompt is open: say
+                        // so, rather than leave the code up with a disabled
+                        // button that looks stuck. Cancel still rejects and
+                        // invalidates the authentication.
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(PairingCopy.ownerAuthTitle).font(.subheadline.weight(.semibold))
+                                Text(PairingCopy.ownerAuthHelper).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
                     HStack {
                         Button("Cancel", role: .cancel) { prompt.decide(accept: false) }
                             .keyboardShortcut(.cancelAction)
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
-                            if ConsentGrant.allowed() { prompt.decide(accept: true) }
+                            guard ConsentGrant.allowed() else {
+                                prompt.noteRefusedGrant()
+                                NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
+                                    userInfo: [.announcement: Self.refusedGrantMessage,
+                                               .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+                                return
+                            }
+                            // Only now, after a hardware press on the grant
+                            // itself, does MeowDisplay come forward, so the
+                            // owner-authentication prompt that may follow
+                            // isn't left behind other apps' windows. The panel
+                            // still never takes focus on its own appearance.
+                            NSApp.activate(ignoringOtherApps: true)
+                            prompt.decide(accept: true)
                         }
                         .disabled(prompt.isAuthenticating || !armed)
                     }
@@ -355,7 +360,7 @@ private struct PairingPanelView: View {
                 Color.clear.frame(width: 1, height: 1)
             }
         }
-        .frame(minWidth: 360)
+        .frame(width: 380)
         // Stays open while waiting for the other device; closes only when the
         // attempt has neither a pending SAS nor a local confirmation.
         .modifier(ArmsAfterDelay(armed: $armed, key: prompt.pending?.id))

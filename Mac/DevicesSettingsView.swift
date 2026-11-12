@@ -66,14 +66,14 @@ struct DevicesSettingsView: View {
                 ForEach(controller.knownDeviceEntries) { entry in
                     HStack(alignment: .firstTextBaseline) {
                         Circle()
-                            .fill(entry.activeSessionID != nil ? .green : .secondary.opacity(0.5))
+                            .fill(knownDeviceDotColor(entry.connection))
                             .frame(width: 9, height: 9)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.name)
-                            Text(entry.activeSessionID != nil ? "Connected"
-                                 : entry.resolvedTarget != nil ? "Paired · Nearby" : "Paired · Offline")
+                            Text(knownDeviceStatus(entry))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(3)
                         }
                         Spacer()
                         if entry.activeSessionID == nil, let target = entry.resolvedTarget {
@@ -83,10 +83,20 @@ struct DevicesSettingsView: View {
                             } label: {
                                 Text("Connect")
                             } primaryAction: {
-                                controller.connect(to: target, userInitiated: true)
+                                controller.explicitConnect(to: target)
                             }
                             .menuStyle(.button)
                             .fixedSize()
+                            .controlSize(.small)
+                        }
+
+                        // A dial that hasn't reached the device yet: say so
+                        // and let it be stopped, instead of a Connect it absorbs.
+                        if case .connecting(let sessionID, _, _) = entry.connection {
+                            ProgressView().controlSize(.small)
+                            Button("Cancel") {
+                                if let session = controller.session(for: sessionID) { controller.disconnect(session) }
+                            }
                             .controlSize(.small)
                         }
                         NavigationLink {
@@ -168,7 +178,7 @@ struct DevicesSettingsView: View {
                                     .controlSize(.small)
                             } else {
                                 Button("Connect") {
-                                    controller.connect(to: target, userInitiated: true)
+                                    controller.explicitConnect(to: target)
                                 }
                                 .controlSize(.small)
                             }
@@ -178,6 +188,28 @@ struct DevicesSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func knownDeviceDotColor(_ connection: KnownDeviceConnection) -> Color {
+        switch connection {
+        case .connected: return .green
+        case .connecting, .awaitingApproval: return .orange
+        case .failed: return .red
+        case .idle: return .secondary.opacity(0.5)
+        }
+    }
+
+    private func knownDeviceStatus(_ entry: SenderController.KnownDeviceEntry) -> String {
+        switch entry.connection {
+        case .connected: return String(localized: "Connected")
+        case .awaitingApproval: return String(localized: "Waiting for approval…")
+        case .connecting(_, let status, let automatic):
+            let connecting = automatic ? String(localized: "Connecting automatically…") : String(localized: "Connecting…")
+            return status == "Starting…" ? connecting : connecting + " " + status
+        case .failed(_, let status): return status
+        case .idle:
+            return entry.resolvedTarget != nil ? String(localized: "Paired · Nearby") : String(localized: "Paired · Offline")
+        }
     }
 }
 

@@ -125,10 +125,49 @@ enum BlockedInputAttemptPolicy {
     /// (pv 8+) must have granted it: View Only forwards nothing, and a touch meant for the Mac
     /// offers Request Control instead (found 2026-10-30: in Window mode the touch went out, the
     /// Mac dropped it, and no prompt appeared). Older Macs never report it, so only the live
-    /// session and this device's own switch count there.
-    static func inputReachesMac(sessionLive: Bool, localAllow: Bool, macPV: Int, macState: SessionInputWireState) -> Bool {
-        guard sessionLive, localAllow else { return false }
+    /// session and this device's own switch count there. `surfaceInteractive` is false while
+    /// Home covers a kept session (#121): nothing on that hidden surface may reach the Mac.
+    static func inputReachesMac(sessionLive: Bool, localAllow: Bool, macPV: Int, macState: SessionInputWireState,
+                                surfaceInteractive: Bool = true) -> Bool {
+        guard sessionLive, localAllow, surfaceInteractive else { return false }
         return macPV < WireProtocol.allowInputWireVersion || macState == .allowed
+    }
+}
+
+/// What a delayed remote action, such as a later step of a one-tap sequence,
+/// was started under. It may go on only while the receiver still reports
+/// the same ticket:
+/// - `controlGeneration` moves on every reset of local control state: Home,
+///   Session Actions, a display-mode switch, the surface closing (the app
+///   not active, Picture in Picture), or the session pausing or ending.
+/// - `connectionGeneration` moves with every new connection: another Mac,
+///   or the same one reconnecting.
+///
+/// There is no ticket while input can't leave this device. The permission
+/// at the moment the action started is never enough on its own.
+struct RemoteInputTicket: Equatable, Sendable {
+    let controlGeneration: Int
+    let connectionGeneration: Int
+
+    static func current(surfaceOpen: Bool, displayRunning: Bool, sessionLive: Bool,
+                        controlGeneration: Int, connectionGeneration: Int?) -> RemoteInputTicket? {
+        guard surfaceOpen, displayRunning, sessionLive, let connectionGeneration else { return nil }
+        return RemoteInputTicket(controlGeneration: controlGeneration, connectionGeneration: connectionGeneration)
+    }
+}
+
+/// The last check before input leaves this device. While the receiver
+/// surface is closed (Home over a kept session, Session Actions, Picture in
+/// Picture, or the app not active), only releases go out. That way nothing
+/// new starts on the Mac, and nothing already pressed stays pressed.
+enum RemoteInputTransmission {
+    /// A touch or Pencil phase that ends contact rather than starting or moving it.
+    static func isRelease(phase: String) -> Bool {
+        phase == "ended" || phase == "cancelled"
+    }
+
+    static func mayLeave(surfaceOpen: Bool, isRelease: Bool) -> Bool {
+        surfaceOpen || isRelease
     }
 }
 
@@ -185,11 +224,17 @@ enum KeyboardBarItem: Hashable {
     case tab
     /// One Return press, beside Escape and Tab for ⌘↵ and ⇧↵.
     case returnKey
+    /// Opens the arrow keypad (#179); shown only while the arrow keys are.
+    case arrowKeys
     /// Dismisses the software keyboard.
     case dismissKeyboard
 
     static let defaultItems: [KeyboardBarItem] = ControlModifier.allCases.map(KeyboardBarItem.modifier)
-        + [.escape, .tab, .returnKey, .dismissKeyboard]
+        + [.escape, .tab, .returnKey, .arrowKeys, .dismissKeyboard]
+
+    /// Points between keys. A ninth key tightens it a little, so a 375pt
+    /// iPhone keeps 32pt keys instead of dropping to the 30pt floor.
+    static func gap(count: Int) -> CGFloat { count > 8 ? 6 : 8 }
 }
 
 

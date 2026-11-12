@@ -13,7 +13,14 @@ versions and download links are in
 
 MeowDisplay has receiving apps on iPhone, iPad, Android and Mac. The main Mac
 app both shares and receives; the separate Receiver-only app runs on macOS 12
-or later. Android 2.0 (closed testing) requires the Mac 2.0 app. All
+or later. Android 2.0 (closed testing) works with the Mac app 2.0 and later.
+The Mac's updater (Sparkle) has one feed, so it offers Mac 2.1 to every Mac
+2.0 install, including Macs used with Android, and Android 2.0 keeps working
+with it over the same protocol (pv 22, pairing 13). It doesn't get the 2.1
+features. While a Mac 2.1 is locked, it sends Android 2.0 no picture and
+accepts none of its input: the Android screen shows video off (dark) with no
+lock notice, can't show or operate the lock screen, and resumes once the Mac
+is unlocked at the Mac. All
 receivers negotiate the same shared wire protocol but have different
 platforms, release channels and capability limits.
 
@@ -31,6 +38,52 @@ This document is the companion policy for *evolving* it.
 > Status: **draft / partially implemented.** Version negotiation and the pv 11
 > secure-transport boundary are implemented. Sections marked _(planned)_
 > describe target behavior.
+
+## Operating systems: minimum and tested
+
+**Minimum supported.** Each app is built to run on this version or later
+(the deployment targets in `project.yml` and `AndroidReceiver/app/build.gradle.kts`):
+
+| App | Minimum |
+| --- | --- |
+| MeowDisplay for Mac (share and receive) | macOS 14 |
+| MeowDisplay Receiver (receiver-only Mac app) | macOS 12 |
+| MeowDisplay for iPhone and iPad | iOS / iPadOS 16.4 |
+| MeowDisplay for Android (closed testing) | Android 10 (API 29) |
+
+**Tested.** What has actually been run, as of the 2.1 release candidate:
+
+- **CI, every pull request:** the Mac app, MeowDisplay Receiver and the
+  iOS app are built and the Mac tests run on GitHub's hosted macOS runner,
+  currently macOS 27.0.1 (26A434) with Xcode 27.1 (`xcode-27-arm64` image). The iPhone Duo UI
+  tests run in an iOS 27 simulator, and the Android tests on the JVM. CI
+  doesn't run on older macOS or iOS versions.
+- **Physical devices, 2.1 release QA:** a Mac on macOS 27.0 sending to an
+  iPhone 14 Pro Max (iOS 27.0.1) and an iPad (9th generation, iPadOS 27.0.1).
+  The receiver-only Mac app and receiving on a second Mac haven't been tested
+  on hardware.
+
+Every version from the minimum up is supported, including ones we haven't
+run: macOS 14 to 26 for the Mac app, iOS / iPadOS 16.4 to 26, and every
+version for MeowDisplay Receiver, which so far is only built in CI. Problems
+on those versions are bugs: please
+[report them](https://github.com/raiseCatError/meowdisplay/issues/new/choose)
+with your macOS or iOS version.
+
+**Known issues**
+
+- **Mac app quits after approving pairing on macOS 15**
+  ([#219](https://github.com/raiseCatError/meowdisplay/issues/219)). Reported
+  with Mac 2.0.0 on macOS 15.7.7 and an iPhone on the same Wi-Fi. Right after
+  pairing, the Mac sets up QUIC from the iPhone's Bonjour service, and macOS 15
+  rejects that ("Endpoint Bonjour is of invalid type for multiplex group");
+  macOS 27 accepts it, which is why our testing didn't catch it. Mac 2.1
+  includes a proposed fix ([#226](https://github.com/raiseCatError/meowdisplay/pull/226)):
+  the service is resolved to an address first, and if that doesn't work, Auto
+  uses the secure TCP connection instead. It's tested on macOS 27 only and
+  **not yet verified on a Mac running macOS 15**. The reporter saw the same
+  failure over Tailscale; that route dials an address directly, so this cause
+  doesn't explain it, and the Tailscale failure remains unexplained.
 
 ---
 

@@ -76,6 +76,42 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(AppStore.receiverUpdateURL, AppStore.updateURL)
     }
 
+    func testTheShippingReviewLinkOpensWriteAReview() {
+        XCTAssertEqual(AppStore.writeReviewURL?.absoluteString,
+                       "https://apps.apple.com/app/id6817552864?action=write-review")
+    }
+
+    // MARK: - Rate MeowDisplay
+
+    func testTheReviewLinkFollowsTheListing() {
+        XCTAssertNil(AppStore.writeReviewURL(appID: nil))
+        XCTAssertNil(AppStore.writeReviewURL(appID: "id123"))
+        XCTAssertEqual(AppStore.writeReviewURL(appID: Self.ownID)?.absoluteString,
+                       "https://apps.apple.com/app/id\(Self.ownID)?action=write-review")
+    }
+
+    /// Rate MeowDisplay is a plain link on the iPhone and iPad app. No app
+    /// asks for a review itself, and the directly downloaded Mac apps have no
+    /// listing to send anyone to.
+    func testOnlyTheIPhoneAndIPadAppLinksToAReviewAndNoAppAsksForOne() throws {
+        let fileManager = FileManager.default
+        for folder in ["iOS", "Shared", "Mac", "MacReceiver"] {
+            let root = Self.repoRoot.appendingPathComponent(folder)
+            let files = fileManager.enumerator(at: root, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
+            XCTAssertFalse(files.isEmpty, folder)
+            for file in files {
+                let text = try String(contentsOf: file, encoding: .utf8)
+                for api in ["requestReview", "SKStoreReviewController", "RequestReviewAction"] {
+                    XCTAssertFalse(text.contains(api), "\(folder)/\(file.lastPathComponent) uses \(api)")
+                }
+                if folder == "Mac" || folder == "MacReceiver" {
+                    XCTAssertFalse(text.contains("writeReviewURL"), "\(folder)/\(file.lastPathComponent) links to a review")
+                }
+            }
+        }
+    }
+
     // MARK: - With a listing
 
     func testOwnListingIsLinkedOnceConfigured() {

@@ -14,17 +14,24 @@ let meowAccent = Color(red: 0.33, green: 0.60, blue: 1.0)
 /// dark surface instead of blur (still not pitch black).
 struct GlassSurface<S: InsettableShape>: View {
     let shape: S
+    /// The black layer over the material. Stage Peek passes
+    /// `StagePeekLegibility.minimumScrimOpacity` so its white labels stay
+    /// legible over a bright window behind.
+    var scrimOpacity: Double = 0.16
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         ZStack {
-            if reduceTransparency {
+            // Increase Contrast takes the same dense surface as Reduce Transparency: the
+            // label contrast then no longer depends on what the Mac shows behind it.
+            if reduceTransparency || contrast == .increased {
                 shape.fill(Color(white: 0.13).opacity(0.95))
             } else {
                 shape.fill(.ultraThinMaterial)
-                shape.fill(Color.black.opacity(0.16))
+                shape.fill(Color.black.opacity(scrimOpacity))
             }
-            shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6)
+            shape.strokeBorder(Color.white.opacity(contrast == .increased ? 0.5 : 0.22), lineWidth: contrast == .increased ? 1 : 0.6)
         }
         .shadow(color: .black.opacity(0.30), radius: 14, x: 0, y: 6)
     }
@@ -32,6 +39,11 @@ struct GlassSurface<S: InsettableShape>: View {
 
 extension View {
     func glass<S: InsettableShape>(_ shape: S) -> some View { background(GlassSurface(shape: shape)) }
+    /// Glass for controls drawn over the live Mac picture (Stage Peek), dark
+    /// enough for white labels over any content (issue #121, Workstream D).
+    func legibleGlass<S: InsettableShape>(_ shape: S) -> some View {
+        background(GlassSurface(shape: shape, scrimOpacity: StagePeekLegibility.minimumScrimOpacity))
+    }
 }
 
 // MARK: - Icons
@@ -43,22 +55,8 @@ struct MacAppIcon: View {
     var size: CGFloat = 44
 
     var body: some View {
-        Group {
-            if let cg = model.icons[bundleID] {
-                Image(decorative: cg, scale: 1).resizable().interpolation(.high)
-            } else if bundleID == MacAppItem.finderBundle {
-                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(red: 0.36, green: 0.72, blue: 1), Color(red: 0.13, green: 0.45, blue: 0.95)],
-                                         startPoint: .top, endPoint: .bottom))
-                    .overlay(Image(systemName: "face.smiling").font(.system(size: size * 0.55)).foregroundStyle(.white))
-            } else {
-                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                    .fill(Color.white.opacity(0.16))
-                    .overlay(Text(String(name.prefix(1))).font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(.white))
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
+        // The one placeholder every app view uses until the Mac sends the icon (or has none).
+        WorkspaceAppIcon(icon: model.icons[bundleID], name: name, bundleID: bundleID, size: size)
     }
 }
 
@@ -88,7 +86,7 @@ struct StagePeekSearchPill: View {
         .font(.system(size: 16))
         .padding(.horizontal, 14)
         .frame(height: 42)
-        .glass(Capsule())
+        .legibleGlass(Capsule())
         .contentShape(Capsule())
     }
 }
@@ -175,7 +173,7 @@ struct StagePeekDock: View {
             }
             grabber(layout: layout, shown: shown)
         }
-        .glass(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .legibleGlass(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: shown)
     }
 
@@ -408,6 +406,8 @@ struct StagePeekGallery: View {
     var onEmptyTap: () -> Void = {}
     /// The gallery's visible height (Spatial Overview pages fill it).
     var height: CGFloat = 600
+    /// Open as Floating Window (nil: not offered).
+    var onFloat: ((CatalogWindowItem) -> Void)?
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -471,7 +471,7 @@ struct StagePeekGallery: View {
                                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                             }
                             .padding(12)
-                            .glass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .legibleGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
@@ -526,6 +526,7 @@ struct StagePeekGallery: View {
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
                             titleVisibility: .visible, presenting: menuWindow) { w in
             Button("Show in Pane") { onWindow(w) }
+            if canFloat(w) { Button("Open as Floating Window") { float(w) } }
             if model.canAddTile, !tiled.contains(w.id) { Button("Add as New Pane") { onAddTile(w) } }
             if model.canCloseWindows { Button("Close Window on Mac", role: .destructive) { model.closeWindow(w) } }
             Button("Cancel", role: .cancel) {}
@@ -538,6 +539,17 @@ struct StagePeekGallery: View {
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
+    }
+
+    /// In Window view, or over the mirrored desktop; never offered in Extend (see `canOpenFloats`).
+    private func canFloat(_ w: CatalogWindowItem) -> Bool {
+        onFloat != nil && model.canOpenFloats && !WorkspaceSource.isDisplayKey(w.id)
+    }
+
+    /// Floats `w`. From Mirror it floats over the mirrored desktop straight away (Window view
+    /// starts underneath, as when a window is dropped onto the desktop).
+    private func float(_ w: CatalogWindowItem) {
+        onFloat?(w)
     }
 
     /// The window list in the chosen expanded layout (search results always use the grid).
@@ -605,6 +617,7 @@ struct StagePeekGallery: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onWindow(w) }
         .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+        .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
         .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
         .accessibilityIdentifier("spatialWindowCard")
     }
@@ -631,6 +644,7 @@ struct StagePeekGallery: View {
                 .accessibilityAction { onWindow(w) }
                 .accessibilityAction(named: "Show in Pane") { onWindow(w) }
                 .accessibilityAction(named: "Add as New Pane") { if model.canAddTile, !tiled.contains(w.id) { onAddTile(w) } }
+                .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
                 .accessibilityAction(named: "Close Window") { if closable { confirmClose = w } }
                 .scaleEffect(held == w.id ? 1.04 : 1)
                 .overlay(cardGestures(w, onTap: { onWindow(w) }, swipe: closable && !closing))
@@ -805,7 +819,7 @@ struct StagePeekGallery: View {
                         .padding(.horizontal, 18).padding(.vertical, 10)
                 }
                 .buttonStyle(.plain).foregroundStyle(.white)
-                .glass(Capsule())
+                .legibleGlass(Capsule())
                 .disabled(!inputAllowed)
                 .opacity(inputAllowed ? 1 : 0.5)
                 .accessibilityIdentifier("stagePeekOpenOnMac")
@@ -861,7 +875,7 @@ struct StagePeekLaunchpad: View {
                 StagePeekSearchPill(query: $query, focused: $searchFocused, placeholder: String(localized: "Search all apps"))
                 Button(action: onClose) {
                     Image(systemName: "xmark").font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                        .frame(width: 42, height: 42).glass(Circle())
+                        .frame(width: 42, height: 42).legibleGlass(Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close All Apps")

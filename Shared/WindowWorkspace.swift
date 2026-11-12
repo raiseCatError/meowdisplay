@@ -372,6 +372,10 @@ struct WorkspaceTile: Equatable, Codable, Sendable {
     /// each tab keeps its own while another is shown. Absent = the default view.
     var tabViews: [String: WorkspaceTabView] = [:]
 
+    /// Its last window closed on the Mac: the pane stays, empty, until the person chooses a
+    /// window for it or removes it (`compacted()` keeps it; `removingClosedWindows`).
+    var emptied = false
+
     /// The pane's windows in label order (one, or its tabs).
     var windows: [WorkspaceSource] { tabs.isEmpty ? (source.map { [$0] } ?? []) : tabs }
 
@@ -576,6 +580,8 @@ struct WorkspaceBackdrop: @unchecked Sendable {
     var image: CGImage
     /// From before macOS paused the window.
     var stale: Bool
+    /// When this device received it.
+    var receivedAt = Date()
 }
 
 // MARK: - Layout tree
@@ -729,18 +735,26 @@ enum WorkspaceWindowDrop: Equatable, Sendable {
 /// new layout, so undo is a stack of values and nothing is half-applied.
 struct WorkspaceLayout: Equatable, Sendable {
     static let schema = 3
-    /// Hard ceiling on tiles in one workspace (iPad / expanded Android).
+    /// A saved record that carries floating panes. Written only when there are floats, so a
+    /// layout without them stays byte-for-byte schema 3 (older readers keep the tree).
+    static let floatSchema = 4
+    /// Hard ceiling on tiles in one workspace (iPad / expanded Android), floats included.
     static let maximumTiles = 9
 
     var root: WorkspaceNode
     var tiles: [String: WorkspaceTile]
     /// A tile temporarily filling the workspace; the tree is kept for restore.
     var maximized: String?
+    /// Panes floating above the tree, back to front (WorkspaceFloats.swift). Their tiles are in
+    /// `tiles` but never in `root`: a tile id is in one place only.
+    var floats: [WorkspaceFloat] = []
 
-    init(root: WorkspaceNode = .slot(nil), tiles: [String: WorkspaceTile] = [:], maximized: String? = nil) {
+    init(root: WorkspaceNode = .slot(nil), tiles: [String: WorkspaceTile] = [:], maximized: String? = nil,
+         floats: [WorkspaceFloat] = []) {
         self.root = root
         self.tiles = tiles
         self.maximized = maximized
+        self.floats = floats
         normalize()
     }
 
@@ -757,11 +771,13 @@ struct WorkspaceLayout: Equatable, Sendable {
 
     // MARK: Operations
 
-    /// Swap two tiles' places; their sources, rotations and ids move with them.
+    /// Swap two tiles' places; their sources, rotations and ids move with them. A pane and a
+    /// floating pane swap too: each window takes the other's place.
     func swapping(_ a: String, _ b: String) -> WorkspaceLayout {
         guard a != b, tiles[a] != nil, tiles[b] != nil else { return self }
         var copy = self
         copy.root = Self.mapSlots(root) { id in id == a ? b : (id == b ? a : id) }
+        for i in copy.floats.indices { copy.floats[i].tile = copy.floats[i].tile == a ? b : (copy.floats[i].tile == b ? a : copy.floats[i].tile) }
         return copy
     }
 
@@ -787,6 +803,7 @@ struct WorkspaceLayout: Equatable, Sendable {
         var copy = self
         copy.tiles[id] = nil
         copy.root = Self.removeSlot(root, tileID: id)
+        copy.floats.removeAll { $0.tile == id }
         if copy.maximized == id { copy.maximized = nil }
         copy.normalize()
         return copy
@@ -812,6 +829,7 @@ struct WorkspaceLayout: Equatable, Sendable {
             if tile.tabs.count <= 1 { tile.tabs = [] }
         }
         tile.source = source
+        if source != nil { tile.emptied = false }
         var copy = self
         copy.tiles[id] = tile
         return copy
@@ -873,9 +891,44 @@ struct WorkspaceLayout: Equatable, Sendable {
         return copy
     }
 
-    /// The pane showing (or holding as a tab) this window, if any.
+    /// The Mac closed these windows (`isClosed`; PROTOCOL.md 6.10 `gone`). A floating pane whose
+    /// windows all closed goes, tucked or not; a closed tab goes and its pane shows the next; a pane
+    /// whose last window closed stays, empty (`emptied`), for the person to fill or remove.
+    /// Returns the floating panes removed and the panes emptied.
+    func removingClosedWindows(_ isClosed: (WorkspaceSource) -> Bool) -> (layout: WorkspaceLayout, removed: Set<String>, emptied: Set<String>) {
+        var l = self
+        var removed = Set<String>(), emptied = Set<String>()
+        for id in allTileIDs {
+            guard let tile = l.tiles[id] else { continue }
+            let closed = tile.windows.filter { !$0.isDisplay && isClosed($0) }
+            guard !closed.isEmpty else { continue }
+            if l.isFloat(id), closed.count == tile.windows.count {
+                l = l.removing(id)
+                removed.insert(id)
+                continue
+            }
+            for s in closed {
+                guard var t = l.tiles[id] else { break }
+                if let i = t.tabs.firstIndex(of: s) {
+                    l = l.removingTab(of: id, at: i)
+                } else if t.source == s {
+                    t.source = nil
+                    l.tiles[id] = t
+                }
+            }
+            if var t = l.tiles[id], t.source == nil {
+                // Its view belonged to the window that closed.
+                t.emptied = true; t.zoom = nil; t.rotation = .none; t.fit = .fit; t.tabs = []; t.tabViews = [:]
+                l.tiles[id] = t
+                emptied.insert(id)
+            }
+        }
+        return (l, removed, emptied)
+    }
+
+    /// The pane (or floating pane) showing, or holding as a tab, this window, if any.
     func tile(holding host: String, windowID: UInt32) -> String? {
-        orderedTileIDs.first { id in tiles[id]?.windows.contains { $0.host == host && $0.windowID == windowID } == true }
+        allTileIDs.first { id in tiles[id]?.windows.contains { $0.host == host && $0.windowID == windowID } == true }
     }
 
     /// A new pane beside the one in slot `index` (a drop on a pane's edge).
@@ -964,10 +1017,11 @@ struct WorkspaceLayout: Equatable, Sendable {
 
     /// No empty panes: tiles without a window are dropped, empty slots close up and their
     /// neighbours take the space (ratios kept in proportion); one window fills the picture.
-    /// Only a layout with no windows at all keeps its single empty slot.
+    /// Only a layout with no windows at all keeps its single empty slot. A pane emptied because
+    /// its window closed on the Mac (`emptied`) stays until the person fills or removes it.
     func compacted() -> WorkspaceLayout {
         var copy = self
-        for (id, tile) in tiles where tile.source == nil { copy.tiles[id] = nil }
+        for (id, tile) in tiles where tile.source == nil && !tile.emptied { copy.tiles[id] = nil }
         copy.normalize()
         func prune(_ n: WorkspaceNode) -> WorkspaceNode? {
             switch n {
@@ -989,9 +1043,9 @@ struct WorkspaceLayout: Equatable, Sendable {
         return copy
     }
 
-    /// Move `id` to `target`. Dropping on its own slot does nothing.
+    /// Move `id` to `target`. Dropping on its own slot does nothing. Floats dock with `docking`.
     func moving(_ id: String, to target: WorkspaceDropTarget) -> WorkspaceLayout {
-        guard tiles[id] != nil else { return self }
+        guard tiles[id] != nil, !isFloat(id) else { return self }
         switch target {
         case .slot(let index, _):
             guard let occupant = Self.slotID(root, at: index) else { return self }
@@ -1044,6 +1098,15 @@ struct WorkspaceLayout: Equatable, Sendable {
             guard let id, self.tiles[id] != nil, !seen.contains(id) else { return nil }
             seen.insert(id)
             return id
+        }
+        // Floats: known tiles that aren't in the tree (the tree wins), once each, kept on the canvas.
+        if !floats.isEmpty {
+            var kept: [WorkspaceFloat] = []
+            for f in floats where tiles[f.tile] != nil && !seen.contains(f.tile) {
+                seen.insert(f.tile)
+                kept.append(f.sanitized)
+            }
+            floats = kept
         }
         for id in Array(tiles.keys) where !seen.contains(id) { tiles[id] = nil }
         root = Self.normalizeNode(root)
@@ -1211,11 +1274,26 @@ struct WorkspaceDivider: Equatable, Sendable {
 }
 
 struct WorkspaceFrames: Equatable, Sendable {
-    /// Normalized rect per tile id.
+    /// Normalized rect per tile id (visible floats included).
     var tiles: [String: WorkspaceRect]
     /// Normalized rect per slot index (empty slots included).
     var slots: [WorkspaceRect]
     var dividers: [WorkspaceDivider]
+    /// Visible floating panes, back to front. Their rects are in `tiles` and may overlap
+    /// anything; the tree's panes never overlap each other.
+    var floats: [String] = []
+
+    /// The pane under `p`: the frontmost float that contains it, else the tree's pane. The one
+    /// rule for selection, hover, zoom and drops, matching the Mac's `WorkspaceInputTargeting`.
+    func hitTest(_ p: WorkspacePoint) -> String? {
+        for id in floats.reversed() where tiles[id]?.contains(p) == true { return id }
+        if floats.isEmpty { return tiles.first { $0.value.contains(p) }?.key }
+        let floating = Set(floats)
+        return tiles.first { !floating.contains($0.key) && $0.value.contains(p) }?.key
+    }
+
+    /// Whether `id` is drawn as a floating pane.
+    func isFloat(_ id: String) -> Bool { floats.contains(id) }
 }
 
 enum WorkspaceGeometry {
@@ -1246,10 +1324,13 @@ enum WorkspaceGeometry {
 
     static func frames(for layout: WorkspaceLayout, in size: WorkspaceSize, hinge: WorkspaceHinge? = nil) -> WorkspaceFrames {
         if let m = layout.maximized {
+            // One pane (or floating pane) fills the picture; the floats come back when it ends.
             let region = hinge.map { largestRegion(beside: $0) } ?? .unit
-            let index = (0..<layout.slotCount).first { WorkspaceLayout.slotID(layout.root, at: $0) == .some(m) } ?? 0
             var slots = Array(repeating: WorkspaceRect(x: 0, y: 0, width: 0, height: 0), count: layout.slotCount)
-            if index < slots.count { slots[index] = region }
+            if !layout.isFloat(m) {
+                let index = (0..<layout.slotCount).first { WorkspaceLayout.slotID(layout.root, at: $0) == .some(m) } ?? 0
+                if index < slots.count { slots[index] = region }
+            }
             return WorkspaceFrames(tiles: [m: region], slots: slots, dividers: [])
         }
         var slots: [WorkspaceRect] = []
@@ -1286,7 +1367,13 @@ enum WorkspaceGeometry {
         for (i, rect) in slots.enumerated() {
             if case .some(.some(let id)) = WorkspaceLayout.slotID(root, at: i) { tiles[id] = rect }
         }
-        return WorkspaceFrames(tiles: tiles, slots: slots, dividers: dividers)
+        // Visible floats over the tree, back to front (a tucked float has no frame: it isn't shown or sent).
+        var floats: [String] = []
+        for f in layout.floats where f.tuck == nil {
+            tiles[f.tile] = f.frame
+            floats.append(f.tile)
+        }
+        return WorkspaceFrames(tiles: tiles, slots: slots, dividers: dividers, floats: floats)
     }
 
     /// With a separating hinge and a tree that doesn't split along it, the
@@ -1402,6 +1489,10 @@ enum WorkspaceGeometry {
         guard let index = frames.slots.firstIndex(where: { $0.contains(point) }) else { return nil }
         let slot = frames.slots[index]
         guard let occupant = WorkspaceLayout.slotID(layout.root, at: index) else { return nil }
+        // A pane left empty after its window closed on the Mac: the window shows in it.
+        if let tile = occupant, layout.tiles[tile]?.source == nil, layout.tiles[tile]?.emptied == true {
+            return .replace(tile: tile, preview: slot)
+        }
         guard let tile = occupant, layout.tiles[tile]?.source != nil else { return .emptySlot(index: index, preview: slot) }
         let strip = min(labelHeight * 1.6, slot.height * 0.25)
         if point.y - slot.y <= strip {
@@ -1472,11 +1563,18 @@ enum WorkspaceAdaptation {
         var stacked: [String]
     }
 
+    /// `floatsShown`: false when the Mac can't draw floating panes (an older Mac): they are kept,
+    /// tucked to an edge, never sent and never lost.
     static func adapt(_ saved: WorkspaceLayout, to size: WorkspaceSize, hinge: WorkspaceHinge? = nil,
-                      active: String?) -> Result {
+                      active: String?, floatsShown: Bool = true) -> Result {
         let capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         let ordered = saved.orderedTileIDs
-        guard ordered.count > capacity else { return Result(visible: saved, stacked: []) }
+        guard ordered.count > capacity else {
+            guard !saved.floats.isEmpty else { return Result(visible: saved, stacked: []) }
+            var visible = saved
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
+            return Result(visible: visible, stacked: [])
+        }
         var shown = Array(ordered.prefix(capacity))
         if let active, ordered.contains(active), !shown.contains(active) {
             shown[shown.count - 1] = active
@@ -1486,7 +1584,13 @@ enum WorkspaceAdaptation {
         let preset = WorkspacePreset.natural(for: shown.count, landscape: landscape)
         let tiles = shown.compactMap { saved.tiles[$0] }
         var visible = WorkspaceLayout(preset: preset, tiles: tiles)
-        if let m = saved.maximized, shown.contains(m) { visible.maximized = m }
+        if !saved.floats.isEmpty {
+            // Floats don't take the tree's room: they stay, fitted to this space.
+            for f in saved.floats { visible.tiles[f.tile] = saved.tiles[f.tile] }
+            visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
+            visible.normalize()
+        }
+        if let m = saved.maximized, shown.contains(m) || saved.isFloat(m) { visible.maximized = m }
         return Result(visible: visible, stacked: stacked)
     }
 }
@@ -1525,6 +1629,12 @@ struct WorkspaceHistory: Equatable, Sendable {
         if past.last == layout { return }
         past.append(layout)
         if past.count > Self.depth { past.removeFirst(past.count - Self.depth) }
+    }
+
+    /// The last step recorded `layout` and the change came to nothing (a float's move cancelled
+    /// back to where it was): no undo step for it.
+    mutating func forget(_ layout: WorkspaceLayout) {
+        if past.last == layout { past.removeLast() }
     }
 
     /// The layout before the last change. With `current`, that change can be redone.
@@ -1570,7 +1680,7 @@ extension WorkspaceLayout {
             for s in tile.windows where !s.isDisplay && listed.contains(s.windowID) { used.insert(s.windowID) }
         }
         var moved: [UInt32: UInt32] = [:]
-        for id in orderedTileIDs {
+        for id in allTileIDs {
             for s in tiles[id]?.windows ?? [] where !s.isDisplay && !listed.contains(s.windowID) && moved[s.windowID] == nil {
                 guard let bundle = s.bundleID,
                       let w = windows.first(where: { $0.bundleID == bundle && !used.contains($0.id) }) else { continue }
@@ -1621,6 +1731,9 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var tabs: [TabRecord]?
         /// The pane's zoom `[scale, centerX, centerY]` (schema 3).
         var zoom: [Double]?
+        /// Its window closed on the Mac and it was kept empty (absent otherwise; older readers
+        /// drop the empty pane, as they always have).
+        var emptied: Bool?
     }
 
     struct TabRecord: Codable, Equatable, Sendable {
@@ -1634,13 +1747,30 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var zoom: [Double]?
     }
 
+    /// A floating pane (schema 4): its tile (in `tiles`), its frame on the canvas, and the edge
+    /// it is tucked to. Older readers ignore it and keep the tree.
+    struct FloatRecord: Codable, Equatable, Sendable {
+        var tile: String
+        var x: Double
+        var y: Double
+        var w: Double
+        var h: Double
+        /// "left", "right", "top" or "bottom" while tucked; absent while shown. A reader that
+        /// knows fewer edges shows a float tucked to one it doesn't know where it was (untucked).
+        var tuck: String?
+        /// The tucked handle's place along its edge (0 top or left, 1 bottom or right).
+        var offset: Double?
+    }
+
     var schema: Int
     var root: Node
     var tiles: [Tile]
     var maximized: String?
+    /// Back to front; absent (schema 3) when there are none.
+    var floats: [FloatRecord]?
 
     init(_ layout: WorkspaceLayout) {
-        schema = WorkspaceLayout.schema
+        schema = layout.floats.isEmpty ? WorkspaceLayout.schema : WorkspaceLayout.floatSchema
         func encode(_ n: WorkspaceNode) -> Node {
             switch n {
             case .slot(let id): return Node(tile: id)
@@ -1649,7 +1779,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             }
         }
         root = encode(layout.root)
-        tiles = layout.orderedTileIDs.compactMap { layout.tiles[$0] }.map {
+        tiles = layout.allTileIDs.compactMap { layout.tiles[$0] }.map {
             Tile(id: $0.id, host: $0.source?.host, window: $0.source?.windowID, bundle: $0.source?.bundleID,
                  follow: $0.source?.follow.rawValue, rotation: $0.rotation.rawValue, fit: $0.fit.rawValue,
                  tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { [views = $0.tabViews] s in
@@ -1657,9 +1787,13 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                      return TabRecord(host: s.host, window: s.windowID, bundle: s.bundleID, follow: s.follow.rawValue,
                                       rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue }, zoom: v?.zoom?.wire)
                  },
-                 zoom: $0.zoom?.wire)
+                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil)
         }
         maximized = layout.maximized
+        floats = layout.floats.isEmpty ? nil : layout.floats.map {
+            FloatRecord(tile: $0.tile, x: $0.frame.x, y: $0.frame.y, w: $0.frame.width, h: $0.frame.height,
+                        tuck: $0.tuck?.edge.rawValue, offset: $0.tuck?.offset)
+        }
     }
 
     var layout: WorkspaceLayout {
@@ -1685,6 +1819,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             let fit: WorkspaceFit = t.fit == WorkspaceFit.fill.rawValue ? .fill : .fit
             var tile = WorkspaceTile(id: t.id, source: source, rotation: WorkspaceRotation(degrees: t.rotation ?? 0), fit: fit)
             if source != nil, let z = WorkspacePaneZoom(wire: t.zoom), !z.isIdentity { tile.zoom = z }
+            if source == nil, t.emptied == true { tile.emptied = true }
             let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
                                 follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
@@ -1701,7 +1836,14 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             }
             map[t.id] = tile
         }
-        return WorkspaceLayout(root: decode(root), tiles: map, maximized: maximized)
+        let floating = (floats ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { f -> WorkspaceFloat? in
+            guard [f.x, f.y, f.w, f.h].allSatisfy(\.isFinite), f.w > 0, f.h > 0 else { return nil }
+            // An edge this build doesn't know: shown where it was, untucked.
+            let edge = f.tuck.flatMap(WorkspaceEdge.init(rawValue:))
+            return WorkspaceFloat(tile: f.tile, frame: WorkspaceRect(x: f.x, y: f.y, width: f.w, height: f.h),
+                                  tuck: edge.map { WorkspaceFloatTuck(edge: $0, offset: f.offset ?? 0.5) })
+        }
+        return WorkspaceLayout(root: decode(root), tiles: map, maximized: maximized, floats: Array(floating))
     }
 
     static func decode(_ data: Data) -> WorkspaceLayout? {

@@ -622,6 +622,9 @@ private fun PaneLabel(
     val density = LocalDensity.current.density
     val view = androidx.compose.ui.platform.LocalView.current
     var labelOrigin by remember { mutableStateOf(CGPoint.zero) }
+    // The last tap's time, for telling a double tap (fullscreen toggle) from two single taps.
+    var lastTapAt by remember { mutableStateOf(0L) }
+    val fullscreen = controller.ui.collectAsState().value.localFullscreen == id
     val highlighted = shown && active
     Row(
         Modifier
@@ -648,7 +651,19 @@ private fun PaneLabel(
                         @Suppress("UNREACHABLE_CODE") false
                     }
                     when (early) {
-                        true -> { if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id); onTap() }
+                        true -> {
+                            // A second tap on the same label: this pane fills the device, or the layout comes back.
+                            // The first tap acts at once (no waiting to see whether another follows).
+                            val now = System.currentTimeMillis()
+                            if (now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis) {
+                                lastTapAt = 0L
+                                controller.toggleLocalFullscreen(id)
+                                view.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
+                            } else {
+                                lastTapAt = now
+                                if (tab != null && !shown) controller.switchTab(id, tab) else controller.focus(id); onTap()
+                            }
+                        }
                         false -> Unit
                         null -> {
                             view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -685,6 +700,9 @@ private fun PaneLabel(
                     true
                 }
                 onLongClick(label = "Pane options") { onMenu(tab); true }
+                customActions = listOf(CustomAccessibilityAction(if (fullscreen) "Exit Fullscreen" else "Fullscreen on This Device") {
+                    controller.toggleLocalFullscreen(id); true
+                })
             }
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -784,13 +802,15 @@ private fun FullscreenStrip(controller: WorkspaceController, ui: WorkspaceUi, on
 @Composable
 fun WorkspaceDropOverlay(controller: WorkspaceController, origin: CGPoint) {
     val ui by controller.ui.collectAsState()
-    val drag = ui.drag ?: run { controller.cancelZone = CGRect.zero; return }
+    val drag = ui.drag ?: run { controller.cancelZone = CGRect.zero; controller.removeZone = CGRect.zero; return }
     val density = LocalDensity.current.density
     val view = androidx.compose.ui.platform.LocalView.current
     val target = controller.dropTarget(drag.location)
     val frame = if (ui.windowMode) controller.pictureFrame else controller.desktopFrame
     val over = controller.overCancelZone(drag.location)
-    val key = if (over) "cancel" else target?.toString() ?: ""
+    val removable = controller.canDropToRemove
+    val overRemove = controller.overRemoveZone(drag.location)
+    val key = if (over) "cancel" else if (overRemove) "remove" else target?.toString() ?: ""
     LaunchedEffect(key) { if (key.isNotEmpty()) view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK) }
     Box(Modifier.fillMaxSize()) {
         if (target != null && !frame.isEmpty) {
@@ -817,25 +837,45 @@ fun WorkspaceDropOverlay(controller: WorkspaceController, origin: CGPoint) {
             }
         }
         if (!frame.isEmpty) {
-            val cx = frame.midX - origin.x; val cy = frame.maxY - 64 - origin.y
+            val cy = frame.maxY - 64 - origin.y
+            fun report(b: androidx.compose.ui.geometry.Rect) =
+                CGRect(b.left / density.toDouble(), b.top / density.toDouble(), b.width / density.toDouble(), b.height / density.toDouble())
             Row(
                 Modifier
-                    .offset { IntOffset(((cx - 105) * density).roundToInt(), ((cy - 24) * density).roundToInt()) }
-                    .width(210.dp).height(48.dp)
-                    .onGloballyPositioned { c ->
-                        val b = c.boundsInWindow()
-                        controller.cancelZone = CGRect(b.left / density.toDouble(), b.top / density.toDouble(), b.width / density.toDouble(), b.height / density.toDouble())
-                    }
-                    .background(if (over) Color(0xD9E53935) else Color.Black.copy(alpha = 0.62f), CircleShape)
-                    .border(1.dp, Color.White.copy(alpha = if (over) 0.9f else 0.35f), CircleShape),
-                horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+                    .offset { IntOffset(((frame.minX - origin.x) * density).roundToInt(), ((cy - 24) * density).roundToInt()) }
+                    .width(frame.width.dp).padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    if (over) "✕  Release to Cancel" else "✕  Drop Here to Cancel", color = Color.White, style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.semantics { contentDescription = if (over) "Release to cancel" else "Drop here to cancel" },
-                )
+                // Beside Remove, Cancel lights neutral so the two never look alike.
+                DropZone(
+                    if (over) "✕  Release to Cancel" else if (removable) "✕  Cancel" else "✕  Drop Here to Cancel",
+                    if (over) "Release to cancel" else "Drop here to cancel", over,
+                    if (over) (if (removable) Color(0xEB6B6B6B) else Color(0xD9E53935)) else Color.Black.copy(alpha = 0.62f),
+                ) { controller.cancelZone = report(it) }
+                // Takes the pane out of this device's layout. Never closes, minimizes or quits the Mac window.
+                if (removable) DropZone(
+                    if (overRemove) "−  Release to Remove" else "−  Remove from Layout",
+                    if (overRemove) "Release to remove from layout" else "Drop here to remove from layout", overRemove,
+                    if (overRemove) Color(0xD9E53935) else Color(0xB85A0F0F),
+                ) { controller.removeZone = report(it) }
             }
         }
+    }
+}
+
+@Composable
+private fun DropZone(text: String, description: String, over: Boolean, fill: Color, onBounds: (androidx.compose.ui.geometry.Rect) -> Unit) {
+    Box(
+        Modifier
+            .heightIn(min = 48.dp)
+            .onGloballyPositioned { onBounds(it.boundsInWindow()) }
+            .background(fill, CircleShape)
+            .border(1.dp, Color.White.copy(alpha = if (over) 0.9f else 0.35f), CircleShape)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = Color.White, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.semantics { contentDescription = description })
     }
 }
 

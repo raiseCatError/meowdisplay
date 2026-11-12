@@ -117,6 +117,72 @@ final class DemoModeSmokeTests: XCTestCase {
     }
 }
 
+// MARK: - Pane titles
+
+extension DemoModeSmokeTests {
+    /// Demo Window view: whatever is named after a pane is title-sized at the pane's top, never
+    /// the whole pane (whose middle is the Mac picture in a live session), and holding the title
+    /// there opens the pane's menu.
+    @MainActor
+    func testPaneTitlesAreTheirOwnControlsInDemoWindowView() throws {
+        let app = XCUIApplication()
+        app.launch()
+        if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
+        waitForNonExistence(app.buttons["Close"])
+        let explore = app.buttons["exploreDemo"]
+        XCTAssertTrue(explore.waitForExistence(timeout: 5))
+        tapWhenSettled(explore, in: app)
+        let toggle = app.buttons["demoWindowViewToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 8))
+        toggle.tap()
+        let panes = app.descendants(matching: .any).matching(identifier: "workspacePane")
+        XCTAssertTrue(panes.firstMatch.waitForExistence(timeout: 8), "Window view shows its panes")
+        snapshot(app, "pane-titles-window-view")
+
+        let rotate = app.buttons["Rotate"]
+        for pane in panes.allElementsBoundByIndex {
+            let paneFrame = pane.frame
+            let title = String(pane.label.dropLast(" pane".count))
+            let named = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@ AND identifier != 'workspacePane'", title)).allElementsBoundByIndex
+            print("PANE '\(title)' \(paneFrame): \(named.map { "type \($0.elementType.rawValue) id '\($0.identifier)' \($0.frame)" })")
+            XCTAssertFalse(named.isEmpty, "'\(title)' has a title")
+            if named.contains(where: { $0.frame.height >= XCUIApplication.paneTitleMaxHeight }) {
+                let tree = XCTAttachment(string: app.debugDescription)
+                tree.name = "pane-titles-tree-\(title)"
+                tree.lifetime = .keepAlways
+                add(tree)
+            }
+            for element in named {
+                XCTAssertLessThan(element.frame.height, XCUIApplication.paneTitleMaxHeight,
+                                  "'\(title)' is title-sized, not the pane: \(element.frame) in \(paneFrame)")
+                XCTAssertLessThan(element.frame.width, paneFrame.width * 0.75, "'\(title)': \(element.frame) in \(paneFrame)")
+            }
+            _ = try XCTUnwrap(app.paneTitleFrame(.paneTitle(title), in: pane), "'\(title)' has a title at its pane's top")
+            try app.holdPaneTitle(.paneTitle(title), in: pane)
+            XCTAssertTrue(rotate.waitForExistence(timeout: 5), "holding '\(title)' opens its menu")
+            snapshot(app, "pane-titles-menu-\(title)")
+            closePaneMenu(app, panes: panes)
+            waitForNonExistence(rotate)
+        }
+    }
+
+    /// Closes the pane menu with a tap on a pane away from the menu (its scrim takes the tap).
+    @MainActor
+    private func closePaneMenu(_ app: XCUIApplication, panes: XCUIElementQuery) {
+        let rows = ["Fullscreen on This Device", "Exit Fullscreen", "View Full Screen", "Fill Pane", "Show Whole Window",
+                    "Show Whole Desktop", "Reset View", "Rotate", "Change Window…", "Show a Window Here…", "Float This Pane",
+                    "Float This Tab", "Arrange Panes", "Remove from Layout", "Remove This Tab"]
+        let menu = rows.map { app.buttons[$0].firstMatch }.filter(\.exists).map(\.frame)
+            .reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -16, dy: -16)
+        let spots = panes.allElementsBoundByIndex.map(\.frame).flatMap { f in
+            [CGPoint(x: f.midX, y: f.midY), CGPoint(x: f.midX, y: f.maxY - 24), CGPoint(x: f.maxX - 24, y: f.midY)]
+        }
+        guard let spot = spots.first(where: { !menu.contains($0) }) else { XCTFail("no spot outside the menu \(menu)"); return }
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: spot.x, dy: spot.y)).tap()
+    }
+}
+
 // MARK: - Touch Style
 
 extension DemoModeSmokeTests {
@@ -127,34 +193,51 @@ extension DemoModeSmokeTests {
         openControlsSettings(app)
         let stagePeek = app.buttons["Stage Peek"].firstMatch
         let rail = app.buttons["Rail"].firstMatch
+        // Lists load rows only as they scroll into view, and the Arrow Keys
+        // rows in Control Tray push Window Switcher below the fold on a phone.
+        for _ in 0..<5 where !stagePeek.waitForExistence(timeout: 1) { app.swipeUp(velocity: .slow) }
         XCTAssertTrue(stagePeek.waitForExistence(timeout: 5))
         for _ in 0..<6 where !rail.isHittable { app.swipeUp() }
         // The default itself is unit-tested (StagePeekTests); a run that failed
         // mid-way may have left Rail selected, so start from Stage Peek.
-        if !stagePeek.isSelected { stagePeek.tap() }
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: stagePeek)
-        waitForExpectations(timeout: 3)
+        select(stagePeek)
         XCTAssertTrue(app.otherElements["stagePeekEdgePicker"].exists || app.buttons["stagePeekEdgePicker"].exists
                       || app.staticTexts["Stage Peek Edge"].exists, "the edge choice shows for Stage Peek")
         snapshot(app, "window-switcher-stage-peek")
 
-        rail.tap()
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: rail)
-        waitForExpectations(timeout: 3)
+        select(rail)
         XCTAssertFalse(app.staticTexts["Stage Peek Edge"].exists, "no edge choice for the Rail")
         snapshot(app, "window-switcher-rail")
 
         app.terminate()
         app.launch()
         openControlsSettings(app)
-        XCTAssertTrue(app.buttons["Rail"].firstMatch.waitForExistence(timeout: 5))
-        for _ in 0..<6 where !app.buttons["Rail"].firstMatch.isHittable { app.swipeUp() }
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Rail"].firstMatch)
-        waitForExpectations(timeout: 3)   // Rail is remembered
+        let railAfterRelaunch = app.buttons["Rail"].firstMatch
+        for _ in 0..<5 where !railAfterRelaunch.waitForExistence(timeout: 1) { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(railAfterRelaunch.waitForExistence(timeout: 5))
+        for _ in 0..<6 where !railAfterRelaunch.isHittable { app.swipeUp() }
+        XCTAssertTrue(becomesSelected(railAfterRelaunch, within: 10), "Rail is remembered")
 
-        app.buttons["Stage Peek"].firstMatch.tap()   // leave the simulator on the default
-        expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: app.buttons["Stage Peek"].firstMatch)
-        waitForExpectations(timeout: 3)
+        select(app.buttons["Stage Peek"].firstMatch)   // leave the simulator on the default
+    }
+
+    /// Taps a segment until it reads as selected. On a loaded CI simulator the selection
+    /// can take more than 3 s to reach the accessibility tree, and a tap can land while
+    /// the list is still settling after a scroll, so one retry is allowed.
+    @MainActor
+    private func select(_ segment: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        for timeout: TimeInterval in [6, 10] {
+            if segment.isSelected { return }
+            segment.tap()
+            if becomesSelected(segment, within: timeout) { return }
+        }
+        XCTFail("\(segment.label) never read as selected", file: file, line: line)
+    }
+
+    @MainActor
+    private func becomesSelected(_ element: XCUIElement, within timeout: TimeInterval) -> Bool {
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isSelected == true"), object: element)
+        return XCTWaiter.wait(for: [selected], timeout: timeout) == .completed
     }
 
     /// Physical iPhone + a live Mac that offers Window mode (skipped otherwise).
@@ -162,6 +245,7 @@ extension DemoModeSmokeTests {
     /// Mac's pointer or focuses a Mac window.
     @MainActor
     func testStagePeekOnALiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let yes = app.buttons["windowModePromptYes"]
@@ -241,51 +325,77 @@ extension DemoModeSmokeTests {
         XCTAssertTrue(app.navigationBars["Input"].waitForExistence(timeout: 5))
     }
 
-    /// Natural Touch is the default; Classic stays available, shows Smart
-    /// Touch, and is remembered across a relaunch.
+    /// Touch Style, with Direct Touch: Classic shows the Smart Touch rows and Natural Touch
+    /// doesn't, a change is remembered across a relaunch, and the device's own choice is put
+    /// back. Starts from whichever style the device has (Classic for new and upgraded installs
+    /// since schema 21, which InputDefaultsTests checks), so it means the same on any device.
     @MainActor
-    func testTouchStyleDefaultsToNaturalAndClassicPersists() throws {
+    func testTouchStyleShowsSmartTouchForClassicAndIsRemembered() throws {
         let app = XCUIApplication()
         app.launch()
         openInputSettings(app)
-        let natural = app.buttons["Natural Touch"].firstMatch
-        let classic = app.buttons["Classic"].firstMatch
-        // Touch Style belongs to Direct Touch; a device set to Trackpad is left as it is.
+        // Touch Style belongs to Direct Touch; a device set to Trackpad (phones start there) is left as it is.
         if app.buttons["Trackpad"].firstMatch.waitForExistence(timeout: 3), app.buttons["Trackpad"].firstMatch.isSelected {
             throw XCTSkip("Input Mode is Trackpad on this device; not changing it")
         }
+        let natural = app.buttons["Natural Touch"].firstMatch
+        let classic = app.buttons["Classic"].firstMatch
         // Lists load rows only as they scroll into view (the Input page grew).
         for _ in 0..<5 where !natural.waitForExistence(timeout: 1) { app.swipeUp() }
         XCTAssertTrue(natural.waitForExistence(timeout: 5))
-        XCTAssertTrue(natural.isSelected, "Natural Touch is the default")
-        XCTAssertFalse(app.staticTexts["Smart Touch"].exists, "Smart Touch belongs to Classic")
-        snapshot(app, "touch-style-natural")
+        XCTAssertTrue(classic.exists)
+        XCTAssertNotEqual(natural.isSelected, classic.isSelected, "exactly one Touch Style is chosen")
+        let startedClassic = classic.isSelected
+        let (own, other) = startedClassic ? ("Classic", "Natural Touch") : ("Natural Touch", "Classic")
+        assertSmartTouch(app, shown: startedClassic)
+        snapshot(app, "touch-style-start-\(own)")
 
-        classic.tap()
-        XCTAssertTrue(classic.isSelected)
-        XCTAssertTrue(app.staticTexts["Smart Touch"].waitForExistence(timeout: 3), "Classic shows Smart Touch")
-        snapshot(app, "touch-style-classic")
+        select(app.buttons[other].firstMatch)
+        assertSmartTouch(app, shown: !startedClassic)
+        snapshot(app, "touch-style-\(other)")
 
         app.terminate()
         app.launch()
         openInputSettings(app)
-        for _ in 0..<5 where !app.buttons["Classic"].firstMatch.waitForExistence(timeout: 1) { app.swipeUp() }
-        XCTAssertTrue(app.buttons["Classic"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Classic"].firstMatch.isSelected, "Classic is remembered")
+        let remembered = app.buttons[other].firstMatch
+        for _ in 0..<5 where !remembered.waitForExistence(timeout: 1) { app.swipeUp() }
+        XCTAssertTrue(remembered.waitForExistence(timeout: 5))
+        XCTAssertTrue(remembered.isSelected, "\(other) is remembered")
+        assertSmartTouch(app, shown: !startedClassic)
 
-        app.buttons["Natural Touch"].firstMatch.tap()   // leave the simulator on the default
-        XCTAssertTrue(app.buttons["Natural Touch"].firstMatch.isSelected)
+        select(app.buttons[own].firstMatch)   // the device's own choice back
+        assertSmartTouch(app, shown: startedClassic)
+    }
+
+    /// The Smart Touch rows show with Classic only.
+    @MainActor
+    private func assertSmartTouch(_ app: XCUIApplication, shown: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        let row = app.staticTexts["Smart Touch"]
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == %@", NSNumber(value: shown)), object: row)
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 3), .completed,
+                       shown ? "Classic shows Smart Touch" : "Smart Touch belongs to Classic", file: file, line: line)
     }
 }
 
 // MARK: - Live Mac connection (physical iPhone)
 
 extension DemoModeSmokeTests {
+    /// Each live-Mac test otherwise finds out there's no Mac only by waiting out its connection
+    /// timeouts (up to a minute each). A run that can never reach one says so with
+    /// MEOW_NO_LIVE_MAC=1 (pass TEST_RUNNER_MEOW_NO_LIVE_MAC=1 to xcodebuild, as CI does),
+    /// and the tests skip at once.
+    private func skipWithoutLiveMac() throws {
+        if ProcessInfo.processInfo.environment["MEOW_NO_LIVE_MAC"] == "1" {
+            throw XCTSkip("no live Mac for this run (MEOW_NO_LIVE_MAC=1)")
+        }
+    }
+
     /// Physical iPhone + the paired Mac on the same network (skipped otherwise): connects from the
     /// home screen (or the Reconnect button) and waits for the session to leave the home screen.
     /// The Mac's log is the oracle for what the device then shows; this only drives the button.
     @MainActor
     func testConnectsToThePairedMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
@@ -311,6 +421,7 @@ extension DemoModeSmokeTests {
     /// The Mac's log is the oracle for the angle it drew.
     @MainActor
     func testTwistTurnsAPaneAndTheTrackpadCursorShowsOnTheLiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
@@ -318,8 +429,11 @@ extension DemoModeSmokeTests {
         if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
         else if connect.waitForExistence(timeout: 10) { connect.tap() }
         sleep(10)
-        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        let titles = NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")
+        let pane = app.descendants(matching: .any).matching(titles).firstMatch
         guard pane.waitForExistence(timeout: 20) else { snapshot(app, "twist-no-pane"); throw XCTSkip("no Window-mode pane") }
+        // Only a title-sized title is held at the end: the rest of a pane is the Mac picture.
+        guard app.paneTitleFrame(titles) != nil else { snapshot(app, "twist-no-title"); throw XCTSkip("no title-sized pane title") }
         snapshot(app, "cursor-before")
         // Trackpad: one finger moves the cursor (a drag, never a tap: no click on the Mac).
         let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
@@ -335,7 +449,7 @@ extension DemoModeSmokeTests {
         sleep(4)
         snapshot(app, "twist-after")
         // Leave the owner's layout as it was.
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let reset = app.buttons["Reset View"]
         XCTAssertTrue(reset.waitForExistence(timeout: 5), "a turned pane offers Reset View")
         snapshot(app, "twist-menu")
@@ -347,6 +461,7 @@ extension DemoModeSmokeTests {
     /// Live Mac (skips without one): Rotate from a pane's menu turns that pane's picture.
     @MainActor
     func testRotatesAPaneOnTheLiveMac() throws {
+        try skipWithoutLiveMac()
         let app = XCUIApplication()
         app.launch()
         let reconnect = app.buttons["Reconnect"]
@@ -354,10 +469,12 @@ extension DemoModeSmokeTests {
         if reconnect.waitForExistence(timeout: 5) { reconnect.tap() }
         else if connect.waitForExistence(timeout: 10) { connect.tap() }
         sleep(10)
-        let pane = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")).firstMatch
+        let titles = NSPredicate(format: "label == 'Full Desktop' OR label == 'Zed' OR label BEGINSWITH 'Zed,'")
+        let pane = app.descendants(matching: .any).matching(titles).firstMatch
         guard pane.waitForExistence(timeout: 20) else { snapshot(app, "rotate-no-pane"); throw XCTSkip("no Window-mode pane") }
+        guard app.paneTitleFrame(titles) != nil else { snapshot(app, "rotate-no-title"); throw XCTSkip("no title-sized pane title") }
         snapshot(app, "rotate-before")
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let rotate = app.buttons["Rotate"]
         XCTAssertTrue(rotate.waitForExistence(timeout: 5), "the pane menu offers Rotate")
         snapshot(app, "rotate-menu")
@@ -365,7 +482,7 @@ extension DemoModeSmokeTests {
         sleep(4)
         snapshot(app, "rotate-after")
         // Leave the owner's layout as it was.
-        pane.press(forDuration: 0.7)
+        try app.holdPaneTitle(titles)
         let reset = app.buttons["Reset View"]
         XCTAssertTrue(reset.waitForExistence(timeout: 5), "a rotated pane offers Reset View")
         reset.tap()

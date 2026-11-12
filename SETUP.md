@@ -26,7 +26,8 @@ differences between receiver platforms.
 
 - **Xcode**: use the version pinned by `.xcode-version` for reproducible
   Mac/iOS builds. The Mac sender target supports macOS 14+, the standalone
-  Mac Receiver macOS 12+, and iPhone/iPad iOS/iPadOS 16.4+.
+  Mac Receiver macOS 12+, and iPhone/iPad iOS/iPadOS 16.4+. Tested versions
+  and known issues: [COMPATIBILITY.md](COMPATIBILITY.md#operating-systems-minimum-and-tested).
 - **Android source builds** need JDK 17 and Android SDK platform 36;
   they use Gradle in `AndroidReceiver/` instead of Xcode.
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`.
@@ -223,6 +224,37 @@ Connect is always shown to the Mac's own policy. If the Mac connects but you
 cannot see its picture, check that Tailscale allows the Mac to reach the
 phone as well as the phone to reach the Mac; the Mac dials the phone.
 
+### On iPhone and iPad
+
+**Settings & Help → Remote Access** starts with **Before You Start**, which
+stays open until an address is saved: install
+[Tailscale](https://apps.apple.com/app/tailscale/id1470499037) on the Mac and
+on the iPhone or iPad and sign in on both (the same tailnet, or tailnets
+allowed to reach each other), turn Tailscale on on both, keep the Mac awake
+and logged in with MeowDisplay open, and pair first. Tailscale's own
+[VPN On Demand](https://tailscale.com/docs/features/client/ios-vpn-on-demand)
+can keep Tailscale on. MeowDisplay never installs, signs in to or changes
+Tailscale, and this page checks no network.
+
+1. **Pair a new Mac over Remote.** On the Mac, choose Settings → Devices →
+   **Open Pair over Remote**. On Home, choose **Remote Access** at the bottom
+   of the Macs card, then **Pair over Remote**, enter the Mac's Tailscale
+   address or MagicDNS name and tap **Pair**. Confirm the same code on both.
+2. **Or add an address to a Mac you already paired.** In the Mac's ••• menu on
+   Home, choose **Add Address…** (later **Edit Address…** or **Remove
+   Address**), or use the **Address** section in Settings & Help → Remote
+   Access. The Mac shows its address in Settings → Remote Access → **Check
+   Tailscale**. If the Mac shared its Tailscale address during an earlier
+   connection (**Share Tailscale Addresses with Paired Macs** on both sides),
+   it appears as **Found Automatically**: **Use This Address** fills it in and
+   **Save** keeps it. iPhone and iPad don't connect to a shared address by
+   themselves yet; that waits for verification on devices (#81, #95).
+3. **Connect.** Tap **Connect** on the Mac's row. While the request goes out
+   the row says **Contacting your Mac…**, then **Waiting for your Mac to
+   connect…** once the Mac has it. If the attempt times out, the row says why
+   and what to check, with the same reasons as Android (below). Settings &
+   Help → Remote Access → **If Remote Access Doesn't Connect** lists them.
+
 ## Using MeowDisplay
 
 ### Mirror vs. Extend
@@ -251,6 +283,19 @@ To turn it off for every device, clear **Let devices show individual windows**
 under Settings → Displays → Windows on the Mac. How it works, how to switch
 between Window view and the whole screen, and its limits are in
 [WINDOW_MODE.md](WINDOW_MODE.md).
+
+Windows in Stage Manager's side strip don't stream live. Under Settings →
+System → Stage Manager on the Mac, **Set Up Automatically** prepares two
+shortcuts (you click Add Shortcut for each), and **Turn Off During Window
+Mode** then turns Stage Manager off when the first device starts Window mode
+and back on about 25 seconds after the last one leaves. The shortcuts are
+made with your current Dock and recent-apps settings so running them leaves
+those alone. If you change those settings later, or made the shortcuts with
+an older MeowDisplay, Settings asks you to delete the two shortcuts in
+Shortcuts and set them up again, and nothing switches on its own until you
+do. Your own Shortcuts automations for Stage Manager run each time MeowDisplay
+switches it. Settings shows what MeowDisplay last did and whether it still
+needs to turn Stage Manager back on.
 
 ### Audio
 
@@ -372,7 +417,11 @@ roadmap commitments; see [CONTRIBUTING.md](CONTRIBUTING.md).
   firewall and Tailscale access in that direction), **Connection failed:
   different Mac at this address** and **This Mac doesn't accept this device**
   (both are identity problems: the phone never retries them; check the
-  address, or forget the Mac here and pair again).
+  address, or forget the Mac here and pair again). On iPhone and iPad the
+  Mac's row on Home shows the same messages after a Connect over Remote times
+  out (**This Mac doesn't accept this iPhone** names the device), with a line
+  under it on what to check; the full list is in Settings & Help → Remote
+  Access → **If Remote Access Doesn't Connect**.
 - **Wake & Connect doesn't work**: confirm Wake for Network Access is
   enabled on the Mac (System Settings → Energy) and that the Mac's
   hardware/firmware supports Wake-on-LAN; this currently only works over

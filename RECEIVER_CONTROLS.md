@@ -99,6 +99,7 @@ ignore Touch Style.
 | Chord palettes (hold a modifier for shortcuts) | Yes. Editable | Yes | Yes. Not editable | n/a |
 | Function tray (Zoom In/Out, Undo, Redo by default) | Yes | Yes, as **Function Controls** | Yes | n/a |
 | Function tray editor (add, rename, sequences, faces) | Yes | Yes | Yes | n/a |
+| Calculator (on the device; never sent to the Mac; works in View Only) | Yes. Off by default; **Edit Function Tray** → Utilities. Upper-left corner | Yes. Same switch for Strip and Overlay (first on the Function edge); Custom: **Add Control** → Calculator | No | n/a |
 | Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Tray Side**, **Function Tray Position**, **Avoid Cutouts** | n/a |
 | Layouts: Strip / Overlay / Custom | n/a | Yes | Yes on large windows (tablet, unfolded) | n/a |
 | Edges, Palette Style (Keys / Wheel), Control Size, Control Hints, Standard Controls | n/a | Yes | Yes (Tablet Layout page) | n/a |
@@ -115,8 +116,26 @@ ignore Touch Style.
 | Hardware keyboard | Partial. Not verified with a real keyboard | Partial | Partial. Same | Yes, after Request Control |
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
+| Hold Response (how long ⌘ ⌥ ⌃ ⇧ are touched before their shortcuts appear: Fast 0.18 s, Standard 0.25 s, Deliberate 0.4 s) | Yes | Yes | No (fixed) | n/a |
+| Arrow keys (button, ↑ ← ↓ → keypad and its own ⇧ ⌥ ⌘) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Compact windows only (roomy layouts: planned) | No | n/a |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
+
+### Arrow keys (#179)
+
+One small button gives the arrow keys. **Tap** it to open an inverted-T keypad (↑ above ← ↓ →) and tap it again to close it. **Swipe** it in a direction to send one arrow without opening anything. A touch that is neither a tap nor a clear swipe (a diagonal, a short drag, a touch the system cancelled) sends nothing.
+
+On the keypad a touch is a real key press: key down, then the Mac's own autorepeat after 0.4 s at 12.5 a second while the finger stays, then key up on lift. Sliding to another key releases the first; sliding off the keypad releases it too. The receiver times the repeats, because the Mac never repeats a key it was sent. A late timer sends one repeat, never a catch-up burst. Haptics: one tick when a key goes down, none per repeat, the usual open/close tap for the keypad and a tap when a keypad modifier latches or unlatches, all under **Haptics**.
+
+**Keypad modifiers.** The open keypad has its own **⇧ ⌥ ⌘**: capsule keys, so they never read as the round tray modifiers. A tap latches one (it lights up) and a second tap unlatches it. Touching one applies it at once; hold it while you press an arrow and it applies only for that hold, ending when you lift it. Lifting off the key, or a touch the system takes, changes nothing. Keypad arrows carry only the keypad's modifiers, never the tray's, so ⇧ on the keypad and → selects, while ⌘ latched on the tray still gives ⌘C from the keyboard and leaves the keypad's → a plain →. A key keeps the modifiers it went down with until it goes up, so a modifier toggled mid-hold never changes it. Latches last while the keypad is open; closing it, and everything that closes it (a disconnect, Allow Input off, View Only, leaving the app, a profile change), clears them. They are never held down on the Mac, only named on each arrow, so nothing can stay stuck. The button's swipe and its named actions still carry the tray's modifiers, as before. Keeping the two apart needs a Mac with this update (it tells the device it posts keys with exactly their own modifiers). With an older Mac the keypad's modifiers work only while the tray holds none: otherwise they are dimmed and dropped, and the arrows carry the tray's modifiers as they always did.
+
+The keypad stays open while you use Return, modifiers, the Function Tray and shortcuts. It closes when you tap the button, touch the Mac's picture (the touch still goes to the Mac), open or close the keyboard, open Settings, or when input stops reaching the Mac: Allow Input off, a disconnect, paused capture, a view change, leaving the app. Each of those also sends key up for a held key. The button follows the keyboard's gates: Allow Input, a Mac that understands keyboard messages, and its own switch.
+
+**With the keyboard up**, the companion bar gains one **Arrow Keys** item between Return and Hide Keyboard. It is the same button: a tap opens the same keypad, a swipe sends one arrow. The keypad and its modifiers open above the item, above an open shortcut palette, or beside the bar when the keyboard leaves no room above it (iPhone landscape, where the modifiers become a row under the T to fit). They never cover the keyboard, and Stage Peek keeps clear of them as it does of the bar. Nine keys tighten the bar's gaps from 8 to 6 pt, so a 375 pt iPhone keeps 32 pt keys. Turning **Show Arrow Keys** off brings back the eight-key bar.
+
+**Where it sits.** On iPhone in landscape it sits on the bottom edge on the chosen side (Right by default), stepping inward past whatever already holds that corner. With the default trays the Main Tray is on the right and Return is bottom-left, so on the right the button sits just inside the Main Tray, and on the left it sits beside Return. Return is never on the right by default, so "right side, next to Return" can't both hold. In portrait it sits at the chosen end of the row above the Main Tray. The keypad opens above the button and moves inward or up to clear the other controls and system-reserved areas. Its modifiers sit in a compact column beside the T, as tall as it, on the side with room (toward the middle of the screen), in portrait and landscape alike; where no column fits, they become a row under the T. The T and the modifiers move as one, so the modifiers clear everything the T clears: the trays, the calculator, the palette, the notch and reserved areas. The button never moves when the keypad opens. A shortcut palette can push both aside while it is open. They are not tray items, so tray chips keep their size, and saved profiles, Function Tray layouts and share codes are unchanged. Older builds ignore the two new preferences.
+
+**Accessibility.** The button is **Arrow Keys** (Shown/Hidden), with **Up Arrow**, **Down Arrow**, **Left Arrow** and **Right Arrow** as named actions, so VoiceOver, Voice Control and Switch Control can send arrows without a swipe. Each keypad key is a button of the same name; its value names the keypad modifiers it adds, and activating it sends the arrow with those. The keypad's modifiers are **Shift for Arrows**, **Option for Arrows** and **Command for Arrows** (Voice Control also answers to **Arrow Shift** and so on), On or Off, with the hint "Only the arrow keys use it."; activating one latches or unlatches it. With an older Mac and a tray modifier on, they read Unavailable and say why. Reduce Motion turns the keypad's scale into a fade.
 
 ## Typing
 
@@ -137,6 +156,8 @@ Two things keep what you type visible. Both work only after the Mac has granted 
 
 Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 
+On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and hold** the title (about 0.4 seconds), then release without dragging, to open its options menu; keep holding and drag to rearrange (drop on **Cancel** to change nothing, or, when moving a whole pane with others left, on **Remove from Layout**). **Double-tap** the title to toggle Fullscreen on This Device. The **Fullscreen on This Device** action only changes the receiver's view, while **Remove from Layout** doesn't close the Mac window. These gestures should not be confused with the separate **Close Window on Mac…** action.
+
 | Control | iPhone | iPad | Android | Mac Receiver |
 | --- | --- | --- | --- | --- |
 | Windows as a display mode | Yes | Yes | Yes. A **Windows** chip beside Mirror and Extend | Yes, from the **Windows** button |
@@ -149,10 +170,12 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Stage Peek **Expand** and **Add as Tile** | Yes | Yes | Yes | n/a |
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |
-| Tile menu (Type Here, Change Window…, Rotate, Fill Tile, Maximize, Arrange Tiles, Remove Tile, Close Window on Mac…) | Yes | Yes | Yes | Yes (shared view) |
+| Pane options (Fullscreen on This Device, Fit/Fill, Change Window…, Rotate, Arrange Panes, Remove from Layout, Close Window on Mac…) | Yes. Hold title, then release | Yes | Yes | Yes (shared view) |
+| **Fill Window on Mac** / **Restore Previous Size on Mac** (pane menu, control only) | Yes | Yes | Not yet | Yes (shared view) |
 | Arrange (move, split, resize, layout presets, Undo) | Yes | Yes | Yes | Yes. **Arrange** toggle |
 | Per-tile rotation | Yes | Yes | Yes | Yes |
-| Hinge-aware tiles on foldables | Yes. Simulator only | n/a | Yes. Emulator only | n/a |
+| Hinge-aware tiles on foldables | Yes. Geometry unit-tested only; not yet run on a half-open iPhone Duo or a posed simulator | n/a | Yes. Emulator only | n/a |
+| Fold-aware prompts and keyboard bar (iPhone Duo) | Yes. Centred prompts and hints move wholly onto one half; the keyboard bar splits around a book fold and sits above a laptop fold; Demo Mode uses the same regions. Geometry unit-tested only | n/a | No | n/a |
 | **Hidden on this screen** when space shrinks | Yes | Yes | Yes | Yes |
 | **Typing paused** when another app is in front on the Mac | Yes | Yes | Yes | Yes |
 
@@ -169,6 +192,13 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
 
+Streaming Profile and Priority are the Mac's settings and apply to every
+connected device. While the Mac's Streaming Mode is **Automatic**, iPhone,
+iPad and Mac Receiver show them read-only with a note to switch the Mac to
+Custom; Android still shows the pickers, and the Mac leaves a request it
+can't apply alone (no restart). No receiver can change the Mac's Streaming
+Mode (Automatic/Custom); that is set on the Mac only.
+
 ## Audio and connection
 
 | Control | iPhone | iPad | Android | Mac Receiver |
@@ -179,10 +209,63 @@ Details in [WINDOW_MODE.md](WINDOW_MODE.md).
 | Auto-Reconnect (default on) | Yes | Yes | Yes | Yes |
 | Request Control (Mac decides; every session starts View Only) | Yes | Yes | Yes | Yes. Title bar shows View Only or Controlling |
 | Request Control Automatically (per Mac) | Yes | Yes | Yes | No |
+| Disconnect | **Settings → Connections**, or **Session Actions** → **Disconnect from Mac** | Same | Settings | Overview |
+| Back to Home — Keep Connected | Yes. Settings → Connections, **Session Actions**, or the picture's **Back to Home** VoiceOver action | Yes | No | n/a |
+
+**Session Actions** (iPhone and iPad): touch and hold the Settings control (a
+haptic confirms) to blur and dim the session under a modal with **Back to Home —
+Keep Connected**, **Disconnect from Mac** and **Cancel**. A tap on Settings still
+opens Settings. VoiceOver and Voice Control: the Settings control's **Session
+Actions** action; the escape gesture, Esc or a tap outside cancels. On iOS 26 and
+later a thin red outline follows the screen's corners; earlier versions show no
+outline. While it is up nothing reaches the Mac (touch, pointer, scroll, either
+keyboard) and anything held is released, so latched modifiers drop; Cancel brings
+back the keyboard if it was open and changes nothing else. It is offered only
+while connected with the session on screen, and not while a modifier's palette
+is open or while Auto-hide has faded the control that holds Settings.
+
+Disconnect from Mac there is the same as Settings → Connections → Disconnect.
+It tells the Mac the goodbye is deliberate, so neither side reconnects
+automatically (the Mac waits until the device leaves and returns, or someone
+presses Connect). The pairing and the Mac app are untouched; the next session
+starts View Only, like every session.
+
+**Back to Home — Keep Connected** (iPhone and iPad) shows Home while the session stays up: the
+Mac keeps its display and arrangement, and the picture's zoom, Move View, panes and Stage Peek
+are as you left them. Home's pinned card offers **Resume** (the same session, no reconnect) and
+**Disconnect**; only the session's Mac shows **Connected**, and other Macs can't be connected
+or paired until you disconnect. While on Home nothing reaches the Mac (touch, pointer, scroll,
+either keyboard; anything held is released first), this device stops drawing the picture and
+playing Mac audio (the Mac keeps sending; Resume asks for a fresh frame), and rotating doesn't
+reshape the Mac's display until Resume. **Unified Clipboard** keeps working on Home while
+MeowDisplay is open: copies from the Mac still arrive, and what you copy elsewhere is offered or
+sent as usual. Leaving the app from Home never starts Picture in
+Picture; a window already showing keeps playing. **Keep Screen Awake While Streaming** also
+covers Home with a kept session, because a device lock ends the session: that costs battery
+while you sit on Home, so turn it off or disconnect if you won't be back soon. The interruption
+card's **Back to Home** (Connection Lost, Mac Disconnected, Can't Connect) still gives up and
+disconnects.
+
+**When input stops** (iPhone and iPad). Input stops in these cases:
+- Home covers a kept session.
+- Session Actions is open.
+- The picture is in Picture in Picture, which is view-only.
+- The app isn't active, for example in the background or under Control Center.
+- Allow Input is off, or the Mac takes control back.
+- The session pauses, ends, reconnects or becomes another Mac's.
+
+Then nothing new reaches the Mac: touch, pointer, scroll, Pencil, gestures, the keyboards and
+the tray's keys. Anything held is released: keys, latched modifiers, mouse buttons and drags.
+A Window view right-click still waiting for a second tap is dropped. A one-tap sequence that
+is still running stops for good, and its remaining steps are never sent, even if input comes
+back before the next step. A step's keys always go out together, so stopping never leaves a
+key down.
 
 ## Gaps
 
 **Android compared with iOS**
+- No Back to Home — Keep Connected.
+- No Session Actions (touch and hold Settings); Disconnect is in Settings and the Overview.
 - Rotation can't target the viewport, and there is no Snap Rotation control (the picture is on a SurfaceView).
 - **Prefer MeowDisplay Gestures** is saved but nothing in the app reads it.
 - The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.

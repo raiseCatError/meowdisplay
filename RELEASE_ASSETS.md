@@ -31,8 +31,9 @@ superseded by these real captures and removed from the README.
 Also already exist: app icons for Mac, Mac Receiver, and iOS
 (`Mac/Assets.xcassets`, `MacReceiver/Assets.xcassets`,
 `iOS/Assets.xcassets`) — complete size sets including the Debug variant;
-marketing site assets in `assets/`/`public/` (`Github Readme Icon.png`,
-`MeowDisplay-mark.png`, `logo.png`, `icon.png`/`icon-256.png`, `og.png`).
+brand artwork in `assets/` (`Github Readme Icon.png`, `MeowDisplay-mark.png`,
+`AppIcon-master.png`). Website artwork, including the social preview, lives in
+[MeowDisplayWebsite](https://github.com/raiseCatError/MeowDisplayWebsite).
 
 ## Still worth capturing later (real device photos/screen recordings)
 

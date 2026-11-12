@@ -63,6 +63,11 @@ final class MacSenderTransportController: @unchecked Sendable {
     /// staleness check covers QUIC too. Confined to `queue` like the rest.
     private var quicSession: QUICTransportSession?
     private var quicGenerationCounter = 0
+    /// A Bonjour QUIC service being resolved to its address before the tunnel
+    /// is built (#219), for dial `generation`. Cancelled with the session.
+    private var quicServiceResolution: (generation: Int, resolver: QUICServiceResolver)?
+    /// How long a Bonjour QUIC service may take to resolve. Tests shorten it.
+    var quicServiceResolutionTimeout = QUICServiceResolver.defaultTimeout
     /// Budget from dial to an accepted authenticated application `hello`.
     /// Running out before it is an ordinary reachability failure.
     static let quicApplicationHandshakeTimeout: TimeInterval = 8
@@ -677,6 +682,10 @@ extension MacSenderTransportController {
     /// every late callback of it stale.
     fileprivate func cancelQUICSession(applicationError: QUICApplicationError? = nil) {
         dispatchPrecondition(condition: .onQueue(queue))
+        if let pending = quicServiceResolution {
+            quicServiceResolution = nil
+            pending.resolver.cancel()
+        }
         guard let session = quicSession else { return }
         quicSession = nil
         session.cancel(applicationError: applicationError)
@@ -716,10 +725,55 @@ extension MacSenderTransportController {
         connection?.cancel()
         connection = nil
         connectionReady = false
+        quicGenerationCounter = generation
+        switch QUICDialEndpoint(endpoint) {
+        case .direct(let address):
+            startQUICTunnel(to: address, requiredInterface: nil, options: options, generation: generation)
+        case .resolveService(let service):
+            // A Bonjour service can't carry a multiplex group on macOS 15 (#219): resolve it
+            // to the address a connection would use, then dial that.
+            Log.info("quic: resolving \(endpointName)'s QUIC service generation=\(generation)")
+            let resolver = QUICServiceResolver(service: service, queue: queue, timeout: quicServiceResolutionTimeout) {
+                [weak self] outcome in
+                guard let self, self.quicServiceResolution?.generation == generation else { return }
+                self.quicServiceResolution = nil
+                switch outcome {
+                case .resolved(let resolved):
+                    Log.info("quic: resolved \(self.endpointName)'s QUIC service to \(resolved.endpoint)"
+                        + (resolved.interface.map { " on \($0.name)" } ?? ""))
+                    self.startQUICTunnel(to: resolved.endpoint, requiredInterface: resolved.interface,
+                                         options: options, generation: generation)
+                case .failed(let failureClass, let error, let detail):
+                    self.failQUICDial(generation: generation, error: error, failureClass: failureClass, detail: detail)
+                }
+            }
+            quicServiceResolution = (generation, resolver)
+            resolver.start()
+        case .unsupported:
+            // Never handed to NWMultiplexGroup. Reported after this call returns, like any dial failure.
+            queue.async { [weak self] in
+                self?.failQUICDial(generation: generation, error: nil, failureClass: .reachability,
+                                   detail: "no QUIC route to this kind of endpoint")
+            }
+        }
+        return true
+    }
+
+    /// Builds and starts the QUIC tunnel for dial `generation` to `endpoint`,
+    /// which must be a host and port (`QUICDialEndpoint.isMultiplexable`).
+    private func startQUICTunnel(to endpoint: NWEndpoint, requiredInterface: NWInterface?,
+                                 options: NWProtocolQUIC.Options, generation: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !stopped, quicGenerationCounter == generation, quicSession == nil else { return }
+        guard QUICDialEndpoint.isMultiplexable(endpoint) else {
+            failQUICDial(generation: generation, error: nil, failureClass: .reachability,
+                         detail: "no QUIC route to this kind of endpoint")
+            return
+        }
         let params = NWParameters(quic: options)
         params.includePeerToPeer = true
+        if let requiredInterface { params.requiredInterface = requiredInterface }
         let group = NWConnectionGroup(with: NWMultiplexGroup(to: endpoint), using: params)
-        quicGenerationCounter = generation
         quicSession = QUICTransportSession(generation: generation, group: group)
         group.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -749,7 +803,6 @@ extension MacSenderTransportController {
                           detail: "no authenticated application handshake within "
                             + "\(Int(Self.quicApplicationHandshakeTimeout))s")
         }
-        return true
     }
 
     /// `MacSender` accepted the authenticated `hello` on the QUIC Control
@@ -861,6 +914,18 @@ extension MacSenderTransportController {
     /// Auto fallback / stop) and retires the tunnel. The session reference
     /// is dropped before the delegate runs, so nothing it does can be undone
     /// by a late callback of this tunnel.
+    /// A QUIC dial failed before its tunnel existed (the Bonjour service did not resolve, or
+    /// the endpoint can't carry QUIC): reported like any dial failure, so the selection policy
+    /// decides — Auto may use secure TCP after a reachability failure, explicit QUIC never does.
+    private func failQUICDial(generation: Int, error: NWError?, failureClass: QUICFailureClass, detail: String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !stopped, quicGenerationCounter == generation, quicSession == nil, quicServiceResolution == nil else { return }
+        Log.info("quic: failure class=\(failureClass.rawValue) established=false \(detail)"
+            + (error.map { " error=\($0)" } ?? ""))
+        delegate?.transportQUICFailed(QUICTransportFailure(
+            error: error, failureClass: failureClass, established: false, detail: detail, liveAge: nil))
+    }
+
     private func failQUIC(generation: Int, error: NWError?, failureClass: QUICFailureClass,
                           detail: String, applicationError: QUICApplicationError? = nil) {
         guard let session = currentQUICSession(generation: generation), !session.failureReported else { return }

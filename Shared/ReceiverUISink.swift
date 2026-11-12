@@ -179,8 +179,8 @@ final class ReceiverUISink: Sendable {
         target?.applyConfirmedExtendShape(preference)
     }
 
-    func publishStreamingProfile(_ profile: StreamingProfile) {
-        target?.applyStreamingProfileUpdate(profile)
+    func publishStreamingProfile(_ update: StreamingProfileStateUpdate) {
+        target?.applyStreamingProfileUpdate(update)
     }
 
     func publishStreamingPriority(_ priority: StreamingPriority) {
@@ -217,6 +217,18 @@ final class ReceiverUISink: Sendable {
 
     func publishInputResetBump() {
         target?.applyInputResetBump()
+    }
+
+    func publishFreshFrameSinceVideoReset(_ fresh: Bool) {
+        target?.applyFreshFrameSinceVideoReset(fresh)
+    }
+
+    func publishMacLock(_ notice: MacLockNotice) {
+        target?.applyMacLockUpdate(notice)
+    }
+
+    func publishLockScreenInputRefusal(_ refusal: LockScreenInputRefusal) {
+        target?.applyLockScreenInputRefusal(refusal)
     }
 
     func publishAllowInputStateChange(_ state: SessionInputWireState) {

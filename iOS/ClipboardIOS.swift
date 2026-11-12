@@ -137,7 +137,7 @@ struct ClipboardSettingsPage: View {
                 Section {
                     Toggle("Send Copies Automatically", isOn: $clipboard.autoSend)
                 } footer: {
-                    Text("When on, what you copy in other apps goes to the Mac as soon as you return to MeowDisplay. iOS asks before each read unless you choose Allow in Settings ▸ Apps ▸ MeowDisplay ▸ Paste from Other Apps. When off, use the Send to Mac button that appears after you copy. Copies from the Mac always arrive while MeowDisplay is open.")
+                    Text("When on, what you copy in other apps goes to the Mac as soon as you return to MeowDisplay. iOS asks before each read unless you choose Allow in Settings ▸ Apps ▸ MeowDisplay ▸ Paste from Other Apps. When off, use the Send to Mac button that appears after you copy. Copies from the Mac arrive while MeowDisplay is open, including on Home while a session is kept.")
                 }
                 Section("Status") {
                     LabeledContent("Mac") { Text(stateText) }

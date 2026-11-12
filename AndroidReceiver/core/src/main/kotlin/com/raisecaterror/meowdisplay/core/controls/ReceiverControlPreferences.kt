@@ -67,7 +67,7 @@ data class ReceiverControlPreferences(
     /** The edge Stage Peek opens from. */
     var stagePeekEdge: StagePeekEdge = StagePeekEdge.Left,
     /** Compact (a bounded, fading column between the controls) or Normal (the open column). */
-    var stagePeekDock: StagePeekDockStyle = StagePeekDockStyle.Compact,
+    var stagePeekDock: StagePeekDockStyle = StagePeekDockStyle.Normal,
     /**
      * Hardware keyboards: Control sends ⌘. Android keeps Meta-key (⌘) combinations for its own
      * shortcuts and never passes them to apps, so this is the only way to type ⌘ shortcuts from a

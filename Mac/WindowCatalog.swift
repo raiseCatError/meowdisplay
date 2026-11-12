@@ -181,12 +181,71 @@ struct WindowCatalogSnapshot: @unchecked Sendable {
     var takenAt: TimeInterval
     /// Sheets open on listed windows, by the window they belong to (front-most first).
     var sheets: [UInt32: [AttachedSheet]] = [:]
+    /// Every window the window server has, listed or not (any Space, minimized, hidden, any
+    /// layer), by id: its owning process. Nil when that read gave nothing (never "all closed").
+    var existing: [UInt32: Int32]? = nil
 }
 
-/// Which on-screen windows are sheets of which window. A sheet is an untitled normal-layer
-/// window of the same app, ordered directly above its window and horizontally centred on it,
-/// starting inside it (attached under the title bar, or centred as on macOS 26 and later).
-/// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510).
+/// Which windows a receiver holds (in a pane, a tab or a floating pane, shown or not) are
+/// provably closed on the Mac, so it can take them out of its layout (PROTOCOL.md 6.10 `watch` /
+/// `gone`). Proof is the window server's own list of every window: the id missing from two reads
+/// at least `confirmAfter` apart, or the id now owned by another process. Being left out of the
+/// window list (minimized untitled windows, Stage Manager, Mission Control, other Spaces, hidden
+/// apps, a skipped listing) is never proof, and a failed read concludes nothing. Once proved,
+/// a window stays gone while it is watched.
+struct WindowGoneTracker: Sendable {
+    struct Watch: Hashable, Sendable, Comparable {
+        var window: UInt32
+        var generation: UInt64
+        static func < (a: Watch, b: Watch) -> Bool { (a.window, a.generation) < (b.window, b.generation) }
+    }
+
+    static let confirmAfter: TimeInterval = 1
+    /// The process each watched window was listed under (with the watched generation).
+    private var owners: [UInt32: Int32] = [:]
+    private var absentSince: [UInt32: TimeInterval] = [:]
+    private(set) var gone: Set<Watch> = []
+
+    /// One read. `listed`: this listing's windows (id -> owner and generation); `existing`: the
+    /// window server's every window (id -> owner), nil when the read failed. Returns whether `gone`
+    /// changed.
+    @discardableResult
+    mutating func observe(watched: Set<Watch>, listed: [UInt32: (pid: Int32, generation: UInt64)],
+                          existing: [UInt32: Int32]?, now: TimeInterval) -> Bool {
+        let before = gone
+        let ids = Set(watched.map(\.window))
+        gone = gone.intersection(watched)
+        owners = owners.filter { ids.contains($0.key) }
+        absentSince = absentSince.filter { ids.contains($0.key) }
+        let server = (existing?.isEmpty ?? true) ? nil : existing
+        for w in watched where !gone.contains(w) {
+            if let l = listed[w.window], l.generation == w.generation { owners[w.window] = l.pid }
+            guard let server else { continue }
+            if let pid = server[w.window] {
+                absentSince[w.window] = nil
+                // Same id, another process: the window the receiver holds is gone.
+                if let owner = owners[w.window], owner != pid { gone.insert(w) }
+                continue
+            }
+            if let since = absentSince[w.window] {
+                if now - since >= Self.confirmAfter { gone.insert(w) }
+            } else {
+                absentSince[w.window] = now
+            }
+        }
+        return gone != before
+    }
+}
+
+/// Which on-screen windows are sheets of which window. A sheet is a normal-layer window of the
+/// same app, ordered above its window and horizontally centred on it, starting inside it
+/// (attached under the title bar, or centred as on macOS 26 and later). Untitled, that shape is
+/// enough. Titled (an Open or Save panel shown as a sheet: "Open", "Save"), the app itself must
+/// confirm it through Accessibility (`confirmsTitled`); otherwise it is an ordinary window. So
+/// must a sheet wider than its window (titled or not).
+/// Measured on macOS 27: an NSWindow sheet is its own CGWindow (e.g. 19511 over 19510), and a
+/// single-window capture of its window includes it (child windows), so a titled Open sheet
+/// showed in its window's pane while presses on it were refused as covered (QA 9000025).
 enum WindowSheetMatcher {
     struct Window: Equatable, Sendable {
         var id: UInt32
@@ -198,12 +257,26 @@ enum WindowSheetMatcher {
 
     /// `frontToBack`: on-screen windows in window-server order (CGWindowList order).
     /// Returns sheet ids by the id of the window they belong to.
-    static func sheets(frontToBack: [Window]) -> [UInt32: [UInt32]] {
+    /// `confirmsTitled(sheet, window)` is asked only for a titled window of sheet shape that sits on
+    /// the next window of its app below it; never for untitled ones.
+    static func sheets(frontToBack: [Window], confirmsTitled: (Window, Window) -> Bool = { _, _ in false }) -> [UInt32: [UInt32]] {
         var parentOf: [UInt32: UInt32] = [:]
-        for (i, w) in frontToBack.enumerated() where isSheetShaped(w) {
-            // Its window: the next window of the same app below it that it sits on.
-            guard let parent = frontToBack[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.id != w.id }),
-                  sits(w.frame, on: parent.frame) else { continue }
+        for (i, w) in frontToBack.enumerated() where isSheetSized(w) {
+            // Its window: the first window of the same app below it that it sits on. A window of the
+            // app in between that doesn't overlap it (a tooltip, a title-bar strip: QA 9000028 had a
+            // 66 x 20 one between an Open sheet and its window) doesn't part them; one that overlaps
+            // it does, as before.
+            var parent: Window?
+            for c in frontToBack[(i + 1)...] where c.pid == w.pid && c.layer == 0 && c.id != w.id {
+                if sits(w.frame, on: c.frame, allowWider: true) { parent = c; break }
+                if c.frame.intersects(w.frame) { break }
+            }
+            // Shape alone is enough only for an untitled sheet no wider than its window. A titled
+            // one, or one wider than its window (Chrome opens its Open panel at the size last used,
+            // and macOS moves the window to make room: a 1596-wide sheet on a 1100-wide window,
+            // QA 9000036), counts only when the app confirms it through Accessibility.
+            guard let parent,
+                  (isUntitled(w) && sits(w.frame, on: parent.frame)) || confirmsTitled(w, parent) else { continue }
             parentOf[w.id] = parent.id
         }
         // A sheet on a sheet (an alert over a Save panel) belongs to the same window. Front-most first.
@@ -217,13 +290,93 @@ enum WindowSheetMatcher {
         return result
     }
 
-    static func isSheetShaped(_ w: Window) -> Bool {
-        w.layer == 0 && (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty && w.frame.width >= 40 && w.frame.height >= 30
+    /// Windows over `target` that may be its sheets, by shape alone, from the live on-screen
+    /// listing above it (front to back): the target's app, normal layer, visible, sheet-sized,
+    /// sitting on the target, with no other window of the app overlapping it between them. The
+    /// caller still has the app confirm each one (`SheetConfirmation`); a listing can lag behind a
+    /// sheet that is already on screen (QA 9000031/32: presses on an open chooser were refused
+    /// while the listing had no sheets for its window).
+    static func liveCandidates(targetPID: Int32, targetFrame: CGRect,
+                               aboveFrontToBack: [WorkspaceInputCover.Window]) -> [WorkspaceInputCover.Window] {
+        var accepted: [WorkspaceInputCover.Window] = []
+        var blockers: [CGRect] = []
+        for w in aboveFrontToBack.reversed() where w.pid == targetPID && w.layer == 0 && w.alpha > 0.01 {
+            // Wider than the window too: the caller always has the app confirm each one.
+            let shaped = w.bounds.width >= 40 && w.bounds.height >= 30 && sits(w.bounds, on: targetFrame, allowWider: true)
+            if shaped, !blockers.contains(where: { $0.intersects(w.bounds) }) { accepted.append(w) } else { blockers.append(w.bounds) }
+        }
+        return accepted
     }
 
-    static func sits(_ sheet: CGRect, on window: CGRect) -> Bool {
-        abs(sheet.midX - window.midX) <= 3 && sheet.width < window.width + 1
+    static func isSheetShaped(_ w: Window) -> Bool { isSheetSized(w) && isUntitled(w) }
+
+    static func isSheetSized(_ w: Window) -> Bool { w.layer == 0 && w.frame.width >= 40 && w.frame.height >= 30 }
+
+    static func isUntitled(_ w: Window) -> Bool { (w.title ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Centred on the window and starting inside it, below its top. `allowWider`: the sheet may be
+    /// wider than the window (only ever with the app's confirmation, see `sheets`).
+    static func sits(_ sheet: CGRect, on window: CGRect, allowWider: Bool = false) -> Bool {
+        abs(sheet.midX - window.midX) <= 3 && (allowWider || sheet.width < window.width + 1)
             && sheet.minY > window.minY && sheet.minY < window.maxY - 20
+    }
+}
+
+/// Whether the app confirms a titled window as a sheet of its window, through Accessibility: of
+/// its Accessibility windows exactly one has the window's frame, and that one has exactly one
+/// child of role `AXSheet` at the titled window's frame. Without Accessibility trust, on a timeout
+/// or any ambiguity, no. Confirmations are remembered per window pair (window numbers aren't
+/// reused while listed); refusals for 2 s, as a new sheet can appear before its element does.
+enum SheetConfirmation {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var known: [String: (at: TimeInterval, yes: Bool)] = [:]
+
+    static func confirms(pid: Int32, sheet: UInt32, sheetFrame: CGRect, window: UInt32, windowFrame: CGRect) -> Bool {
+        let key = "\(pid)|\(sheet)|\(window)"
+        let now = ProcessInfo.processInfo.systemUptime
+        if let k = lock.withLock({ known[key] }), k.yes || now - k.at < 2 { return k.yes }
+        let (yes, why) = ask(pid: pid, sheetFrame: sheetFrame, windowFrame: windowFrame)
+        let first = lock.withLock { () -> Bool in
+            let first = known[key] == nil
+            if known.count > 128 { known = known.filter { $0.value.yes || now - $0.value.at < 2 } }
+            known[key] = (now, yes)
+            return first
+        }
+        if first { Log.info("workspace: titled window \(sheet) over \(window) \(yes ? "confirmed as its sheet" : "not a sheet (\(why))") by Accessibility") }
+        return yes
+    }
+
+    private static func ask(pid: Int32, sheetFrame: CGRect, windowFrame: CGRect) -> (Bool, String) {
+        guard AXIsProcessTrusted() else { return (false, "no Accessibility trust") }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        guard let windows = elements(app, kAXWindowsAttribute) else { return (false, "no windows") }
+        let parents = windows.prefix(64).filter { frame($0).map { WindowCloser.framesMatch($0, windowFrame) } ?? false }
+        guard parents.count == 1, let parent = parents.first else { return (false, "\(parents.count) windows at its frame") }
+        let sheets = (elements(parent, kAXChildrenAttribute) ?? []).prefix(256).filter { child in
+            var role: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role) == .success,
+                  role as? String == kAXSheetRole else { return false }
+            return frame(child).map { WindowCloser.framesMatch($0, sheetFrame) } ?? false
+        }
+        return sheets.count == 1 ? (true, "") : (false, "\(sheets.count) sheets at its frame")
+    }
+
+    private static func elements(_ e: AXUIElement, _ attribute: String) -> [AXUIElement]? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, attribute as CFString, &value) == .success else { return nil }
+        return value as? [AXUIElement]
+    }
+
+    private static func frame(_ e: AXUIElement) -> CGRect? {
+        var p: CFTypeRef?, s: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(e, kAXPositionAttribute as CFString, &p) == .success,
+              AXUIElementCopyAttributeValue(e, kAXSizeAttribute as CFString, &s) == .success,
+              let p, let s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero, size = CGSize.zero
+        AXValueGetValue(p as! AXValue, .cgPoint, &origin)   // swiftlint:disable:this force_cast
+        AXValueGetValue(s as! AXValue, .cgSize, &size)      // swiftlint:disable:this force_cast
+        return size.width > 0 && size.height > 0 ? CGRect(origin: origin, size: size) : nil
     }
 }
 
@@ -296,8 +449,13 @@ enum WindowCatalogBuilder {
                                    hasWindows: windowPIDs.contains(app.processID))
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        var existing: [UInt32: Int32] = [:]
+        for info in cgList {
+            if let n = info[kCGWindowNumber as String] as? UInt32, let pid = info[kCGWindowOwnerPID as String] as? Int32 { existing[n] = pid }
+        }
         return (WindowCatalogSnapshot(windows: entries, apps: apps, scWindows: scByID,
-                                      takenAt: ProcessInfo.processInfo.systemUptime, sheets: sheetMap), ledger)
+                                      takenAt: ProcessInfo.processInfo.systemUptime, sheets: sheetMap,
+                                      existing: existing.isEmpty ? nil : existing), ledger)
     }
 
     private static func sheetsOfListedWindows(content: SCShareableContent, cgList: [[String: Any]],
@@ -316,13 +474,69 @@ enum WindowCatalogBuilder {
                                              layer: (info[kCGWindowLayer as String] as? Int) ?? 0)
         }
         var result: [UInt32: [AttachedSheet]] = [:]
-        for (parent, ids) in WindowSheetMatcher.sheets(frontToBack: order) where listed.contains(parent) {
-            result[parent] = ids.compactMap { id in
-                guard let sc = scByID[id] else { return nil }
-                return AttachedSheet(windowID: id, frame: sc.frame, scWindow: sc)
+        let sheets = WindowSheetMatcher.sheets(frontToBack: order) { sheet, window in
+            listed.contains(window.id) && SheetConfirmation.confirms(pid: sheet.pid, sheet: sheet.id, sheetFrame: sheet.frame,
+                                                                     window: window.id, windowFrame: window.frame)
+        }
+        noteUnmatchedSheets(order: order, matched: Set(sheets.filter { listed.contains($0.key) }.values.flatMap { $0 }), listed: listed)
+        let frames = attachedSheetFrames(sheets: sheets, listed: listed, scFrames: scByID.mapValues(\.frame), order: order)
+        for (parent, list) in frames {
+            result[parent] = list.map { s in
+                if !s.fromCapture {
+                    noteOnce(s.id, "workspace: sheet \(s.id) of \(parent) isn't listed by ScreenCaptureKit; taken from the window list")
+                }
+                return AttachedSheet(windowID: s.id, frame: s.frame, scWindow: scByID[s.id])
             }
         }
         return result.filter { !$0.value.isEmpty }
+    }
+
+    /// Each listed window's sheets and their frames: ScreenCaptureKit's when it lists the sheet,
+    /// else the window list's. A sheet ScreenCaptureKit doesn't list (yet) is still its window's,
+    /// so presses on it are on the window (QA 9000030: the third Open sheet in a row went unlisted
+    /// and every press on it was refused); it just has no capture of its own.
+    static func attachedSheetFrames(sheets: [UInt32: [UInt32]], listed: Set<UInt32>, scFrames: [UInt32: CGRect],
+                                    order: [WindowSheetMatcher.Window]) -> [UInt32: [(id: UInt32, frame: CGRect, fromCapture: Bool)]] {
+        var result: [UInt32: [(id: UInt32, frame: CGRect, fromCapture: Bool)]] = [:]
+        for (parent, ids) in sheets where listed.contains(parent) {
+            let list = ids.compactMap { id -> (id: UInt32, frame: CGRect, fromCapture: Bool)? in
+                if let f = scFrames[id] { return (id, f, true) }
+                guard let w = order.first(where: { $0.id == id }) else { return nil }
+                return (id, w.frame, false)
+            }
+            if !list.isEmpty { result[parent] = list }
+        }
+        return result
+    }
+
+    nonisolated(unsafe) private static var unmatchedLogged = Set<UInt32>()
+    private static let unmatchedLock = NSLock()
+    nonisolated(unsafe) private static var notedOnce = Set<UInt32>()
+
+    private static func noteOnce(_ id: UInt32, _ message: @autoclosure () -> String) {
+        let first = unmatchedLock.withLock { () -> Bool in
+            if notedOnce.count > 256 { notedOnce.removeAll() }
+            return notedOnce.insert(id).inserted
+        }
+        if first { Log.info(message()) }
+    }
+
+    /// Diagnostics: a titled window of sheet size that lies inside a listed window of its app but
+    /// wasn't taken as its sheet is logged once, with why (ids, frames and order; never titles).
+    private static func noteUnmatchedSheets(order: [WindowSheetMatcher.Window], matched: Set<UInt32>, listed: Set<UInt32>) {
+        func r(_ f: CGRect) -> String { "\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))" }
+        for (i, w) in order.enumerated() where WindowSheetMatcher.isSheetSized(w) && !matched.contains(w.id) {
+            guard let parent = order[(i + 1)...].first(where: { $0.pid == w.pid && $0.layer == 0 && $0.frame.contains(w.frame) })
+            else { continue }
+            let first = unmatchedLock.withLock { unmatchedLogged.insert(w.id).inserted }
+            guard first else { continue }
+            if unmatchedLock.withLock({ unmatchedLogged.count }) > 256 { unmatchedLock.withLock { unmatchedLogged = [w.id] } }
+            let between = order[(i + 1)...].prefix { $0.id != parent.id }.filter { $0.pid == w.pid }
+                .map { "\($0.id)/L\($0.layer)/\(r($0.frame))\($0.frame.intersects(w.frame) ? "/overlaps" : "")" }
+            let sits = WindowSheetMatcher.sits(w.frame, on: parent.frame)
+            Log.info("workspace: \(WindowSheetMatcher.isUntitled(w) ? "untitled" : "titled") window \(w.id) (\(r(w.frame))) inside \(parent.id) "
+                     + "(\(r(parent.frame))) not taken as its sheet: sits=\(sits) parentListed=\(listed.contains(parent.id)) app windows between=\(between)")
+        }
     }
 
     /// Installed apps the receiver may ask to open: /Applications only,

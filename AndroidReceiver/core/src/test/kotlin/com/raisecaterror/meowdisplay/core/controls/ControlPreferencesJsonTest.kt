@@ -264,4 +264,14 @@ class WindowSwitcherPreferenceTest {
         assertEquals(p.toJson()["windowSwitcher"]?.toString(), "\"rail\"")
         assertEquals(p.toJson()["stagePeekEdge"]?.toString(), "\"right\"")
     }
+
+    /** Issue #130: Normal for new installs; a saved Compact stays Compact. */
+    @Test
+    fun stagePeekDockDefaultsToNormalAndAStoredCompactIsKept() {
+        assertEquals(StagePeekDockStyle.Normal, ReceiverControlPreferences().stagePeekDock)
+        val store = MapStore()
+        val repository = ReceiverControlPreferencesRepository(store)
+        repository.save(ReceiverControlPreferences().also { it.stagePeekDock = StagePeekDockStyle.Compact })
+        assertEquals(StagePeekDockStyle.Compact, repository.load(ReceiverControlPreferences()).stagePeekDock)
+    }
 }

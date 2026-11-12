@@ -24,7 +24,9 @@ enum ReceiverPanelGeometry {
 
 /// Announces window-size changes to the Mac. The first size, and any size while no Mac is
 /// connected, applies at once (it only shapes the next hello); while connected, a change waits
-/// until the size has been stable for `delay`, and only the last one is sent.
+/// until the size has been stable for `delay`, and only the last one is sent. While held (Home
+/// with the session kept, #121) a connected Mac's display keeps its shape; the latest size is
+/// sent when the hold ends.
 @MainActor
 final class ReceiverPanelSettler {
     typealias Panel = (wide: Int, high: Int, scale: Double)
@@ -34,6 +36,9 @@ final class ReceiverPanelSettler {
     private let apply: (Panel) -> Void
     private var pending: DispatchWorkItem?
     private var last: (wide: Int, high: Int)?
+    private var held = false
+    /// The newest size not yet announced (waiting to settle, or held).
+    private var latest: Panel?
 
     init(delay: TimeInterval = ReceiverPanelGeometry.settleDelay,
          isConnected: @escaping () -> Bool,
@@ -48,19 +53,37 @@ final class ReceiverPanelSettler {
         let panel: Panel = (px.wide, px.high, Double(scale))
         pending?.cancel()
         pending = nil
+        latest = nil
         if let last, last == px { return }
         if last == nil || !isConnected() {
-            last = px
-            apply(panel)
+            announce(panel)
             return
         }
+        latest = panel
+        guard !held else { return }
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pending = nil
-            self.last = px
-            self.apply(panel)
+            self.announce(panel)
         }
         pending = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// Holding parks any size waiting to settle; releasing announces the latest one at once
+    /// (the window has been still since).
+    func setHeld(_ held: Bool) {
+        guard held != self.held else { return }
+        self.held = held
+        pending?.cancel()
+        pending = nil
+        guard !held, let latest else { return }
+        announce(latest)
+    }
+
+    private func announce(_ panel: Panel) {
+        latest = nil
+        last = (panel.wide, panel.high)
+        apply(panel)
     }
 }

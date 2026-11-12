@@ -13,9 +13,25 @@ protocol ReceiverControlSource: ObservableObject {
     var videoEnabled: Bool { get }
     var inputResetGeneration: Int { get }
     var controlResetGeneration: Int { get }
+    /// What a delayed remote action must still hold before each later step
+    /// (see `OneTapActionRunner`); nil while input can't leave this device.
+    var remoteInputTicket: RemoteInputTicket? { get }
     func sendKeyboardPress(usage: Int, modifiers: [String])
     func sendKeyboardDown(usage: Int, modifiers: [String])
+    /// `isRepeat`: an autorepeat of a key already down, timed by the
+    /// receiver (the Mac never repeats a key on its own).
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool)
     func sendKeyboardUp(usage: Int, modifiers: [String])
+    /// The Mac posts a key marked `exactModifiers` with only its own
+    /// modifiers (welcome feature `exactKeyModifiers`). An older Mac adds
+    /// whatever the tray holds down.
+    var macSupportsExactKeyModifiers: Bool { get }
+    /// The arrow keypad's keys: `modifiers` are the keypad's own, never the
+    /// tray's chord, and `exactModifiers` asks the Mac not to add the
+    /// modifiers the tray holds down (ignored by a Mac without the feature).
+    func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool)
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool)
+    func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool)
     func sendModifier(_ modifier: ControlModifier, down: Bool)
     func sendGesture(name: String)
 }
@@ -30,11 +46,20 @@ enum ReceiverPresentationRoute: Equatable {
     case idle
     case demo
     case receiver
+    /// Home over a real session kept behind it (#121). The surface stays
+    /// mounted underneath; the demo can't start (see `canEnterDemo`).
+    case sessionHome
 
-    static func resolve(demoActive: Bool, realSurfaceShown: Bool) -> ReceiverPresentationRoute {
-        if realSurfaceShown { return .receiver }
+    static func resolve(demoActive: Bool, realSurfaceShown: Bool,
+                        presentation: ReceiverSessionPresentation = .session) -> ReceiverPresentationRoute {
+        if realSurfaceShown { return presentation.keepsSessionOnHome ? .sessionHome : .receiver }
         return demoActive ? .demo : .idle
     }
+
+    /// Whether the Mac's picture counts as watched for Keep Screen Awake. A
+    /// kept session counts too: Auto-Lock would lock the device, and a lock
+    /// ends the session the person chose to keep.
+    var watchesMac: Bool { self == .receiver || self == .sessionHome }
 
     /// The demo only starts from the home screen. While a real session's
     /// surface is up, entering would leave a hidden demo that appears once
@@ -179,6 +204,8 @@ extension DemoSession: ReceiverControlSource {
     var displayState: DisplayState { .running }
     var inputResetGeneration: Int { 0 }
     var controlResetGeneration: Int { 0 }
+    /// The demo has one session that never changes, and nothing leaves the device.
+    var remoteInputTicket: RemoteInputTicket? { RemoteInputTicket(controlGeneration: 0, connectionGeneration: 0) }
 
     // Every "send" lands on the sample desktop or becomes a preview of what
     // a real session would send. Nothing leaves the device.
@@ -192,7 +219,27 @@ extension DemoSession: ReceiverControlSource {
         sendKeyboardPress(usage: usage, modifiers: modifiers)
     }
 
+    /// The sample desktop has no held keys: each repeat moves it once more,
+    /// like a held arrow on a real Mac.
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool) {
+        sendKeyboardPress(usage: usage, modifiers: modifiers)
+    }
+
     func sendKeyboardUp(usage: Int, modifiers: [String]) {}
+
+    /// The sample desktop holds no modifiers for the tray, so every key
+    /// already carries exactly what it names.
+    var macSupportsExactKeyModifiers: Bool { true }
+
+    func sendKeyboardPress(usage: Int, modifiers: [String], exactModifiers: Bool) {
+        sendKeyboardPress(usage: usage, modifiers: modifiers)
+    }
+
+    func sendKeyboardDown(usage: Int, modifiers: [String], isRepeat: Bool, exactModifiers: Bool) {
+        sendKeyboardDown(usage: usage, modifiers: modifiers, isRepeat: isRepeat)
+    }
+
+    func sendKeyboardUp(usage: Int, modifiers: [String], exactModifiers: Bool) {}
 
     func sendModifier(_ modifier: ControlModifier, down: Bool) {
         if down, inputAllowed { workspace.show(.modifierHeld(modifier)) }

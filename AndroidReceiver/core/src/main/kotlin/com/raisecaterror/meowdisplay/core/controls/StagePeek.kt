@@ -41,10 +41,10 @@ enum class StagePeekEdge(val raw: String) {
 
 /** How the compact peek's window Dock sits on screen. Persisted as `stagePeekDock`; stable raw values. */
 enum class StagePeekDockStyle(val raw: String, val title: String) {
-    /** A bounded column between the search and app carousel above and the buttons below (the default). */
+    /** A bounded column between the search and app carousel above and the buttons below. */
     Compact("compact", "Compact"),
 
-    /** The open column across the whole edge (controls stay on top). */
+    /** The open column across the whole edge (controls stay on top). The default for new installs (issue #130). */
     Normal("normal", "Normal");
 
     companion object {

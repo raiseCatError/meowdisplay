@@ -220,6 +220,8 @@ class WorkspaceController(
 
     /** The "Cancel" drop zone shown during a drag (window dp). Dropping there changes nothing. */
     var cancelZone: CGRect = CGRect.zero
+    /** The "Remove from Layout" drop zone (window dp), shown only while [canDropToRemove]. */
+    var removeZone: CGRect = CGRect.zero
 
     private var saved: WLayout = WLayout.of()
     /** The arrangement without local fullscreen: what edits apply to. */
@@ -230,6 +232,9 @@ class WorkspaceController(
     private var history = WHistory()
     private var nextTile = 1
     private var catalogAwaitingSend = false
+    /** The Mac's lock screen is up (`macLockState`): nothing of it is shown, kept or accepted. */
+    private var macLocked = false
+    private var macFeatures: Set<String> = emptySet()
     private val sendRunnable = Runnable { sendNow() }
     private var throttledSendPending = false
     private val throttledSend = Runnable { throttledSendPending = false; sendNow() }
@@ -293,7 +298,10 @@ class WorkspaceController(
         when (event) {
             is SessionEvent.Connected -> if (event.peerID != host) loadFor(event.peerID)
             is SessionEvent.PrivacyShield -> state.update { it.copy(privacyShieldNotice = event.on, privacyNoticeSeq = it.privacyNoticeSeq + 1) }
+            is SessionEvent.MacLock -> if (event.notice.isLocked) onMacLocked() else onMacUnlocked()
             is SessionEvent.MacFeatures -> {
+                macFeatures = event.features
+                if (macLocked) return
                 state.update { it.copy(available = WorkspaceWire.WELCOME_FEATURE in event.features, canCloseWindows = WorkspaceWire.CLOSE_FEATURE in event.features, canLockMac = LockMacWire.FEATURE in event.features) }
                 files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in event.features)
                 clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in event.features)
@@ -307,6 +315,8 @@ class WorkspaceController(
                 publish()
             }
             is SessionEvent.Disconnected, SessionEvent.AdmissionWithdrawn -> {
+                macLocked = false
+                macFeatures = emptySet()
                 main.removeCallbacks(sendRunnable)
                 fullDisplayMode = DisplayMode.Mirror
                 planner.reset()
@@ -321,7 +331,7 @@ class WorkspaceController(
                         canCloseWindows = false, closingWindows = emptySet(), closeNotice = null)
                 }
             }
-            is SessionEvent.Control -> when (event.type) {
+            is SessionEvent.Control -> if (macLocked) Unit else when (event.type) {
                 WorkspaceWire.CATALOG -> onCatalog(WindowCatalog.parse(event.body))
                 WorkspaceWire.WORKSPACE_STATE -> {
                     val parsed = WorkspaceState.parse(event.body)
@@ -366,6 +376,45 @@ class WorkspaceController(
             }
             else -> Unit
         }
+    }
+
+    /**
+     * The Mac locked (or can't say it is unlocked): forget everything it showed, close every surface
+     * that listed or pictured it, and stop asking. The arrangement (which tiles, where) is the
+     * device's own and stays; nothing the Mac sent is kept, so nothing can reappear on unlock.
+     */
+    private fun onMacLocked() {
+        macLocked = true
+        main.removeCallbacks(sendRunnable); main.removeCallbacks(throttledSend)
+        throttledSendPending = false
+        catalogAwaitingSend = false
+        planner.reset(); appRevision = null
+        clearViews()
+        thumbs.value = emptyMap(); thumbAge.clear(); iconState.value = emptyMap(); displayThumbs.value = emptyMap()
+        files.setAvailable(false)
+        clipboard.setAvailable(false)
+        (clipboard.platform as? AndroidClipboardPlatform)?.forgetSent()
+        menus.setAvailable(false)
+        state.update {
+            it.copy(
+                remote = null, catalog = null, apps = emptyList(), missing = emptySet(), launching = emptySet(), launchFailed = null,
+                overviewOpen = false, replacingTile = null, railExpanded = false, stagePeekOpen = false, launchpadOpen = false,
+                arranging = false, hovered = null, drag = null, appDrop = null, closingWindows = emptySet(), closeNotice = null,
+                lockMac = null, privacyShieldNotice = null,
+            )
+        }
+        publish()
+    }
+
+    /** The Mac is unlocked: ask again. Nothing from before the lock is restored. */
+    private fun onMacUnlocked() {
+        if (!macLocked) return
+        macLocked = false
+        val f = macFeatures
+        files.setAvailable(RemoteFilesWire.WELCOME_FEATURE in f)
+        clipboard.setAvailable(!media.isDemo && com.raisecaterror.meowdisplay.core.clipboard.ClipboardWire.FEATURE in f)
+        menus.setAvailable(AppMenuWire.WELCOME_FEATURE in f)
+        if (state.value.windowMode) { catalogAwaitingSend = true; requestCatalog() }
     }
 
     private fun loadFor(peerID: String) {
@@ -1202,9 +1251,25 @@ class WorkspaceController(
 
     fun overCancelZone(p: CGPoint): Boolean = !cancelZone.isEmpty && cancelZone.insetBy(-8.0, -8.0).contains(p)
 
+    /**
+     * Remove from Layout is offered only while repositioning a whole pane already in the layout (its
+     * label, not one of its tabs) with another pane left: never for a Stage Peek window or app, a new
+     * pane or a tab. It removes the pane here only; the Mac window is untouched.
+     */
+    val canDropToRemove: Boolean
+        get() {
+            val s = state.value
+            val item = s.drag?.item as? WorkspaceDrag.Item.Pane ?: return false
+            return s.windowMode && item.tab == null && item.tile in arranged.tiles && arranged.tiles.size > 1
+        }
+
+    /** Cancel wins where the two zones' touch margins meet, so the highlight, haptic and drop agree and the uncertain case removes nothing. */
+    fun overRemoveZone(p: CGPoint): Boolean =
+        canDropToRemove && !removeZone.isEmpty && removeZone.insetBy(-8.0, -8.0).contains(p) && !overCancelZone(p)
+
     /** The drop under the finger. Null outside the picture and over Cancel. In Mirror/Extend the desktop counts as one pane. */
     fun dropTarget(p: CGPoint, labelHeight: Double = 30.0): WWindowDrop? {
-        if (overCancelZone(p)) return null
+        if (overCancelZone(p) || overRemoveZone(p)) return null
         val s = state.value
         if (!s.windowMode) {
             if (s.drag?.item !is WorkspaceDrag.Item.Window && s.drag?.item !is WorkspaceDrag.Item.App) return null
@@ -1224,7 +1289,13 @@ class WorkspaceController(
     fun endDrag(): Boolean {
         val d = state.value.drag ?: return false
         val target = dropTarget(d.location)
+        val remove = overRemoveZone(d.location)
         state.update { it.copy(drag = null) }
+        val item = d.item
+        if (remove && item is WorkspaceDrag.Item.Pane && item.tab == null) {
+            removeTile(item.tile)   // one undo step; never a request to close the window on the Mac
+            return true
+        }
         target ?: return false
         return when (val item = d.item) {
             is WorkspaceDrag.Item.Window -> place(item.window, target)
@@ -1313,6 +1384,11 @@ class WorkspaceController(
         if (state.value.localFullscreen == null) return
         state.update { it.copy(localFullscreen = null) }
         publish(); scheduleSend(0)
+    }
+
+    /** A double tap on a pane's label: that pane fills this device, or (already) the layout comes back. */
+    fun toggleLocalFullscreen(tile: String) {
+        if (state.value.localFullscreen == tile) exitLocalFullscreen() else enterLocalFullscreen(tile)
     }
 
     fun noteSurfaceTouch() { if (state.value.localFullscreen != null) state.update { it.copy(touchPulse = it.touchPulse + 1) } }

@@ -4,6 +4,81 @@
     "" : {
 
     },
+    "Arrow Keys" : {
+
+    },
+    "Arrow Keys Side" : {
+
+    },
+    "%@ for Arrows" : {
+      "comment" : "The arrow keypad's own modifier key, e.g. Shift for Arrows. It applies to the arrow keys only."
+    },
+    "Arrow %@" : {
+      "comment" : "Short spoken name for the arrow keypad's own modifier key, e.g. Arrow Shift."
+    },
+    "Arrow Key Modifiers" : {
+      "comment" : "The arrow keypad's own Shift, Option and Command keys."
+    },
+    "Only the arrow keys use it." : {
+      "comment" : "Hint for the arrow keypad's own Shift, Option and Command."
+    },
+    "Unavailable while a tray modifier is on. Update MeowDisplay on the Mac to use both." : {
+      "comment" : "Hint for an arrow keypad modifier on a Mac too old to keep it apart from the tray's modifiers."
+    },
+    "Arrows" : {
+
+    },
+    "Deliberate" : {
+
+    },
+    "Balanced" : {
+
+    },
+    "Down Arrow" : {
+
+    },
+    "Hold Response" : {
+
+    },
+    "How long to touch ⌘ ⌥ ⌃ ⇧ before their shortcuts appear. A quick tap still latches the key; sliding opens the shortcuts at once. Standard is the default." : {
+
+    },
+    "Favors a smooth, steady frame rate, keeping a little more work in flight at a small cost in delay." : {
+
+    },
+    "Favors the newest frame and the lowest delay, accepting a lower frame rate under load." : {
+
+    },
+    "Left Arrow" : {
+
+    },
+    "Right Arrow" : {
+
+    },
+    "Show Arrow Keys" : {
+
+    },
+    "Shown" : {
+
+    },
+    "Shows or hides the arrow keys." : {
+
+    },
+    "Standard" : {
+
+    },
+    "Smoothness" : {
+
+    },
+    "Tap the arrow button for ↑ ← ↓ →, or swipe it for one press." : {
+
+    },
+    "The default: a balance of smooth motion and low delay." : {
+
+    },
+    "Up Arrow" : {
+
+    },
     "· Sample session" : {
 
     },
@@ -50,6 +125,9 @@
         }
       }
     },
+    "%@ times ten to the power of %@" : {
+
+    },
     "%@ wants to share its display with this device." : {
 
     },
@@ -74,6 +152,12 @@
     "⌘ ⌥ ⌃ ⇧ form the next arc out. Hold or tap a modifier to use it." : {
 
     },
+    "A calculator that works on this iPad, in View Only too. Its button shows with every Function profile in the Strip and Overlay layouts; in a Custom layout, add it from the layout's editor." : {
+
+    },
+    "A calculator that works on this iPhone, in View Only too. Its button sits in the upper-left corner and shows with every Function Tray profile." : {
+
+    },
     "A control dropped near a guide line settles exactly on it. Needs Alignment Guides on." : {
 
     },
@@ -96,6 +180,18 @@
 
     },
     "A solid rail at the edge of the screen holds the controls, and your Mac fits beside it." : {
+
+    },
+    "Add Address…" : {
+
+    },
+    "Address filled in. Tap Save to use it." : {
+
+    },
+    "Add a Utility" : {
+
+    },
+    "All Clear" : {
 
     },
     "Automatically reconnect to paired devices after connection interruptions. Turning this off only stops automatic reconnecting — Connect, Reconnect, and Wake & Connect still work, and an active session stays connected." : {
@@ -131,13 +227,49 @@
     "Active Layout" : {
 
     },
+    "Away from your Mac's Wi-Fi? Turn on Tailscale on both devices, then choose Remote Access at the bottom of the Macs card." : {
+
+    },
+    "Before You Start" : {
+
+    },
+    "calculator" : {
+
+    },
+    "Calculator" : {
+
+    },
     "Can't connect" : {
+
+    },
+    "Check that the Tailscale app shows both devices as connected. Connecting once on the same Wi-Fi or with a USB cable shows that the pairing works, and lets your Mac share its Tailscale address when sharing is on. A Mac that is asleep can't answer until it wakes." : {
+
+    },
+    "Check that your Mac is awake and online, and that Tailscale is on for both devices." : {
+
+    },
+    "Check the address, and that Tailscale is on for both devices." : {
+
+    },
+    "Check the address, that Tailscale is on for both devices, and that Pair over Remote is open on the Mac." : {
+
+    },
+    "Connection failed: different Mac at this address" : {
+
+    },
+    "Clear" : {
+
+    },
+    "Close Calculator" : {
 
     },
     "Connection lost" : {
 
     },
     "Connect to %@" : {
+
+    },
+    "Contacting your Mac…" : {
 
     },
     "Control Profile" : {
@@ -173,6 +305,54 @@
     "Allow" : {
 
     },
+    "Couldn't save this address. Try again." : {
+
+    },
+    "Edit Address…" : {
+
+    },
+    "Enter an address." : {
+
+    },
+    "Fills in the address. Nothing is saved until you tap Save." : {
+
+    },
+    "Found Automatically" : {
+
+    },
+    "Get Tailscale on the App Store" : {
+
+    },
+    "If Remote Access Doesn't Connect" : {
+
+    },
+    "Install Tailscale on your Mac and on this %@, and sign in on both. They need to be on the same tailnet, or allowed to reach each other." : {
+
+    },
+    "Keep Tailscale On with VPN On Demand" : {
+
+    },
+    "Keep your Mac awake and logged in, with MeowDisplay open." : {
+
+    },
+    "Copies the number to this device's clipboard." : {
+
+    },
+    "Copy Result" : {
+
+    },
+    "Decimal Point" : {
+
+    },
+    "Divide" : {
+
+    },
+    "Equals" : {
+
+    },
+    "Error" : {
+
+    },
     "Looking for Macs on this Wi-Fi…" : {
 
     },
@@ -182,7 +362,19 @@
     "Macs" : {
 
     },
+    "MeowDisplay doesn't install, sign in to or change Tailscale. An address only finds your Mac; the pairing decides who it is, and every connection still needs it." : {
+
+    },
+    "Messages" : {
+
+    },
+    "Minus" : {
+
+    },
     "More for %@" : {
+
+    },
+    "Multiply" : {
 
     },
     "Not found" : {
@@ -191,7 +383,37 @@
     "Not paired" : {
 
     },
+    "Offline · address not found" : {
+
+    },
+    "Offline · connection refused" : {
+
+    },
+    "Offline · couldn't connect" : {
+
+    },
+    "Offline · no route" : {
+
+    },
+    "Offline · timed out" : {
+
+    },
+    "On iPhone and iPad, Remote Access connects with the address saved above. An address your Mac shared appears there as Found Automatically, and is used only after you save it." : {
+
+    },
+    "On this device. Nothing is sent to your Mac." : {
+
+    },
+    "Open" : {
+
+    },
+    "Opens a calculator on this iPad, in View Only too. It never sends anything to your Mac." : {
+
+    },
     "Or tap Connect next to a paired Mac" : {
+
+    },
+    "Pair this %@ with the Mac first: on the same Wi-Fi, with a USB cable, or with Pair over Remote." : {
 
     },
     "Pair with %@" : {
@@ -200,7 +422,22 @@
     "Paused" : {
 
     },
+    "Percent" : {
+
+    },
+    "Plus" : {
+
+    },
+    "Plus or Minus" : {
+
+    },
     "Ready to connect" : {
+
+    },
+    "Remote: on another network, turn on Tailscale on both devices and save the Mac's address in Remote Access." : {
+
+    },
+    "Remove Address" : {
 
     },
     "Request Control (Demo)" : {
@@ -461,9 +698,6 @@
     "Couldn't reach the Mac" : {
 
     },
-    "Couldn't save this endpoint. Try again." : {
-
-    },
     "Create Custom Layout" : {
 
     },
@@ -632,9 +866,6 @@
     "Edit Palette Actions" : {
 
     },
-    "Edit Remote Details…" : {
-
-    },
     "Edit Shortcut…" : {
 
     },
@@ -651,9 +882,6 @@
 
     },
     "Enlarge the area you're typing in when the keyboard is open." : {
-
-    },
-    "Enter a host or IP address." : {
 
     },
     "Enter a port between 1 and 65535." : {
@@ -800,9 +1028,6 @@
     "Hold or latch %@ to show these. Tap one to change what it sends or how it looks; drag to reorder." : {
 
     },
-    "Host (Tailscale IP or MagicDNS name)" : {
-
-    },
     "How a modifier's shortcuts appear while you hold or latch it. Wheel surrounds it with wedge-shaped segments; Arc fans them along the next ring out; Ring circles it; Row and Column line them up." : {
 
     },
@@ -836,25 +1061,70 @@
     "Control allowed (Demo)." : {
 
     },
-    "Set Up Remote Access…" : {
+    "Result" : {
 
     },
     "Shake the %@ to open Settings anytime" : {
 
     },
+    "Share Tailscale Addresses with Paired Macs" : {
+
+    },
+    "Something answered at that address, but it isn't MeowDisplay. Check the address." : {
+
+    },
+    "Still Not Connecting" : {
+
+    },
     "Switched Out" : {
+
+    },
+    "Tailscale address or MagicDNS name" : {
+
+    },
+    "That doesn't look like an address. Enter a name such as mac.tailnet-name.ts.net or an address such as 100.101.102.103." : {
+
+    },
+    "The address answered, but MeowDisplay isn't open there. Open MeowDisplay on your Mac, then try again." : {
+
+    },
+    "The Mac at this address is %@, not the Mac you chose. Check the address. Nothing was connected." : {
+
+    },
+    "The Mac didn't connect back" : {
+
+    },
+    "This %@ has no route to that address. Turn on Tailscale on both devices, then try again." : {
 
     },
     "This Device" : {
 
     },
+    "This Mac doesn't accept this %@" : {
+
+    },
     "Tip" : {
+
+    },
+    "To pair a Mac that isn't on this Wi-Fi, first choose Settings → Devices → Open Pair over Remote on the Mac. Then, on Home, choose Remote Access → Pair over Remote and enter the Mac's address." : {
 
     },
     "Try again with %@" : {
 
     },
     "Try the Demo" : {
+
+    },
+    "Turn on Tailscale on both devices." : {
+
+    },
+    "Turn on Tailscale on this %@ and on the Mac. On the Mac, choose Settings → Devices → Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here. The Mac shows both in Settings → Remote Access → Check Tailscale." : {
+
+    },
+    "Use This Address" : {
+
+    },
+    "Utilities" : {
 
     },
     "View Only (Demo)." : {
@@ -971,9 +1241,6 @@
     "Mac" : {
 
     },
-    "Mac Address" : {
-
-    },
     "Mac Disconnected" : {
 
     },
@@ -1022,7 +1289,22 @@
     "MeowDisplay on GitHub" : {
 
     },
+    "Waiting for your Mac to connect…" : {
+
+    },
     "Wake and connect to %@" : {
+
+    },
+    "Whatever answered isn't the Mac you paired. Check the address. Nothing was connected." : {
+
+    },
+    "When Connect over Remote doesn't finish, the Mac's row on Home says what happened and what to check." : {
+
+    },
+    "Works on this iPad only. Nothing is sent to your Mac." : {
+
+    },
+    "Works on this iPhone only. Nothing is sent to your Mac." : {
 
     },
     "You also need the **MeowDisplay Mac app**, open on your Mac." : {
@@ -1136,9 +1418,6 @@
     "On the Mac" : {
 
     },
-    "On the Mac, open Devices and choose Open Pair over Remote, then enter the Mac's Tailscale address or MagicDNS name here." : {
-
-    },
     "On, content moves with your fingers, like a Mac trackpad's natural scrolling. Turn an axis off to reverse just that direction; diagonal scrolls follow both. Moving your own view of the Mac isn't affected." : {
 
     },
@@ -1191,9 +1470,6 @@
 
     },
     "Pair with a Mac first — Remote Access uses the same secure pairing as local connections." : {
-
-    },
-    "Pair with a Mac first, then set up Remote Access for it here." : {
 
     },
     "Paired · Connected" : {
@@ -1361,6 +1637,9 @@
     "Radial Template" : {
 
     },
+    "Rate MeowDisplay" : {
+
+    },
     "Ready" : {
 
     },
@@ -1389,9 +1668,6 @@
 
     },
     "Remove from Layout" : {
-
-    },
-    "Remove Remote Details" : {
 
     },
     "Replace this orientation with the radial template?" : {
@@ -1751,9 +2027,6 @@
     "Tab" : {
 
     },
-    "Tailscale IP or MagicDNS name" : {
-
-    },
     "Tap a control on the canvas to edit it, or drag it to move it." : {
 
     },
@@ -1770,9 +2043,6 @@
 
     },
     "Text" : {
-
-    },
-    "That doesn't look like a valid host or IP address." : {
 
     },
     "The canvas shows this modifier's palette while it's selected. Its actions come from your Control Profile, so the same palette appears everywhere you use this modifier." : {
@@ -2136,7 +2406,16 @@
     "your Mac" : {
 
     },
+    "Your Mac got the request but didn't connect back. Allow it on the Mac if it asks, and check that Tailscale lets the Mac reach this %@." : {
+
+    },
+    "Your Mac no longer trusts this %@. Forget the Mac here and pair again." : {
+
+    },
     "Your Mac uses the whole screen and the controls float over it." : {
+
+    },
+    "Your Mac's Tailscale address or MagicDNS name. On the Mac, Settings → Remote Access → Check Tailscale shows both." : {
 
     },
     "Your other hand gets modifier keys on the opposite side while a chord is in progress." : {
