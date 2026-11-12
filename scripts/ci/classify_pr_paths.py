@@ -113,7 +113,7 @@ CI_DIR = "scripts/ci/"
 # release-tooling checks they stay fail-closed. Listed by name: a new workflow
 # means full CI until it is added here.
 RELEASE_WORKFLOWS = frozenset(f".github/workflows/{name}.yml" for name in (
-    "pr-title", "reference-intake", "reference-sync", "release-android", "release-candidate",
+    "pr-title", "recover-mac-release", "reference-intake", "reference-sync", "release-android", "release-candidate",
     "release-dry-run", "release-ios", "release-mac", "release-monitor", "release-pr",
     "release-preflight", "release-publish", "release-state-access", "repository-guard",
 ))
