@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: ''
+      live_release_sha256:
+        description: 'finish only, needed when Cloudflare challenges the runner: sha256 of https://meowdisplay.app/release.json as YOU fetched it'
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -137,6 +142,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           PROMOTION_PR: ${{ inputs.promotion_pr }}
+          LIVE_RELEASE_SHA256: ${{ inputs.live_release_sha256 }}
         run: |
           set -euo pipefail
           scripts/release/reconcile-mac-release.sh --finish
