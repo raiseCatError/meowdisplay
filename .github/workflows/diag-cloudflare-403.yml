@@ -43,3 +43,8 @@ jobs:
           probe "llms.txt"               "https://meowdisplay.app/llms.txt"
           probe "appcast.xml (no follow)" "https://meowdisplay.app/appcast.xml"
           probe "pages.dev release.json (no follow)" "https://meowdisplay.pages.dev/release.json"
+          probe "robots.txt"             "https://meowdisplay.app/robots.txt"
+          probe "sitemap.xml"            "https://meowdisplay.app/sitemap.xml"
+          probe "site.js"                "https://meowdisplay.app/site.js"
+          probe "prod deployment release.json" "https://e3a2b883.meowdisplay.pages.dev/release.json"
+          probe "prod deployment llms.txt"     "https://e3a2b883.meowdisplay.pages.dev/llms.txt"
