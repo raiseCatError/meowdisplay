@@ -874,6 +874,7 @@ struct ReceiverScreen: View {
                                lockFlow: model.lockScreenFlow,
                                onShowLockScreen: { model.showLockScreen() },
                                onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
+                               onCancelLockScreen: { keyboardActive = false; model.cancelLockScreen() },
                                onDisconnect: { model.receiver.disconnect() })
                     .transition(.opacity)
             }
@@ -2461,8 +2462,15 @@ final class ReceiverModel: ObservableObject {
     // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
     // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
     @Published private(set) var lockScreenFlow = LockScreenFlow() {
-        didSet { syncLockScreenInputTag() }
+        didSet {
+            syncLockScreenInputTag()
+            scheduleLockScreenTimeoutCheck()
+        }
     }
+    /// While a step waits, the flow's clock is checked once a second, so its timeout runs out even
+    /// when the Mac never answers (#255: no lock state after the switch to Full Desktop left
+    /// "Switching to Full Desktop…" up until the app was closed). Nothing runs while nothing waits.
+    private var lockScreenTimeoutCheck: DispatchWorkItem?
     /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
     private var lockScreenReturnsToExtend = false
     /// Going back to Extend waits for video (the receiver can't ask for Extend while the locked
@@ -2483,6 +2491,31 @@ final class ReceiverModel: ObservableObject {
 
     func hideLockScreen() {
         perform(lockScreenFlow.hide(now: Date()))
+    }
+
+    /// Cancel on the locked cover while a step waits.
+    func cancelLockScreen() {
+        Log.info("lockScreen: cancelled while waiting phase=\(lockScreenFlow.phase)")
+        perform(lockScreenFlow.cancel(now: Date()))
+    }
+
+    private func scheduleLockScreenTimeoutCheck() {
+        guard lockScreenFlow.isWaiting else {
+            lockScreenTimeoutCheck?.cancel()
+            lockScreenTimeoutCheck = nil
+            return
+        }
+        guard lockScreenTimeoutCheck == nil else { return }
+        let check = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lockScreenTimeoutCheck = nil
+            let waiting = self.lockScreenFlow.phase
+            let action = self.lockScreenFlow.tick(now: Date(), connected: self.receiver.connected)
+            if !self.lockScreenFlow.isWaiting { Log.info("lockScreen: timed out waiting phase=\(waiting)") }
+            self.perform(action)
+        }
+        lockScreenTimeoutCheck = check
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: check)
     }
 
     private func lockScreenInputsChanged() {
