@@ -1,3 +1,5 @@
+> **Historical, not maintained (marked 2026-11-12).** Extend start-latency investigation from 2.0 QA (2026-10-30). The fix lives in `Mac/ShareableContentBroker.swift` and `Mac/CoalescingFetch.swift`; see [ARCHITECTURE.md](../ARCHITECTURE.md). [Archive index](../docs/archive/README.md).
+
 <!-- Sanitized copy of the integration folder's evidence/extend-p0-2026-10-30/README.md (2026-10-31). Local paths and personal names removed; the integration folder holds the original and evidence. -->
 
 # Extend start latency (P0), 2026-10-30 night
