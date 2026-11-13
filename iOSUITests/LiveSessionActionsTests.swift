@@ -60,8 +60,8 @@ final class LiveSessionActionsTests: XCTestCase {
         snapshot(app, "actions-04-disconnected")
     }
 
-    /// Lock Mac in Session Actions: opens its confirmation and cancels (Cancel on iPhone, a tap
-    /// outside the popover on iPad). Never confirms, so the Mac is never locked and no control
+    /// Lock Mac in Session Actions: opens its confirmation and cancels (Cancel, or a tap outside
+    /// when the system shows it as a popover without Cancel). Never confirms, so the Mac is never locked and no control
     /// request is sent. Skips when the Mac can't lock.
     @MainActor
     func testLockMacRowOpensConfirmationAndCancelsWithoutLocking() throws {
@@ -92,8 +92,8 @@ final class LiveSessionActionsTests: XCTestCase {
         if cancel.exists {
             cancel.tap()
         } else {
-            // iPad (regular width): the confirmation is a popover, and iPadOS leaves out its
-            // Cancel button. A tap outside dismisses it, and that sends nothing either
+            // The confirmation can be a popover without its Cancel button: seen on iPad and on
+            // iPhone with iOS 27. A tap outside dismisses it, and that sends nothing either
             // (`LockMacConfirmation`).
             let outside = app.otherElements["PopoverDismissRegion"]
             XCTAssertTrue(outside.exists, "a confirmation without Cancel can be dismissed by a tap outside")
