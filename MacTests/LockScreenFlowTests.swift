@@ -312,6 +312,63 @@ final class LockScreenFlowTests: XCTestCase {
         XCTAssertEqual(flow.phase, .showing)
     }
 
+    /// #255, physical QA 9000041: after the switch to Full Desktop the new connection never said the
+    /// Mac was locked, and "Switching to Full Desktop…" stayed up until the app was closed. The
+    /// receiver's clock alone now ends the wait, and the trip goes back to Window view.
+    func testTheSwitchToFullDesktopGivesUpWhenTheNewConnectionSaysNothing() {
+        var flow = LockScreenFlow()
+        XCTAssertEqual(flow.begin(notice: locked(.needsFullDesktop), now: t0), .switchToFullDesktop)
+        _ = flow.update(notice: nil, connected: false, now: t0.addingTimeInterval(1))
+        _ = flow.update(notice: nil, connected: true, now: t0.addingTimeInterval(2))
+        XCTAssertEqual(flow.tick(now: t0.addingTimeInterval(29.9), connected: true), .none)
+        XCTAssertEqual(flow.phase, .waitingForFullDesktop, "not yet")
+        XCTAssertEqual(flow.tick(now: t0.addingTimeInterval(30), connected: true), .returnToWindowView)
+        XCTAssertEqual(flow.phase, .failed("The Mac didn't respond."))
+        XCTAssertEqual(flow.tick(now: t0.addingTimeInterval(31), connected: true), .none, "once")
+    }
+
+    func testATimeoutWithoutAConnectionKeepsTheReturnForTheNextUpdate() {
+        var flow = LockScreenFlow()
+        _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)
+        _ = flow.update(notice: nil, connected: false, now: t0.addingTimeInterval(1))
+        XCTAssertEqual(flow.tick(now: t0.addingTimeInterval(30)), .none)
+        XCTAssertEqual(flow.phase, .failed("The Mac didn't respond."))
+        XCTAssertEqual(flow.update(notice: locked(.needsFullDesktop), connected: true, now: t0.addingTimeInterval(31)),
+                       .returnToWindowView)
+    }
+
+    func testCancelStopsEveryWaitingStepAndHidesOnlyWhatWasAsked() {
+        var control = LockScreenFlow()
+        _ = control.begin(notice: locked(.needsControl), now: t0)
+        XCTAssertEqual(control.cancel(now: t0), .none, "nothing was shown yet")
+        XCTAssertEqual(control.phase, .idle)
+
+        var active = LockScreenFlow()
+        _ = active.begin(notice: locked(.available), now: t0)
+        XCTAssertEqual(active.cancel(now: t0), .show(false), "the Mac was asked to show it")
+        XCTAssertEqual(active.phase, .idle)
+        // A late `active` for the cancelled request is never shown.
+        XCTAssertEqual(active.update(notice: locked(.active), connected: true, now: t0.addingTimeInterval(1)), .show(false))
+        XCTAssertFalse(active.isShowing)
+
+        var fullDesktop = LockScreenFlow()
+        _ = fullDesktop.begin(notice: locked(.needsFullDesktop), now: t0)
+        XCTAssertEqual(fullDesktop.cancel(now: t0), .none)
+        XCTAssertEqual(fullDesktop.phase, .idle)
+        XCTAssertEqual(fullDesktop.tick(now: t0.addingTimeInterval(60), connected: true), .none, "no clock after Cancel")
+        // The unlock still goes back to Window view, once.
+        XCTAssertEqual(fullDesktop.update(notice: nil, connected: true, now: t0.addingTimeInterval(61)), .returnToWindowView)
+    }
+
+    func testCancelLeavesShowingAndIdleAlone() {
+        var showing = shown()
+        XCTAssertEqual(showing.cancel(now: t0), .none, "Hide ends a shown lock screen")
+        XCTAssertTrue(showing.isShowing)
+        var idle = LockScreenFlow()
+        XCTAssertEqual(idle.cancel(now: t0), .none)
+        XCTAssertEqual(idle.phase, .idle)
+    }
+
     func testCouldNotPerformFailsAWaitingFlow() {
         var flow = LockScreenFlow()
         _ = flow.begin(notice: locked(.needsFullDesktop), now: t0)

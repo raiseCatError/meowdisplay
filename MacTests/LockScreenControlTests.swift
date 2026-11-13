@@ -371,6 +371,89 @@ final class LockScreenControlTests: XCTestCase {
         XCTAssertFalse(g.accepts(encodedAtMs: 3_001, keyframe: false), "a new view starts with a keyframe again")
     }
 
+    // MARK: Capture for the view (#255)
+
+    func testRecoveryRunsWhileLockedOnlyForALiveView() {
+        typealias P = LockScreenCapturePolicy
+        XCTAssertTrue(P.consoleCanCapture(interactive: true, lockScreenViewLive: false,
+                                          mainDisplayAsleep: false, captureDisplayAwake: true))
+        XCTAssertFalse(P.consoleCanCapture(interactive: false, lockScreenViewLive: false,
+                                           mainDisplayAsleep: false, captureDisplayAwake: true),
+                       "locked with nobody viewing the lock screen: still waits")
+        XCTAssertTrue(P.consoleCanCapture(interactive: false, lockScreenViewLive: true,
+                                          mainDisplayAsleep: false, captureDisplayAwake: true),
+                      "a receiver showing the lock screen needs capture before any unlock")
+        XCTAssertFalse(P.consoleCanCapture(interactive: false, lockScreenViewLive: true,
+                                           mainDisplayAsleep: true, captureDisplayAwake: false),
+                       "nothing awake to capture: still waits")
+        XCTAssertTrue(P.consoleCanCapture(interactive: true, lockScreenViewLive: false,
+                                          mainDisplayAsleep: true, captureDisplayAwake: true),
+                      "a switched-off external main display doesn't block the awake captured one")
+    }
+
+    func testAViewWithoutAFreshPictureRecoversOrRebuildsCapture() {
+        typealias P = LockScreenCapturePolicy
+        func action(live: Bool = true, sent: Bool = false, capturing: Bool, established: Bool = true,
+                    mirror: Bool = true) -> P.FreshFrameAction {
+            P.freshFrameAction(viewStillLive: live, keyframeSent: sent, captureLive: capturing,
+                               captureEstablished: established, mirror: mirror)
+        }
+        XCTAssertEqual(action(capturing: true), .rebuildCapture,
+                       "a still login window sends nothing new: rebuild for a complete frame")
+        XCTAssertEqual(action(capturing: false), .recoverCapture)
+        XCTAssertEqual(action(capturing: false, established: false), .none,
+                       "before the first capture start (Mirror waiting for a display, the Extend offer), "
+                       + "startup owns that start: the view never races it")
+        XCTAssertEqual(action(sent: true, capturing: true), .none)
+        XCTAssertEqual(action(live: false, capturing: true), .none, "a view that ended, or was replaced, rebuilds nothing")
+        XCTAssertEqual(action(live: false, capturing: false), .none)
+        XCTAssertEqual(action(capturing: true, mirror: false), .none)
+        XCTAssertEqual(P.freshFrameChecks.count, 2, "bounded")
+    }
+
+    /// Recovery for the view can't outlive it. Ticks at the 3 s recovery cadence across a lock:
+    /// rounds run only while the view is live (or after the unlock), a failed round while locked
+    /// never counts toward ending the session, and once the view ends, a locked Mac only waits.
+    func testLockedRecoveryStopsWhenTheViewEnds() {
+        typealias P = LockScreenCapturePolicy
+        struct Tick { let interactive: Bool; let viewLive: Bool; let runs: Bool }
+        let timeline = [
+            Tick(interactive: false, viewLive: false, runs: false),   // locked, nobody viewing
+            Tick(interactive: false, viewLive: true, runs: true),     // view shown
+            Tick(interactive: false, viewLive: true, runs: true),
+            Tick(interactive: false, viewLive: false, runs: false),   // view hidden / idle / revoked
+            Tick(interactive: false, viewLive: false, runs: false),
+            Tick(interactive: false, viewLive: false, runs: false),
+            Tick(interactive: true, viewLive: false, runs: true),     // unlocked: ordinary recovery
+        ]
+        for (i, t) in timeline.enumerated() {
+            XCTAssertEqual(P.consoleCanCapture(interactive: t.interactive, lockScreenViewLive: t.viewLive,
+                                               mainDisplayAsleep: false, captureDisplayAwake: true), t.runs, "tick \(i)")
+        }
+        XCTAssertFalse(P.failedRoundCounts(interactive: false), "a locked round never ends the session")
+        XCTAssertTrue(P.failedRoundCounts(interactive: true), "unlocked rounds keep the usual budget")
+    }
+
+    func testAutomaticMirrorShowsTheLoginWindowsMainDisplay() {
+        typealias P = LockScreenCapturePolicy
+        let builtIn = MirrorSourceCandidate(displayID: 1, persistentID: "built-in")
+        let external = MirrorSourceCandidate(displayID: 2, persistentID: "external")
+        let meow = MirrorSourceCandidate(displayID: 9, persistentID: "meow")
+        XCTAssertEqual(P.automaticDisplay(in: [builtIn, external], excluding: [], main: 2), 2)
+        XCTAssertEqual(P.automaticDisplay(in: [builtIn, external], excluding: [], main: 7), 1,
+                       "main not capturable: the usual Automatic choice")
+        XCTAssertEqual(P.automaticDisplay(in: [meow, builtIn], excluding: [9], main: 9), 1,
+                       "never a MeowDisplay virtual display")
+        XCTAssertTrue(P.shouldMoveToMain(selectedUUID: nil, captureDisplayID: 1, main: 2, mainUsable: true, meowDisplayIDs: []))
+        XCTAssertFalse(P.shouldMoveToMain(selectedUUID: "built-in", captureDisplayID: 1, main: 2, mainUsable: true,
+                                          meowDisplayIDs: []), "an explicit choice is kept")
+        XCTAssertFalse(P.shouldMoveToMain(selectedUUID: nil, captureDisplayID: 2, main: 2, mainUsable: true, meowDisplayIDs: []))
+        XCTAssertFalse(P.shouldMoveToMain(selectedUUID: nil, captureDisplayID: 1, main: 2, mainUsable: false, meowDisplayIDs: []),
+                       "a sleeping or switched-off main display isn't a target")
+        XCTAssertFalse(P.shouldMoveToMain(selectedUUID: nil, captureDisplayID: 1, main: 9, mainUsable: true, meowDisplayIDs: [9]))
+        XCTAssertFalse(P.shouldMoveToMain(selectedUUID: nil, captureDisplayID: 0, main: 2, mainUsable: true, meowDisplayIDs: []))
+    }
+
     // MARK: The per-device switch
 
     private func isolatedDefaults() -> UserDefaults {

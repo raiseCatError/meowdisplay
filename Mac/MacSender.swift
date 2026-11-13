@@ -1692,6 +1692,48 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("lockScreen: shown on \(endpointName)")
         sendLockState()
         sendVideoState()
+        ensureLockScreenCapture(view: view)
+    }
+
+    /// `queue` (#255): the view needs a picture of the login window made after it began. Capture
+    /// on Automatic moves to the main display, where macOS draws the login window; a stream that
+    /// sends nothing new (a still login window) is rebuilt; a capture that is down recovers now
+    /// rather than after an unlock. Every frame still passes `LockScreenFrameGate`.
+    private func ensureLockScreenCapture(view: Int) {
+        let main = CGMainDisplayID()
+        let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+        if mode == .mirror, LockScreenCapturePolicy.shouldMoveToMain(
+            selectedUUID: mirrorDisplayUUID, captureDisplayID: captureDisplayID, main: main,
+            mainUsable: DisplayHealth.isUsable(main), meowDisplayIDs: meowIDs) {
+            Log.info("lockScreen: capturing display \(captureDisplayID), login window is on main \(main) — moving")
+            scheduleWakeCaptureRecovery(reason: "lockScreenMainDisplay")
+        }
+        if captureOwnership.liveStream == nil, captureDisplayID != 0 {
+            scheduleCaptureRecovery()
+        }
+        let selfBox = self.selfBox
+        for (index, delay) in LockScreenCapturePolicy.freshFrameChecks.enumerated() {
+            queue.asyncAfter(deadline: .now() + delay) {
+                guard let self = selfBox.currentOnQueue() else { return }
+                let action = LockScreenCapturePolicy.freshFrameAction(
+                    viewStillLive: self.lockScreenLive && self.lockScreenView == view,
+                    keyframeSent: self.lockScreenFrames.keyframeSent,
+                    captureLive: self.captureOwnership.liveStream != nil,
+                    captureEstablished: self.captureDisplayID != 0, mirror: self.mode == .mirror)
+                switch action {
+                case .none:
+                    return
+                case .recoverCapture:
+                    Log.info("lockScreen: no picture after \(delay)s, capture is down — recovering (check \(index + 1))")
+                    self.scheduleCaptureRecovery()
+                case .rebuildCapture:
+                    Log.info("lockScreen: no new picture after \(delay)s — rebuilding capture (check \(index + 1)) "
+                        + "display=\(self.captureDisplayID) main=\(CGMainDisplayID()) "
+                        + "mainAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0)")
+                    self.scheduleWakeCaptureRecovery(reason: "lockScreenNoFreshFrame")
+                }
+            }
+        }
     }
 
     /// `queue`. Held keys and buttons are released; the picture stops again while locked. The
@@ -4375,8 +4417,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// capturable displays while the main display sleeps or the screen is
     /// locked (display sleep drops capture seconds before the lock engages),
     /// so attempts then are doomed and must not count against the budget.
+    /// The exception is a receiver showing the lock screen (#255): the view
+    /// is the one case the lock screen may leave this Mac, and recovery used
+    /// to wait for the unlock the view itself was needed for. `queue`.
+    /// `queue`: capture may be recovered for the lock screen view: the view is
+    /// live on this connection, and capture was established for this session
+    /// (`captureDisplayID`). Before the first capture start (Mirror waiting for
+    /// a display, or its Extend offer), startup owns that start and the view
+    /// never races it. False the moment the view ends (hidden, idle, unlock,
+    /// revocation, another user, a new connection).
+    private var lockScreenViewNeedsCapture: Bool { lockScreenLive && captureDisplayID != 0 }
+
     private var consoleCanCapture: Bool {
-        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+        LockScreenCapturePolicy.consoleCanCapture(
+            interactive: consoleIsInteractive, lockScreenViewLive: lockScreenViewNeedsCapture,
+            mainDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            captureDisplayAwake: captureDisplayID != 0 && CGDisplayIsAsleep(captureDisplayID) == 0)
     }
 
     /// On `queue`: after a recovery round, re-arm the loop while capture is
@@ -4388,6 +4444,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard videoEnabled, captureStateSnapshot().shouldRetryCapture else { return }
         guard stream == nil else {
             captureRecoveryBudget.reset()
+            return
+        }
+        // A round run only for the lock screen view (#255) doesn't count: if
+        // ScreenCaptureKit can't capture this locked console, the session must
+        // not end for it. The view itself is bounded (idle timeout, unlock).
+        if !LockScreenCapturePolicy.failedRoundCounts(interactive: consoleIsInteractive) {
+            scheduleCaptureRecovery()
             return
         }
         let shouldRetry = captureRecoveryBudget.recordFailure()
@@ -4629,10 +4692,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             // Auto mode: the first display, skipping other devices'
             // MeowDisplay virtual displays (issue #20).
-            Log.info("wakeCapture: selectedUUID=none(Auto)")
-            let automaticID = MirrorSourceResolver.automatic(
-                in: Self.mirrorSourceCandidates(content.displays),
-                excluding: VirtualDisplayRegistry.shared.displayIDs)
+            // While a receiver shows the lock screen: the main display, where
+            // macOS draws the login window (#255).
+            let showingLockScreen = (try? await onQueue { sender in sender.lockScreenLive }) ?? false
+            Log.info("wakeCapture: selectedUUID=none(Auto) lockScreenView=\(showingLockScreen)")
+            let candidates = Self.mirrorSourceCandidates(content.displays)
+            let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+            let automaticID = showingLockScreen
+                ? LockScreenCapturePolicy.automaticDisplay(in: candidates, excluding: meowIDs, main: mainID)
+                : MirrorSourceResolver.automatic(in: candidates, excluding: meowIDs)
             resolvedDisplay = automaticID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         }
         guard let display = resolvedDisplay else {
@@ -4658,6 +4726,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
             Log.info("wakeCapture: startCaptureSucceeded")
+        } catch is CancellationError {
+            // Superseded by a newer start (Mirror startup, another recovery), a
+            // stop, a pause or the session ending: whoever won owns capture now.
+            // Marking an unexpected stop here would put a healthy new capture
+            // back into recovery, where keyboard input is refused.
+            Log.info("wakeCapture: startCaptureSuperseded")
+            wakeCaptureAwaitingFirstFrameGeneration = nil
+            wakeCaptureAwaitingEncodedFrameGeneration = nil
         } catch {
             Log.info("wakeCapture: startCaptureFailed error=\(error)")
             wakeCaptureAwaitingFirstFrameGeneration = nil
@@ -6384,6 +6460,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingPromoteGeneration = nil
         if promote { performInteractiveWakePromotion() }
         sendRemoteEndpointsIfSupported(generation: generation)
+        // Locked: say so now (#255). The lock state goes only to an admitted
+        // connection, and the two earlier chances on a new connection, the
+        // welcome and this device's permit (`onHello`), usually come just
+        // before the receiver accepts the invitation. Both were dropped then,
+        // so the receiver never learned the Mac was locked: it showed the
+        // video-off trackpad, or waited on "Switching to Full Desktop…".
+        if !privacyGate.allowsContent { sendLockState() }
     }
 
     /// On `queue`, admitted connections only: this Mac's Tailscale addresses (PROTOCOL.md 6.17),
@@ -8079,6 +8162,39 @@ extension MacSender {
         try await onQueue { $0.handleCurrentConnectionControl(payload) }
     }
 
+    /// Like `admitConnectionForTesting`, but stops before the receiver accepts the session
+    /// invitation: the hello is verified, the connection isn't admitted yet. Finish it with
+    /// `acceptInvitationForTesting`, the real admission path.
+    func helloWithoutAdmissionForTesting(helloJSON: Data, pinnedSPKI: Data,
+                                         eventSink: SyntheticEventSink,
+                                         sent: @escaping @Sendable (String) -> Void) async throws -> UInt64 {
+        try await onQueue { sender in
+            sender.inputEventSink = eventSink
+            sender.sentControlObserverForTesting = sent
+            let generation = sender.authenticatedSession.beginTransport()
+            sender.activeConnectionGeneration = generation
+            sender.connectionAuthorityEnded(dropped: sender.sessionAuthorization.transportBegan(generation: generation))
+            let info = try JSONDecoder().decode(PhoneInfo.self, from: helloJSON)
+            let outcome = sender.sessionAuthorization.acceptHello(
+                generation: generation, intendedPeerID: sender.transport.tls.peerID, claimedPeerID: info.id,
+                authenticatedSPKI: pinnedSPKI, currentPinnedSPKI: pinnedSPKI,
+                receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                needsSenderApproval: false)
+            if case .rejected = outcome { throw InputHarnessError.helloRejected }
+            _ = sender.authenticatedSession.markApplicationReady(generation: generation)
+            sender.lastHello = info
+            return generation
+        }
+    }
+
+    /// The receiver accepts the session invitation on the live connection (`sessionInviteResponse`).
+    func acceptInvitationForTesting() async throws {
+        try await onQueue { sender in
+            sender.sessionAuthorization.receiverResponded(.accepted, generation: sender.activeConnectionGeneration)
+            sender.evaluateSessionAdmission()
+        }
+    }
+
     /// The live connection ended (the receiver's control stream hit EOF).
     func loseConnectionForTesting() async throws {
         try await onQueue { $0.invalidateApplicationSession(reason: "controlEOF") }
@@ -8109,6 +8225,16 @@ extension MacSender {
 
     var lockScreenWakeCountForTesting: Int {
         get async throws { try await onQueue { $0.lockScreenWakeCount } }
+    }
+
+    /// Whether the lock screen view may drive capture recovery now (#255).
+    var lockScreenViewNeedsCaptureForTesting: Bool {
+        get async throws { try await onQueue { $0.lockScreenViewNeedsCapture } }
+    }
+
+    /// Stands in for a capture established on `displayID` (0: none yet).
+    func setCaptureDisplayForTesting(_ displayID: CGDirectDisplayID) async throws {
+        try await onQueue { $0.captureDisplayID = displayID }
     }
 
     /// Whether the encoder output would hand a fresh lock-screen keyframe to `sendFramed` now.

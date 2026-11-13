@@ -90,6 +90,19 @@ struct LockScreenFlow: Equatable, Sendable {
         return .show(false)
     }
 
+    /// The user tapped Cancel while a step was waiting (#255: "Switching to Full Desktop…" had no
+    /// way out but Disconnect). Stops asking; if this device already asked the Mac to show its lock
+    /// screen, it asks it to hide. A trip from Window view or Extend still goes back once the Mac
+    /// unlocks, as after Hide.
+    mutating func cancel(now: Date) -> LockScreenAction {
+        guard isWaiting else { return .none }
+        let asked = askedOnThisConnection
+        phase = .idle
+        waitingSince = nil
+        askedOnThisConnection = false
+        return asked ? .show(false) : .none
+    }
+
     /// The app couldn't carry out an action the flow asked for (for example, the mode switch
     /// wasn't possible): nothing will arrive, so say so now instead of waiting out the timeout.
     mutating func couldNotPerform() {
@@ -177,10 +190,14 @@ struct LockScreenFlow: Equatable, Sendable {
         }
     }
 
-    /// Time passing with no news from the Mac.
-    mutating func tick(now: Date) -> LockScreenAction {
+    /// Time passing with no news from the Mac. The receiver calls this while a step waits, so the
+    /// timeout runs out even when nothing ever arrives (#255). With a connection, a flow that just
+    /// timed out goes back to where it started, as a refusal does.
+    mutating func tick(now: Date, connected: Bool = false) -> LockScreenAction {
+        let wasWaiting = isWaiting
         checkTimeout(now)
-        return .none
+        guard wasWaiting, !isWaiting, connected, returnPending else { return .none }
+        return takeReturn()
     }
 
     // MARK: -
