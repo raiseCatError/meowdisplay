@@ -50,11 +50,20 @@ struct WakeConnectAttempt: Equatable {
     static let maxPromoteAttempts = 3
     static let promoteRetryInterval: TimeInterval = 3
     static let overallTimeout: TimeInterval = 40
+    // A Mac that dialed in answers (and so ends) this device's Connect
+    // request. If that session then drops while the attempt is still running
+    // (the Mac was reachable but could not start yet, #255), the request is
+    // asked again, at most this many times per attempt.
+    static let maxConnectRequestRenewals = 3
 
     private(set) var stage: WakeConnectStage = .idle
     private(set) var attemptID: UInt64 = 0
     private(set) var peerID: String?
     private(set) var wolBurstsSent = 0
+    private(set) var connectRequestRenewals = 0
+    /// A session reached this attempt and was then lost: the Connect request
+    /// it answered is gone and may be asked again (`shouldRenewConnectRequest`).
+    private(set) var connectRequestAnswered = false
     /// The `ReceiverSessionState.generation` Promote is currently armed for.
     /// Reset whenever a new generation authenticates so a stale generation's
     /// leftover attempt count can never suppress a fresh one's first attempt.
@@ -78,6 +87,8 @@ struct WakeConnectAttempt: Equatable {
         self.peerID = peerID
         stage = .preparing
         wolBurstsSent = 0
+        connectRequestRenewals = 0
+        connectRequestAnswered = false
         promoteGeneration = nil
         promoteAttemptsThisGeneration = 0
         promoteSucceededGeneration = nil
@@ -169,7 +180,23 @@ struct WakeConnectAttempt: Equatable {
     /// `wolBurstsSent` is NOT reset, keeping the whole attempt bounded.
     mutating func connectionLost() -> Bool {
         guard isActive else { return false }
+        switch stage {
+        case .authenticating, .promoting, .waitingForVideo: connectRequestAnswered = true
+        default: break
+        }
         stage = .waking
+        return true
+    }
+
+    /// Whether to ask the Mac to dial again after a session this attempt had
+    /// reached was lost. Once per lost session (the recovery run the new
+    /// request starts reports "reconnecting" again, which must not ask
+    /// twice), and bounded by `maxConnectRequestRenewals` for the attempt.
+    mutating func shouldRenewConnectRequest() -> Bool {
+        guard stage == .waking, connectRequestAnswered,
+              connectRequestRenewals < Self.maxConnectRequestRenewals else { return false }
+        connectRequestAnswered = false
+        connectRequestRenewals += 1
         return true
     }
 

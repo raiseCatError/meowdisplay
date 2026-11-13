@@ -44,6 +44,7 @@ final class WakeConnectCoordinator: ObservableObject {
 
     private let receiver: StreamReceiver
     private var activePeerID: String?
+    private var activeMode: ReceiverDisplayMode?
     private var cancellables = Set<AnyCancellable>()
     private var wolTimer: DispatchSourceTimer?
     private var tokenRefreshTimer: DispatchSourceTimer?
@@ -97,6 +98,7 @@ final class WakeConnectCoordinator: ObservableObject {
         stopAllTimers()
         subscribeIfNeeded()
         activePeerID = peerID
+        activeMode = mode
         let id = attempt.begin(peerID: peerID)
         Log.info("wakeConnect: begin peer=\(peerID) attempt=\(id)")
 
@@ -244,7 +246,12 @@ final class WakeConnectCoordinator: ObservableObject {
                     sendPromoteIfNeeded()
                 }
             }
-        case .reconnecting, .reconnectFailed, .disconnected, .peerDisconnected:
+        case .reconnecting:
+            if attempt.connectionLost() {
+                renewConnectRequestIfAnswered()
+                scheduleTokenRefresh()
+            }
+        case .reconnectFailed, .disconnected, .peerDisconnected:
             if attempt.connectionLost() {
                 scheduleTokenRefresh()
             }
@@ -257,6 +264,21 @@ final class WakeConnectCoordinator: ObservableObject {
         case .paused:
             break
         }
+    }
+
+    /// The Mac dialed in for this attempt and the session then dropped (a Mac
+    /// reached in a dark wake that could not start yet, #255). Its arrival
+    /// answered this device's Connect request, so the token refresh has
+    /// nothing left to re-publish and the Mac, the only dialer on the local
+    /// network, is never asked again: the attempt would sit until its
+    /// timeout even after the Mac is fully awake. Asks again through the
+    /// same `connectPrimary` the attempt began with — same pinned peer, same
+    /// Mac-side policy — only for a dropped transport (never a Disconnect),
+    /// and a bounded number of times.
+    private func renewConnectRequestIfAnswered() {
+        guard let peerID = activePeerID, attempt.shouldRenewConnectRequest() else { return }
+        Log.info("wakeConnect: connectRequestRenewed count=\(attempt.connectRequestRenewals)")
+        receiver.connectPrimary(peerID: peerID, mode: activeMode)
     }
 
     private func handleVideoSizeChange(_ size: CGSize) {

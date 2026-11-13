@@ -357,4 +357,66 @@ final class WakeConnectAttemptTests: XCTestCase {
         XCTAssertEqual(attempt.stage, .waking)
         XCTAssertEqual(attempt.wolBurstsSent, 2)   // not reset — the attempt stays bounded
     }
+
+    // MARK: - Connect request renewal after a lost session (#255)
+
+    /// The Mac dialed in from a dark wake, was admitted, and dropped because
+    /// it could not start yet. Its arrival answered the Connect request, so
+    /// the attempt must ask again or the Mac (the only dialer) never returns.
+    private func attemptWithAnAuthenticatedSession() -> WakeConnectAttempt {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        _ = attempt.transportReady()
+        _ = attempt.applicationAuthenticated(generation: 2, peerID: "peer-1")
+        return attempt
+    }
+
+    func testALostSessionRenewsTheConnectRequestOnce() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "nothing to renew while the session is live")
+
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        XCTAssertEqual(attempt.connectRequestRenewals, 1)
+
+        // The recovery run the renewed request starts reports the loss again.
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "one lost session asks once")
+        XCTAssertEqual(attempt.connectRequestRenewals, 1)
+    }
+
+    func testALossBeforeAnySessionDoesNotRenew() {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        _ = attempt.beginWaitingForConnection()
+
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "the first request still stands and is refreshed")
+    }
+
+    func testConnectRequestRenewalsAreBoundedPerAttempt() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        for generation in 0..<WakeConnectAttempt.maxConnectRequestRenewals {
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 10 + generation, peerID: "peer-1")
+        }
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "the budget is spent")
+        XCTAssertEqual(attempt.connectRequestRenewals, WakeConnectAttempt.maxConnectRequestRenewals)
+
+        _ = attempt.fail("timedOut")
+        _ = attempt.begin(peerID: "peer-1")
+        XCTAssertEqual(attempt.connectRequestRenewals, 0, "a new attempt gets a fresh budget")
+    }
+
+    func testAFinishedAttemptNeverRenews() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        XCTAssertTrue(attempt.connectionLost())
+        _ = attempt.fail("cancelled")
+        XCTAssertFalse(attempt.shouldRenewConnectRequest())
+    }
 }
