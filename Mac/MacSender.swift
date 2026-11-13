@@ -4239,7 +4239,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.captureRecoveryScheduled = false
             guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped,
                   self.captureOwnership.liveStream == nil,
-                  self.captureStateSnapshot().shouldRetryCapture else { return }
+                  self.captureStateSnapshot().shouldRetryCapture,
+                  DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: self.windowStartAwaitingDisplay)
+            else { return }
             // A doomed attempt must not count against the budget: re-arm
             // without running a round until the console can capture again.
             guard self.consoleCanCapture else {
@@ -6535,6 +6537,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // A start still in flight was prepared for an earlier admission and
         // cannot commit for this one; the start below supersedes it.
         guard !stopped, captureOwnership.liveStream == nil else { return }
+        // A Window start waiting for a display (it follows this re-admission)
+        // builds the carrier itself; a second start here collides with it.
+        guard DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: windowStartAwaitingDisplay) else {
+            Log.info("displayDebug: windowReadiness readmission recovery left to the waiting start")
+            return
+        }
         let selfBox = self.selfBox
         switch captureStateSnapshot().phase {
         case .resuming:
