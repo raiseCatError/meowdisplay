@@ -52,11 +52,16 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     var onStop: (@Sendable (Int) -> Void)?
     /// A status other than `.complete` changed (suspended, idle, blank...).
     var onStatus: (@Sendable (SCFrameStatus) -> Void)?
+    /// Applies a configuration to the live stream: ScreenCaptureKit's `updateConfiguration`.
+    /// Tests pass their own, so no capture runs there.
+    private let reconfigure: @Sendable (SCStream, SCStreamConfiguration) async throws -> Void
 
-    init(tileID: String, windowID: UInt32, assignmentGeneration: UInt64) {
+    init(tileID: String, windowID: UInt32, assignmentGeneration: UInt64,
+         reconfigure: @escaping @Sendable (SCStream, SCStreamConfiguration) async throws -> Void = { try await $0.updateConfiguration($1) }) {
         self.tileID = tileID
         self.windowID = windowID
         self.assignmentGeneration = assignmentGeneration
+        self.reconfigure = reconfigure
         // The first-frame wait counts from now: a Full Desktop pane asks macOS for its content
         // before its stream exists, and with no start time the watch called it stalled at once.
         health = Health(startedAt: ProcessInfo.processInfo.systemUptime)
@@ -113,8 +118,16 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         config.width = Int(size.width)
         config.height = Int(size.height)
         config.minimumFrameInterval = newInterval
-        try? await s.updateConfiguration(config)
+        try? await reconfigure(s, config)
         return true
+    }
+
+    /// Tests: a stream that was never started stands in for a live one, at `size` and `fps`.
+    func installStreamForTesting(_ s: SCStream, size: CGSize, fps: Int) {
+        lock.withLock { stream = s }
+        config.width = Int(size.width)
+        config.height = Int(size.height)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
     }
 
     var configuredSize: CGSize { CGSize(width: config.width, height: config.height) }
