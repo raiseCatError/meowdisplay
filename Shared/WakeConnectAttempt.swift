@@ -34,6 +34,18 @@ enum WakeConnectStage: Equatable {
     }
 }
 
+/// What the coordinator does when the receiver session reports a phase that
+/// means the connection is gone (see `WakeConnectAttempt.lossAction`).
+enum WakeConnectLossAction: Equatable {
+    /// This device ended the session: the attempt is over and its Connect
+    /// request is withdrawn.
+    case endAttempt
+    /// The transport dropped: fall back to waking and ask the Mac again.
+    case connectionLostAndRenew
+    /// The session gave up or the Mac closed it: fall back to waking.
+    case connectionLost
+}
+
 struct WakeConnectAttempt: Equatable {
     // Send a short burst rather than a single packet or an unbounded loop —
     // "a few magic packets over roughly 1–2 seconds" per the orchestration spec.
@@ -50,11 +62,20 @@ struct WakeConnectAttempt: Equatable {
     static let maxPromoteAttempts = 3
     static let promoteRetryInterval: TimeInterval = 3
     static let overallTimeout: TimeInterval = 40
+    // A Mac that dialed in answers (and so ends) this device's Connect
+    // request. If that session then drops while the attempt is still running
+    // (the Mac was reachable but could not start yet, #255), the request is
+    // asked again, at most this many times per attempt.
+    static let maxConnectRequestRenewals = 3
 
     private(set) var stage: WakeConnectStage = .idle
     private(set) var attemptID: UInt64 = 0
     private(set) var peerID: String?
     private(set) var wolBurstsSent = 0
+    private(set) var connectRequestRenewals = 0
+    /// A session reached this attempt and was then lost: the Connect request
+    /// it answered is gone and may be asked again (`shouldRenewConnectRequest`).
+    private(set) var connectRequestAnswered = false
     /// The `ReceiverSessionState.generation` Promote is currently armed for.
     /// Reset whenever a new generation authenticates so a stale generation's
     /// leftover attempt count can never suppress a fresh one's first attempt.
@@ -65,6 +86,36 @@ struct WakeConnectAttempt: Equatable {
     private(set) var promoteSucceededGeneration: Int?
 
     var isActive: Bool { stage.isActive }
+
+    /// A session has reached this attempt (transport adopted or beyond) and
+    /// the attempt is still working on it.
+    var hasSession: Bool {
+        switch stage {
+        case .authenticating, .promoting, .waitingForVideo: return true
+        default: return false
+        }
+    }
+
+    /// How an active attempt reacts to a session that is gone. The loss reason
+    /// decides, not the stage: `.disconnected` is also what a dropped
+    /// transport reads as with Auto-Reconnect off or before the first
+    /// connection since launch, and only this device's own Disconnect
+    /// (`.explicitDisconnect`) ends the attempt, in any stage (#255).
+    /// `nil` for phases that are not a loss, or when the attempt is not active.
+    func lossAction(phase: ReceiverSessionPhase,
+                    lossReason: ReceiverSessionLossReason?) -> WakeConnectLossAction? {
+        guard isActive else { return nil }
+        switch phase {
+        case .disconnected:
+            return lossReason == .explicitDisconnect ? .endAttempt : .connectionLostAndRenew
+        case .reconnecting:
+            return .connectionLostAndRenew
+        case .reconnectFailed, .peerDisconnected:
+            return .connectionLost
+        case .connecting, .connected, .paused, .unrecoverable:
+            return nil
+        }
+    }
 
     // MARK: - Transitions
     //
@@ -78,6 +129,8 @@ struct WakeConnectAttempt: Equatable {
         self.peerID = peerID
         stage = .preparing
         wolBurstsSent = 0
+        connectRequestRenewals = 0
+        connectRequestAnswered = false
         promoteGeneration = nil
         promoteAttemptsThisGeneration = 0
         promoteSucceededGeneration = nil
@@ -169,7 +222,20 @@ struct WakeConnectAttempt: Equatable {
     /// `wolBurstsSent` is NOT reset, keeping the whole attempt bounded.
     mutating func connectionLost() -> Bool {
         guard isActive else { return false }
+        if hasSession { connectRequestAnswered = true }
         stage = .waking
+        return true
+    }
+
+    /// Whether to ask the Mac to dial again after a session this attempt had
+    /// reached was lost. Once per lost session (the recovery run the new
+    /// request starts reports "reconnecting" again, which must not ask
+    /// twice), and bounded by `maxConnectRequestRenewals` for the attempt.
+    mutating func shouldRenewConnectRequest() -> Bool {
+        guard stage == .waking, connectRequestAnswered,
+              connectRequestRenewals < Self.maxConnectRequestRenewals else { return false }
+        connectRequestAnswered = false
+        connectRequestRenewals += 1
         return true
     }
 

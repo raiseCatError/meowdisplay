@@ -973,7 +973,11 @@ reconnect, and SHOULD retire it on a local deadline rather than wait forever.
 
 **`mirrorUnavailable`** (Mac → receiver, pv 17): sent instead of immediately
 failing the session when `mode` is `mirror` and the Mac has no usable
-physical display (e.g. lid closed, no external monitor). This is purely
+physical display (e.g. lid closed, no external monitor, or displays still
+asleep after a wake). Before sending it the Mac asks macOS once to wake its
+displays (the public user-activity call Wake & Connect also uses) and waits
+up to 8s for a physical display to become stably usable; if one does, Mirror
+starts and no offer is sent. This is purely
 additive UX around a known limitation — it does not add a new mode-switch
 mechanism. A receiver that understands it MAY present an offer to switch to
 Extend; accepting sends the EXISTING `displayModeRequest` (`mode: extend`)
@@ -982,8 +986,11 @@ The Mac holds the authenticated connection open for a bounded window
 (currently 30s) waiting for that request before failing Mirror with its
 normal error; a receiver that declines, disconnects, or simply never
 responds gets the exact same outcome a receiver that never saw the offer at
-all would. Receivers below pv 17 are never sent this message and see
-today's immediate Mirror failure.
+all would. If a physical display becomes stably usable during that window,
+the Mac starts Mirror by itself and sends `displayModeState`, so a receiver
+MAY let the user wait instead of choosing (the offer is then moot).
+Receivers below pv 17 are never sent this message and see today's immediate
+Mirror failure (after the same bounded wait for a display).
 
 **`videoRequest` / `videoState`** (pv 9) control video production without
 changing the logical session. When disabled, the sender stops capture,
@@ -2347,6 +2354,33 @@ Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.
   password. Receivers show an opaque locked screen, forget stills, window names and anything in
   progress (drags, Stage Peek, pickers), keep the layout, and ask for the window list again after
   the unlock.
+
+### 6.18.1 Display sleep (`macDisplaySleep`)
+
+Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent to the admitted receiver when
+the Mac's displays go to sleep or wake, and once on every admission, first or re-admission, as a
+snapshot of where they stand (a new session can start while they already sleep, and sleep usually
+drops the transport, so the connection that heard the change is gone). The snapshot reports and
+never wakes. Additive: a receiver that doesn't
+know it ignores it, and a receiver that never hears it assumes the displays are awake.
+
+A session can outlive display sleep: the transport stays up or reconnects in a dark wake, but
+there is nothing to capture. On `asleep: true` a receiver drops its last picture and shows that
+the Mac is asleep, with one explicit action that sends `promoteInteractiveWake` (the request Wake
+& Connect sends). The Mac never wakes itself for a connected viewer. On `asleep: false` capture
+resumes through the existing wake paths, and `macLockState` decides what may be shown.
+
+Only an explicit request wakes the Mac. The Mac decides this per admitted connection, from the
+`intent` of that connection's own `sessionInvite` (6.9, `manual` only for a Connect or Wake &
+Connect the user asked for, on the receiver or on the Mac), never from a label or from discovery
+metadata, and only once the connection is authenticated and admitted. A start that finds no
+display (Mirror or Window) wakes the displays once for a `manual` session. An `automatic` one
+(auto-connect, a redial, an unsolicited Mac-side dial, any re-admission after the first) never
+does: it stays admitted and authenticated, the Mac reports `asleep: true`, and the start keeps
+waiting while the displays sleep, so it neither fails nor offers Extend. It captures when macOS
+wakes by itself or when the user sends `promoteInteractiveWake`, which keeps working unchanged
+for either kind of session. A manual intent never carries over to a later connection or
+invitation. Authentication, pairing and input consent are not affected.
 
 ### 6.19 Lock screen control (`lockScreenRequest`, `macLockState.lockScreen`)
 

@@ -398,12 +398,13 @@ struct MirrorUnavailableOfferAlert: ViewModifier {
     @ObservedObject var controller: ReceiverController
 
     func body(content: Content) -> some View {
-        content.alert("Mirror isn't available",
+        content.alert("Mirror isn't available yet",
                       isPresented: Binding(get: { controller.mirrorUnavailableOffer }, set: { _ in })) {
-            Button("Cancel", role: .cancel) { controller.declineMirrorUnavailableOffer() }
             Button("Use Extend") { controller.acceptMirrorUnavailableOffer() }
+            Button("Wait", role: .cancel) { controller.waitForMirrorDisplay() }
+            Button("Disconnect", role: .destructive) { controller.declineMirrorUnavailableOffer() }
         } message: {
-            Text("The other Mac has no active physical display, for example its lid is closed. Use Extend to create a virtual display instead?")
+            Text("The other Mac hasn't reported a usable display. You can wait for it to become available or use Extend.")
         }
     }
 }

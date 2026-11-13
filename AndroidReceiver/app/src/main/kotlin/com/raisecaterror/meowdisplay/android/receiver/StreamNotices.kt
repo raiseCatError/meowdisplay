@@ -37,7 +37,7 @@ import com.raisecaterror.meowdisplay.android.session.SessionHost
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 
 /**
- * The Mac has no physical display to mirror (closed lid, headless): offer Extend instead (pv 17
+ * The Mac has reported no usable physical display (asleep, waking, closed lid, headless): offer Extend (pv 17
  * `mirrorUnavailable`). Switching goes through the ordinary Mac-confirmed mode request.
  */
 @Composable
@@ -48,10 +48,11 @@ fun MirrorUnavailableOffer(media: SessionHost) {
     if (!stream.mirrorUnavailable || !ui.admitted || dismissedFor == ui.peerID) return
     AlertDialog(
         onDismissRequest = { dismissedFor = ui.peerID },
-        title = { Text("No display to mirror") },
-        text = { Text("Your Mac has no screen MeowDisplay can mirror right now, for example when its lid is closed. Extend gives it a separate display on this device instead.") },
-        confirmButton = { TextButton(onClick = { media.session.requestDisplayMode(DisplayMode.Extend) }) { Text("Switch to Extend") } },
-        dismissButton = { TextButton(onClick = { dismissedFor = ui.peerID }) { Text("Not Now") } },
+        title = { Text("Mirror isn't available yet") },
+        // Says only what the Mac reported (#255): it can be asleep, waking or switched off.
+        text = { Text("Your Mac hasn't reported a usable display. You can wait for it to become available or use Extend.") },
+        confirmButton = { TextButton(onClick = { media.session.requestDisplayMode(DisplayMode.Extend) }) { Text("Use Extend") } },
+        dismissButton = { TextButton(onClick = { dismissedFor = ui.peerID }) { Text("Wait") } },
     )
 }
 

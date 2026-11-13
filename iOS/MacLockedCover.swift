@@ -15,6 +15,7 @@ struct MacLockedCover: View {
     var onBackToHome: (() -> Void)?
     var onShowLockScreen: () -> Void = {}
     var onHideLockScreen: () -> Void = {}
+    var onCancelLockScreen: () -> Void = {}
     let onDisconnect: () -> Void
 
     /// The Mac offers its own lock screen to this device (or is waiting on a step toward it).
@@ -51,6 +52,10 @@ struct MacLockedCover: View {
         VStack(spacing: 8) {
             if lockFlow.isWaiting {
                 status(waitingText)
+                // A way out that isn't Disconnect: stop waiting and keep the session (#255).
+                Button("Cancel", action: onCancelLockScreen)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("macLockedCancelLockScreen")
             } else if notice.showsMacLockScreen, lockFlow.isShowing {
                 // The Mac said `active`; the picture isn't playing yet.
                 status(String(localized: "Waiting for the lock screen picture…"))

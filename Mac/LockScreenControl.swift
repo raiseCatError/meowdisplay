@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // Lock screen control (SECURITY.md "Lock screen control"): while the Mac is locked, a receiver
@@ -427,5 +428,70 @@ enum LockScreenTaggedInput {
         case "text": return text?.count ?? 0
         default: return 0
         }
+    }
+}
+
+/// Capture while a receiver shows the lock screen (#255). The view admits only frames encoded
+/// after it began (`LockScreenFrameGate`), so it depends on capture actually running and actually
+/// delivering a new picture. Neither was guaranteed: capture recovery waited for an unlocked
+/// console, and ScreenCaptureKit sends nothing while a login window stays still (no blinking
+/// caret, a user picker), so the receiver could wait for the clock's next minute or forever. This
+/// never widens what may be shown: frames still pass `LockScreenFrameGate` and `sendFramed`.
+enum LockScreenCapturePolicy {
+    /// Whether a capture recovery attempt can succeed now. An unlocked console, or a locked one
+    /// whose lock screen a receiver is showing right now (`lockScreenViewLive`: started on this
+    /// connection, its grant held, macOS still locked and on this console). Another user's session
+    /// or a locked Mac nobody is viewing keeps waiting, as before. A sleeping main display blocks
+    /// it unless the display being captured is awake (a switched-off external main display must
+    /// not block the built-in one).
+    static func consoleCanCapture(interactive: Bool, lockScreenViewLive: Bool,
+                                  mainDisplayAsleep: Bool, captureDisplayAwake: Bool) -> Bool {
+        (interactive || lockScreenViewLive) && (!mainDisplayAsleep || captureDisplayAwake)
+    }
+
+    /// When the sender checks that a new view got its first picture, measured from the view's
+    /// start. Two checks at most: views are already rate-limited (`LockScreenShowRateLimit`).
+    static let freshFrameChecks: [TimeInterval] = [1.5, 5]
+
+    enum FreshFrameAction: Equatable, Sendable {
+        case none
+        /// Capture is down: run the ordinary recovery (now allowed for the live view).
+        case recoverCapture
+        /// Capture runs but sent nothing new: rebuild the stream, whose first frame is complete.
+        case rebuildCapture
+    }
+
+    /// `captureEstablished`: a capture was started for this session. Before that (Mirror still
+    /// waiting for a display, or its Extend offer pending) startup owns the first start, and the
+    /// view never starts a competing one.
+    static func freshFrameAction(viewStillLive: Bool, keyframeSent: Bool, captureLive: Bool,
+                                 captureEstablished: Bool, mirror: Bool) -> FreshFrameAction {
+        guard viewStillLive, mirror, !keyframeSent else { return .none }
+        if captureLive { return .rebuildCapture }
+        return captureEstablished ? .recoverCapture : .none
+    }
+
+    /// Whether a failed recovery round counts against the session's budget. Rounds while the
+    /// console is locked ran only for a live view: they don't, so a capture ScreenCaptureKit
+    /// can't make while locked never ends the session. They also never run on their own: the
+    /// next round waits for `consoleCanCapture` (a live view or an unlock) again.
+    static func failedRoundCounts(interactive: Bool) -> Bool { interactive }
+
+    /// Automatic Mirror while the lock screen is shown: macOS draws the login window on the main
+    /// display, so prefer it when it can be captured and isn't a MeowDisplay virtual display.
+    /// Otherwise the usual Automatic choice.
+    static func automaticDisplay(in candidates: [MirrorSourceCandidate], excluding meowDisplayIDs: Set<CGDirectDisplayID>,
+                                 main: CGDirectDisplayID) -> CGDirectDisplayID? {
+        if !meowDisplayIDs.contains(main), candidates.contains(where: { $0.displayID == main }) { return main }
+        return MirrorSourceResolver.automatic(in: candidates, excluding: meowDisplayIDs)
+    }
+
+    /// A view starting on Automatic Mirror while another display than the main one is captured:
+    /// move to the main display, where the login window is. An explicit choice is never overridden.
+    static func shouldMoveToMain(selectedUUID: String?, captureDisplayID: CGDirectDisplayID,
+                                 main: CGDirectDisplayID, mainUsable: Bool,
+                                 meowDisplayIDs: Set<CGDirectDisplayID>) -> Bool {
+        selectedUUID == nil && captureDisplayID != 0 && captureDisplayID != main && mainUsable
+            && !meowDisplayIDs.contains(main)
     }
 }

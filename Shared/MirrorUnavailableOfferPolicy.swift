@@ -17,6 +17,18 @@ enum MirrorUnavailableOfferPolicy {
         !hasUsablePhysicalDisplay && receiverProtocolVersion >= WireProtocol.mirrorUnavailableWireVersion
     }
 
+    /// How long a Mirror start that finds no usable physical display waits
+    /// for one before offering Extend (#255). After a sleep or network wake
+    /// the display is usually asleep or still coming up, not gone; external
+    /// monitors can take several seconds to reappear. Bounded, and only spent
+    /// when no display is usable at admission.
+    static let readinessGrace: TimeInterval = 8
+
+    /// How long a Mirror start after the display returned waits for a wake
+    /// recovery already in progress (it starts Mirror itself) before starting
+    /// one of its own. Bounded; usually the recovery has finished well before.
+    static let wakeRecoverySettle: TimeInterval = 5
+
     /// Whether a previously-sent offer is still the one this poll iteration
     /// (or the eventual timeout) is entitled to act on. False once the
     /// authenticated session that owns it is no longer live (disconnect,

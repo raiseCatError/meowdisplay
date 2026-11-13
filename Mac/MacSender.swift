@@ -866,6 +866,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// A `promoteInteractiveWake` that arrived before its connection was
     /// admitted; performed on admission of that same connection.
     private var pendingPromoteGeneration: UInt64?
+    /// The invitation intent of the most recently admitted connection,
+    /// recorded at its admission. `StartWakePolicy` reads it for exactly that
+    /// generation, so an earlier connection's manual intent never reaches a
+    /// later one. `queue` only.
+    private var admittedSessionIntent: AdmittedSessionIntent?
     /// A rotation re-hello that arrived while its connection was not yet
     /// admitted: the rebuild runs once that connection is admitted.
     private var deferredRotationRebuild = false
@@ -893,6 +898,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     #if DEBUG
     /// Input test harness: every control message this sender writes.
     private var sentControlObserverForTesting: (@Sendable (String) -> Void)?
+    /// Replaces the live display sleep reading in the admission snapshot.
+    private var displaysAsleepForTesting: Bool?
     #endif
     /// Window mode only: this receiver's window workspace (queue-confined reference).
     private var workspaceEngine: WindowWorkspaceEngine?
@@ -1027,6 +1034,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // so — like `captureGeneration`/`audioGeneration` — they live on
     // `pipelineState`.
     private var wakeCaptureObserver: NSObjectProtocol?
+    private var displaySleepObserver: NSObjectProtocol?
     // Not itself part of the wake-capture-recovery machinery above — this is
     // the fixed 60s post-authentication display/system-sleep stabilization
     // hold (see WakeStabilizationAssertion), armed for every route.
@@ -1043,6 +1051,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // different generation) by the poll itself.
     private var mirrorUnavailableOfferGeneration: UInt64?
     private var wakeCaptureRecoveryScheduled = false
+    /// `queue` only. A Window-mode start is waiting for a sleeping display
+    /// (`awaitWindowCarrierReadiness`) and will start the carrier stream
+    /// itself: the wake it asked for must not start one too (#255).
+    private var windowStartAwaitingDisplay = false
+    /// `queue` only. A re-admission's capture reconcile was left to a Window start holding the
+    /// carrier; it runs when the hold ends, in case that start ended without building one.
+    private var readmissionReconcileDeferred = false
     private var wakeCaptureRecoveryRunning = false
     // Display-topology generation (distinct from `captureGeneration`/session
     // generation): bumped on every topology-changing notification so an
@@ -1692,6 +1707,48 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("lockScreen: shown on \(endpointName)")
         sendLockState()
         sendVideoState()
+        ensureLockScreenCapture(view: view)
+    }
+
+    /// `queue` (#255): the view needs a picture of the login window made after it began. Capture
+    /// on Automatic moves to the main display, where macOS draws the login window; a stream that
+    /// sends nothing new (a still login window) is rebuilt; a capture that is down recovers now
+    /// rather than after an unlock. Every frame still passes `LockScreenFrameGate`.
+    private func ensureLockScreenCapture(view: Int) {
+        let main = CGMainDisplayID()
+        let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+        if mode == .mirror, LockScreenCapturePolicy.shouldMoveToMain(
+            selectedUUID: mirrorDisplayUUID, captureDisplayID: captureDisplayID, main: main,
+            mainUsable: DisplayHealth.isUsable(main), meowDisplayIDs: meowIDs) {
+            Log.info("lockScreen: capturing display \(captureDisplayID), login window is on main \(main) — moving")
+            scheduleWakeCaptureRecovery(reason: "lockScreenMainDisplay")
+        }
+        if captureOwnership.liveStream == nil, captureDisplayID != 0 {
+            scheduleCaptureRecovery()
+        }
+        let selfBox = self.selfBox
+        for (index, delay) in LockScreenCapturePolicy.freshFrameChecks.enumerated() {
+            queue.asyncAfter(deadline: .now() + delay) {
+                guard let self = selfBox.currentOnQueue() else { return }
+                let action = LockScreenCapturePolicy.freshFrameAction(
+                    viewStillLive: self.lockScreenLive && self.lockScreenView == view,
+                    keyframeSent: self.lockScreenFrames.keyframeSent,
+                    captureLive: self.captureOwnership.liveStream != nil,
+                    captureEstablished: self.captureDisplayID != 0, mirror: self.mode == .mirror)
+                switch action {
+                case .none:
+                    return
+                case .recoverCapture:
+                    Log.info("lockScreen: no picture after \(delay)s, capture is down — recovering (check \(index + 1))")
+                    self.scheduleCaptureRecovery()
+                case .rebuildCapture:
+                    Log.info("lockScreen: no new picture after \(delay)s — rebuilding capture (check \(index + 1)) "
+                        + "display=\(self.captureDisplayID) main=\(CGMainDisplayID()) "
+                        + "mainAsleep=\(CGDisplayIsAsleep(CGMainDisplayID()) != 0)")
+                    self.scheduleWakeCaptureRecovery(reason: "lockScreenNoFreshFrame")
+                }
+            }
+        }
     }
 
     /// `queue`. Held keys and buttons are released; the picture stops again while locked. The
@@ -2166,6 +2223,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case .mirror:
             if DisplayHealth.hasUsablePhysicalDisplay(excluding: nil) {
                 try await startMirrorCaptureUsingPreference(sessionGeneration: admittedGeneration)
+            } else if try await awaitMirrorDisplayReadiness(sessionGeneration: admittedGeneration) {
+                try await startMirrorOnceDisplayReturned(sessionGeneration: admittedGeneration)
             } else {
                 try await offerExtendOrFailMirror(info: admitted.info, sessionGeneration: admittedGeneration)
             }
@@ -2287,6 +2346,87 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// alone changes nothing here — the receiver's own "Use Extend" tap (if
     /// it still arrives) remains a perfectly valid request regardless of
     /// what the physical topology looks like by then.
+    /// Mirror found no usable physical display at admission (#255). Right
+    /// after a sleep or a network wake that is usually a display still
+    /// asleep or still coming up, not one that is gone: ask macOS once to
+    /// wake its displays (the same public user-activity call Wake & Connect
+    /// makes, for this admitted session) and give the topology a bounded
+    /// `MirrorUnavailableOfferPolicy.readinessGrace` to settle. True once a
+    /// physical display is stably usable; false sends the Extend offer. Not
+    /// reached when a display is already usable, so it adds no wait then.
+    /// Only a session the user asked for may wake the Mac (`StartWakePolicy`):
+    /// any other waits the same way without waking it, and while the displays
+    /// sleep it keeps waiting past the grace, so a Mac that wakes by itself or
+    /// by Wake Mac is mirrored with no tap and no Extend offer.
+    private func awaitMirrorDisplayReadiness(sessionGeneration: UInt64) async throws -> Bool {
+        guard authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+        let grace = MirrorUnavailableOfferPolicy.readinessGrace
+        let mayWake = try await startMayWake(sessionGeneration: sessionGeneration)
+        if mayWake {
+            let promotion = InteractiveWakePromotion.promote(reason: "MEOW Mirror Display")
+            Log.info("displayDebug: mirrorReadiness no usable display yet — waiting up to \(Int(grace))s "
+                + "promoteResult=\(promotion.result)")
+        } else {
+            Log.info("displayDebug: mirrorReadiness no usable display yet and this session was not "
+                + "requested by the user — waiting up to \(Int(grace))s without waking the Mac")
+        }
+        let start = ContinuousClock.now
+        var stability = DisplayStabilityTracker()
+        var graceEnd = start + .seconds(grace)
+        while true {
+            while ContinuousClock.now < graceEnd {
+                try await Task.sleep(for: .milliseconds(500))
+                guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+                if stability.recordSample(usable: DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)) {
+                    Log.info("displayDebug: mirrorReadiness display ready after \(ContinuousClock.now - start)")
+                    return true
+                }
+            }
+            // A session that may not wake the Mac stays pending while its displays sleep: the
+            // user's Wake Mac, or macOS waking by itself (`screensDidWake`), completes it.
+            let asleep = try await onQueue { sender in sender.currentDisplaysAsleep() }
+            guard StartWakePolicy.keepsWaitingAfterGrace(mayWake: mayWake, displaysAsleep: asleep) else { break }
+            graceEnd = ContinuousClock.now + .seconds(grace)
+        }
+        Log.info("displayDebug: mirrorReadiness no usable display after \(Int(grace))s — offering Extend")
+        return false
+    }
+
+    /// Whether this admitted session was explicitly requested, so its start may wake the Mac
+    /// (`StartWakePolicy`). Decided from the intent recorded at this generation's admission.
+    private func startMayWake(sessionGeneration: UInt64) async throws -> Bool {
+        try await onQueue { sender in
+            StartWakePolicy.mayWake(
+                admittedGeneration: sessionGeneration,
+                sessionIsAdmitted: sender.sessionAuthorization.isAdmitted(generation: sessionGeneration),
+                recorded: sender.admittedSessionIntent)
+        }
+    }
+
+    /// Starts Mirror once a waiting display is back (the readiness wait, or
+    /// the offer's poll). The wake that brought it back usually also fires
+    /// `screensDidWake`, whose wake recovery starts Mirror for this session on
+    /// its own: a second start would fail ("capture stream is already active")
+    /// or supersede that one. Waits, bounded, for a wake recovery in progress,
+    /// then starts only if nothing is capturing yet.
+    private func startMirrorOnceDisplayReturned(sessionGeneration: UInt64) async throws {
+        let pollsLeft = Int(MirrorUnavailableOfferPolicy.wakeRecoverySettle / 0.25)
+        for poll in 0...pollsLeft {
+            let (recovering, capturing) = try await onQueue { sender in
+                (sender.wakeCaptureRecoveryScheduled || sender.wakeCaptureRecoveryRunning,
+                 sender.captureOwnership.liveStream != nil)
+            }
+            if capturing {
+                Log.info("displayDebug: mirrorReadiness wake recovery already started Mirror")
+                return
+            }
+            if !recovering || poll == pollsLeft { break }
+            try await Task.sleep(for: .milliseconds(250))
+            guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+        }
+        try await startMirrorCaptureUsingPreference(sessionGeneration: sessionGeneration)
+    }
+
     private func offerExtendOrFailMirror(info: PhoneInfo, sessionGeneration: UInt64) async throws {
         guard MirrorUnavailableOfferPolicy.shouldOffer(
             hasUsablePhysicalDisplay: false, receiverProtocolVersion: info.protocolVersion
@@ -2330,7 +2470,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 mirrorUnavailableOfferGeneration = nil
                 Log.info("displayDebug: mirrorUnavailable offer cleared generation=\(sessionGeneration) "
                     + "— a physical display returned and stayed stable, resuming Mirror")
-                try await startMirrorCaptureUsingPreference(sessionGeneration: sessionGeneration)
+                try await startMirrorOnceDisplayReturned(sessionGeneration: sessionGeneration)
                 return
             }
         }
@@ -3417,6 +3557,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeCaptureObserver)
         }
         wakeCaptureObserver = nil
+        if let displaySleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(displaySleepObserver)
+        }
+        displaySleepObserver = nil
         if let mirrorDisplayTopologyObserver {
             NotificationCenter.default.removeObserver(mirrorDisplayTopologyObserver)
         }
@@ -4174,7 +4318,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.captureRecoveryScheduled = false
             guard self.videoEnabled || self.desiredAudioEnabled, !self.stopped,
                   self.captureOwnership.liveStream == nil,
-                  self.captureStateSnapshot().shouldRetryCapture else { return }
+                  self.captureStateSnapshot().shouldRetryCapture,
+                  DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: self.windowStartAwaitingDisplay)
+            else { return }
             // A doomed attempt must not count against the budget: re-arm
             // without running a round until the console can capture again.
             guard self.consoleCanCapture else {
@@ -4375,8 +4521,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// capturable displays while the main display sleeps or the screen is
     /// locked (display sleep drops capture seconds before the lock engages),
     /// so attempts then are doomed and must not count against the budget.
+    /// The exception is a receiver showing the lock screen (#255): the view
+    /// is the one case the lock screen may leave this Mac, and recovery used
+    /// to wait for the unlock the view itself was needed for. `queue`.
+    /// `queue`: capture may be recovered for the lock screen view: the view is
+    /// live on this connection, and capture was established for this session
+    /// (`captureDisplayID`). Before the first capture start (Mirror waiting for
+    /// a display, or its Extend offer), startup owns that start and the view
+    /// never races it. False the moment the view ends (hidden, idle, unlock,
+    /// revocation, another user, a new connection).
+    private var lockScreenViewNeedsCapture: Bool { lockScreenLive && captureDisplayID != 0 }
+
     private var consoleCanCapture: Bool {
-        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+        LockScreenCapturePolicy.consoleCanCapture(
+            interactive: consoleIsInteractive, lockScreenViewLive: lockScreenViewNeedsCapture,
+            mainDisplayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            captureDisplayAwake: captureDisplayID != 0 && CGDisplayIsAsleep(captureDisplayID) == 0)
     }
 
     /// On `queue`: after a recovery round, re-arm the loop while capture is
@@ -4388,6 +4548,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard videoEnabled, captureStateSnapshot().shouldRetryCapture else { return }
         guard stream == nil else {
             captureRecoveryBudget.reset()
+            return
+        }
+        // A round run only for the lock screen view (#255) doesn't count: if
+        // ScreenCaptureKit can't capture this locked console, the session must
+        // not end for it. The view itself is bounded (idle timeout, unlock).
+        if !LockScreenCapturePolicy.failedRoundCounts(interactive: consoleIsInteractive) {
+            scheduleCaptureRecovery()
             return
         }
         let shouldRetry = captureRecoveryBudget.recordFailure()
@@ -4430,8 +4597,45 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             queue.async {
                 guard let self = selfBox.currentOnQueue() else { return }
                 self.topologyChanged(reason: "screensDidWake")
+                self.sendDisplaySleepState(asleep: false)
             }
         }
+        displaySleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
+        ) { _ in
+            queue.async { selfBox.currentOnQueue()?.sendDisplaySleepState(asleep: true) }
+        }
+    }
+
+    /// `queue` (#255): tells the admitted receiver that this Mac's displays went to sleep or woke
+    /// (`MacDisplaySleepWire`). The session can stay up through display sleep with nothing to
+    /// capture; the receiver shows that, and offers its own explicit wake request. Nothing here
+    /// wakes the Mac.
+    private func sendDisplaySleepState(asleep: Bool) {
+        guard !stopped, sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        Log.info("macPower: receiver told displayAsleep=\(asleep)")
+        sendJSONObject(MacDisplaySleepWire.message(asleep: asleep))
+    }
+
+    /// `queue`: where the displays stand now, for a connection that has just been admitted. Only
+    /// a report: nothing here wakes the Mac.
+    private func sendDisplaySleepSnapshot() {
+        sendDisplaySleepState(asleep: currentDisplaysAsleep())
+    }
+
+    private func currentDisplaysAsleep() -> Bool {
+        #if DEBUG
+        if let displaysAsleepForTesting { return displaysAsleepForTesting }
+        #endif
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        if count > 0 { CGGetOnlineDisplayList(count, &ids, &count) }
+        // Public API only: the virtual display is told apart by this sender's own id; another
+        // app's virtual display would still count as physical here.
+        return MacDisplaySleepWire.snapshotAsleep(
+            displays: ids.map { (id: $0, asleep: CGDisplayIsAsleep($0) != 0) },
+            excluding: virtualDisplayID, mainAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0)
     }
 
     /// Called on `queue` for every topology-changing notification, for both
@@ -4464,6 +4668,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Windows keep their own streams across display changes; only a
             // wake needs the carrier rebuilt (same as Mirror).
             guard reason == "screensDidWake" else { return }
+            // A start that is waiting for this very wake starts the carrier
+            // itself. Rebuilding it here as well made the two starts collide
+            // ("capture stream is already active") and ended the session.
+            guard DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: windowStartAwaitingDisplay) else {
+                Log.info("displayDebug: windowReadiness wake rebuild left to the waiting start")
+                return
+            }
             let carrierSelfBox = self.selfBox
             Task { try? await carrierSelfBox.resolve()?.reattachWindowCarrier() }
         }
@@ -4629,10 +4840,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         } else {
             // Auto mode: the first display, skipping other devices'
             // MeowDisplay virtual displays (issue #20).
-            Log.info("wakeCapture: selectedUUID=none(Auto)")
-            let automaticID = MirrorSourceResolver.automatic(
-                in: Self.mirrorSourceCandidates(content.displays),
-                excluding: VirtualDisplayRegistry.shared.displayIDs)
+            // While a receiver shows the lock screen: the main display, where
+            // macOS draws the login window (#255).
+            let showingLockScreen = (try? await onQueue { sender in sender.lockScreenLive }) ?? false
+            Log.info("wakeCapture: selectedUUID=none(Auto) lockScreenView=\(showingLockScreen)")
+            let candidates = Self.mirrorSourceCandidates(content.displays)
+            let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+            let automaticID = showingLockScreen
+                ? LockScreenCapturePolicy.automaticDisplay(in: candidates, excluding: meowIDs, main: mainID)
+                : MirrorSourceResolver.automatic(in: candidates, excluding: meowIDs)
             resolvedDisplay = automaticID.flatMap { id in content.displays.first(where: { $0.displayID == id }) }
         }
         guard let display = resolvedDisplay else {
@@ -4658,6 +4874,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try await startMirrorCapture(display: display, sessionGeneration: sessionGeneration)
             Log.info("wakeCapture: startCaptureSucceeded")
+        } catch is CancellationError {
+            // Superseded by a newer start (Mirror startup, another recovery), a
+            // stop, a pause or the session ending: whoever won owns capture now.
+            // Marking an unexpected stop here would put a healthy new capture
+            // back into recovery, where keyboard input is refused.
+            Log.info("wakeCapture: startCaptureSuperseded")
+            wakeCaptureAwaitingFirstFrameGeneration = nil
+            wakeCaptureAwaitingEncodedFrameGeneration = nil
         } catch {
             Log.info("wakeCapture: startCaptureFailed error=\(error)")
             wakeCaptureAwaitingFirstFrameGeneration = nil
@@ -6358,10 +6582,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// gap held back, on this connection only.
     private func connectionAdmitted(generation: UInt64, first: Bool) {
         Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
+        // Only what this admission's own invitation declared: an invitation re-sent after the
+        // first admission is always automatic (`sendSessionInviteIfSupported`).
+        admittedSessionIntent = AdmittedSessionIntent(
+            generation: generation, intent: StartWakePolicy.recordedIntent(invitation: sessionInvitation.intent, first: first))
         syncWorkspaceSuspension()
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
         }
+        // Every admission, once: a new session to a Mac whose displays already sleep (Extend has
+        // no readiness wait) would otherwise never hear it, and a re-admission usually follows a
+        // transport the sleep dropped.
+        sendDisplaySleepSnapshot()
         if !first {
             // Nothing reached this connection while it waited: start it on
             // a fresh keyframe and a fresh audio timeline, and tell it where
@@ -6384,6 +6616,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pendingPromoteGeneration = nil
         if promote { performInteractiveWakePromotion() }
         sendRemoteEndpointsIfSupported(generation: generation)
+        // Locked: say so now (#255). The lock state goes only to an admitted
+        // connection, and the two earlier chances on a new connection, the
+        // welcome and this device's permit (`onHello`), usually come just
+        // before the receiver accepts the invitation. Both were dropped then,
+        // so the receiver never learned the Mac was locked: it showed the
+        // video-off trackpad, or waited on "Switching to Full Desktop…".
+        if !privacyGate.allowsContent { sendLockState() }
     }
 
     /// On `queue`, admitted connections only: this Mac's Tailscale addresses (PROTOCOL.md 6.17),
@@ -6414,6 +6653,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // A start still in flight was prepared for an earlier admission and
         // cannot commit for this one; the start below supersedes it.
         guard !stopped, captureOwnership.liveStream == nil else { return }
+        // A Window start waiting for a display (it follows this re-admission)
+        // builds the carrier itself; a second start here collides with it.
+        guard DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: windowStartAwaitingDisplay) else {
+            Log.info("displayDebug: windowReadiness readmission recovery left to the waiting start")
+            readmissionReconcileDeferred = true
+            return
+        }
         let selfBox = self.selfBox
         switch captureStateSnapshot().phase {
         case .resuming:
@@ -7844,11 +8090,75 @@ extension MacSender {
     /// Mac too, as long as macOS has some display (even a virtual one)
     /// holding the windows; it never creates one.
     func startWindowWorkspace(info: PhoneInfo, sessionGeneration: UInt64) async throws {
+        // From before the first display probe until this start is over, the
+        // carrier is this start's to build (see `topologyChanged`), and the
+        // hold is released on every exit, including a throw from the
+        // readiness wait.
+        let selfBox = self.selfBox
+        try await DisplayReadinessWait.whileAwaitingDisplay(
+            begin: { try await self.onQueue { sender in sender.windowStartAwaitingDisplay = true } },
+            end: {
+                self.queue.async {
+                    guard let sender = selfBox.currentOnQueue() else { return }
+                    sender.windowStartAwaitingDisplay = false
+                    // The start may have ended without a carrier (its connection was replaced
+                    // past the readiness wait): the reconcile it deferred runs now. It does
+                    // nothing when the start built one.
+                    if sender.readmissionReconcileDeferred {
+                        sender.readmissionReconcileDeferred = false
+                        sender.reconcileCaptureAfterReadmission()
+                    }
+                }
+            },
+            body: { try await self.startWindowWorkspaceHoldingCarrier(info: info, sessionGeneration: sessionGeneration) })
+    }
+
+    /// A real error, not a cancellation: the start failure path stops the
+    /// sender, where a cancellation is read as a user stop and would leave a
+    /// running Window sender with no workspace engine.
+    private static func windowSessionChangedError() -> NSError {
+        NSError(domain: "MacSender", code: 22, userInfo: [
+            NSLocalizedDescriptionKey: "the connection kept changing while Window mode waited for a display"])
+    }
+
+    private func startWindowWorkspaceHoldingCarrier(info startInfo: PhoneInfo,
+                                                    sessionGeneration startGeneration: UInt64) async throws {
+        var info = startInfo
+        var sessionGeneration = startGeneration
         let contentClock = ContinuousClock.now
         let content = try await ShareableContent.content()
         Self.logStartupStep("windowModeContent", since: contentClock)
-        let main = CGMainDisplayID()
-        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+        var found = Self.windowCarrier(in: content.displays)
+        var follows = 0
+        while found == nil {
+            do {
+                found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration)
+                break
+            } catch is CancellationError {
+                // Stopped, or the generation was superseded mid-wait. A
+                // superseded session is followed to its next admitted
+                // connection (as startup does); anything else must not leave
+                // a running sender with no workspace engine.
+                switch DisplayReadinessWait.afterCancelledWait(stopped: stopped, follows: follows) {
+                case .endQuietly:
+                    throw CancellationError()
+                case .follow:
+                    follows += 1
+                    Log.info("displayDebug: windowReadiness generation=\(sessionGeneration) superseded — following the session")
+                    do {
+                        let (admitted, generation) = try await awaitAdmittedConnection()
+                        info = admitted.info
+                        sessionGeneration = generation
+                    } catch is CancellationError {
+                        guard !stopped else { throw CancellationError() }
+                        throw Self.windowSessionChangedError()
+                    }
+                case .fail:
+                    throw Self.windowSessionChangedError()
+                }
+            }
+        }
+        guard let carrier = found else {
             await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")
             throw NSError(domain: "MacSender", code: 21,
                           userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
@@ -7864,12 +8174,69 @@ extension MacSender {
         Log.info("workspace: Window mode started canvas=\(canvasW)x\(canvasH) carrier=\(carrier.displayID)")
     }
 
+    /// The display Window mode's carrier stream captures: the main display,
+    /// else any display macOS lists.
+    private static func windowCarrier(in displays: [SCDisplay]) -> SCDisplay? {
+        let main = CGMainDisplayID()
+        return displays.first(where: { $0.displayID == main }) ?? displays.first
+    }
+
+    /// Window mode found no display to carry its stream at admission (#255).
+    /// A Mac reached while its displays sleep (a dark wake keeps the network
+    /// up) lists none, and failing there ended every Wake & Connect and
+    /// reconnect until someone woke the Mac by hand. Same answer as Mirror's
+    /// `awaitMirrorDisplayReadiness`: ask macOS once to wake its displays
+    /// (one public user-activity call, for this admitted session only) and
+    /// give them the same bounded grace to be listed. Nil when none appears,
+    /// which keeps today's failure. Not reached when a display is listed, so
+    /// it adds no wait then. Wake recovery is Mirror-only, so nothing else
+    /// starts a capture for this session meanwhile. Only a session the user
+    /// asked for may wake the Mac (`StartWakePolicy`); any other does not, and
+    /// stays pending while the displays sleep instead of failing with code 21.
+    private func awaitWindowCarrierReadiness(sessionGeneration: UInt64) async throws -> SCDisplay? {
+        let grace = MirrorUnavailableOfferPolicy.readinessGrace
+        let start = ContinuousClock.now
+        let mayWake = try await startMayWake(sessionGeneration: sessionGeneration)
+        Log.info("displayDebug: windowReadiness no display listed yet — waiting up to \(Int(grace))s "
+            + (mayWake ? "" : "without waking the Mac (not requested by the user)"))
+        let polls = DisplayReadinessWait.polls(grace: grace, interval: 0.5)
+        let probe = { () async -> SCDisplay? in
+            // A failed listing while displays come up is "not yet".
+            guard let content = try? await ShareableContent.content() else { return nil }
+            return Self.windowCarrier(in: content.displays)
+        }
+        let pause = { try await Task.sleep(for: .milliseconds(500)) }
+        let stillWanted = { !self.stopped && self.authenticatedSession.isLive(generation: sessionGeneration) }
+        var carrier = try await DisplayReadinessWait.firstAvailable(
+            polls: polls,
+            wake: {
+                guard mayWake else { return }
+                let promotion = InteractiveWakePromotion.promote(reason: "MEOW Window Mode Display")
+                Log.info("displayDebug: windowReadiness promoteResult=\(promotion.result)")
+            },
+            probe: probe, pause: pause, stillWanted: stillWanted)
+        // A session that may not wake the Mac stays pending while its displays sleep: the user's
+        // Wake Mac, or macOS waking by itself, makes one listed and this start builds the carrier
+        // (a wake rebuild is left to it, `windowStartAwaitingDisplay`).
+        while carrier == nil {
+            let asleep = try await onQueue { sender in sender.currentDisplaysAsleep() }
+            guard StartWakePolicy.keepsWaitingAfterGrace(mayWake: mayWake, displaysAsleep: asleep) else { break }
+            carrier = try await DisplayReadinessWait.firstAvailable(
+                polls: polls, wake: {}, probe: probe, pause: pause, stillWanted: stillWanted)
+        }
+        if carrier != nil {
+            Log.info("displayDebug: windowReadiness display ready after \(ContinuousClock.now - start)")
+        } else {
+            Log.info("displayDebug: windowReadiness no display after \(Int(grace))s")
+        }
+        return carrier
+    }
+
     /// Capture recovery in Window mode: restart the carrier display stream.
     func reattachWindowCarrier() async throws {
         guard let info = lastHello else { throw CancellationError() }
         let content = try await ShareableContent.content()
-        let main = CGMainDisplayID()
-        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+        guard let carrier = Self.windowCarrier(in: content.displays) else {
             throw NSError(domain: "MacSender", code: 21,
                           userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
         }
@@ -8074,9 +8441,50 @@ extension MacSender {
         }
     }
 
+    /// The admission step for `generation` (first or re-admission) with the displays' sleep state fixed.
+    func runAdmissionForTesting(generation: UInt64, first: Bool, displaysAsleep: Bool) async throws {
+        try await onQueue { sender in
+            sender.displaysAsleepForTesting = displaysAsleep
+            sender.connectionAdmitted(generation: generation, first: first)
+        }
+    }
+
     /// A control message from the receiver on the live connection.
     func receiveControlForTesting(_ payload: Data) async throws {
         try await onQueue { $0.handleCurrentConnectionControl(payload) }
+    }
+
+    /// Like `admitConnectionForTesting`, but stops before the receiver accepts the session
+    /// invitation: the hello is verified, the connection isn't admitted yet. Finish it with
+    /// `acceptInvitationForTesting`, the real admission path.
+    func helloWithoutAdmissionForTesting(helloJSON: Data, pinnedSPKI: Data,
+                                         eventSink: SyntheticEventSink,
+                                         sent: @escaping @Sendable (String) -> Void) async throws -> UInt64 {
+        try await onQueue { sender in
+            sender.inputEventSink = eventSink
+            sender.sentControlObserverForTesting = sent
+            let generation = sender.authenticatedSession.beginTransport()
+            sender.activeConnectionGeneration = generation
+            sender.connectionAuthorityEnded(dropped: sender.sessionAuthorization.transportBegan(generation: generation))
+            let info = try JSONDecoder().decode(PhoneInfo.self, from: helloJSON)
+            let outcome = sender.sessionAuthorization.acceptHello(
+                generation: generation, intendedPeerID: sender.transport.tls.peerID, claimedPeerID: info.id,
+                authenticatedSPKI: pinnedSPKI, currentPinnedSPKI: pinnedSPKI,
+                receiverSupportsInvitations: info.protocolVersion >= WireProtocol.sessionInvitationWireVersion,
+                needsSenderApproval: false)
+            if case .rejected = outcome { throw InputHarnessError.helloRejected }
+            _ = sender.authenticatedSession.markApplicationReady(generation: generation)
+            sender.lastHello = info
+            return generation
+        }
+    }
+
+    /// The receiver accepts the session invitation on the live connection (`sessionInviteResponse`).
+    func acceptInvitationForTesting() async throws {
+        try await onQueue { sender in
+            sender.sessionAuthorization.receiverResponded(.accepted, generation: sender.activeConnectionGeneration)
+            sender.evaluateSessionAdmission()
+        }
     }
 
     /// The live connection ended (the receiver's control stream hit EOF).
@@ -8109,6 +8517,16 @@ extension MacSender {
 
     var lockScreenWakeCountForTesting: Int {
         get async throws { try await onQueue { $0.lockScreenWakeCount } }
+    }
+
+    /// Whether the lock screen view may drive capture recovery now (#255).
+    var lockScreenViewNeedsCaptureForTesting: Bool {
+        get async throws { try await onQueue { $0.lockScreenViewNeedsCapture } }
+    }
+
+    /// Stands in for a capture established on `displayID` (0: none yet).
+    func setCaptureDisplayForTesting(_ displayID: CGDirectDisplayID) async throws {
+        try await onQueue { $0.captureDisplayID = displayID }
     }
 
     /// Whether the encoder output would hand a fresh lock-screen keyframe to `sendFramed` now.

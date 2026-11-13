@@ -74,6 +74,20 @@ final class WakeConnectAttemptTests: XCTestCase {
     /// in `recordWOLSent()` silently capped every burst at 1 packet instead
     /// of the intended 3 — this reproduces the coordinator's exact call
     /// sequence and asserts the full burst actually lands.
+    /// #255: with no saved wake details the coordinator sends no packet.
+    /// The attempt must still connect to an awake Mac (and its label then
+    /// says Connecting…, from `wolBurstsSent == 0`), never wait out the timeout.
+    func testNoWakePacketStillConnects() {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        XCTAssertEqual(attempt.wolBurstsSent, 0)
+        XCTAssertTrue(attempt.transportReady(), "a Mac that dials in is adopted without any wake packet")
+        XCTAssertEqual(attempt.stage, .authenticating)
+        XCTAssertTrue(attempt.applicationAuthenticated(generation: 1, peerID: "peer-1"))
+        XCTAssertEqual(attempt.stage, .promoting, "the display is still asked to wake after authentication")
+    }
+
     func testWOLBurstSendsTheFullBoundedBurstAcrossTheStageTransition() {
         var attempt = WakeConnectAttempt()
         _ = attempt.begin(peerID: "peer-1")
@@ -342,5 +356,187 @@ final class WakeConnectAttemptTests: XCTestCase {
         XCTAssertTrue(attempt.connectionLost())
         XCTAssertEqual(attempt.stage, .waking)
         XCTAssertEqual(attempt.wolBurstsSent, 2)   // not reset — the attempt stays bounded
+    }
+
+    // MARK: - Connect request renewal after a lost session (#255)
+
+    /// The Mac dialed in from a dark wake, was admitted, and dropped because
+    /// it could not start yet. Its arrival answered the Connect request, so
+    /// the attempt must ask again or the Mac (the only dialer) never returns.
+    private func attemptWithAnAuthenticatedSession() -> WakeConnectAttempt {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        _ = attempt.transportReady()
+        _ = attempt.applicationAuthenticated(generation: 2, peerID: "peer-1")
+        return attempt
+    }
+
+    func testALostSessionRenewsTheConnectRequestOnce() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "nothing to renew while the session is live")
+
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        XCTAssertEqual(attempt.connectRequestRenewals, 1)
+
+        // The recovery run the renewed request starts reports the loss again.
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "one lost session asks once")
+        XCTAssertEqual(attempt.connectRequestRenewals, 1)
+    }
+
+    func testALossBeforeAnySessionDoesNotRenew() {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        _ = attempt.beginWaitingForConnection()
+
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "the first request still stands and is refreshed")
+    }
+
+    func testConnectRequestRenewalsAreBoundedPerAttempt() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        for generation in 0..<WakeConnectAttempt.maxConnectRequestRenewals {
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 10 + generation, peerID: "peer-1")
+        }
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest(), "the budget is spent")
+        XCTAssertEqual(attempt.connectRequestRenewals, WakeConnectAttempt.maxConnectRequestRenewals)
+
+        _ = attempt.fail("timedOut")
+        _ = attempt.begin(peerID: "peer-1")
+        XCTAssertEqual(attempt.connectRequestRenewals, 0, "a new attempt gets a fresh budget")
+    }
+
+    func testAFinishedAttemptNeverRenews() {
+        var attempt = attemptWithAnAuthenticatedSession()
+        XCTAssertTrue(attempt.connectionLost())
+        _ = attempt.fail("cancelled")
+        XCTAssertFalse(attempt.shouldRenewConnectRequest())
+    }
+    /// `connectionLost()` marks the Connect request answered only when a
+    /// session had actually reached the attempt.
+    func testHasSessionOnlyBetweenTransportAndVideo() {
+        var attempt = WakeConnectAttempt()
+        XCTAssertFalse(attempt.hasSession)
+        _ = attempt.begin(peerID: "peer-1")
+        _ = attempt.connectRequestPublished()
+        XCTAssertFalse(attempt.hasSession)
+        _ = attempt.transportReady()
+        XCTAssertTrue(attempt.hasSession)
+        _ = attempt.applicationAuthenticated(generation: 2, peerID: "peer-1")
+        XCTAssertTrue(attempt.hasSession)
+        _ = attempt.videoReady()
+        XCTAssertFalse(attempt.hasSession, "a finished attempt is not ended by a later Disconnect")
+    }
+
+    // MARK: - What a lost session means for the attempt
+
+    private func attemptAt(_ stage: WakeConnectStage) -> WakeConnectAttempt {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        switch stage {
+        case .preparing:
+            break
+        case .waking:
+            _ = attempt.connectRequestPublished()
+        case .waitingForConnection:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.beginWaitingForConnection()
+        case .authenticating:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+        case .promoting:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 1, peerID: "peer-1")
+        case .waitingForVideo:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 1, peerID: "peer-1")
+            _ = attempt.promoteSucceeded(generation: 1)
+        default:
+            XCTFail("not an active stage")
+        }
+        XCTAssertEqual(attempt.stage, stage)
+        return attempt
+    }
+
+    func testExplicitDisconnectEndsTheAttemptInEveryActiveStage() {
+        let stages: [WakeConnectStage] = [.preparing, .waking, .waitingForConnection,
+                                          .authenticating, .promoting, .waitingForVideo]
+        for stage in stages {
+            let attempt = attemptAt(stage)
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .explicitDisconnect),
+                           .endAttempt, "stage \(stage)")
+        }
+    }
+
+    func testExplicitDisconnectAfterARenewalStillEndsTheAttempt() {
+        var attempt = attemptAt(.authenticating)
+        XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .transportLost),
+                       .connectionLostAndRenew)
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        XCTAssertEqual(attempt.stage, .waking)
+        // The user's own Disconnect now finds the attempt back at `.waking`.
+        XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .explicitDisconnect),
+                       .endAttempt)
+    }
+
+    func testADroppedTransportReadAsDisconnectedRenewsTheRequestAndKeepsTheAttempt() {
+        // Auto-Reconnect off, or no connection yet since launch: the receiver
+        // reports `.disconnected` with a transport loss, not `.reconnecting`.
+        let reasons: [ReceiverSessionLossReason?] = [.transportLost, .listenerFailed, nil]
+        for reason in reasons {
+            var attempt = attemptAt(.authenticating)
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: reason),
+                           .connectionLostAndRenew, "reason \(String(describing: reason))")
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.isActive)
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+            XCTAssertEqual(attempt.connectRequestRenewals, 1)
+        }
+    }
+
+    func testDisconnectedRenewalStaysBoundedPerAttempt() {
+        var attempt = attemptAt(.waking)
+        for _ in 0..<WakeConnectAttempt.maxConnectRequestRenewals {
+            XCTAssertTrue(attempt.transportReady())
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .transportLost),
+                           .connectionLostAndRenew)
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        }
+        XCTAssertTrue(attempt.transportReady())
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest())
+        XCTAssertTrue(attempt.isActive)
+    }
+
+    func testReconnectingStillRenewsAndGivenUpStatesOnlyFallBackToWaking() {
+        let attempt = attemptAt(.authenticating)
+        XCTAssertEqual(attempt.lossAction(phase: .reconnecting, lossReason: .transportLost),
+                       .connectionLostAndRenew)
+        XCTAssertEqual(attempt.lossAction(phase: .reconnectFailed, lossReason: .transportLost),
+                       .connectionLost)
+        XCTAssertEqual(attempt.lossAction(phase: .peerDisconnected, lossReason: .peerClosed),
+                       .connectionLost)
+    }
+
+    func testNonLossPhasesAndFinishedAttemptsHaveNoLossAction() {
+        let attempt = attemptAt(.waking)
+        let phases: [ReceiverSessionPhase] = [.connecting, .connected, .paused, .unrecoverable]
+        for phase in phases {
+            XCTAssertNil(attempt.lossAction(phase: phase, lossReason: nil), "phase \(phase)")
+        }
+        var finished = attemptAt(.waking)
+        _ = finished.fail("cancelled")
+        XCTAssertNil(finished.lossAction(phase: .disconnected, lossReason: .explicitDisconnect))
     }
 }

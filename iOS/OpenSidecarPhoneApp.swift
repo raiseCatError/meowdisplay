@@ -929,6 +929,7 @@ struct ReceiverScreen: View {
                                onBackToHome: coverHomeAvailable ? { leaveLockedCoverForHome() } : nil,
                                onShowLockScreen: { model.showLockScreen() },
                                onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
+                               onCancelLockScreen: { keyboardActive = false; model.cancelLockScreen() },
                                onDisconnect: { model.receiver.disconnect() })
                     .transition(.opacity)
             }
@@ -955,6 +956,11 @@ struct ReceiverScreen: View {
                     .transition(slideTransition(from: .top))
             }
         }
+        // The Mac's displays are asleep: no stale picture, and one explicit way to wake it (#255).
+        .modifier(MacAsleepCoverOverlay(
+            receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: coverSessionOnScreen,
+            onSettings: { keyboardActive = false; showSettings = true },
+            onBackToHome: coverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession(fromCover: true) } : nil))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
@@ -1011,16 +1017,23 @@ struct ReceiverScreen: View {
         // the only place the choice can be made. "Use Extend" sends the
         // EXISTING `displayModeRequest`; the Mac remains authoritative for
         // the actual mode change.
-        .alert("Mirror isn't available",
+        .alert("Mirror isn't available yet",
                isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
-            Button("Cancel", role: .cancel) {
-                model.receiver.declineMirrorUnavailableOffer()
-            }
             Button("Use Extend") {
                 model.receiver.acceptMirrorUnavailableOffer()
             }
+            // Keeps the session: the Mac goes on watching for its display and
+            // starts Mirror by itself when one is back (#255).
+            Button("Wait", role: .cancel) {
+                model.receiver.waitForMirrorDisplay()
+            }
+            Button("Disconnect", role: .destructive) {
+                model.receiver.declineMirrorUnavailableOffer()
+            }
         } message: {
-            Text("This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?")
+            // Says only what the Mac reported: no usable display. It can be asleep,
+            // still waking or switched off, not only a closed lid (#255).
+            Text("The Mac hasn't reported a usable display. You can wait for it to become available or use Extend.")
         }
         // Distinct from the offer above: this fires when Mirror was
         // requested while ALREADY confirmed extending — the user is
@@ -1794,7 +1807,10 @@ struct IdleView: View {
             default: return String(localized: "Ready to connect")
             }
         case .connecting: return String(localized: "Connecting…")
-        case .connected: return String(localized: "Connected")
+        case .connected:
+            // Connected, but Mirror has no display yet and the user chose to wait (#255).
+            return receiver.awaitingMirrorDisplay
+                ? String(localized: "Waiting for the Mac's display…") : String(localized: "Connected")
         case .paused: return String(localized: "Paused")
         case .reconnecting: return String(localized: "Reconnecting…")
         case .reconnectFailed: return String(localized: "Connection lost")
@@ -2526,8 +2542,15 @@ final class ReceiverModel: ObservableObject {
     // Lives here, not in the view or the receiver, so it outlives the receiver rebuild a mode
     // switch to Full Desktop causes. The Mac decides everything; this only asks and shows.
     @Published private(set) var lockScreenFlow = LockScreenFlow() {
-        didSet { syncLockScreenInputTag() }
+        didSet {
+            syncLockScreenInputTag()
+            scheduleLockScreenTimeoutCheck()
+        }
     }
+    /// While a step waits, the flow's clock is checked once a second, so its timeout runs out even
+    /// when the Mac never answers (#255: no lock state after the switch to Full Desktop left
+    /// "Switching to Full Desktop…" up until the app was closed). Nothing runs while nothing waits.
+    private var lockScreenTimeoutCheck: DispatchWorkItem?
     /// The flow switched from Extend (not Window view) to Mirror: the unlock goes back to Extend.
     private var lockScreenReturnsToExtend = false
     /// Going back to Extend waits for video (the receiver can't ask for Extend while the locked
@@ -2548,6 +2571,31 @@ final class ReceiverModel: ObservableObject {
 
     func hideLockScreen() {
         perform(lockScreenFlow.hide(now: Date()))
+    }
+
+    /// Cancel on the locked cover while a step waits.
+    func cancelLockScreen() {
+        Log.info("lockScreen: cancelled while waiting phase=\(lockScreenFlow.phase)")
+        perform(lockScreenFlow.cancel(now: Date()))
+    }
+
+    private func scheduleLockScreenTimeoutCheck() {
+        guard lockScreenFlow.isWaiting else {
+            lockScreenTimeoutCheck?.cancel()
+            lockScreenTimeoutCheck = nil
+            return
+        }
+        guard lockScreenTimeoutCheck == nil else { return }
+        let check = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lockScreenTimeoutCheck = nil
+            let waiting = self.lockScreenFlow.phase
+            let action = self.lockScreenFlow.tick(now: Date(), connected: self.receiver.connected)
+            if !self.lockScreenFlow.isWaiting { Log.info("lockScreen: timed out waiting phase=\(waiting)") }
+            self.perform(action)
+        }
+        lockScreenTimeoutCheck = check
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: check)
     }
 
     private func lockScreenInputsChanged() {
