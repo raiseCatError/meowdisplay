@@ -173,3 +173,52 @@ final class MirrorUnavailableOfferPolicyTests: XCTestCase {
         XCTAssertTrue(MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: true))
     }
 }
+
+import AVFoundation
+
+/// #255: a sleeping or still-waking display isn't "no display". The Mac waits
+/// a bounded time before offering Extend, and the receiver's Wait keeps the
+/// session and says what it is waiting for.
+@MainActor
+final class MirrorUnavailableWaitTests: XCTestCase {
+    private func makeReceiver() -> StreamReceiver {
+        StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(), deviceKind: "Test", fallbackServiceName: "Test")
+    }
+
+    func testReadinessGraceIsBoundedAndShorterThanTheOffer() {
+        XCTAssertGreaterThan(MirrorUnavailableOfferPolicy.readinessGrace, 0)
+        XCTAssertLessThanOrEqual(MirrorUnavailableOfferPolicy.readinessGrace, 10,
+                                 "a missing display must still reach the Extend offer promptly")
+        XCTAssertGreaterThan(MirrorUnavailableOfferPolicy.wakeRecoverySettle, 0)
+        XCTAssertLessThanOrEqual(MirrorUnavailableOfferPolicy.wakeRecoverySettle, 10, "bounded")
+    }
+
+    func testWaitKeepsTheSessionAndClearsOnTheMacsAnswer() {
+        let receiver = makeReceiver()
+        receiver.applyMirrorAvailabilitySignal()
+        XCTAssertTrue(receiver.mirrorUnavailable)
+        receiver.waitForMirrorDisplay()
+        XCTAssertFalse(receiver.mirrorUnavailable, "the offer goes away")
+        XCTAssertTrue(receiver.awaitingMirrorDisplay, "and the receiver says it is waiting")
+        receiver.applyConfirmedDisplayMode(.mirror)
+        XCTAssertFalse(receiver.awaitingMirrorDisplay, "Mirror resuming by itself ends the wait")
+    }
+
+    func testUseExtendEndsTheWait() {
+        let receiver = makeReceiver()
+        receiver.applyMirrorAvailabilitySignal()
+        receiver.waitForMirrorDisplay()
+        receiver.acceptMirrorUnavailableOffer()
+        XCTAssertFalse(receiver.awaitingMirrorDisplay)
+        XCTAssertFalse(receiver.mirrorUnavailable)
+    }
+
+    func testAlreadyExtendingIsOnlyExplainedNeverOffered() {
+        let receiver = makeReceiver()
+        receiver.applyConfirmedDisplayMode(.extend)
+        receiver.applyMirrorAvailabilitySignal()
+        XCTAssertFalse(receiver.mirrorUnavailable)
+        XCTAssertTrue(receiver.mirrorRejectedWhileExtending)
+        XCTAssertFalse(receiver.awaitingMirrorDisplay)
+    }
+}

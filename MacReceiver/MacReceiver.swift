@@ -387,8 +387,12 @@ final class ReceiverController: ObservableObject {
     /// sends the existing `displayModeRequest`; nothing is faked locally.
     func acceptMirrorUnavailableOffer() { receiver?.acceptMirrorUnavailableOffer() }
 
-    /// "Cancel" — ends this attempt exactly like Disconnect (trust stays).
+    /// "Disconnect" — ends this attempt exactly like Disconnect (trust stays).
     func declineMirrorUnavailableOffer() { receiver?.declineMirrorUnavailableOffer() }
+
+    /// "Wait" — keeps the session; the other Mac resumes Mirror by itself
+    /// when its display is back (#255).
+    func waitForMirrorDisplay() { receiver?.waitForMirrorDisplay() }
 
     /// Re-published name from the System page's name field. Empty falls back to the
     /// computer name (mirrors the iOS Settings behavior).

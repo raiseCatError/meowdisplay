@@ -153,11 +153,25 @@ struct ReceiverScreen: View {
     /// Home over a kept session: nothing under it changes geometry.
     private var fullScreenSurface: Bool { route != .idle }
 
-    /// Back to Home — Keep Connected (#121).
-    private func showHomeKeepingSession() {
+    /// Back to Home — Keep Connected (#121). `fromCover`: from the asleep or locked cover, which may
+    /// stand for a session that has had no picture yet (`SessionCoverPolicy`, #255).
+    private func showHomeKeepingSession(fromCover: Bool = false) {
         keyboardBeforeHome = keyboardActive
         showSettings = false
-        model.showHomeKeepingSession()
+        model.showHomeKeepingSession(fromCover: fromCover)
+    }
+
+    /// The session is what is on screen, so the asleep and locked covers belong over it, also
+    /// before its first picture (a session admitted while the Mac sleeps or is locked, #255).
+    private var coverSessionOnScreen: Bool {
+        SessionCoverPolicy.sessionOnScreen(surfaceShown: route == .receiver, connected: model.receiver.connected,
+                                           keptOnHome: model.presentation.keepsSessionOnHome, demoShown: route == .demo)
+    }
+
+    /// Back to Home on the asleep or locked cover (#255).
+    private var coverHomeAvailable: Bool {
+        SessionCoverPolicy.homeAvailable(connected: model.receiver.connected, sessionOnScreen: coverSessionOnScreen,
+                                         presentation: model.presentation)
     }
 
     /// Offered in Settings ▸ Connections only while a real session is on screen.
@@ -251,7 +265,8 @@ struct ReceiverScreen: View {
 
     private func enterDemo() {
         // A real session always wins (see `route`); never start a demo behind it.
-        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface) else { return }
+        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface),
+              !model.presentation.keepsSessionOnHome else { return }
         demoControlStore = DemoControlStoreFactory.make()
         demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
         Log.info("demo mode entered")
@@ -901,6 +916,11 @@ struct ReceiverScreen: View {
                     .transition(slideTransition(from: .top))
             }
         }
+        // The Mac's displays are asleep: no stale picture, and one explicit way to wake it (#255).
+        .modifier(MacAsleepCoverOverlay(
+            receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: coverSessionOnScreen,
+            onSettings: { keyboardActive = false; showSettings = true },
+            onBackToHome: coverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession(fromCover: true) } : nil))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
@@ -957,16 +977,23 @@ struct ReceiverScreen: View {
         // the only place the choice can be made. "Use Extend" sends the
         // EXISTING `displayModeRequest`; the Mac remains authoritative for
         // the actual mode change.
-        .alert("Mirror isn't available",
+        .alert("Mirror isn't available yet",
                isPresented: Binding(get: { model.receiver.mirrorUnavailable }, set: { _ in })) {
-            Button("Cancel", role: .cancel) {
-                model.receiver.declineMirrorUnavailableOffer()
-            }
             Button("Use Extend") {
                 model.receiver.acceptMirrorUnavailableOffer()
             }
+            // Keeps the session: the Mac goes on watching for its display and
+            // starts Mirror by itself when one is back (#255).
+            Button("Wait", role: .cancel) {
+                model.receiver.waitForMirrorDisplay()
+            }
+            Button("Disconnect", role: .destructive) {
+                model.receiver.declineMirrorUnavailableOffer()
+            }
         } message: {
-            Text("This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?")
+            // Says only what the Mac reported: no usable display. It can be asleep,
+            // still waking or switched off, not only a closed lid (#255).
+            Text("The Mac hasn't reported a usable display. You can wait for it to become available or use Extend.")
         }
         // Distinct from the offer above: this fires when Mirror was
         // requested while ALREADY confirmed extending — the user is
@@ -1730,7 +1757,10 @@ struct IdleView: View {
             default: return String(localized: "Ready to connect")
             }
         case .connecting: return String(localized: "Connecting…")
-        case .connected: return String(localized: "Connected")
+        case .connected:
+            // Connected, but Mirror has no display yet and the user chose to wait (#255).
+            return receiver.awaitingMirrorDisplay
+                ? String(localized: "Waiting for the Mac's display…") : String(localized: "Connected")
         case .paused: return String(localized: "Paused")
         case .reconnecting: return String(localized: "Reconnecting…")
         case .reconnectFailed: return String(localized: "Connection lost")
@@ -2800,8 +2830,10 @@ final class ReceiverModel: ObservableObject {
 
     /// Home in front, the session kept behind it: the Mac keeps its display
     /// and keeps encoding, this device stops showing, playing and sending.
-    func showHomeKeepingSession() {
-        let surfaceRetained = receiver.session.retainsReceiverSurface && receiver.videoSize != .zero
+    func showHomeKeepingSession(fromCover: Bool = false) {
+        let surfaceRetained = SessionCoverPolicy.surfaceRetainedForHome(
+            retainsSurface: receiver.session.retainsReceiverSurface, hasPicture: receiver.videoSize != .zero,
+            fromCover: fromCover)
         var next = presentation
         guard next.showHome(surfaceRetained: surfaceRetained, macPeerID: receiver.connectedMacPeerID) else { return }
         // Nothing stays pressed on the Mac while nobody can see it.

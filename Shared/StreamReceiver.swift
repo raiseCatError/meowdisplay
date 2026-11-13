@@ -808,9 +808,17 @@ final class StreamReceiver: ObservableObject {
     /// mode-switch path. Cleared on any disconnect (`setConnected`) or once
     /// the user acts on it.
     @MainActor @Published private(set) var mirrorUnavailable = false
+    /// The user chose Wait on the Mirror-unavailable offer (#255): the session
+    /// stays, and the Mac keeps watching for its display, resuming Mirror on
+    /// its own. Cleared by any confirmed mode, accepting Extend, or the end of
+    /// the connection. Only changes what the connection headline says.
+    @MainActor @Published private(set) var awaitingMirrorDisplay = false
     /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
     /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
     @MainActor @Published private(set) var macLock: MacLockNotice?
+    /// The Mac's displays are asleep (`macDisplaySleep`, #255): the session is up but there is no
+    /// picture to send. False when not said (an older Mac) and after any disconnect.
+    @MainActor @Published private(set) var macDisplayAsleep = false
     /// A frame that arrived after the last video reset (lock, video off/on, codec change) has been
     /// handed to presentation. The Mac's lock screen (6.19) shows only once this is true, so no
     /// picture from before the reset (the pre-lock desktop) can show, whichever renderer is on.
@@ -893,7 +901,9 @@ final class StreamReceiver: ObservableObject {
     /// re-deriving it from `connected` alone, which used to miss states
     /// like reconnecting/paused.
     @MainActor var canonicalPhaseTitle: String {
-        session.interruption?.title ?? (session.phase == .connected ? String(localized: "Connected") : String(localized: "Waiting for a Mac…"))
+        session.interruption?.title ?? (session.phase == .connected
+            ? (awaitingMirrorDisplay ? String(localized: "Waiting for the Mac's display…") : String(localized: "Connected"))
+            : String(localized: "Waiting for a Mac…"))
     }
     /// Auto-Reconnect preference (Settings/Home toggle) — this receiver's own
     /// local setting, independent of the paired Mac's and not synced with
@@ -2982,6 +2992,11 @@ final class StreamReceiver: ObservableObject {
                 target = nil
             }
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
+        case MacDisplaySleepWire.type:
+            guard let asleep = MacDisplaySleepWire.asleep(from: obj) else { return }
+            // The last picture goes now: a sleeping Mac must not leave a frozen frame behind.
+            if asleep { resetDecoderForVideoStateChange() }
+            DispatchQueue.main.async { uiSink.publishMacDisplayAsleep(asleep) }
         case MacLockWire.type:
             guard let notice = MacLockNotice(message: obj) else { return }
             // The last picture goes now, not when video-off follows. While this device shows the
@@ -3675,7 +3690,19 @@ final class StreamReceiver: ObservableObject {
     @MainActor
     func acceptMirrorUnavailableOffer() {
         mirrorUnavailable = false
+        awaitingMirrorDisplay = false
         requestDisplayMode(.extend)
+    }
+
+    /// "Wait" from the Mirror-unavailable offer (#255): keep this session.
+    /// The Mac goes on watching for a usable display and starts Mirror by
+    /// itself when one is stably back (`offerExtendOrFailMirror`); nothing
+    /// goes on the wire. If none comes back in the Mac's bounded wait, the
+    /// Mac ends the attempt as before.
+    @MainActor
+    func waitForMirrorDisplay() {
+        mirrorUnavailable = false
+        awaitingMirrorDisplay = true
     }
 
     /// "Cancel" from the Mirror-unavailable offer: deliberately end this
@@ -3733,6 +3760,7 @@ final class StreamReceiver: ObservableObject {
         // longer reach a "Use Extend" button that isn't there anymore.
         mirrorUnavailable = false
         mirrorRejectedWhileExtending = false
+        awaitingMirrorDisplay = false
     }
 
     /// Requests an Extend display shape change without predicting its
@@ -6112,7 +6140,9 @@ final class StreamReceiver: ObservableObject {
             // a fresh one arrives on the Mac's own next attempt, if any.
             self.mirrorUnavailable = false
             self.mirrorRejectedWhileExtending = false
+            self.awaitingMirrorDisplay = false
             self.macLock = nil
+            self.macDisplayAsleep = false
             self.setLockScreenInputTag(LockScreenInputTagState())
         }
     }
@@ -6238,6 +6268,10 @@ final class StreamReceiver: ObservableObject {
         if freshFrameSinceVideoReset != fresh { freshFrameSinceVideoReset = fresh }
     }
 
+    @MainActor func applyMacDisplayAsleep(_ asleep: Bool) {
+        if macDisplayAsleep != asleep { macDisplayAsleep = asleep }
+    }
+
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
         macLock = notice.isLocked ? notice : nil
         // Tagged from the moment this device knows the Mac is locked, untagged from the moment it
@@ -6249,6 +6283,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyMirrorUnavailableClear() {
         mirrorUnavailable = false
+        awaitingMirrorDisplay = false
     }
 
     @MainActor func applyMirrorRejectionClear() {

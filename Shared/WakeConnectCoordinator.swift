@@ -44,6 +44,11 @@ final class WakeConnectCoordinator: ObservableObject {
 
     private let receiver: StreamReceiver
     private var activePeerID: String?
+    private var activeMode: ReceiverDisplayMode?
+    /// The receiver's last published session and authenticated peer, as the sinks saw them. The
+    /// two are published separately and in either order (`completeAuthenticationIfPossible`).
+    private var observedSession: ReceiverSessionState?
+    private var observedAuthenticatedPeerID: String?
     private var cancellables = Set<AnyCancellable>()
     private var wolTimer: DispatchSourceTimer?
     private var tokenRefreshTimer: DispatchSourceTimer?
@@ -75,7 +80,11 @@ final class WakeConnectCoordinator: ObservableObject {
     var statusLabel: String {
         switch attempt.stage {
         case .idle, .failed: return ""
-        case .preparing, .waking, .waitingForConnection: return String(localized: "Waking…")
+        case .preparing: return String(localized: "Waking…")
+        // No wake packet could be sent (no saved wake details for this Mac):
+        // say what is actually happening (#255).
+        case .waking, .waitingForConnection:
+            return attempt.wolBurstsSent > 0 ? String(localized: "Waking…") : String(localized: "Connecting…")
         case .authenticating: return String(localized: "Connecting…")
         case .promoting: return String(localized: "Waking display…")
         case .waitingForVideo: return String(localized: "Starting video…")
@@ -93,6 +102,7 @@ final class WakeConnectCoordinator: ObservableObject {
         stopAllTimers()
         subscribeIfNeeded()
         activePeerID = peerID
+        activeMode = mode
         let id = attempt.begin(peerID: peerID)
         Log.info("wakeConnect: begin peer=\(peerID) attempt=\(id)")
 
@@ -134,9 +144,19 @@ final class WakeConnectCoordinator: ObservableObject {
     // MARK: - WoL
 
     private func sendWOLBurst() {
-        guard let peerID = activePeerID,
-              let metadata = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole),
-              let broadcast = metadata.broadcastAddress else { return }
+        guard let peerID = activePeerID else { return }
+        // Without the Mac's wake details no magic packet can go: connect
+        // anyway (an awake Mac still answers), but say so in the log rather
+        // than fail silently (#255). The details arrive from the Mac
+        // (`wakeInfo`) on a connection while it is awake.
+        guard let metadata = WakeMetadataStore.metadata(forPeerID: peerID, role: .receiverRole) else {
+            Log.info("wakeConnect: noWakePacket reason=noWakeMetadata — connecting without waking")
+            return
+        }
+        guard let broadcast = metadata.broadcastAddress else {
+            Log.info("wakeConnect: noWakePacket reason=noBroadcastAddress — connecting without waking")
+            return
+        }
         func sendOne() {
             guard attempt.recordWOLSent() else { return }
             let result = WakeOnLAN.send(macAddress: metadata.macAddress, broadcastAddress: broadcast)
@@ -190,6 +210,9 @@ final class WakeConnectCoordinator: ObservableObject {
         receiver.$session
             .sink { [weak self] session in self?.handleSessionChange(session) }
             .store(in: &cancellables)
+        receiver.$authenticatedPeerID
+            .sink { [weak self] peerID in self?.handleAuthenticatedPeerChange(peerID) }
+            .store(in: &cancellables)
         receiver.$videoSize
             .sink { [weak self] size in self?.handleVideoSizeChange(size) }
             .store(in: &cancellables)
@@ -207,6 +230,7 @@ final class WakeConnectCoordinator: ObservableObject {
     }
 
     private func handleSessionChange(_ session: ReceiverSessionState) {
+        observedSession = session
         guard attempt.isActive, activePeerID != nil else { return }
         switch session.phase {
         case .connecting:
@@ -214,25 +238,29 @@ final class WakeConnectCoordinator: ObservableObject {
                 Log.info("wakeConnect: transportReady")
             }
         case .connected:
-            // Authenticated target-peer binding (P4) — see the file header.
-            // A `nil`/mismatched authenticatedPeerID simply fails this guard
-            // and leaves the attempt exactly where it was; it does not fail
-            // the attempt outright, since the real dial may still be in
-            // flight on a different candidate connection.
-            guard let authenticatedPeerID = receiver.authenticatedPeerID else { return }
-            if attempt.applicationAuthenticated(generation: session.generation, peerID: authenticatedPeerID) {
-                Log.info("wakeConnect: applicationAuthenticated generation=\(session.generation)")
-                tokenRefreshTimer?.cancel(); tokenRefreshTimer = nil
-                if attempt.stage == .waitingForVideo {
-                    Log.info("wakeConnect: waitingForVideo")
-                    checkVideoAlreadyReady()
-                } else {
-                    sendPromoteIfNeeded()
+            completeAuthenticationIfPossible(session)
+        case .reconnecting, .disconnected, .reconnectFailed, .peerDisconnected:
+            switch attempt.lossAction(phase: session.phase, lossReason: session.lossReason) {
+            case .endAttempt:
+                // This device ended the session (its own Disconnect): the
+                // attempt is over. Left running, it would show "Waking…" and
+                // keep its request alive until the timeout (#255).
+                if attempt.fail("disconnected") {
+                    Log.info("wakeConnect: ended reason=disconnected")
                 }
-            }
-        case .reconnecting, .reconnectFailed, .disconnected, .peerDisconnected:
-            if attempt.connectionLost() {
-                scheduleTokenRefresh()
+                stopAllTimers()
+                withdrawConnectRequest()
+            case .connectionLostAndRenew:
+                if attempt.connectionLost() {
+                    renewConnectRequestIfAnswered()
+                    scheduleTokenRefresh()
+                }
+            case .connectionLost:
+                if attempt.connectionLost() {
+                    scheduleTokenRefresh()
+                }
+            case nil:
+                break
             }
         case .unrecoverable:
             let stageAtFailure = attempt.stage
@@ -243,6 +271,49 @@ final class WakeConnectCoordinator: ObservableObject {
         case .paused:
             break
         }
+    }
+
+    /// The authenticated peer is published apart from the session, and on a Mac-side redial it
+    /// arrives after the session already reads "connected". Seen on hardware (#255): the attempt
+    /// then sat at "transport ready" until its timeout and never sent Promote, with the Mac
+    /// still asleep. Whichever of the two arrives second completes the step.
+    private func handleAuthenticatedPeerChange(_ peerID: String?) {
+        observedAuthenticatedPeerID = peerID
+        guard attempt.isActive, activePeerID != nil,
+              let session = observedSession, session.phase == .connected else { return }
+        completeAuthenticationIfPossible(session)
+    }
+
+    /// Authenticated target-peer binding (P4) — see the file header. A `nil`/mismatched
+    /// authenticated peer leaves the attempt exactly where it was; it does not fail the attempt
+    /// outright, since the real dial may still be in flight on a different candidate connection.
+    private func completeAuthenticationIfPossible(_ session: ReceiverSessionState) {
+        guard let authenticatedPeerID = observedAuthenticatedPeerID,
+              attempt.stage == .waking || attempt.stage == .waitingForConnection || attempt.stage == .authenticating,
+              attempt.applicationAuthenticated(generation: session.generation, peerID: authenticatedPeerID) else { return }
+        Log.info("wakeConnect: applicationAuthenticated generation=\(session.generation)")
+        tokenRefreshTimer?.cancel(); tokenRefreshTimer = nil
+        if attempt.stage == .waitingForVideo {
+            Log.info("wakeConnect: waitingForVideo")
+            checkVideoAlreadyReady()
+        } else {
+            sendPromoteIfNeeded()
+        }
+    }
+
+    /// The Mac dialed in for this attempt and the session then dropped (a Mac
+    /// reached in a dark wake that could not start yet, #255). Its arrival
+    /// answered this device's Connect request, so the token refresh has
+    /// nothing left to re-publish and the Mac, the only dialer on the local
+    /// network, is never asked again: the attempt would sit until its
+    /// timeout even after the Mac is fully awake. Asks again through the
+    /// same `connectPrimary` the attempt began with — same pinned peer, same
+    /// Mac-side policy — only for a dropped transport (never a Disconnect),
+    /// and a bounded number of times.
+    private func renewConnectRequestIfAnswered() {
+        guard let peerID = activePeerID, attempt.shouldRenewConnectRequest() else { return }
+        Log.info("wakeConnect: connectRequestRenewed count=\(attempt.connectRequestRenewals)")
+        receiver.connectPrimary(peerID: peerID, mode: activeMode)
     }
 
     private func handleVideoSizeChange(_ size: CGSize) {

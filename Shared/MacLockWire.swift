@@ -265,3 +265,83 @@ struct MacLockNotice: Equatable, Sendable {
         lockScreenView = lockScreen == .active ? LockScreenInputTag.positiveInteger(message[LockScreenWire.viewKey]) : nil
     }
 }
+
+/// Display sleep (#255). A session can outlive the Mac's displays going to sleep: the transport
+/// stays up or reconnects in a dark wake, but there is nothing to capture. The Mac says so, and a
+/// receiver shows that instead of a frozen or black picture, with one explicit action to wake it.
+/// The Mac never wakes itself for a connected viewer: someone put it to sleep.
+///
+/// Only an explicit request wakes the Mac. A connection the user asked for (the receiver's Connect
+/// or Wake & Connect, a Connect on the Mac) may wake the displays once when its start finds none,
+/// and the receiver's `promoteInteractiveWake` (Wake Mac, Wake & Connect) always does. An automatic
+/// connect or an unsolicited Mac-side redial never does (`StartWakePolicy`): it stays admitted and
+/// authenticated, the Mac reports `asleep: true`, and its start waits until the displays wake
+/// by themselves or the user taps Wake Mac, then captures with no further tap.
+enum MacDisplaySleepWire {
+    /// Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent when the displays go to
+    /// sleep or wake during an admitted session, and once on every admission (first or re-admission)
+    /// as a snapshot of where things stand. Additive: a receiver that doesn't know it ignores it.
+    static let type = "macDisplaySleep"
+
+    static func message(asleep: Bool) -> [String: Any] { ["type": type, "asleep": asleep] }
+
+    /// Nil for anything malformed: the receiver then keeps what it last knew.
+    static func asleep(from message: [String: Any]) -> Bool? {
+        guard message["type"] as? String == type else { return nil }
+        return message["asleep"] as? Bool
+    }
+
+    /// The snapshot sent on admission: asleep when every physical display sleeps. The Mac's own
+    /// virtual display (Extend) is left out, since in a headless Extend it can be the main display
+    /// and reports awake while the hardware sleeps. With no physical display listed, the main
+    /// display decides.
+    static func snapshotAsleep(displays: [(id: UInt32, asleep: Bool)], excluding virtualID: UInt32?,
+                               mainAsleep: Bool) -> Bool {
+        let physical = displays.filter { $0.id != virtualID }
+        guard !physical.isEmpty else { return mainAsleep }
+        return physical.allSatisfy(\.asleep)
+    }
+}
+
+/// The receiver's one explicit "Wake Mac" request while the Mac's displays sleep. One request at
+/// a time, answered by the Mac reporting its displays awake, or failed after `timeout`. Nothing
+/// retries by itself: a Mac that stays asleep is asked again only by another tap.
+struct MacWakeRequest: Equatable {
+    enum Phase: Equatable { case idle, waiting, failed }
+    static let timeout: TimeInterval = 12
+
+    private(set) var phase = Phase.idle
+    private(set) var requestID = 0
+
+    /// A tap on Wake Mac. Returns the id its timeout must present, or nil while one is waiting.
+    mutating func begin() -> Int? {
+        guard phase != .waiting else { return nil }
+        requestID &+= 1
+        phase = .waiting
+        return requestID
+    }
+
+    /// The timeout of request `id` fired. Only the request still waiting can fail.
+    @discardableResult
+    mutating func timedOut(_ id: Int) -> Bool {
+        guard phase == .waiting, id == requestID else { return false }
+        phase = .failed
+        return true
+    }
+
+    /// The Mac reported its displays: awake ends the request (and clears a failure); asleep
+    /// again leaves a waiting request waiting.
+    mutating func displayReported(asleep: Bool) {
+        if !asleep { phase = .idle }
+    }
+}
+
+/// Where the "Mac is asleep" cover shows (#255).
+enum MacAsleepCoverPolicy {
+    /// Only over the session itself. Home is opaque and shows nothing of the Mac, so it replaces
+    /// the cover; coming back (Resume) shows the cover again while the Mac still sleeps. Settings
+    /// is presented above the cover, which stays up beneath it.
+    static func showsCover(asleep: Bool, sessionOnScreen: Bool) -> Bool {
+        asleep && sessionOnScreen
+    }
+}

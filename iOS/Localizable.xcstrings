@@ -2084,7 +2084,16 @@
     "This Mac and this device can't work together yet." : {
 
     },
-    "This Mac has no active physical display while its lid is closed. Use Extend to create a virtual display instead?" : {
+    "Mirror isn't available yet" : {
+
+    },
+    "The Mac hasn't reported a usable display. You can wait for it to become available or use Extend." : {
+
+    },
+    "Wait" : {
+
+    },
+    "Waiting for the Mac's display…" : {
 
     },
     "This Mac isn't accepting control requests from this device right now. Enable it from the Mac's Input settings." : {

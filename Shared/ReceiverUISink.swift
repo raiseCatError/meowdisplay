@@ -223,6 +223,10 @@ final class ReceiverUISink: Sendable {
         target?.applyFreshFrameSinceVideoReset(fresh)
     }
 
+    func publishMacDisplayAsleep(_ asleep: Bool) {
+        target?.applyMacDisplayAsleep(asleep)
+    }
+
     func publishMacLock(_ notice: MacLockNotice) {
         target?.applyMacLockUpdate(notice)
     }
