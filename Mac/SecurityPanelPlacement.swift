@@ -12,7 +12,9 @@ enum SecurityPanelPlacement {
     /// A request panel. It is non-activating, so it never takes focus by
     /// appearing. It floats at modal-panel level and stays up while
     /// MeowDisplay isn't the active app. The coordinator owns it, so closing
-    /// it doesn't release it.
+    /// it doesn't release it. AppKit windows are main-actor objects, and every
+    /// caller (the request coordinators) already runs there.
+    @MainActor
     static func makePanel(title: String, contentRect: NSRect) -> NSPanel {
         let panel = NSPanel(contentRect: contentRect, styleMask: [.titled, .closable, .nonactivatingPanel],
                             backing: .buffered, defer: false)
