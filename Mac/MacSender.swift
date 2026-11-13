@@ -893,6 +893,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     #if DEBUG
     /// Input test harness: every control message this sender writes.
     private var sentControlObserverForTesting: (@Sendable (String) -> Void)?
+    /// Replaces the live display sleep reading in the admission snapshot.
+    private var displaysAsleepForTesting: Bool?
     #endif
     /// Window mode only: this receiver's window workspace (queue-confined reference).
     private var workspaceEngine: WindowWorkspaceEngine?
@@ -4511,6 +4513,27 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !stopped, sessionAuthorization.isAdmitted, lastHello != nil else { return }
         Log.info("macPower: receiver told displayAsleep=\(asleep)")
         sendJSONObject(MacDisplaySleepWire.message(asleep: asleep))
+    }
+
+    /// `queue`: where the displays stand now, for a connection that has just been admitted. Only
+    /// a report: nothing here wakes the Mac.
+    private func sendDisplaySleepSnapshot() {
+        sendDisplaySleepState(asleep: currentDisplaysAsleep())
+    }
+
+    private func currentDisplaysAsleep() -> Bool {
+        #if DEBUG
+        if let displaysAsleepForTesting { return displaysAsleepForTesting }
+        #endif
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        if count > 0 { CGGetOnlineDisplayList(count, &ids, &count) }
+        // Public API only: the virtual display is told apart by this sender's own id; another
+        // app's virtual display would still count as physical here.
+        return MacDisplaySleepWire.snapshotAsleep(
+            displays: ids.map { (id: $0, asleep: CGDisplayIsAsleep($0) != 0) },
+            excluding: virtualDisplayID, mainAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0)
     }
 
     /// Called on `queue` for every topology-changing notification, for both
@@ -8261,6 +8284,14 @@ extension MacSender {
                 sender.inputInjector = sender.makeInputInjector(displayID: CGMainDisplayID())
             }
             return generation
+        }
+    }
+
+    /// The admission step for `generation` (first or re-admission) with the displays' sleep state fixed.
+    func runAdmissionForTesting(generation: UInt64, first: Bool, displaysAsleep: Bool) async throws {
+        try await onQueue { sender in
+            sender.displaysAsleepForTesting = displaysAsleep
+            sender.connectionAdmitted(generation: generation, first: first)
         }
     }
 

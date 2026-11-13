@@ -272,8 +272,8 @@ struct MacLockNotice: Equatable, Sendable {
 /// The Mac never wakes itself for a connected viewer: someone put it to sleep.
 enum MacDisplaySleepWire {
     /// Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent when the displays go to
-    /// sleep or wake during an admitted session, and on a re-admission while they are asleep.
-    /// Additive: a receiver that doesn't know it ignores it.
+    /// sleep or wake during an admitted session, and once on every admission (first or re-admission)
+    /// as a snapshot of where things stand. Additive: a receiver that doesn't know it ignores it.
     static let type = "macDisplaySleep"
 
     static func message(asleep: Bool) -> [String: Any] { ["type": type, "asleep": asleep] }
@@ -282,6 +282,17 @@ enum MacDisplaySleepWire {
     static func asleep(from message: [String: Any]) -> Bool? {
         guard message["type"] as? String == type else { return nil }
         return message["asleep"] as? Bool
+    }
+
+    /// The snapshot sent on admission: asleep when every physical display sleeps. The Mac's own
+    /// virtual display (Extend) is left out, since in a headless Extend it can be the main display
+    /// and reports awake while the hardware sleeps. With no physical display listed, the main
+    /// display decides.
+    static func snapshotAsleep(displays: [(id: UInt32, asleep: Bool)], excluding virtualID: UInt32?,
+                               mainAsleep: Bool) -> Bool {
+        let physical = displays.filter { $0.id != virtualID }
+        guard !physical.isEmpty else { return mainAsleep }
+        return physical.allSatisfy(\.asleep)
     }
 }
 

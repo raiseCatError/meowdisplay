@@ -159,6 +159,91 @@ final class MacDisplaySleepTests: XCTestCase {
         XCTAssertNil(MacDisplaySleepWire.asleep(from: ["type": "macLockState", "asleep": true]))
     }
 
+    // MARK: - The snapshot on admission
+
+    func testSnapshotIsAsleepOnlyWhenEveryPhysicalDisplaySleeps() {
+        XCTAssertTrue(MacDisplaySleepWire.snapshotAsleep(
+            displays: [(1, true), (2, true)], excluding: nil, mainAsleep: false))
+        XCTAssertFalse(MacDisplaySleepWire.snapshotAsleep(
+            displays: [(1, true), (2, false)], excluding: nil, mainAsleep: true))
+    }
+
+    /// Headless Extend: the virtual display can be main and awake while the hardware sleeps.
+    func testSnapshotIgnoresTheVirtualDisplay() {
+        XCTAssertTrue(MacDisplaySleepWire.snapshotAsleep(
+            displays: [(1, true), (99, false)], excluding: 99, mainAsleep: false))
+        XCTAssertFalse(MacDisplaySleepWire.snapshotAsleep(
+            displays: [(1, false), (99, true)], excluding: 99, mainAsleep: true))
+    }
+
+    func testSnapshotFallsBackToTheMainDisplayWithNoPhysicalDisplay() {
+        XCTAssertTrue(MacDisplaySleepWire.snapshotAsleep(displays: [], excluding: nil, mainAsleep: true))
+        XCTAssertFalse(MacDisplaySleepWire.snapshotAsleep(displays: [(99, true)], excluding: 99, mainAsleep: false))
+    }
+
+    func testFirstAdmissionSendsTheSnapshotExactlyOnce() async throws {
+        let (sender, sent, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        try await sender.runAdmissionForTesting(generation: sent.generation, first: true, displaysAsleep: true)
+        try await sender.settleForTesting()
+        XCTAssertEqual(sent.messages.sleepStates, [true], "a new session to a sleeping Mac hears it once")
+        XCTAssertFalse(sent.messages.contains(type: WireMessage.promoteInteractiveWakeResult),
+                       "the snapshot never wakes (no wake promotion ran)")
+    }
+
+    func testFirstAdmissionToAnAwakeMacSendsAwakeOnce() async throws {
+        let (sender, sent, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        try await sender.runAdmissionForTesting(generation: sent.generation, first: true, displaysAsleep: false)
+        try await sender.settleForTesting()
+        XCTAssertEqual(sent.messages.sleepStates, [false])
+    }
+
+    func testReadmissionStillSendsExactlyOneSnapshot() async throws {
+        let (sender, sent, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        try await sender.runAdmissionForTesting(generation: sent.generation, first: false, displaysAsleep: true)
+        try await sender.settleForTesting()
+        XCTAssertEqual(sent.messages.sleepStates, [true])
+    }
+
+    private final class SentLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var parsed: [[String: Any]] = []
+        var generation: UInt64 = 0
+
+        var record: @Sendable (String) -> Void {
+            { [weak self] json in
+                guard let self, let data = json.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                self.lock.withLock { self.parsed.append(object) }
+            }
+        }
+
+        var messages: [[String: Any]] { lock.withLock { parsed } }
+    }
+
+    /// A Mac sender with one admitted connection and nothing yet sent for the admission step.
+    private func admittedSender() async throws -> (MacSender, SentLog, () -> Void) {
+        UserDefaults.standard.removeObject(forKey: InputPolicy.defaultsKey)
+        LoginSessionConsole.shared.set(onConsole: true)
+        let keychain = try TemporaryTestKeychain(prefix: "meowdisplay-display-sleep-tests")
+        let identity = try keychain.makeIdentity()
+        let tls = TLSSessionConfig(identity: SendableSecIdentity(value: identity.identity),
+                                   pinnedPeerSPKI: identity.spki, peerID: "display-sleep-test-phone")
+        // Never dialed: the endpoint only satisfies the initializer.
+        let sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
+                               name: "Display Sleep Test Phone", mode: .mirror)
+        let sent = SentLog()
+        let hello: [String: Any] = ["type": "hello", "pixelsWide": 2532, "pixelsHigh": 1170, "scale": 3.0,
+                                    "device": "iPhone", "id": "display-sleep-test-phone", "pv": WireProtocol.version]
+        sent.generation = try await sender.admitConnectionForTesting(
+            helloJSON: try JSONSerialization.data(withJSONObject: hello),
+            pinnedSPKI: Data([0x30, 0x59]), eventSink: RecordingEventSink(), sent: sent.record)
+        try await sender.settleForTesting()
+        return (sender, sent, { keychain.delete() })
+    }
+
     func testOneWakeRequestAtATime() {
         var request = MacWakeRequest()
         let first = request.begin()
@@ -233,4 +318,13 @@ final class MacDisplaySleepTests: XCTestCase {
         request.displayReported(asleep: true)
         XCTAssertEqual(request.phase, .failed, "still asleep on return: Try Again stays offered")
     }
+}
+
+private extension Array where Element == [String: Any] {
+    /// The `asleep` value of every `macDisplaySleep` message, in order.
+    var sleepStates: [Bool] {
+        filter { $0["type"] as? String == MacDisplaySleepWire.type }.compactMap { $0["asleep"] as? Bool }
+    }
+
+    func contains(type: String) -> Bool { contains { $0["type"] as? String == type } }
 }
