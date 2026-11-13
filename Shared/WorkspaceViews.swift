@@ -2098,7 +2098,8 @@ struct PaneOutlineShape: InsettableShape {
         return copy
     }
 
-    /// The screen in global coordinates (nil off iOS).
+    /// The screen in global coordinates (nil off iOS). UIKit scene state: main actor only.
+    @MainActor
     static var screenBounds: CGRect? {
         #if os(iOS)
         return UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.screen.bounds
@@ -2109,6 +2110,7 @@ struct PaneOutlineShape: InsettableShape {
 
     /// The phone's screen-corner radius. There is no public API for it: Face ID iPhones (a home
     /// indicator inset) are close to an eighth of the short side; home-button phones are square.
+    @MainActor
     static var screenCornerRadius: CGFloat {
         #if os(iOS)
         guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
