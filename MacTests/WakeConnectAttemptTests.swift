@@ -419,9 +419,8 @@ final class WakeConnectAttemptTests: XCTestCase {
         _ = attempt.fail("cancelled")
         XCTAssertFalse(attempt.shouldRenewConnectRequest())
     }
-    /// The coordinator ends an attempt whose reached session this device
-    /// disconnected; before any session, a "disconnected" report is only the
-    /// state the attempt started from.
+    /// `connectionLost()` marks the Connect request answered only when a
+    /// session had actually reached the attempt.
     func testHasSessionOnlyBetweenTransportAndVideo() {
         var attempt = WakeConnectAttempt()
         XCTAssertFalse(attempt.hasSession)

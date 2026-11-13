@@ -96,14 +96,18 @@ struct WakeConnectAttempt: Equatable {
         }
     }
 
-    /// How an active attempt reacts to a session that is gone. `nil` for phases
-    /// that are not a loss, or when the attempt is not active.
+    /// How an active attempt reacts to a session that is gone. The loss reason
+    /// decides, not the stage: `.disconnected` is also what a dropped
+    /// transport reads as with Auto-Reconnect off or before the first
+    /// connection since launch, and only this device's own Disconnect
+    /// (`.explicitDisconnect`) ends the attempt, in any stage (#255).
+    /// `nil` for phases that are not a loss, or when the attempt is not active.
     func lossAction(phase: ReceiverSessionPhase,
                     lossReason: ReceiverSessionLossReason?) -> WakeConnectLossAction? {
         guard isActive else { return nil }
         switch phase {
         case .disconnected:
-            return hasSession ? .endAttempt : .connectionLost
+            return lossReason == .explicitDisconnect ? .endAttempt : .connectionLostAndRenew
         case .reconnecting:
             return .connectionLostAndRenew
         case .reconnectFailed, .peerDisconnected:
