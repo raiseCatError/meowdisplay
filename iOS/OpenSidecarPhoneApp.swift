@@ -153,26 +153,32 @@ struct ReceiverScreen: View {
     /// Home over a kept session: nothing under it changes geometry.
     private var fullScreenSurface: Bool { route != .idle }
 
-    /// Back to Home — Keep Connected (#121).
-    private func showHomeKeepingSession() {
+    /// Back to Home — Keep Connected (#121). `fromCover`: from the asleep or locked cover, which may
+    /// stand for a session that has had no picture yet (`SessionCoverPolicy`, #255).
+    private func showHomeKeepingSession(fromCover: Bool = false) {
         keyboardBeforeHome = keyboardActive
         showSettings = false
-        model.showHomeKeepingSession()
+        model.showHomeKeepingSession(fromCover: fromCover)
     }
 
-    /// Back to Home from the locked cover: the same as Session Actions' (which the cover hides),
-    /// so only while there is a surface to come back to.
-    private var lockedCoverHomeAvailable: Bool {
-        model.receiver.connected && route == .receiver
-            && ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
-                                                    presentation: model.presentation).contains(.backToHome)
+    /// The session is what is on screen, so the asleep and locked covers belong over it, also
+    /// before its first picture (a session admitted while the Mac sleeps or is locked, #255).
+    private var coverSessionOnScreen: Bool {
+        SessionCoverPolicy.sessionOnScreen(surfaceShown: route == .receiver, connected: model.receiver.connected,
+                                           keptOnHome: model.presentation.keepsSessionOnHome, demoShown: route == .demo)
+    }
+
+    /// Back to Home on the asleep or locked cover (#255).
+    private var coverHomeAvailable: Bool {
+        SessionCoverPolicy.homeAvailable(connected: model.receiver.connected, sessionOnScreen: coverSessionOnScreen,
+                                         presentation: model.presentation)
     }
 
     /// Nothing of the lock screen keeps playing behind Home: a shown one is hidden first.
     private func leaveLockedCoverForHome() {
         keyboardActive = false
         if model.lockScreenFlow.isShowing { model.hideLockScreen() }
-        showHomeKeepingSession()
+        showHomeKeepingSession(fromCover: true)
     }
 
     /// Offered in Settings ▸ Connections only while a real session is on screen.
@@ -200,8 +206,9 @@ struct ReceiverScreen: View {
     /// Control Center, a call), so no picture of it (its password dots) is kept or shown there.
     private var macLockedCoverShowing: Bool {
         if scenePhase != .active, model.receiver.macLock != nil { return true }
-        // Home (opaque) covers the kept session; Resume brings the cover back.
-        if route == .sessionHome { return false }
+        // Home (opaque) covers the kept session; Resume brings the cover back. Kept before its
+        // first picture, the route is still idle, so this asks the presentation (#255).
+        if model.presentation.keepsSessionOnHome { return false }
         return MacLockedCoverPolicy.showsCover(notice: model.receiver.macLock, flow: model.lockScreenFlow,
                                         videoEnabled: model.receiver.videoEnabled,
                                         freshFrame: model.receiver.freshFrameSinceVideoReset)
@@ -268,7 +275,8 @@ struct ReceiverScreen: View {
 
     private func enterDemo() {
         // A real session always wins (see `route`); never start a demo behind it.
-        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface) else { return }
+        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface),
+              !model.presentation.keepsSessionOnHome else { return }
         demoControlStore = DemoControlStoreFactory.make()
         demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
         Log.info("demo mode entered")
@@ -918,7 +926,7 @@ struct ReceiverScreen: View {
                                macName: model.workspace.hostName,
                                lockFlow: model.lockScreenFlow,
                                onSettings: { keyboardActive = false; showSettings = true },
-                               onBackToHome: lockedCoverHomeAvailable ? { leaveLockedCoverForHome() } : nil,
+                               onBackToHome: coverHomeAvailable ? { leaveLockedCoverForHome() } : nil,
                                onShowLockScreen: { model.showLockScreen() },
                                onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
                                onDisconnect: { model.receiver.disconnect() })
@@ -2824,8 +2832,10 @@ final class ReceiverModel: ObservableObject {
 
     /// Home in front, the session kept behind it: the Mac keeps its display
     /// and keeps encoding, this device stops showing, playing and sending.
-    func showHomeKeepingSession() {
-        let surfaceRetained = receiver.session.retainsReceiverSurface && receiver.videoSize != .zero
+    func showHomeKeepingSession(fromCover: Bool = false) {
+        let surfaceRetained = SessionCoverPolicy.surfaceRetainedForHome(
+            retainsSurface: receiver.session.retainsReceiverSurface, hasPicture: receiver.videoSize != .zero,
+            fromCover: fromCover)
         var next = presentation
         guard next.showHome(surfaceRetained: surfaceRetained, macPeerID: receiver.connectedMacPeerID) else { return }
         // Nothing stays pressed on the Mac while nobody can see it.
