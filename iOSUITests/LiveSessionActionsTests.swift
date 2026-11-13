@@ -60,8 +60,9 @@ final class LiveSessionActionsTests: XCTestCase {
         snapshot(app, "actions-04-disconnected")
     }
 
-    /// Lock Mac in Session Actions: opens its confirmation and cancels. Never confirms, so the
-    /// Mac is never locked and no control request is sent. Skips when the Mac can't lock.
+    /// Lock Mac in Session Actions: opens its confirmation and cancels (Cancel, or a tap outside
+    /// when the system shows it as a popover without Cancel). Never confirms, so the Mac is never locked and no control
+    /// request is sent. Skips when the Mac can't lock.
     @MainActor
     func testLockMacRowOpensConfirmationAndCancelsWithoutLocking() throws {
         guard env["MEOW_LIVE_SESSION_TESTS"] == "1" else {
@@ -87,9 +88,19 @@ final class LiveSessionActionsTests: XCTestCase {
         XCTAssertTrue(waitUntil(5) { confirm.exists || requestAndLock.exists },
                       "the confirmation shows over the overlay")
         snapshot(app, "actions-lock-confirmation")
-        app.buttons["lockMacCancel"].tap()
+        let cancel = app.buttons["lockMacCancel"]
+        if cancel.exists {
+            cancel.tap()
+        } else {
+            // The confirmation can be a popover without its Cancel button: seen on iPad and on
+            // iPhone with iOS 27. A tap outside dismisses it, and that sends nothing either
+            // (`LockMacConfirmation`).
+            let outside = app.otherElements["PopoverDismissRegion"]
+            XCTAssertTrue(outside.exists, "a confirmation without Cancel can be dismissed by a tap outside")
+            outside.tap()
+        }
 
-        XCTAssertTrue(waitUntil(3) { !confirm.exists && !requestAndLock.exists }, "Cancel closes the confirmation")
+        XCTAssertTrue(waitUntil(3) { !confirm.exists && !requestAndLock.exists }, "Cancel or a tap outside closes the confirmation")
         XCTAssertTrue(overlay.exists, "the overlay stays up")
         XCTAssertTrue(lock.isEnabled, "nothing is pending")
         XCTAssertFalse(app.staticTexts["lockMacStatus"].exists, "nothing was sent, so nothing to report")
