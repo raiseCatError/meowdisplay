@@ -15,6 +15,33 @@ import UniformTypeIdentifiers
 
 // MARK: - One window's stream
 
+/// A pane stream's capture size and rate (#256).
+struct TileCaptureSettings: Equatable, Sendable {
+    var width: Int
+    var height: Int
+    var fps: Int
+
+    init(size: CGSize, fps: Int) {
+        width = Int(size.width)
+        height = Int(size.height)
+        self.fps = max(fps, 1)
+    }
+}
+
+/// How one `WindowTileCapture.applyRequested()` ended (#256).
+enum TileRetuneOutcome: Equatable, Sendable {
+    /// The stream now has the latest request.
+    case applied
+    /// It already had it.
+    case unchanged
+    /// A change already running for this stream takes the request up.
+    case coalesced
+    /// ScreenCaptureKit refused the latest change (its error code). The stream keeps what it had.
+    case failed(Int)
+    /// The stream stopped. Nothing was applied to it after that.
+    case stopped
+}
+
 final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     /// One captured frame: the pixels, where the source's content sits in them (ScreenCaptureKit
     /// pads to the configured size, e.g. 1200x656 content in a 1200x800 buffer, measured), and
@@ -46,7 +73,14 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     /// Set by `stop()`, never cleared: a capture stopped while it was still starting must
     /// not come up afterwards with nobody holding its stream.
     private var stopRequested = false
-    private var config = SCStreamConfiguration()
+    /// Under `lock`. What the engine last asked this stream for, in the order it decided (#256).
+    private var requested: TileCaptureSettings?
+    /// Under `lock`. What the live stream really has: set at start and by each change
+    /// ScreenCaptureKit accepted for this stream, never by a refused or stale one.
+    private var applied: TileCaptureSettings?
+    /// Under `lock`. One configuration change at a time per stream; requests made meanwhile
+    /// are taken up by the change already running, latest first.
+    private var applying = false
     private let outputQueue = DispatchQueue(label: "meow.workspace.tile", qos: .userInteractive)
     var onFrame: (@Sendable () -> Void)?
     var onStop: (@Sendable (Int) -> Void)?
@@ -81,20 +115,30 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
                         size: size, fps: fps)
     }
 
-    private func start(filter: SCContentFilter, size: CGSize, fps: Int) async throws {
-        config.width = Int(size.width)
-        config.height = Int(size.height)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
+    /// The stream's whole configuration for `settings`. Every change sends all of it, so a
+    /// live change never resets the rest (#172).
+    static func configuration(_ settings: TileCaptureSettings) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = settings.width
+        config.height = settings.height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(settings.fps))
         config.showsCursor = false   // the receiver draws one workspace pointer
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.queueDepth = 3
         config.capturesAudio = false
         if #available(macOS 14.2, *) { config.ignoreShadowsSingleWindow = true }
-        let s = SCStream(filter: filter, configuration: config, delegate: self)
+        return config
+    }
+
+    private func start(filter: SCContentFilter, size: CGSize, fps: Int) async throws {
+        let settings = TileCaptureSettings(size: size, fps: fps)
+        let s = SCStream(filter: filter, configuration: Self.configuration(settings), delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         let installed = lock.withLock { () -> Bool in
             guard !stopRequested else { return false }
             stream = s
+            requested = settings
+            applied = settings
             health = Health(startedAt: ProcessInfo.processInfo.systemUptime)
             return true
         }
@@ -108,29 +152,73 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         }
     }
 
-    /// Re-size or re-rate without restarting: the last frame stays.
-    /// Returns true when the stream was reconfigured.
-    @discardableResult
-    func update(size: CGSize, fps: Int) async -> Bool {
-        guard let s = lock.withLock({ stream }) else { return false }
-        let newInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
-        guard Int(size.width) != config.width || Int(size.height) != config.height || newInterval != config.minimumFrameInterval else { return false }
-        config.width = Int(size.width)
-        config.height = Int(size.height)
-        config.minimumFrameInterval = newInterval
-        try? await reconfigure(s, config)
-        return true
+    /// Re-size or re-rate without restarting (the last frame stays), step one: records what the
+    /// tile wants now. Call it where the engine decides (its queue), so a later decision always
+    /// wins whatever order the tasks applying them run in. Returns true when the live stream
+    /// doesn't have these settings yet, so `applyRequested()` should run.
+    func request(size: CGSize, fps: Int) -> Bool {
+        let wanted = TileCaptureSettings(size: size, fps: fps)
+        return lock.withLock {
+            guard stream != nil, !stopRequested else { return false }
+            requested = wanted
+            return wanted != applied
+        }
     }
+
+    /// Step two: brings the live stream to the latest requested settings, one change at a time.
+    /// A change that fails is not recorded as applied, so the next request for the same settings
+    /// tries again; nothing retries on its own. A stream stopped meanwhile is left alone.
+    func applyRequested() async -> TileRetuneOutcome {
+        var outcome = TileRetuneOutcome.unchanged
+        var claimed = false
+        while true {
+            let next = lock.withLock { () -> (SCStream, TileCaptureSettings)? in
+                guard !stopRequested, let stream else {
+                    if claimed { applying = false }
+                    outcome = .stopped
+                    return nil
+                }
+                if !claimed {
+                    // A change is already running: it takes this request up when it finishes.
+                    guard !applying else { outcome = .coalesced; return nil }
+                    applying = true
+                    claimed = true
+                }
+                guard let wanted = requested, wanted != applied else { applying = false; return nil }
+                return (stream, wanted)
+            }
+            guard let next else { return outcome }
+            let (s, wanted) = next
+            do {
+                try await reconfigure(s, Self.configuration(wanted))
+                lock.withLock {
+                    // Only this stream, still running, has it now.
+                    if !stopRequested, stream === s { applied = wanted }
+                }
+                outcome = .applied
+            } catch {
+                let code = (error as NSError).code
+                let retry = lock.withLock { () -> Bool in
+                    // A newer request came in while this one failed: try that one. Each try
+                    // answers a new request, so this can't spin.
+                    if !stopRequested, stream === s, let latest = requested, latest != wanted { return true }
+                    applying = false
+                    return false
+                }
+                if !retry { return lock.withLock({ stopRequested || stream !== s }) ? .stopped : .failed(code) }
+                outcome = .failed(code)
+            }
+        }
+    }
+
+    /// What the live stream has (nil before it started and after it stopped).
+    var appliedSettings: TileCaptureSettings? { lock.withLock { stream == nil ? nil : applied } }
 
     /// Tests: a stream that was never started stands in for a live one, at `size` and `fps`.
     func installStreamForTesting(_ s: SCStream, size: CGSize, fps: Int) {
-        lock.withLock { stream = s }
-        config.width = Int(size.width)
-        config.height = Int(size.height)
-        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(fps, 1)))
+        let settings = TileCaptureSettings(size: size, fps: fps)
+        lock.withLock { stream = s; requested = settings; applied = settings }
     }
-
-    var configuredSize: CGSize { CGSize(width: config.width, height: config.height) }
 
     func stop() async {
         let s = lock.withLock { () -> SCStream? in
@@ -1144,8 +1232,21 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             guard let capture = captures[a.tileID] else { continue }
             let fps = budgetFPS(a, active: active, coverage: coverage, available: tileState[a.tileID] != "offscreen")
             let size = captureSize(for: a)
+            // Recorded here, in the engine's order; applied off the queue, one change at a
+            // time per stream. Only a change ScreenCaptureKit accepted counts (#256).
+            guard capture.request(size: size, fps: max(fps, 1)) else { continue }
             Task { [weak self] in
-                if await capture.update(size: size, fps: max(fps, 1)) { self?.queue.async { self?.reconfigurations += 1 } }
+                let outcome = await capture.applyRequested()
+                self?.queue.async {
+                    switch outcome {
+                    case .applied: self?.reconfigurations += 1
+                    case .failed(let code):
+                        // The stream keeps its settings; the next retune asks again. A stream
+                        // that died reports it through `onStop` and recovers there.
+                        Log.info("workspace: tile=\(capture.tileID) capture retune failed code=\(code)")
+                    case .unchanged, .coalesced, .stopped: break
+                    }
+                }
             }
         }
     }
