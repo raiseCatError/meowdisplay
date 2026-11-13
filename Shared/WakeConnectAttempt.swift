@@ -34,6 +34,18 @@ enum WakeConnectStage: Equatable {
     }
 }
 
+/// What the coordinator does when the receiver session reports a phase that
+/// means the connection is gone (see `WakeConnectAttempt.lossAction`).
+enum WakeConnectLossAction: Equatable {
+    /// This device ended the session: the attempt is over and its Connect
+    /// request is withdrawn.
+    case endAttempt
+    /// The transport dropped: fall back to waking and ask the Mac again.
+    case connectionLostAndRenew
+    /// The session gave up or the Mac closed it: fall back to waking.
+    case connectionLost
+}
+
 struct WakeConnectAttempt: Equatable {
     // Send a short burst rather than a single packet or an unbounded loop —
     // "a few magic packets over roughly 1–2 seconds" per the orchestration spec.
@@ -81,6 +93,23 @@ struct WakeConnectAttempt: Equatable {
         switch stage {
         case .authenticating, .promoting, .waitingForVideo: return true
         default: return false
+        }
+    }
+
+    /// How an active attempt reacts to a session that is gone. `nil` for phases
+    /// that are not a loss, or when the attempt is not active.
+    func lossAction(phase: ReceiverSessionPhase,
+                    lossReason: ReceiverSessionLossReason?) -> WakeConnectLossAction? {
+        guard isActive else { return nil }
+        switch phase {
+        case .disconnected:
+            return hasSession ? .endAttempt : .connectionLost
+        case .reconnecting:
+            return .connectionLostAndRenew
+        case .reconnectFailed, .peerDisconnected:
+            return .connectionLost
+        case .connecting, .connected, .paused, .unrecoverable:
+            return nil
         }
     }
 

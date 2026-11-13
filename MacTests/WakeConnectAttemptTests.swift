@@ -435,4 +435,109 @@ final class WakeConnectAttemptTests: XCTestCase {
         _ = attempt.videoReady()
         XCTAssertFalse(attempt.hasSession, "a finished attempt is not ended by a later Disconnect")
     }
+
+    // MARK: - What a lost session means for the attempt
+
+    private func attemptAt(_ stage: WakeConnectStage) -> WakeConnectAttempt {
+        var attempt = WakeConnectAttempt()
+        _ = attempt.begin(peerID: "peer-1")
+        switch stage {
+        case .preparing:
+            break
+        case .waking:
+            _ = attempt.connectRequestPublished()
+        case .waitingForConnection:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.beginWaitingForConnection()
+        case .authenticating:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+        case .promoting:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 1, peerID: "peer-1")
+        case .waitingForVideo:
+            _ = attempt.connectRequestPublished()
+            _ = attempt.transportReady()
+            _ = attempt.applicationAuthenticated(generation: 1, peerID: "peer-1")
+            _ = attempt.promoteSucceeded(generation: 1)
+        default:
+            XCTFail("not an active stage")
+        }
+        XCTAssertEqual(attempt.stage, stage)
+        return attempt
+    }
+
+    func testExplicitDisconnectEndsTheAttemptInEveryActiveStage() {
+        let stages: [WakeConnectStage] = [.preparing, .waking, .waitingForConnection,
+                                          .authenticating, .promoting, .waitingForVideo]
+        for stage in stages {
+            let attempt = attemptAt(stage)
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .explicitDisconnect),
+                           .endAttempt, "stage \(stage)")
+        }
+    }
+
+    func testExplicitDisconnectAfterARenewalStillEndsTheAttempt() {
+        var attempt = attemptAt(.authenticating)
+        XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .transportLost),
+                       .connectionLostAndRenew)
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        XCTAssertEqual(attempt.stage, .waking)
+        // The user's own Disconnect now finds the attempt back at `.waking`.
+        XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .explicitDisconnect),
+                       .endAttempt)
+    }
+
+    func testADroppedTransportReadAsDisconnectedRenewsTheRequestAndKeepsTheAttempt() {
+        // Auto-Reconnect off, or no connection yet since launch: the receiver
+        // reports `.disconnected` with a transport loss, not `.reconnecting`.
+        let reasons: [ReceiverSessionLossReason?] = [.transportLost, .listenerFailed, nil]
+        for reason in reasons {
+            var attempt = attemptAt(.authenticating)
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: reason),
+                           .connectionLostAndRenew, "reason \(String(describing: reason))")
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.isActive)
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+            XCTAssertEqual(attempt.connectRequestRenewals, 1)
+        }
+    }
+
+    func testDisconnectedRenewalStaysBoundedPerAttempt() {
+        var attempt = attemptAt(.waking)
+        for _ in 0..<WakeConnectAttempt.maxConnectRequestRenewals {
+            XCTAssertTrue(attempt.transportReady())
+            XCTAssertEqual(attempt.lossAction(phase: .disconnected, lossReason: .transportLost),
+                           .connectionLostAndRenew)
+            XCTAssertTrue(attempt.connectionLost())
+            XCTAssertTrue(attempt.shouldRenewConnectRequest())
+        }
+        XCTAssertTrue(attempt.transportReady())
+        XCTAssertTrue(attempt.connectionLost())
+        XCTAssertFalse(attempt.shouldRenewConnectRequest())
+        XCTAssertTrue(attempt.isActive)
+    }
+
+    func testReconnectingStillRenewsAndGivenUpStatesOnlyFallBackToWaking() {
+        let attempt = attemptAt(.authenticating)
+        XCTAssertEqual(attempt.lossAction(phase: .reconnecting, lossReason: .transportLost),
+                       .connectionLostAndRenew)
+        XCTAssertEqual(attempt.lossAction(phase: .reconnectFailed, lossReason: .transportLost),
+                       .connectionLost)
+        XCTAssertEqual(attempt.lossAction(phase: .peerDisconnected, lossReason: .peerClosed),
+                       .connectionLost)
+    }
+
+    func testNonLossPhasesAndFinishedAttemptsHaveNoLossAction() {
+        let attempt = attemptAt(.waking)
+        let phases: [ReceiverSessionPhase] = [.connecting, .connected, .paused, .unrecoverable]
+        for phase in phases {
+            XCTAssertNil(attempt.lossAction(phase: phase, lossReason: nil), "phase \(phase)")
+        }
+        var finished = attemptAt(.waking)
+        _ = finished.fail("cancelled")
+        XCTAssertNil(finished.lossAction(phase: .disconnected, lossReason: .explicitDisconnect))
+    }
 }

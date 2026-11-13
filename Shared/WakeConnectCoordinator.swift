@@ -239,23 +239,28 @@ final class WakeConnectCoordinator: ObservableObject {
             }
         case .connected:
             completeAuthenticationIfPossible(session)
-        case .reconnecting:
-            if attempt.connectionLost() {
-                renewConnectRequestIfAnswered()
-                scheduleTokenRefresh()
-            }
-        case .disconnected where attempt.hasSession:
-            // This device ended the session the attempt had reached (its own
-            // Disconnect): the attempt is over. Left running, it would show
-            // "Waking…" and keep its request alive until the timeout (#255).
-            if attempt.fail("disconnected") {
-                Log.info("wakeConnect: ended reason=disconnected")
-            }
-            stopAllTimers()
-            withdrawConnectRequest()
-        case .reconnectFailed, .disconnected, .peerDisconnected:
-            if attempt.connectionLost() {
-                scheduleTokenRefresh()
+        case .reconnecting, .disconnected, .reconnectFailed, .peerDisconnected:
+            switch attempt.lossAction(phase: session.phase, lossReason: session.lossReason) {
+            case .endAttempt:
+                // This device ended the session (its own Disconnect): the
+                // attempt is over. Left running, it would show "Waking…" and
+                // keep its request alive until the timeout (#255).
+                if attempt.fail("disconnected") {
+                    Log.info("wakeConnect: ended reason=disconnected")
+                }
+                stopAllTimers()
+                withdrawConnectRequest()
+            case .connectionLostAndRenew:
+                if attempt.connectionLost() {
+                    renewConnectRequestIfAnswered()
+                    scheduleTokenRefresh()
+                }
+            case .connectionLost:
+                if attempt.connectionLost() {
+                    scheduleTokenRefresh()
+                }
+            case nil:
+                break
             }
         case .unrecoverable:
             let stageAtFailure = attempt.stage
