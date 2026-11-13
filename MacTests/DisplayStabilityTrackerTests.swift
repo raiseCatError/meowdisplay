@@ -318,4 +318,14 @@ final class DisplayStabilityTrackerTests: XCTestCase {
         XCTAssertNil(value)
         XCTAssertEqual(recorder.wakes, 1)
     }
+
+    /// Final #260 review, finding 3: a manual first admission must not make later re-admissions
+    /// manual, even when the invitation is never re-sent (an older receiver).
+    func testOnlyTheFirstAdmissionCarriesTheInvitationsManualIntent() {
+        XCTAssertEqual(StartWakePolicy.recordedIntent(invitation: .manual, first: true), .manual)
+        XCTAssertEqual(StartWakePolicy.recordedIntent(invitation: .manual, first: false), .automatic)
+        XCTAssertEqual(StartWakePolicy.recordedIntent(invitation: .automatic, first: true), .automatic)
+        let later = AdmittedSessionIntent(generation: 7, intent: StartWakePolicy.recordedIntent(invitation: .manual, first: false))
+        XCTAssertFalse(StartWakePolicy.mayWake(admittedGeneration: 7, sessionIsAdmitted: true, recorded: later))
+    }
 }

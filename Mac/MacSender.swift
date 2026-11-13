@@ -1055,6 +1055,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (`awaitWindowCarrierReadiness`) and will start the carrier stream
     /// itself: the wake it asked for must not start one too (#255).
     private var windowStartAwaitingDisplay = false
+    /// `queue` only. A re-admission's capture reconcile was left to a Window start holding the
+    /// carrier; it runs when the hold ends, in case that start ended without building one.
+    private var readmissionReconcileDeferred = false
     private var wakeCaptureRecoveryRunning = false
     // Display-topology generation (distinct from `captureGeneration`/session
     // generation): bumped on every topology-changing notification so an
@@ -6513,7 +6516,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
         // Only what this admission's own invitation declared: an invitation re-sent after the
         // first admission is always automatic (`sendSessionInviteIfSupported`).
-        admittedSessionIntent = AdmittedSessionIntent(generation: generation, intent: sessionInvitation.intent)
+        admittedSessionIntent = AdmittedSessionIntent(
+            generation: generation, intent: StartWakePolicy.recordedIntent(invitation: sessionInvitation.intent, first: first))
         syncWorkspaceSuspension()
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
@@ -6578,6 +6582,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // builds the carrier itself; a second start here collides with it.
         guard DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: windowStartAwaitingDisplay) else {
             Log.info("displayDebug: windowReadiness readmission recovery left to the waiting start")
+            readmissionReconcileDeferred = true
             return
         }
         let selfBox = self.selfBox
@@ -8017,7 +8022,19 @@ extension MacSender {
         let selfBox = self.selfBox
         try await DisplayReadinessWait.whileAwaitingDisplay(
             begin: { try await self.onQueue { sender in sender.windowStartAwaitingDisplay = true } },
-            end: { self.queue.async { selfBox.currentOnQueue()?.windowStartAwaitingDisplay = false } },
+            end: {
+                self.queue.async {
+                    guard let sender = selfBox.currentOnQueue() else { return }
+                    sender.windowStartAwaitingDisplay = false
+                    // The start may have ended without a carrier (its connection was replaced
+                    // past the readiness wait): the reconcile it deferred runs now. It does
+                    // nothing when the start built one.
+                    if sender.readmissionReconcileDeferred {
+                        sender.readmissionReconcileDeferred = false
+                        sender.reconcileCaptureAfterReadmission()
+                    }
+                }
+            },
             body: { try await self.startWindowWorkspaceHoldingCarrier(info: info, sessionGeneration: sessionGeneration) })
     }
 

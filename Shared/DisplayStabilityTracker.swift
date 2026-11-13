@@ -140,6 +140,13 @@ enum StartWakePolicy {
     /// gives up as before. One that may not wake keeps waiting while the
     /// Mac's displays sleep, so the user's Wake Mac or macOS waking by itself
     /// completes it; it gives up on an awake Mac with no display as before.
+    /// The intent recorded for an admission. Only a first admission carries the invitation's
+    /// intent; a re-admission is automatic whatever the invitation still says (an older receiver
+    /// is never re-invited, so its first, manual invitation would otherwise last).
+    static func recordedIntent(invitation: SessionInvitationIntent, first: Bool) -> SessionInvitationIntent {
+        first ? invitation : .automatic
+    }
+
     static func keepsWaitingAfterGrace(mayWake: Bool, displaysAsleep: Bool) -> Bool {
         !mayWake && displaysAsleep
     }
