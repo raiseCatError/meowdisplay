@@ -6479,6 +6479,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
         }
+        // Every admission, once: a new session to a Mac whose displays already sleep (Extend has
+        // no readiness wait) would otherwise never hear it, and a re-admission usually follows a
+        // transport the sleep dropped.
+        sendDisplaySleepSnapshot()
         if !first {
             // Nothing reached this connection while it waited: start it on
             // a fresh keyframe and a fresh audio timeline, and tell it where
@@ -6528,9 +6532,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// unadmitted (a deferred Video On, a resume, or a recovery that found
     /// no admitted owner) starts now that one is admitted again.
     private func reconcileCaptureAfterReadmission() {
-        // The connection that heard the displays go to sleep (or wake) is usually gone: sleep
-        // drops the transport. The one admitted in its place hears where things stand now.
-        sendDisplaySleepState(asleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0)
         // A start still in flight was prepared for an earlier admission and
         // cannot commit for this one; the start below supersedes it.
         guard !stopped, captureOwnership.liveStream == nil else { return }

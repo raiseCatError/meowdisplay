@@ -2358,8 +2358,10 @@ Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.
 ### 6.18.1 Display sleep (`macDisplaySleep`)
 
 Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent to the admitted receiver when
-the Mac's displays go to sleep or wake, and on every re-admission (sleep usually drops the
-transport, so the connection that heard the change is gone). Additive: a receiver that doesn't
+the Mac's displays go to sleep or wake, and once on every admission, first or re-admission, as a
+snapshot of where they stand (a new session can start while they already sleep, and sleep usually
+drops the transport, so the connection that heard the change is gone). The snapshot reports and
+never wakes. Additive: a receiver that doesn't
 know it ignores it, and a receiver that never hears it assumes the displays are awake.
 
 A session can outlive display sleep: the transport stays up or reconnects in a dark wake, but
