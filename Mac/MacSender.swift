@@ -866,6 +866,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// A `promoteInteractiveWake` that arrived before its connection was
     /// admitted; performed on admission of that same connection.
     private var pendingPromoteGeneration: UInt64?
+    /// The invitation intent of the most recently admitted connection,
+    /// recorded at its admission. `StartWakePolicy` reads it for exactly that
+    /// generation, so an earlier connection's manual intent never reaches a
+    /// later one. `queue` only.
+    private var admittedSessionIntent: AdmittedSessionIntent?
     /// A rotation re-hello that arrived while its connection was not yet
     /// admitted: the rebuild runs once that connection is admitted.
     private var deferredRotationRebuild = false
@@ -2304,24 +2309,53 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `MirrorUnavailableOfferPolicy.readinessGrace` to settle. True once a
     /// physical display is stably usable; false sends the Extend offer. Not
     /// reached when a display is already usable, so it adds no wait then.
+    /// Only a session the user asked for may wake the Mac (`StartWakePolicy`):
+    /// any other waits the same way without waking it, and while the displays
+    /// sleep it keeps waiting past the grace, so a Mac that wakes by itself or
+    /// by Wake Mac is mirrored with no tap and no Extend offer.
     private func awaitMirrorDisplayReadiness(sessionGeneration: UInt64) async throws -> Bool {
         guard authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
         let grace = MirrorUnavailableOfferPolicy.readinessGrace
-        let promotion = InteractiveWakePromotion.promote(reason: "MEOW Mirror Display")
-        Log.info("displayDebug: mirrorReadiness no usable display yet — waiting up to \(Int(grace))s "
-            + "promoteResult=\(promotion.result)")
+        let mayWake = try await startMayWake(sessionGeneration: sessionGeneration)
+        if mayWake {
+            let promotion = InteractiveWakePromotion.promote(reason: "MEOW Mirror Display")
+            Log.info("displayDebug: mirrorReadiness no usable display yet — waiting up to \(Int(grace))s "
+                + "promoteResult=\(promotion.result)")
+        } else {
+            Log.info("displayDebug: mirrorReadiness no usable display yet and this session was not "
+                + "requested by the user — waiting up to \(Int(grace))s without waking the Mac")
+        }
         let start = ContinuousClock.now
         var stability = DisplayStabilityTracker()
-        while ContinuousClock.now - start < .seconds(grace) {
-            try await Task.sleep(for: .milliseconds(500))
-            guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
-            if stability.recordSample(usable: DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)) {
-                Log.info("displayDebug: mirrorReadiness display ready after \(ContinuousClock.now - start)")
-                return true
+        var graceEnd = start + .seconds(grace)
+        while true {
+            while ContinuousClock.now < graceEnd {
+                try await Task.sleep(for: .milliseconds(500))
+                guard !stopped, authenticatedSession.isLive(generation: sessionGeneration) else { throw CancellationError() }
+                if stability.recordSample(usable: DisplayHealth.hasUsablePhysicalDisplay(excluding: nil)) {
+                    Log.info("displayDebug: mirrorReadiness display ready after \(ContinuousClock.now - start)")
+                    return true
+                }
             }
+            // A session that may not wake the Mac stays pending while its displays sleep: the
+            // user's Wake Mac, or macOS waking by itself (`screensDidWake`), completes it.
+            let asleep = try await onQueue { sender in sender.currentDisplaysAsleep() }
+            guard StartWakePolicy.keepsWaitingAfterGrace(mayWake: mayWake, displaysAsleep: asleep) else { break }
+            graceEnd = ContinuousClock.now + .seconds(grace)
         }
         Log.info("displayDebug: mirrorReadiness no usable display after \(Int(grace))s — offering Extend")
         return false
+    }
+
+    /// Whether this admitted session was explicitly requested, so its start may wake the Mac
+    /// (`StartWakePolicy`). Decided from the intent recorded at this generation's admission.
+    private func startMayWake(sessionGeneration: UInt64) async throws -> Bool {
+        try await onQueue { sender in
+            StartWakePolicy.mayWake(
+                admittedGeneration: sessionGeneration,
+                sessionIsAdmitted: sender.sessionAuthorization.isAdmitted(generation: sessionGeneration),
+                recorded: sender.admittedSessionIntent)
+        }
     }
 
     /// Starts Mirror once a waiting display is back (the readiness wait, or
@@ -6477,6 +6511,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// gap held back, on this connection only.
     private func connectionAdmitted(generation: UInt64, first: Bool) {
         Log.info("sessionInvite: admitted generation=\(generation) first=\(first)")
+        // Only what this admission's own invitation declared: an invitation re-sent after the
+        // first admission is always automatic (`sendSessionInviteIfSupported`).
+        admittedSessionIntent = AdmittedSessionIntent(generation: generation, intent: sessionInvitation.intent)
         syncWorkspaceSuspension()
         if let info = lastHello, info.protocolVersion >= WireProtocol.mirrorDisplayWireVersion {
             sendMirrorDisplayState()
@@ -8061,24 +8098,40 @@ extension MacSender {
     /// give them the same bounded grace to be listed. Nil when none appears,
     /// which keeps today's failure. Not reached when a display is listed, so
     /// it adds no wait then. Wake recovery is Mirror-only, so nothing else
-    /// starts a capture for this session meanwhile.
+    /// starts a capture for this session meanwhile. Only a session the user
+    /// asked for may wake the Mac (`StartWakePolicy`); any other does not, and
+    /// stays pending while the displays sleep instead of failing with code 21.
     private func awaitWindowCarrierReadiness(sessionGeneration: UInt64) async throws -> SCDisplay? {
         let grace = MirrorUnavailableOfferPolicy.readinessGrace
         let start = ContinuousClock.now
-        Log.info("displayDebug: windowReadiness no display listed yet — waiting up to \(Int(grace))s")
-        let carrier = try await DisplayReadinessWait.firstAvailable(
-            polls: DisplayReadinessWait.polls(grace: grace, interval: 0.5),
+        let mayWake = try await startMayWake(sessionGeneration: sessionGeneration)
+        Log.info("displayDebug: windowReadiness no display listed yet — waiting up to \(Int(grace))s "
+            + (mayWake ? "" : "without waking the Mac (not requested by the user)"))
+        let polls = DisplayReadinessWait.polls(grace: grace, interval: 0.5)
+        let probe = { () async -> SCDisplay? in
+            // A failed listing while displays come up is "not yet".
+            guard let content = try? await ShareableContent.content() else { return nil }
+            return Self.windowCarrier(in: content.displays)
+        }
+        let pause = { try await Task.sleep(for: .milliseconds(500)) }
+        let stillWanted = { !self.stopped && self.authenticatedSession.isLive(generation: sessionGeneration) }
+        var carrier = try await DisplayReadinessWait.firstAvailable(
+            polls: polls,
             wake: {
+                guard mayWake else { return }
                 let promotion = InteractiveWakePromotion.promote(reason: "MEOW Window Mode Display")
                 Log.info("displayDebug: windowReadiness promoteResult=\(promotion.result)")
             },
-            probe: { () async -> SCDisplay? in
-                // A failed listing while displays come up is "not yet".
-                guard let content = try? await ShareableContent.content() else { return nil }
-                return Self.windowCarrier(in: content.displays)
-            },
-            pause: { try await Task.sleep(for: .milliseconds(500)) },
-            stillWanted: { !self.stopped && self.authenticatedSession.isLive(generation: sessionGeneration) })
+            probe: probe, pause: pause, stillWanted: stillWanted)
+        // A session that may not wake the Mac stays pending while its displays sleep: the user's
+        // Wake Mac, or macOS waking by itself, makes one listed and this start builds the carrier
+        // (a wake rebuild is left to it, `windowStartAwaitingDisplay`).
+        while carrier == nil {
+            let asleep = try await onQueue { sender in sender.currentDisplaysAsleep() }
+            guard StartWakePolicy.keepsWaitingAfterGrace(mayWake: mayWake, displaysAsleep: asleep) else { break }
+            carrier = try await DisplayReadinessWait.firstAvailable(
+                polls: polls, wake: {}, probe: probe, pause: pause, stillWanted: stillWanted)
+        }
         if carrier != nil {
             Log.info("displayDebug: windowReadiness display ready after \(ContinuousClock.now - start)")
         } else {

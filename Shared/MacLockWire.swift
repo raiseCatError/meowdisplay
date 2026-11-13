@@ -270,6 +270,13 @@ struct MacLockNotice: Equatable, Sendable {
 /// stays up or reconnects in a dark wake, but there is nothing to capture. The Mac says so, and a
 /// receiver shows that instead of a frozen or black picture, with one explicit action to wake it.
 /// The Mac never wakes itself for a connected viewer: someone put it to sleep.
+///
+/// Only an explicit request wakes the Mac. A connection the user asked for (the receiver's Connect
+/// or Wake & Connect, a Connect on the Mac) may wake the displays once when its start finds none,
+/// and the receiver's `promoteInteractiveWake` (Wake Mac, Wake & Connect) always does. An automatic
+/// connect or an unsolicited Mac-side redial never does (`StartWakePolicy`): it stays admitted and
+/// authenticated, the Mac reports `asleep: true`, and its start waits until the displays wake
+/// by themselves or the user taps Wake Mac, then captures with no further tap.
 enum MacDisplaySleepWire {
     /// Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent when the displays go to
     /// sleep or wake during an admitted session, and once on every admission (first or re-admission)

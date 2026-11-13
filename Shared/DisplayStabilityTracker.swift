@@ -104,3 +104,43 @@ enum DisplayReadinessWait {
         return nil
     }
 }
+
+/// The intent an admitted connection's session declared, recorded when that
+/// connection was admitted (#255). Keyed by the generation, so an intent from
+/// one connection can never be read for another.
+struct AdmittedSessionIntent: Equatable, Sendable {
+    let generation: UInt64
+    let intent: SessionInvitationIntent
+}
+
+/// Who may wake a sleeping Mac at the start of a session (#255, #260): only a
+/// session the user explicitly asked for. A start that finds no display (the
+/// Mac sleeps, a dark wake keeps the network up) wakes it for such a session
+/// and for no other. An automatic connect or an unsolicited Mac-side redial
+/// stays admitted, reports asleep (`macDisplaySleep`) and waits; the user's
+/// explicit `promoteInteractiveWake` (Wake Mac, Wake & Connect) is a separate
+/// request and is not decided here.
+///
+/// Pure: the caller passes state the Mac already trusts. Nothing here reads a
+/// UI label or Bonjour metadata, and a missing record is never a yes.
+enum StartWakePolicy {
+    /// True only for the admitted connection `admittedGeneration`, when the
+    /// intent recorded at its admission is `.manual` (a Mac-side Connect, or
+    /// the receiver's own Connect or Wake & Connect). Not admitted, no record,
+    /// or a record for another generation (an earlier connection's manual
+    /// intent) all mean no wake.
+    static func mayWake(admittedGeneration: UInt64, sessionIsAdmitted: Bool,
+                        recorded: AdmittedSessionIntent?) -> Bool {
+        guard sessionIsAdmitted, let recorded, recorded.generation == admittedGeneration else { return false }
+        return recorded.intent == .manual
+    }
+
+    /// Whether a start that found no display keeps waiting once the bounded
+    /// readiness grace has run out. A start allowed to wake asked once and
+    /// gives up as before. One that may not wake keeps waiting while the
+    /// Mac's displays sleep, so the user's Wake Mac or macOS waking by itself
+    /// completes it; it gives up on an awake Mac with no display as before.
+    static func keepsWaitingAfterGrace(mayWake: Bool, displaysAsleep: Bool) -> Bool {
+        !mayWake && displaysAsleep
+    }
+}

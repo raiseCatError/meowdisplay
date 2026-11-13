@@ -2370,6 +2370,18 @@ the Mac is asleep, with one explicit action that sends `promoteInteractiveWake` 
 & Connect sends). The Mac never wakes itself for a connected viewer. On `asleep: false` capture
 resumes through the existing wake paths, and `macLockState` decides what may be shown.
 
+Only an explicit request wakes the Mac. The Mac decides this per admitted connection, from the
+`intent` of that connection's own `sessionInvite` (6.9, `manual` only for a Connect or Wake &
+Connect the user asked for, on the receiver or on the Mac), never from a label or from discovery
+metadata, and only once the connection is authenticated and admitted. A start that finds no
+display (Mirror or Window) wakes the displays once for a `manual` session. An `automatic` one
+(auto-connect, a redial, an unsolicited Mac-side dial, any re-admission after the first) never
+does: it stays admitted and authenticated, the Mac reports `asleep: true`, and the start keeps
+waiting while the displays sleep, so it neither fails nor offers Extend. It captures when macOS
+wakes by itself or when the user sends `promoteInteractiveWake`, which keeps working unchanged
+for either kind of session. A manual intent never carries over to a later connection or
+invitation. Authentication, pairing and input consent are not affected.
+
 ### 6.19 Lock screen control (`lockScreenRequest`, `macLockState.lockScreen`)
 
 Optional and additive: no `pv` bump. The Mac lists `"lockScreenControl"` in `welcome.features`.

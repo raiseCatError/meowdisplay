@@ -237,4 +237,85 @@ final class DisplayStabilityTrackerTests: XCTestCase {
         XCTAssertEqual(
             DisplayReadinessWait.afterCancelledWait(stopped: false, follows: DisplayReadinessWait.maxFollows), .fail)
     }
+
+    // MARK: - StartWakePolicy (#255, #260: only an explicitly requested session wakes the Mac)
+
+    private func mayWake(_ intent: SessionInvitationIntent?, recordedFor recorded: UInt64 = 7,
+                         admitted: Bool = true, generation: UInt64 = 7) -> Bool {
+        StartWakePolicy.mayWake(
+            admittedGeneration: generation, sessionIsAdmitted: admitted,
+            recorded: intent.map { AdmittedSessionIntent(generation: recorded, intent: $0) })
+    }
+
+    func testAManualAdmittedSessionMayWakeTheMac() {
+        XCTAssertTrue(mayWake(.manual))
+    }
+
+    func testAnAutomaticAdmittedSessionNeverWakesTheMac() {
+        XCTAssertFalse(mayWake(.automatic))
+    }
+
+    func testMissingStateMeansNoWake() {
+        XCTAssertFalse(mayWake(nil), "no recorded intent is never a yes")
+    }
+
+    func testAnUnauthenticatedOrUnadmittedConnectionNeverWakesTheMac() {
+        XCTAssertFalse(mayWake(.manual, admitted: false),
+                       "a manual intent on a connection that is not admitted authorizes nothing")
+    }
+
+    /// A manual intent from an earlier connection must not authorize a wake
+    /// for a later, automatic one (an in-place redial, a route migration).
+    func testAnEarlierConnectionsManualIntentDoesNotAuthorizeALaterGeneration() {
+        XCTAssertFalse(mayWake(.manual, recordedFor: 7, generation: 8))
+        XCTAssertFalse(mayWake(.manual, recordedFor: 8, generation: 7))
+    }
+
+    /// The session's later admission is recorded as automatic and replaces the
+    /// earlier manual record, so the first generation's manual start cannot be
+    /// replayed for the later one.
+    func testALaterAutomaticAdmissionReplacesTheManualRecord() {
+        var recorded = AdmittedSessionIntent(generation: 1, intent: .manual)
+        XCTAssertTrue(StartWakePolicy.mayWake(admittedGeneration: 1, sessionIsAdmitted: true, recorded: recorded))
+        recorded = AdmittedSessionIntent(generation: 2, intent: .automatic)
+        XCTAssertFalse(StartWakePolicy.mayWake(admittedGeneration: 2, sessionIsAdmitted: true, recorded: recorded))
+        XCTAssertFalse(StartWakePolicy.mayWake(admittedGeneration: 1, sessionIsAdmitted: true, recorded: recorded))
+    }
+
+    func testASessionThatMayNotWakeKeepsWaitingOnlyWhileTheDisplaysSleep() {
+        XCTAssertTrue(StartWakePolicy.keepsWaitingAfterGrace(mayWake: false, displaysAsleep: true),
+                      "an asleep Mac must not end the session after the grace")
+        XCTAssertFalse(StartWakePolicy.keepsWaitingAfterGrace(mayWake: false, displaysAsleep: false),
+                       "an awake Mac with no display fails as before")
+        XCTAssertFalse(StartWakePolicy.keepsWaitingAfterGrace(mayWake: true, displaysAsleep: true),
+                       "a session that woke the Mac keeps today's bounded wait")
+    }
+
+    /// The wiring the readiness waits use: the wake call is made only when the
+    /// policy allows it, and the display is still awaited either way.
+    func testAnAutomaticStartWaitsForTheDisplayWithoutWaking() async throws {
+        let recorder = Recorder(readyAtProbe: 4)
+        let allowed = mayWake(.automatic)
+        let value = try await DisplayReadinessWait.firstAvailable(
+            polls: 16,
+            wake: { if allowed { recorder.wakes += 1 } },
+            probe: {
+                recorder.probes += 1
+                return recorder.probes >= 4 ? "display" : nil
+            },
+            pause: { recorder.pauses += 1 },
+            stillWanted: { true })
+        XCTAssertEqual(value, "display", "the display is used when it wakes by itself")
+        XCTAssertEqual(recorder.wakes, 0, "an automatic start never calls InteractiveWakePromotion")
+    }
+
+    func testAManualStartStillWakesTheMacOnce() async throws {
+        let recorder = Recorder(readyAtProbe: nil)
+        let allowed = mayWake(.manual)
+        let value: String? = try await DisplayReadinessWait.firstAvailable(
+            polls: 3, wake: { if allowed { recorder.wakes += 1 } },
+            probe: { nil }, pause: {}, stillWanted: { true })
+        XCTAssertNil(value)
+        XCTAssertEqual(recorder.wakes, 1)
+    }
 }
