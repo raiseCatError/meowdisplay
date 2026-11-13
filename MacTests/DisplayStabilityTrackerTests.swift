@@ -138,4 +138,12 @@ final class DisplayStabilityTrackerTests: XCTestCase {
         XCTAssertEqual(DisplayReadinessWait.polls(grace: 0.1, interval: 0.5), 1)
         XCTAssertEqual(DisplayReadinessWait.polls(grace: 8, interval: 0), 1)
     }
+
+    /// QA 9000043 on hardware: the wake a waiting Window-mode start asked for
+    /// also rebuilt the carrier stream, the two starts collided and the
+    /// session ended. Only one of them may start it.
+    func testAWakeDoesNotRebuildTheCarrierWhileAStartWaitsForIt() {
+        XCTAssertFalse(DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: true))
+        XCTAssertTrue(DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: false))
+    }
 }

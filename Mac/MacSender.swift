@@ -1043,6 +1043,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // different generation) by the poll itself.
     private var mirrorUnavailableOfferGeneration: UInt64?
     private var wakeCaptureRecoveryScheduled = false
+    /// `queue` only. A Window-mode start is waiting for a sleeping display
+    /// (`awaitWindowCarrierReadiness`) and will start the carrier stream
+    /// itself: the wake it asked for must not start one too (#255).
+    private var windowStartAwaitingDisplay = false
     private var wakeCaptureRecoveryRunning = false
     // Display-topology generation (distinct from `captureGeneration`/session
     // generation): bumped on every topology-changing notification so an
@@ -4518,6 +4522,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Windows keep their own streams across display changes; only a
             // wake needs the carrier rebuilt (same as Mirror).
             guard reason == "screensDidWake" else { return }
+            // A start that is waiting for this very wake starts the carrier
+            // itself. Rebuilding it here as well made the two starts collide
+            // ("capture stream is already active") and ended the session.
+            guard DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: windowStartAwaitingDisplay) else {
+                Log.info("displayDebug: windowReadiness wake rebuild left to the waiting start")
+                return
+            }
             let carrierSelfBox = self.selfBox
             Task { try? await carrierSelfBox.resolve()?.reattachWindowCarrier() }
         }
@@ -7910,7 +7921,14 @@ extension MacSender {
         let content = try await ShareableContent.content()
         Self.logStartupStep("windowModeContent", since: contentClock)
         var found = Self.windowCarrier(in: content.displays)
-        if found == nil { found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration) }
+        if found == nil {
+            // From before the wake request until this start is over, the
+            // carrier is this start's to build (see `topologyChanged`).
+            try await onQueue { sender in sender.windowStartAwaitingDisplay = true }
+            found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration)
+        }
+        let selfBox = self.selfBox
+        defer { queue.async { selfBox.currentOnQueue()?.windowStartAwaitingDisplay = false } }
         guard let carrier = found else {
             await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")
             throw NSError(domain: "MacSender", code: 21,

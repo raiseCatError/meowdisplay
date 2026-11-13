@@ -35,6 +35,13 @@ enum DisplayReadinessWait {
         return max(1, Int((grace / interval).rounded(.down)))
     }
 
+    /// Whether a display wake may rebuild a capture stream on its own. Not
+    /// while a start is waiting for that wake: the start builds the stream
+    /// itself, and two starts collide.
+    static func wakeMayRebuildCarrier(startAwaitingDisplay: Bool) -> Bool {
+        !startAwaitingDisplay
+    }
+
     /// The first value `probe` yields. A value already there is returned at
     /// once, with no wake and no pause. Otherwise `wake` runs exactly once
     /// and `probe` is retried after each `pause`, at most `polls` times; nil
