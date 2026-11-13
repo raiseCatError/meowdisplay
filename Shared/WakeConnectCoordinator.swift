@@ -251,6 +251,15 @@ final class WakeConnectCoordinator: ObservableObject {
                 renewConnectRequestIfAnswered()
                 scheduleTokenRefresh()
             }
+        case .disconnected where attempt.hasSession:
+            // This device ended the session the attempt had reached (its own
+            // Disconnect): the attempt is over. Left running, it would show
+            // "Waking…" and keep its request alive until the timeout (#255).
+            if attempt.fail("disconnected") {
+                Log.info("wakeConnect: ended reason=disconnected")
+            }
+            stopAllTimers()
+            withdrawConnectRequest()
         case .reconnectFailed, .disconnected, .peerDisconnected:
             if attempt.connectionLost() {
                 scheduleTokenRefresh()

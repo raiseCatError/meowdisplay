@@ -75,6 +75,15 @@ struct WakeConnectAttempt: Equatable {
 
     var isActive: Bool { stage.isActive }
 
+    /// A session has reached this attempt (transport adopted or beyond) and
+    /// the attempt is still working on it.
+    var hasSession: Bool {
+        switch stage {
+        case .authenticating, .promoting, .waitingForVideo: return true
+        default: return false
+        }
+    }
+
     // MARK: - Transitions
     //
     // Every mutating transition returns whether it actually changed
@@ -180,10 +189,7 @@ struct WakeConnectAttempt: Equatable {
     /// `wolBurstsSent` is NOT reset, keeping the whole attempt bounded.
     mutating func connectionLost() -> Bool {
         guard isActive else { return false }
-        switch stage {
-        case .authenticating, .promoting, .waitingForVideo: connectRequestAnswered = true
-        default: break
-        }
+        if hasSession { connectRequestAnswered = true }
         stage = .waking
         return true
     }
