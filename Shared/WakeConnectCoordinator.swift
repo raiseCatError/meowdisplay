@@ -45,6 +45,10 @@ final class WakeConnectCoordinator: ObservableObject {
     private let receiver: StreamReceiver
     private var activePeerID: String?
     private var activeMode: ReceiverDisplayMode?
+    /// The receiver's last published session and authenticated peer, as the sinks saw them. The
+    /// two are published separately and in either order (`completeAuthenticationIfPossible`).
+    private var observedSession: ReceiverSessionState?
+    private var observedAuthenticatedPeerID: String?
     private var cancellables = Set<AnyCancellable>()
     private var wolTimer: DispatchSourceTimer?
     private var tokenRefreshTimer: DispatchSourceTimer?
@@ -206,6 +210,9 @@ final class WakeConnectCoordinator: ObservableObject {
         receiver.$session
             .sink { [weak self] session in self?.handleSessionChange(session) }
             .store(in: &cancellables)
+        receiver.$authenticatedPeerID
+            .sink { [weak self] peerID in self?.handleAuthenticatedPeerChange(peerID) }
+            .store(in: &cancellables)
         receiver.$videoSize
             .sink { [weak self] size in self?.handleVideoSizeChange(size) }
             .store(in: &cancellables)
@@ -223,6 +230,7 @@ final class WakeConnectCoordinator: ObservableObject {
     }
 
     private func handleSessionChange(_ session: ReceiverSessionState) {
+        observedSession = session
         guard attempt.isActive, activePeerID != nil else { return }
         switch session.phase {
         case .connecting:
@@ -230,22 +238,7 @@ final class WakeConnectCoordinator: ObservableObject {
                 Log.info("wakeConnect: transportReady")
             }
         case .connected:
-            // Authenticated target-peer binding (P4) — see the file header.
-            // A `nil`/mismatched authenticatedPeerID simply fails this guard
-            // and leaves the attempt exactly where it was; it does not fail
-            // the attempt outright, since the real dial may still be in
-            // flight on a different candidate connection.
-            guard let authenticatedPeerID = receiver.authenticatedPeerID else { return }
-            if attempt.applicationAuthenticated(generation: session.generation, peerID: authenticatedPeerID) {
-                Log.info("wakeConnect: applicationAuthenticated generation=\(session.generation)")
-                tokenRefreshTimer?.cancel(); tokenRefreshTimer = nil
-                if attempt.stage == .waitingForVideo {
-                    Log.info("wakeConnect: waitingForVideo")
-                    checkVideoAlreadyReady()
-                } else {
-                    sendPromoteIfNeeded()
-                }
-            }
+            completeAuthenticationIfPossible(session)
         case .reconnecting:
             if attempt.connectionLost() {
                 renewConnectRequestIfAnswered()
@@ -272,6 +265,34 @@ final class WakeConnectCoordinator: ObservableObject {
             }
         case .paused:
             break
+        }
+    }
+
+    /// The authenticated peer is published apart from the session, and on a Mac-side redial it
+    /// arrives after the session already reads "connected". Seen on hardware (#255): the attempt
+    /// then sat at "transport ready" until its timeout and never sent Promote, with the Mac
+    /// still asleep. Whichever of the two arrives second completes the step.
+    private func handleAuthenticatedPeerChange(_ peerID: String?) {
+        observedAuthenticatedPeerID = peerID
+        guard attempt.isActive, activePeerID != nil,
+              let session = observedSession, session.phase == .connected else { return }
+        completeAuthenticationIfPossible(session)
+    }
+
+    /// Authenticated target-peer binding (P4) — see the file header. A `nil`/mismatched
+    /// authenticated peer leaves the attempt exactly where it was; it does not fail the attempt
+    /// outright, since the real dial may still be in flight on a different candidate connection.
+    private func completeAuthenticationIfPossible(_ session: ReceiverSessionState) {
+        guard let authenticatedPeerID = observedAuthenticatedPeerID,
+              attempt.stage == .waking || attempt.stage == .waitingForConnection || attempt.stage == .authenticating,
+              attempt.applicationAuthenticated(generation: session.generation, peerID: authenticatedPeerID) else { return }
+        Log.info("wakeConnect: applicationAuthenticated generation=\(session.generation)")
+        tokenRefreshTimer?.cancel(); tokenRefreshTimer = nil
+        if attempt.stage == .waitingForVideo {
+            Log.info("wakeConnect: waitingForVideo")
+            checkVideoAlreadyReady()
+        } else {
+            sendPromoteIfNeeded()
         }
     }
 
