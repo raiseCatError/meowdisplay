@@ -42,6 +42,44 @@ enum DisplayReadinessWait {
         !startAwaitingDisplay
     }
 
+    /// Runs `body` with a start's hold on the carrier stream (see
+    /// `wakeMayRebuildCarrier`). The hold is taken by `begin` before the body
+    /// starts, so no wake can rebuild the carrier during the body's first
+    /// probe either, and `end` runs on every exit: a return, a throw from the
+    /// wait, a cancellation. A hold that outlived the start blocked every
+    /// later wake rebuild for the life of the sender.
+    static func whileAwaitingDisplay<Result>(
+        begin: () async throws -> Void,
+        end: () -> Void,
+        body: () async throws -> Result
+    ) async throws -> Result {
+        defer { end() }
+        try await begin()
+        return try await body()
+    }
+
+    /// What a Window start does when its readiness wait was cancelled.
+    enum CancelledWaitDecision: Equatable {
+        /// The sender was stopped: nothing is left to start.
+        case endQuietly
+        /// The session generation was superseded (a transport switch, a
+        /// reconnect): follow the session to its next admitted connection and
+        /// start for that one, as startup does before capture.
+        case follow
+        /// The session kept changing: fail the start so the sender stops
+        /// instead of running with no workspace engine.
+        case fail
+    }
+
+    /// Superseded waits a start follows before it fails.
+    static let maxFollows = 2
+
+    /// `follows` is how many superseded waits this start already followed.
+    static func afterCancelledWait(stopped: Bool, follows: Int) -> CancelledWaitDecision {
+        if stopped { return .endQuietly }
+        return follows < maxFollows ? .follow : .fail
+    }
+
     /// The first value `probe` yields. A value already there is returned at
     /// once, with no wake and no pause. Otherwise `wake` runs exactly once
     /// and `probe` is retried after each `pause`, at most `polls` times; nil

@@ -7941,18 +7941,62 @@ extension MacSender {
     /// Mac too, as long as macOS has some display (even a virtual one)
     /// holding the windows; it never creates one.
     func startWindowWorkspace(info: PhoneInfo, sessionGeneration: UInt64) async throws {
+        // From before the first display probe until this start is over, the
+        // carrier is this start's to build (see `topologyChanged`), and the
+        // hold is released on every exit, including a throw from the
+        // readiness wait.
+        let selfBox = self.selfBox
+        try await DisplayReadinessWait.whileAwaitingDisplay(
+            begin: { try await self.onQueue { sender in sender.windowStartAwaitingDisplay = true } },
+            end: { self.queue.async { selfBox.currentOnQueue()?.windowStartAwaitingDisplay = false } },
+            body: { try await self.startWindowWorkspaceHoldingCarrier(info: info, sessionGeneration: sessionGeneration) })
+    }
+
+    /// A real error, not a cancellation: the start failure path stops the
+    /// sender, where a cancellation is read as a user stop and would leave a
+    /// running Window sender with no workspace engine.
+    private static func windowSessionChangedError() -> NSError {
+        NSError(domain: "MacSender", code: 22, userInfo: [
+            NSLocalizedDescriptionKey: "the connection kept changing while Window mode waited for a display"])
+    }
+
+    private func startWindowWorkspaceHoldingCarrier(info startInfo: PhoneInfo,
+                                                    sessionGeneration startGeneration: UInt64) async throws {
+        var info = startInfo
+        var sessionGeneration = startGeneration
         let contentClock = ContinuousClock.now
         let content = try await ShareableContent.content()
         Self.logStartupStep("windowModeContent", since: contentClock)
         var found = Self.windowCarrier(in: content.displays)
-        if found == nil {
-            // From before the wake request until this start is over, the
-            // carrier is this start's to build (see `topologyChanged`).
-            try await onQueue { sender in sender.windowStartAwaitingDisplay = true }
-            found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration)
+        var follows = 0
+        while found == nil {
+            do {
+                found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration)
+                break
+            } catch is CancellationError {
+                // Stopped, or the generation was superseded mid-wait. A
+                // superseded session is followed to its next admitted
+                // connection (as startup does); anything else must not leave
+                // a running sender with no workspace engine.
+                switch DisplayReadinessWait.afterCancelledWait(stopped: stopped, follows: follows) {
+                case .endQuietly:
+                    throw CancellationError()
+                case .follow:
+                    follows += 1
+                    Log.info("displayDebug: windowReadiness generation=\(sessionGeneration) superseded — following the session")
+                    do {
+                        let (admitted, generation) = try await awaitAdmittedConnection()
+                        info = admitted.info
+                        sessionGeneration = generation
+                    } catch is CancellationError {
+                        guard !stopped else { throw CancellationError() }
+                        throw Self.windowSessionChangedError()
+                    }
+                case .fail:
+                    throw Self.windowSessionChangedError()
+                }
+            }
         }
-        let selfBox = self.selfBox
-        defer { queue.async { selfBox.currentOnQueue()?.windowStartAwaitingDisplay = false } }
         guard let carrier = found else {
             await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")
             throw NSError(domain: "MacSender", code: 21,

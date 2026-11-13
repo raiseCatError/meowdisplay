@@ -146,4 +146,95 @@ final class DisplayStabilityTrackerTests: XCTestCase {
         XCTAssertFalse(DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: true))
         XCTAssertTrue(DisplayReadinessWait.wakeMayRebuildCarrier(startAwaitingDisplay: false))
     }
+
+    // MARK: - The start's hold on the carrier (PR #260 review: stuck flag)
+
+    /// Records the order of a hold's begin, body and end.
+    private final class HoldLog {
+        var events: [String] = []
+        var held = false
+        func begin() async throws { events.append("begin"); held = true }
+        func end() { events.append("end"); held = false }
+    }
+
+    func testTheHoldIsTakenBeforeTheBodyAndReleasedAfterIt() async throws {
+        let log = HoldLog()
+        let value = try await DisplayReadinessWait.whileAwaitingDisplay(
+            begin: { try await log.begin() }, end: { log.end() },
+            body: { log.events.append("body"); XCTAssertTrue(log.held); return 7 })
+        XCTAssertEqual(value, 7)
+        XCTAssertEqual(log.events, ["begin", "body", "end"])
+        XCTAssertFalse(log.held)
+    }
+
+    /// The defect: a throw from the readiness wait (session generation no
+    /// longer live, sender stopped) left the hold set for the life of the
+    /// sender, so every later wake rebuild of the carrier was skipped.
+    func testTheHoldIsReleasedWhenTheReadinessWaitThrows() async {
+        let log = HoldLog()
+        do {
+            try await DisplayReadinessWait.whileAwaitingDisplay(
+                begin: { try await log.begin() }, end: { log.end() },
+                body: {
+                    _ = try await DisplayReadinessWait.firstAvailable(
+                        polls: 4, wake: {}, probe: { () async -> String? in nil },
+                        pause: {}, stillWanted: { false })
+                })
+            XCTFail("a wait for a superseded session must throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertFalse(log.held, "a stuck hold blocks every later wake rebuild")
+        XCTAssertEqual(log.events, ["begin", "end"])
+    }
+
+    func testTheHoldIsReleasedWhenTheBodyFailsForAnyOtherReason() async {
+        struct Failure: Error {}
+        let log = HoldLog()
+        do {
+            try await DisplayReadinessWait.whileAwaitingDisplay(
+                begin: { try await log.begin() }, end: { log.end() }, body: { throw Failure() })
+            XCTFail("expected the body's error")
+        } catch {
+            XCTAssertTrue(error is Failure)
+        }
+        XCTAssertFalse(log.held)
+    }
+
+    func testTheHoldIsReleasedWhenTakingItThrows() async {
+        let log = HoldLog()
+        do {
+            try await DisplayReadinessWait.whileAwaitingDisplay(
+                begin: { throw CancellationError() }, end: { log.end() }, body: { XCTFail("body must not run") })
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertFalse(log.held)
+        XCTAssertEqual(log.events, ["end"])
+    }
+
+    // MARK: - A readiness wait cancelled mid-start
+
+    /// A stopped sender has nothing left to start.
+    func testAStoppedSenderEndsTheStartQuietly() {
+        XCTAssertEqual(DisplayReadinessWait.afterCancelledWait(stopped: true, follows: 0), .endQuietly)
+        XCTAssertEqual(DisplayReadinessWait.afterCancelledWait(stopped: true, follows: 99), .endQuietly)
+    }
+
+    /// The defect: a superseded generation was treated as a user stop, which
+    /// left a running Window sender with no workspace engine. It is followed
+    /// to the next admitted connection instead.
+    func testASupersededGenerationIsFollowedNotTreatedAsAUserStop() {
+        for follows in 0..<DisplayReadinessWait.maxFollows {
+            XCTAssertEqual(DisplayReadinessWait.afterCancelledWait(stopped: false, follows: follows), .follow)
+        }
+    }
+
+    /// A session that keeps changing fails the start (which stops the sender)
+    /// rather than waiting forever or running without an engine.
+    func testASessionThatKeepsChangingFailsTheStart() {
+        XCTAssertEqual(
+            DisplayReadinessWait.afterCancelledWait(stopped: false, follows: DisplayReadinessWait.maxFollows), .fail)
+    }
 }
