@@ -30,11 +30,11 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         let c = capture(fake)
         XCTAssertTrue(c.request(size: large, fps: 30))
         let first = await c.applyRequested()
-        XCTAssertEqual(first, .failed(-3802), "ScreenCaptureKit refused the change: not a reconfiguration")
+        XCTAssertEqual(first, TileRetuneResult(outcome: .failed(-3802), accepted: 0), "ScreenCaptureKit refused the change: not a reconfiguration")
         XCTAssertEqual(c.appliedSettings, settings(small), "the stream keeps what it had")
         XCTAssertTrue(c.request(size: large, fps: 30), "the stream still has the old size, so the same request is tried again")
         let second = await c.applyRequested()
-        XCTAssertEqual(second, .applied)
+        XCTAssertEqual(second, TileRetuneResult(outcome: .applied, accepted: 1))
         XCTAssertEqual(c.appliedSettings, settings(large))
         XCTAssertEqual(fake.calls, [call(large), call(large)])
     }
@@ -44,7 +44,7 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         let c = capture(fake)
         XCTAssertTrue(c.request(size: large, fps: 30))
         let outcome = await c.applyRequested()
-        XCTAssertEqual(outcome, .failed(-3802))
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .failed(-3802), accepted: 0))
         XCTAssertEqual(fake.calls.count, 1, "no loop: only a new request tries again")
     }
 
@@ -56,11 +56,11 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         await fake.waitForHeldCall()
         XCTAssertTrue(c.request(size: medium, fps: 30))
         let second = await c.applyRequested()
-        XCTAssertEqual(second, .coalesced, "the change already running takes it up")
+        XCTAssertEqual(second, TileRetuneResult(outcome: .coalesced, accepted: 0), "the change already running takes it up")
         XCTAssertTrue(c.request(size: huge, fps: 15))
         fake.release()
         let firstOutcome = await first.value
-        XCTAssertEqual(firstOutcome, .applied)
+        XCTAssertEqual(firstOutcome, TileRetuneResult(outcome: .applied, accepted: 2), "both accepted changes count, the one taken up from the coalesced request too")
         XCTAssertEqual(fake.maxInFlight, 1, "one stream, one configuration change at a time")
         XCTAssertEqual(fake.calls, [call(large), call(huge, 15)], "the superseded size is skipped; the latest is applied last")
         XCTAssertEqual(c.appliedSettings, settings(huge, 15))
@@ -75,8 +75,8 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         XCTAssertTrue(c.request(size: medium, fps: 30))
         let a = await c.applyRequested()
         let b = await c.applyRequested()
-        XCTAssertEqual(a, .applied)
-        XCTAssertEqual(b, .unchanged)
+        XCTAssertEqual(a, TileRetuneResult(outcome: .applied, accepted: 1))
+        XCTAssertEqual(b, TileRetuneResult(outcome: .unchanged, accepted: 0))
         XCTAssertEqual(fake.calls, [call(medium)])
         XCTAssertEqual(c.appliedSettings, settings(medium))
     }
@@ -92,7 +92,7 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         XCTAssertFalse(c.request(size: small, fps: 30))
         fake.release()
         let outcome = await first.value
-        XCTAssertEqual(outcome, .applied)
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .applied, accepted: 2))
         XCTAssertEqual(fake.calls, [call(large), call(small)])
         XCTAssertEqual(c.appliedSettings, settings(small))
     }
@@ -106,9 +106,24 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         XCTAssertTrue(c.request(size: medium, fps: 30))
         fake.release()
         let outcome = await first.value
-        XCTAssertEqual(outcome, .applied)
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .applied, accepted: 1), "only the newer change was accepted")
         XCTAssertEqual(fake.calls, [call(large), call(medium)])
         XCTAssertEqual(c.appliedSettings, settings(medium))
+    }
+
+    func testAChangeAcceptedBeforeALaterFailureIsCounted() async {
+        let fake = FakeReconfigure(script: [.hold, .fail(-3802)])
+        let c = capture(fake)
+        XCTAssertTrue(c.request(size: large, fps: 30))
+        let first = Task { [c] in await c.applyRequested() }
+        await fake.waitForHeldCall()
+        XCTAssertTrue(c.request(size: medium, fps: 30))
+        fake.release()
+        let outcome = await first.value
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .failed(-3802), accepted: 1),
+                       "the latest change failed, but the one before it was accepted and counts")
+        XCTAssertEqual(c.appliedSettings, settings(large), "the stream has what was accepted")
+        XCTAssertEqual(fake.calls, [call(large), call(medium)])
     }
 
     func testAStopDuringAChangeNeitherRecordsItNorStartsAnother() async {
@@ -121,11 +136,11 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         await c.stop()
         fake.release()
         let outcome = await first.value
-        XCTAssertEqual(outcome, .stopped)
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .stopped, accepted: 0), "accepted by the fake, but the stream had stopped: not recorded, not counted")
         XCTAssertNil(c.appliedSettings, "a stopped stream is never reported current")
         XCTAssertFalse(c.request(size: huge, fps: 30), "nothing to retune after a stop")
         let after = await c.applyRequested()
-        XCTAssertEqual(after, .stopped)
+        XCTAssertEqual(after, TileRetuneResult(outcome: .stopped, accepted: 0))
         XCTAssertEqual(fake.calls, [call(large)], "the request made before the stop is not applied to the stopped stream")
     }
 
@@ -134,7 +149,7 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         let c = capture(fake)
         XCTAssertFalse(c.request(size: small, fps: 30))
         let outcome = await c.applyRequested()
-        XCTAssertEqual(outcome, .unchanged)
+        XCTAssertEqual(outcome, TileRetuneResult(outcome: .unchanged, accepted: 0))
         XCTAssertTrue(fake.calls.isEmpty)
     }
 

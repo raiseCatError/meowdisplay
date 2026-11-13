@@ -42,6 +42,14 @@ enum TileRetuneOutcome: Equatable, Sendable {
     case stopped
 }
 
+/// One `WindowTileCapture.applyRequested()`: how it ended, and how many changes it recorded as
+/// applied on the way. A call that takes up coalesced requests can apply more than one, and one
+/// can be applied before a later one fails (#256).
+struct TileRetuneResult: Equatable, Sendable {
+    var outcome: TileRetuneOutcome
+    var accepted = 0
+}
+
 final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     /// One captured frame: the pixels, where the source's content sits in them (ScreenCaptureKit
     /// pads to the configured size, e.g. 1200x656 content in a 1200x800 buffer, measured), and
@@ -168,8 +176,9 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     /// Step two: brings the live stream to the latest requested settings, one change at a time.
     /// A change that fails is not recorded as applied, so the next request for the same settings
     /// tries again; nothing retries on its own. A stream stopped meanwhile is left alone.
-    func applyRequested() async -> TileRetuneOutcome {
+    func applyRequested() async -> TileRetuneResult {
         var outcome = TileRetuneOutcome.unchanged
+        var accepted = 0
         var claimed = false
         while true {
             let next = lock.withLock { () -> (SCStream, TileCaptureSettings)? in
@@ -187,14 +196,17 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
                 guard let wanted = requested, wanted != applied else { applying = false; return nil }
                 return (stream, wanted)
             }
-            guard let next else { return outcome }
+            guard let next else { return TileRetuneResult(outcome: outcome, accepted: accepted) }
             let (s, wanted) = next
             do {
                 try await reconfigure(s, Self.configuration(wanted))
-                lock.withLock {
+                let recorded = lock.withLock { () -> Bool in
                     // Only this stream, still running, has it now.
-                    if !stopRequested, stream === s { applied = wanted }
+                    guard !stopRequested, stream === s else { return false }
+                    applied = wanted
+                    return true
                 }
+                if recorded { accepted += 1 }
                 outcome = .applied
             } catch {
                 let code = (error as NSError).code
@@ -205,7 +217,10 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
                     applying = false
                     return false
                 }
-                if !retry { return lock.withLock({ stopRequested || stream !== s }) ? .stopped : .failed(code) }
+                if !retry {
+                    let stopped = lock.withLock { stopRequested || stream !== s }
+                    return TileRetuneResult(outcome: stopped ? .stopped : .failed(code), accepted: accepted)
+                }
                 outcome = .failed(code)
             }
         }
@@ -1236,15 +1251,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // time per stream. Only a change ScreenCaptureKit accepted counts (#256).
             guard capture.request(size: size, fps: max(fps, 1)) else { continue }
             Task { [weak self] in
-                let outcome = await capture.applyRequested()
+                let result = await capture.applyRequested()
                 self?.queue.async {
-                    switch outcome {
-                    case .applied: self?.reconfigurations += 1
+                    // Every change ScreenCaptureKit accepted, including coalesced ones and one
+                    // applied before a later change failed.
+                    self?.reconfigurations += result.accepted
+                    switch result.outcome {
                     case .failed(let code):
                         // The stream keeps its settings; the next retune asks again. A stream
                         // that died reports it through `onStop` and recovers there.
                         Log.info("workspace: tile=\(capture.tileID) capture retune failed code=\(code)")
-                    case .unchanged, .coalesced, .stopped: break
+                    case .applied, .unchanged, .coalesced, .stopped: break
                     }
                 }
             }
