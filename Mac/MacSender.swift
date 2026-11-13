@@ -7909,8 +7909,9 @@ extension MacSender {
         let contentClock = ContinuousClock.now
         let content = try await ShareableContent.content()
         Self.logStartupStep("windowModeContent", since: contentClock)
-        let main = CGMainDisplayID()
-        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+        var found = Self.windowCarrier(in: content.displays)
+        if found == nil { found = try await awaitWindowCarrierReadiness(sessionGeneration: sessionGeneration) }
+        guard let carrier = found else {
             await status("Window mode needs a desktop on this Mac. Connect in Extend instead.")
             throw NSError(domain: "MacSender", code: 21,
                           userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
@@ -7926,12 +7927,53 @@ extension MacSender {
         Log.info("workspace: Window mode started canvas=\(canvasW)x\(canvasH) carrier=\(carrier.displayID)")
     }
 
+    /// The display Window mode's carrier stream captures: the main display,
+    /// else any display macOS lists.
+    private static func windowCarrier(in displays: [SCDisplay]) -> SCDisplay? {
+        let main = CGMainDisplayID()
+        return displays.first(where: { $0.displayID == main }) ?? displays.first
+    }
+
+    /// Window mode found no display to carry its stream at admission (#255).
+    /// A Mac reached while its displays sleep (a dark wake keeps the network
+    /// up) lists none, and failing there ended every Wake & Connect and
+    /// reconnect until someone woke the Mac by hand. Same answer as Mirror's
+    /// `awaitMirrorDisplayReadiness`: ask macOS once to wake its displays
+    /// (one public user-activity call, for this admitted session only) and
+    /// give them the same bounded grace to be listed. Nil when none appears,
+    /// which keeps today's failure. Not reached when a display is listed, so
+    /// it adds no wait then. Wake recovery is Mirror-only, so nothing else
+    /// starts a capture for this session meanwhile.
+    private func awaitWindowCarrierReadiness(sessionGeneration: UInt64) async throws -> SCDisplay? {
+        let grace = MirrorUnavailableOfferPolicy.readinessGrace
+        let start = ContinuousClock.now
+        Log.info("displayDebug: windowReadiness no display listed yet — waiting up to \(Int(grace))s")
+        let carrier = try await DisplayReadinessWait.firstAvailable(
+            polls: DisplayReadinessWait.polls(grace: grace, interval: 0.5),
+            wake: {
+                let promotion = InteractiveWakePromotion.promote(reason: "MEOW Window Mode Display")
+                Log.info("displayDebug: windowReadiness promoteResult=\(promotion.result)")
+            },
+            probe: { () async -> SCDisplay? in
+                // A failed listing while displays come up is "not yet".
+                guard let content = try? await ShareableContent.content() else { return nil }
+                return Self.windowCarrier(in: content.displays)
+            },
+            pause: { try await Task.sleep(for: .milliseconds(500)) },
+            stillWanted: { !self.stopped && self.authenticatedSession.isLive(generation: sessionGeneration) })
+        if carrier != nil {
+            Log.info("displayDebug: windowReadiness display ready after \(ContinuousClock.now - start)")
+        } else {
+            Log.info("displayDebug: windowReadiness no display after \(Int(grace))s")
+        }
+        return carrier
+    }
+
     /// Capture recovery in Window mode: restart the carrier display stream.
     func reattachWindowCarrier() async throws {
         guard let info = lastHello else { throw CancellationError() }
         let content = try await ShareableContent.content()
-        let main = CGMainDisplayID()
-        guard let carrier = content.displays.first(where: { $0.displayID == main }) ?? content.displays.first else {
+        guard let carrier = Self.windowCarrier(in: content.displays) else {
             throw NSError(domain: "MacSender", code: 21,
                           userInfo: [NSLocalizedDescriptionKey: "no display is available for Window mode"])
         }

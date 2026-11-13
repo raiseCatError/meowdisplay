@@ -48,4 +48,94 @@ final class DisplayStabilityTrackerTests: XCTestCase {
         }
         XCTAssertTrue(tracker.recordSample(usable: true))
     }
+
+    // MARK: - DisplayReadinessWait (#255: Window mode reached while displays sleep)
+
+    /// Counts what a wait did, with a display that is listed from the
+    /// `readyAtProbe`-th probe on (nil: never).
+    private final class Recorder {
+        var probes = 0, wakes = 0, pauses = 0
+        var wanted = true
+        var endSessionAtPause: Int?
+        let readyAtProbe: Int?
+        init(readyAtProbe: Int?) { self.readyAtProbe = readyAtProbe }
+
+        func run(polls: Int) async throws -> String? {
+            try await DisplayReadinessWait.firstAvailable(
+                polls: polls,
+                wake: { self.wakes += 1 },
+                probe: {
+                    self.probes += 1
+                    guard let ready = self.readyAtProbe, self.probes >= ready else { return nil }
+                    return "display"
+                },
+                pause: {
+                    self.pauses += 1
+                    if self.pauses == self.endSessionAtPause { self.wanted = false }
+                },
+                stillWanted: { self.wanted })
+        }
+    }
+
+    /// An awake Mac pays nothing: no wake call, no wait.
+    func testAListedDisplayIsUsedAtOnceWithoutWakingOrWaiting() async throws {
+        let recorder = Recorder(readyAtProbe: 1)
+        let value = try await recorder.run(polls: 16)
+        XCTAssertEqual(value, "display")
+        XCTAssertEqual(recorder.wakes, 0)
+        XCTAssertEqual(recorder.pauses, 0)
+    }
+
+    /// The 9000042 failure: no display listed at admission (displays asleep).
+    /// The start must wake them once and use the display when it appears,
+    /// instead of failing on the first empty listing.
+    func testASleepingDisplayIsWokenOnceAndAwaited() async throws {
+        let recorder = Recorder(readyAtProbe: 4)
+        let value = try await recorder.run(polls: 16)
+        XCTAssertEqual(value, "display")
+        XCTAssertEqual(recorder.wakes, 1, "one wake request, never a loop of them")
+        XCTAssertEqual(recorder.pauses, 3)
+    }
+
+    /// A Mac with truly no display still fails, after a bounded wait.
+    func testTheWaitIsBoundedWhenNoDisplayAppears() async throws {
+        let recorder = Recorder(readyAtProbe: nil)
+        let value = try await recorder.run(polls: 16)
+        XCTAssertNil(value)
+        XCTAssertEqual(recorder.wakes, 1)
+        XCTAssertEqual(recorder.pauses, 16)
+        XCTAssertEqual(recorder.probes, 17)
+    }
+
+    /// A session that ended while waiting gets no capture started for it.
+    func testTheWaitStopsWhenTheSessionEnds() async {
+        let recorder = Recorder(readyAtProbe: 5)
+        recorder.endSessionAtPause = 2
+        do {
+            _ = try await recorder.run(polls: 16)
+            XCTFail("a wait for an ended session must be cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(recorder.probes, 2, "no probe after the session ended")
+    }
+
+    func testASessionAlreadyEndedNeitherProbesNorWakes() async {
+        let recorder = Recorder(readyAtProbe: 1)
+        recorder.wanted = false
+        do {
+            _ = try await recorder.run(polls: 16)
+            XCTFail("expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(recorder.probes, 0)
+        XCTAssertEqual(recorder.wakes, 0)
+    }
+
+    func testPollCountCoversTheGraceAndIsNeverZero() {
+        XCTAssertEqual(DisplayReadinessWait.polls(grace: 8, interval: 0.5), 16)
+        XCTAssertEqual(DisplayReadinessWait.polls(grace: 0.1, interval: 0.5), 1)
+        XCTAssertEqual(DisplayReadinessWait.polls(grace: 8, interval: 0), 1)
+    }
 }
