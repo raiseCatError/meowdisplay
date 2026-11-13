@@ -197,4 +197,40 @@ final class MacDisplaySleepTests: XCTestCase {
         XCTAssertEqual(request.phase, .waiting)
         XCTAssertTrue(request.timedOut(new))
     }
+
+    // MARK: - Settings, Home and Resume from the asleep cover
+
+    func testTheCoverShowsOverTheSessionWhileTheMacSleeps() {
+        XCTAssertTrue(MacAsleepCoverPolicy.showsCover(asleep: true, sessionOnScreen: true))
+        XCTAssertFalse(MacAsleepCoverPolicy.showsCover(asleep: false, sessionOnScreen: true))
+    }
+
+    /// Back to Home: Home replaces the cover (it shows nothing of the Mac), the Mac stays asleep.
+    func testHomeReplacesTheCover() {
+        XCTAssertFalse(MacAsleepCoverPolicy.showsCover(asleep: true, sessionOnScreen: false))
+    }
+
+    /// Resume while the Mac still sleeps: the cover is back, not a stale picture.
+    func testResumeShowsTheCoverAgainWhileTheMacStillSleeps() {
+        let asleep = true   // nothing about Home or Settings changes what the Mac reported
+        XCTAssertFalse(MacAsleepCoverPolicy.showsCover(asleep: asleep, sessionOnScreen: false))
+        XCTAssertTrue(MacAsleepCoverPolicy.showsCover(asleep: asleep, sessionOnScreen: true))
+    }
+
+    /// Resume after the Mac woke meanwhile: no cover.
+    func testResumeAfterTheMacWokeShowsNoCover() {
+        XCTAssertFalse(MacAsleepCoverPolicy.showsCover(asleep: false, sessionOnScreen: true))
+    }
+
+    /// Settings and Home send nothing: a wake request in flight, or a failed one, is unchanged
+    /// by leaving and coming back, and only the Mac's own report ends it.
+    func testAWakeRequestSurvivesLeavingAndReturning() {
+        var request = MacWakeRequest()
+        let id = request.begin()!
+        request.displayReported(asleep: true)   // re-reported on a re-admission while away
+        XCTAssertEqual(request.phase, .waiting)
+        XCTAssertTrue(request.timedOut(id))
+        request.displayReported(asleep: true)
+        XCTAssertEqual(request.phase, .failed, "still asleep on return: Try Again stays offered")
+    }
 }

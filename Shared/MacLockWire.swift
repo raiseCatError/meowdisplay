@@ -317,3 +317,13 @@ struct MacWakeRequest: Equatable {
         if !asleep { phase = .idle }
     }
 }
+
+/// Where the "Mac is asleep" cover shows (#255).
+enum MacAsleepCoverPolicy {
+    /// Only over the session itself. Home is opaque and shows nothing of the Mac, so it replaces
+    /// the cover; coming back (Resume) shows the cover again while the Mac still sleeps. Settings
+    /// is presented above the cover, which stays up beneath it.
+    static func showsCover(asleep: Bool, sessionOnScreen: Bool) -> Bool {
+        asleep && sessionOnScreen
+    }
+}

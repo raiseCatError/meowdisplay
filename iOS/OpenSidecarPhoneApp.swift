@@ -128,6 +128,14 @@ struct ReceiverScreen: View {
     /// user inside the same receiver session instead of flashing back to the
     /// idle/discovery screen between retries — the geometry the surface needs
     /// (`videoSize`) deliberately survives a disconnect.
+    /// Back to Home from the asleep cover (#255): the same Home that Session Actions offers (which
+    /// the cover hides), so only while there is a surface to come back to.
+    private var asleepCoverHomeAvailable: Bool {
+        model.receiver.connected && route == .receiver
+            && ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
+                                                    presentation: model.presentation).contains(.backToHome)
+    }
+
     private var showsReceiverSurface: Bool {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
@@ -901,7 +909,10 @@ struct ReceiverScreen: View {
             }
         }
         // The Mac's displays are asleep: no stale picture, and one explicit way to wake it (#255).
-        .modifier(MacAsleepCoverOverlay(receiver: model.receiver, macName: model.workspace.hostName))
+        .modifier(MacAsleepCoverOverlay(
+            receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: route == .receiver,
+            onSettings: { keyboardActive = false; showSettings = true },
+            onBackToHome: asleepCoverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession() } : nil))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
