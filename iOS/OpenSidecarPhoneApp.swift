@@ -900,6 +900,8 @@ struct ReceiverScreen: View {
                     .transition(slideTransition(from: .top))
             }
         }
+        // The Mac's displays are asleep: no stale picture, and one explicit way to wake it (#255).
+        .modifier(MacAsleepCoverOverlay(receiver: model.receiver, macName: model.workspace.hostName))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }

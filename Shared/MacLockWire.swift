@@ -265,3 +265,55 @@ struct MacLockNotice: Equatable, Sendable {
         lockScreenView = lockScreen == .active ? LockScreenInputTag.positiveInteger(message[LockScreenWire.viewKey]) : nil
     }
 }
+
+/// Display sleep (#255). A session can outlive the Mac's displays going to sleep: the transport
+/// stays up or reconnects in a dark wake, but there is nothing to capture. The Mac says so, and a
+/// receiver shows that instead of a frozen or black picture, with one explicit action to wake it.
+/// The Mac never wakes itself for a connected viewer: someone put it to sleep.
+enum MacDisplaySleepWire {
+    /// Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent when the displays go to
+    /// sleep or wake during an admitted session, and on a re-admission while they are asleep.
+    /// Additive: a receiver that doesn't know it ignores it.
+    static let type = "macDisplaySleep"
+
+    static func message(asleep: Bool) -> [String: Any] { ["type": type, "asleep": asleep] }
+
+    /// Nil for anything malformed: the receiver then keeps what it last knew.
+    static func asleep(from message: [String: Any]) -> Bool? {
+        guard message["type"] as? String == type else { return nil }
+        return message["asleep"] as? Bool
+    }
+}
+
+/// The receiver's one explicit "Wake Mac" request while the Mac's displays sleep. One request at
+/// a time, answered by the Mac reporting its displays awake, or failed after `timeout`. Nothing
+/// retries by itself: a Mac that stays asleep is asked again only by another tap.
+struct MacWakeRequest: Equatable {
+    enum Phase: Equatable { case idle, waiting, failed }
+    static let timeout: TimeInterval = 12
+
+    private(set) var phase = Phase.idle
+    private(set) var requestID = 0
+
+    /// A tap on Wake Mac. Returns the id its timeout must present, or nil while one is waiting.
+    mutating func begin() -> Int? {
+        guard phase != .waiting else { return nil }
+        requestID &+= 1
+        phase = .waiting
+        return requestID
+    }
+
+    /// The timeout of request `id` fired. Only the request still waiting can fail.
+    @discardableResult
+    mutating func timedOut(_ id: Int) -> Bool {
+        guard phase == .waiting, id == requestID else { return false }
+        phase = .failed
+        return true
+    }
+
+    /// The Mac reported its displays: awake ends the request (and clears a failure); asleep
+    /// again leaves a waiting request waiting.
+    mutating func displayReported(asleep: Bool) {
+        if !asleep { phase = .idle }
+    }
+}

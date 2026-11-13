@@ -144,3 +144,57 @@ final class MacLockPrivacyTests: XCTestCase {
         return CGImageDestinationFinalize(dest) ? data as Data : nil
     }
 }
+
+/// #255: a session that outlives the Mac's displays going to sleep. The Mac says so; the receiver
+/// offers one explicit, bounded wake request and never wakes the Mac by itself.
+final class MacDisplaySleepTests: XCTestCase {
+    func testWireRoundTrip() {
+        XCTAssertEqual(MacDisplaySleepWire.asleep(from: MacDisplaySleepWire.message(asleep: true)), true)
+        XCTAssertEqual(MacDisplaySleepWire.asleep(from: MacDisplaySleepWire.message(asleep: false)), false)
+    }
+
+    func testMalformedMessagesAreIgnored() {
+        XCTAssertNil(MacDisplaySleepWire.asleep(from: ["type": "macDisplaySleep"]))
+        XCTAssertNil(MacDisplaySleepWire.asleep(from: ["type": "macDisplaySleep", "asleep": "yes"]))
+        XCTAssertNil(MacDisplaySleepWire.asleep(from: ["type": "macLockState", "asleep": true]))
+    }
+
+    func testOneWakeRequestAtATime() {
+        var request = MacWakeRequest()
+        let first = request.begin()
+        XCTAssertNotNil(first)
+        XCTAssertEqual(request.phase, .waiting)
+        XCTAssertNil(request.begin(), "a second tap while waiting sends nothing")
+    }
+
+    func testTheMacWakingEndsTheRequest() {
+        var request = MacWakeRequest()
+        let id = request.begin()!
+        request.displayReported(asleep: true)
+        XCTAssertEqual(request.phase, .waiting, "still asleep: keep waiting")
+        request.displayReported(asleep: false)
+        XCTAssertEqual(request.phase, .idle)
+        XCTAssertFalse(request.timedOut(id), "a timeout after the Mac woke fails nothing")
+        XCTAssertEqual(request.phase, .idle)
+    }
+
+    func testAMacThatStaysAsleepFailsTheRequestAndNothingRetries() {
+        var request = MacWakeRequest()
+        let id = request.begin()!
+        XCTAssertTrue(request.timedOut(id))
+        XCTAssertEqual(request.phase, .failed)
+        XCTAssertFalse(request.timedOut(id))
+        XCTAssertEqual(request.phase, .failed, "failed stays failed until another tap")
+        XCTAssertNotNil(request.begin(), "Try Again starts a new request")
+    }
+
+    func testAStaleTimeoutCannotFailANewerRequest() {
+        var request = MacWakeRequest()
+        let old = request.begin()!
+        _ = request.timedOut(old)
+        let new = request.begin()!
+        XCTAssertFalse(request.timedOut(old))
+        XCTAssertEqual(request.phase, .waiting)
+        XCTAssertTrue(request.timedOut(new))
+    }
+}

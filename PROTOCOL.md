@@ -2355,6 +2355,19 @@ Optional and additive: no `pv` bump. The Mac lists `"macLockState"` in `welcome.
   progress (drags, Stage Peek, pickers), keep the layout, and ask for the window list again after
   the unlock.
 
+### 6.18.1 Display sleep (`macDisplaySleep`)
+
+Mac -> receiver: `{"type":"macDisplaySleep","asleep":Bool}`. Sent to the admitted receiver when
+the Mac's displays go to sleep or wake, and on every re-admission (sleep usually drops the
+transport, so the connection that heard the change is gone). Additive: a receiver that doesn't
+know it ignores it, and a receiver that never hears it assumes the displays are awake.
+
+A session can outlive display sleep: the transport stays up or reconnects in a dark wake, but
+there is nothing to capture. On `asleep: true` a receiver drops its last picture and shows that
+the Mac is asleep, with one explicit action that sends `promoteInteractiveWake` (the request Wake
+& Connect sends). The Mac never wakes itself for a connected viewer. On `asleep: false` capture
+resumes through the existing wake paths, and `macLockState` decides what may be shown.
+
 ### 6.19 Lock screen control (`lockScreenRequest`, `macLockState.lockScreen`)
 
 Optional and additive: no `pv` bump. The Mac lists `"lockScreenControl"` in `welcome.features`.

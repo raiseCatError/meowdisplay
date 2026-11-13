@@ -816,6 +816,9 @@ final class StreamReceiver: ObservableObject {
     /// The Mac's screen is locked or switched to another user (`macLockState`): the receiver shows
     /// only its locked screen, over everything. Nil: not said (an older Mac, or unlocked).
     @MainActor @Published private(set) var macLock: MacLockNotice?
+    /// The Mac's displays are asleep (`macDisplaySleep`, #255): the session is up but there is no
+    /// picture to send. False when not said (an older Mac) and after any disconnect.
+    @MainActor @Published private(set) var macDisplayAsleep = false
     /// A frame that arrived after the last video reset (lock, video off/on, codec change) has been
     /// handed to presentation. The Mac's lock screen (6.19) shows only once this is true, so no
     /// picture from before the reset (the pre-lock desktop) can show, whichever renderer is on.
@@ -2989,6 +2992,11 @@ final class StreamReceiver: ObservableObject {
                 target = nil
             }
             DispatchQueue.main.async { uiSink.publishSmartTouchProbeResult(id: id, target: target) }
+        case MacDisplaySleepWire.type:
+            guard let asleep = MacDisplaySleepWire.asleep(from: obj) else { return }
+            // The last picture goes now: a sleeping Mac must not leave a frozen frame behind.
+            if asleep { resetDecoderForVideoStateChange() }
+            DispatchQueue.main.async { uiSink.publishMacDisplayAsleep(asleep) }
         case MacLockWire.type:
             guard let notice = MacLockNotice(message: obj) else { return }
             // The last picture goes now, not when video-off follows. While this device shows the
@@ -6134,6 +6142,7 @@ final class StreamReceiver: ObservableObject {
             self.mirrorRejectedWhileExtending = false
             self.awaitingMirrorDisplay = false
             self.macLock = nil
+            self.macDisplayAsleep = false
             self.setLockScreenInputTag(LockScreenInputTagState())
         }
     }
@@ -6257,6 +6266,10 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyFreshFrameSinceVideoReset(_ fresh: Bool) {
         if freshFrameSinceVideoReset != fresh { freshFrameSinceVideoReset = fresh }
+    }
+
+    @MainActor func applyMacDisplayAsleep(_ asleep: Bool) {
+        if macDisplayAsleep != asleep { macDisplayAsleep = asleep }
     }
 
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {

@@ -1027,6 +1027,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // so — like `captureGeneration`/`audioGeneration` — they live on
     // `pipelineState`.
     private var wakeCaptureObserver: NSObjectProtocol?
+    private var displaySleepObserver: NSObjectProtocol?
     // Not itself part of the wake-capture-recovery machinery above — this is
     // the fixed 60s post-authentication display/system-sleep stabilization
     // hold (see WakeStabilizationAssertion), armed for every route.
@@ -3475,6 +3476,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeCaptureObserver)
         }
         wakeCaptureObserver = nil
+        if let displaySleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(displaySleepObserver)
+        }
+        displaySleepObserver = nil
         if let mirrorDisplayTopologyObserver {
             NotificationCenter.default.removeObserver(mirrorDisplayTopologyObserver)
         }
@@ -4488,8 +4493,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             queue.async {
                 guard let self = selfBox.currentOnQueue() else { return }
                 self.topologyChanged(reason: "screensDidWake")
+                self.sendDisplaySleepState(asleep: false)
             }
         }
+        displaySleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
+        ) { _ in
+            queue.async { selfBox.currentOnQueue()?.sendDisplaySleepState(asleep: true) }
+        }
+    }
+
+    /// `queue` (#255): tells the admitted receiver that this Mac's displays went to sleep or woke
+    /// (`MacDisplaySleepWire`). The session can stay up through display sleep with nothing to
+    /// capture; the receiver shows that, and offers its own explicit wake request. Nothing here
+    /// wakes the Mac.
+    private func sendDisplaySleepState(asleep: Bool) {
+        guard !stopped, sessionAuthorization.isAdmitted, lastHello != nil else { return }
+        Log.info("macPower: receiver told displayAsleep=\(asleep)")
+        sendJSONObject(MacDisplaySleepWire.message(asleep: asleep))
     }
 
     /// Called on `queue` for every topology-changing notification, for both
@@ -6484,6 +6505,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// unadmitted (a deferred Video On, a resume, or a recovery that found
     /// no admitted owner) starts now that one is admitted again.
     private func reconcileCaptureAfterReadmission() {
+        // The connection that heard the displays go to sleep (or wake) is usually gone: sleep
+        // drops the transport. The one admitted in its place hears where things stand now.
+        sendDisplaySleepState(asleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0)
         // A start still in flight was prepared for an earlier admission and
         // cannot commit for this one; the start below supersedes it.
         guard !stopped, captureOwnership.liveStream == nil else { return }
