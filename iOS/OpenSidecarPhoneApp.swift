@@ -174,8 +174,9 @@ struct ReceiverScreen: View {
                                          presentation: model.presentation)
     }
 
-    /// Nothing of the lock screen keeps playing behind Home: a shown one is hidden first.
-    private func leaveLockedCoverForHome() {
+    /// Back to Home from the locked or asleep cover. Nothing of the lock screen keeps playing
+    /// behind Home: a shown one is hidden first (the asleep cover can sit on top of it).
+    private func leaveCoverForHome() {
         keyboardActive = false
         if model.lockScreenFlow.isShowing { model.hideLockScreen() }
         showHomeKeepingSession(fromCover: true)
@@ -926,7 +927,7 @@ struct ReceiverScreen: View {
                                macName: model.workspace.hostName,
                                lockFlow: model.lockScreenFlow,
                                onSettings: { keyboardActive = false; showSettings = true },
-                               onBackToHome: coverHomeAvailable ? { leaveLockedCoverForHome() } : nil,
+                               onBackToHome: coverHomeAvailable ? { leaveCoverForHome() } : nil,
                                onShowLockScreen: { model.showLockScreen() },
                                onHideLockScreen: { keyboardActive = false; model.hideLockScreen() },
                                onCancelLockScreen: { keyboardActive = false; model.cancelLockScreen() },
@@ -960,7 +961,7 @@ struct ReceiverScreen: View {
         .modifier(MacAsleepCoverOverlay(
             receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: coverSessionOnScreen,
             onSettings: { keyboardActive = false; showSettings = true },
-            onBackToHome: coverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession(fromCover: true) } : nil))
+            onBackToHome: coverHomeAvailable ? { leaveCoverForHome() } : nil))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
