@@ -322,6 +322,7 @@ targets:
       - Shared/ReceiverPictureInPicture.swift
       - Shared/ReceiverSessionPresentation.swift
       - Shared/ReceiverSessionActions.swift
+      - Shared/SessionCoverPolicy.swift
       - Shared/LockMacFlow.swift
       - Shared/DisplayStabilityTracker.swift
       - Shared/AudioMediaFrame.swift

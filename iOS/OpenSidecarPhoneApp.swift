@@ -128,14 +128,6 @@ struct ReceiverScreen: View {
     /// user inside the same receiver session instead of flashing back to the
     /// idle/discovery screen between retries — the geometry the surface needs
     /// (`videoSize`) deliberately survives a disconnect.
-    /// Back to Home from the asleep cover (#255): the same Home that Session Actions offers (which
-    /// the cover hides), so only while there is a surface to come back to.
-    private var asleepCoverHomeAvailable: Bool {
-        model.receiver.connected && route == .receiver
-            && ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
-                                                    presentation: model.presentation).contains(.backToHome)
-    }
-
     private var showsReceiverSurface: Bool {
         model.receiver.session.retainsReceiverSurface && model.receiver.videoSize != .zero
     }
@@ -161,11 +153,25 @@ struct ReceiverScreen: View {
     /// Home over a kept session: nothing under it changes geometry.
     private var fullScreenSurface: Bool { route != .idle }
 
-    /// Back to Home — Keep Connected (#121).
-    private func showHomeKeepingSession() {
+    /// Back to Home — Keep Connected (#121). `fromCover`: from the asleep or locked cover, which may
+    /// stand for a session that has had no picture yet (`SessionCoverPolicy`, #255).
+    private func showHomeKeepingSession(fromCover: Bool = false) {
         keyboardBeforeHome = keyboardActive
         showSettings = false
-        model.showHomeKeepingSession()
+        model.showHomeKeepingSession(fromCover: fromCover)
+    }
+
+    /// The session is what is on screen, so the asleep and locked covers belong over it, also
+    /// before its first picture (a session admitted while the Mac sleeps or is locked, #255).
+    private var coverSessionOnScreen: Bool {
+        SessionCoverPolicy.sessionOnScreen(surfaceShown: route == .receiver, connected: model.receiver.connected,
+                                           keptOnHome: model.presentation.keepsSessionOnHome, demoShown: route == .demo)
+    }
+
+    /// Back to Home on the asleep or locked cover (#255).
+    private var coverHomeAvailable: Bool {
+        SessionCoverPolicy.homeAvailable(connected: model.receiver.connected, sessionOnScreen: coverSessionOnScreen,
+                                         presentation: model.presentation)
     }
 
     /// Offered in Settings ▸ Connections only while a real session is on screen.
@@ -259,7 +265,8 @@ struct ReceiverScreen: View {
 
     private func enterDemo() {
         // A real session always wins (see `route`); never start a demo behind it.
-        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface) else { return }
+        guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface),
+              !model.presentation.keepsSessionOnHome else { return }
         demoControlStore = DemoControlStoreFactory.make()
         demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
         Log.info("demo mode entered")
@@ -910,9 +917,9 @@ struct ReceiverScreen: View {
         }
         // The Mac's displays are asleep: no stale picture, and one explicit way to wake it (#255).
         .modifier(MacAsleepCoverOverlay(
-            receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: route == .receiver,
+            receiver: model.receiver, macName: model.workspace.hostName, sessionOnScreen: coverSessionOnScreen,
             onSettings: { keyboardActive = false; showSettings = true },
-            onBackToHome: asleepCoverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession() } : nil))
+            onBackToHome: coverHomeAvailable ? { keyboardActive = false; showHomeKeepingSession(fromCover: true) } : nil))
         .onChange(of: model.receiver.displayModeConfirmationGeneration) { _ in
             haptics.play(.confirmation)
             if !model.workspace.windowMode, let mode = model.receiver.confirmedDisplayMode { lastDesktopMode = mode }
@@ -2790,8 +2797,10 @@ final class ReceiverModel: ObservableObject {
 
     /// Home in front, the session kept behind it: the Mac keeps its display
     /// and keeps encoding, this device stops showing, playing and sending.
-    func showHomeKeepingSession() {
-        let surfaceRetained = receiver.session.retainsReceiverSurface && receiver.videoSize != .zero
+    func showHomeKeepingSession(fromCover: Bool = false) {
+        let surfaceRetained = SessionCoverPolicy.surfaceRetainedForHome(
+            retainsSurface: receiver.session.retainsReceiverSurface, hasPicture: receiver.videoSize != .zero,
+            fromCover: fromCover)
         var next = presentation
         guard next.showHome(surfaceRetained: surfaceRetained, macPeerID: receiver.connectedMacPeerID) else { return }
         // Nothing stays pressed on the Mac while nobody can see it.
