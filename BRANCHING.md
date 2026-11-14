@@ -29,9 +29,11 @@ title).
 | Pull request into `main` or `release/*`; push to `main` or `release/*` | Every job, the complete Duo UI suite included | The promoted commit passes everything |
 | On request | Run Tests by hand on any branch (Actions → Tests → Run workflow): every job | The same, before a merge |
 
-A merge into `dev` is not a verified integration until its gate run passes.
-Releases are cut from a `dev` baseline whose gate passed (RELEASE.md), and
-physical-device QA stays a separate, manual release step.
+A merge into `dev` is not a verified integration until its gate run passes:
+cut a release branch only from a `dev` commit whose Tests run passed. `ios-duo`
+is not a required check yet, so on a pull request into `main` or `release/*`
+its result has to be read, not assumed. Physical-device QA stays a separate,
+manual release step.
 
 ## Product scope and branches
 
