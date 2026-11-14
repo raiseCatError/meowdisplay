@@ -13,8 +13,11 @@ What a change reaches:
                       compiled but runs nothing ("build-only"); anything
                       else there (helpers, new kinds of file) runs them all.
   iOS/*.swift,        by line coverage, per class, from the dev integration
-  Shared/*.swift      run (ui_coverage.json, see dev_runs.py): a class runs
-                      if it executed any line a hunk touches or is next to.
+  Shared/*.swift      run (ui_coverage.py): a class runs if it executed a
+                      line a hunk changes, or one of the two lines around a
+                      hunk that only adds lines. A change no class reaches
+                      runs no Duo job (the mac job compiles the app), unless
+                      the file has simulator-only code ("build-only").
                       Lines that aren't executable count by their kind:
                       blank, comment and brace lines by the executable lines
                       around them; declarations (properties, cases,
@@ -42,6 +45,7 @@ ALL_CLASSES = frozenset(CI_CLASSES)
 BUILD_ONLY = "build-only"
 
 TEST_DIR = "iOSUITests/"
+SIMULATOR_ONLY = "targetEnvironment(simulator)"
 COVERED_DIRS = ("iOS/", "Shared/")
 
 CLASS_DECL = re.compile(r"^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b", re.M)
@@ -227,7 +231,11 @@ def select(paths: list[str], read_head: Callable[[str], Optional[str]], read_bas
             continue
         to_cov = line_map(coverage_diff(coverage.commit, path))
         base_lines = base.splitlines()
-        sel.build = True
+        # The mac job builds the app for devices; code only a simulator compiles
+        # still needs the simulator build.
+        if SIMULATOR_ONLY in head or SIMULATOR_ONLY in base:
+            sel.build = True
+            sel.reasons.append(f"{path} has simulator-only code")
         for hunk in parse_hunks(pr_diff(path)):
             classes, why = hunk_classes(coverage, path, hunk, base_lines, to_cov)
             if classes:

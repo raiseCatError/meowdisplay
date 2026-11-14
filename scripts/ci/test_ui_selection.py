@@ -70,10 +70,16 @@ class SwiftSources(unittest.TestCase):
         tests, _ = run(["iOS/Panel.swift"], head, {"iOS/Panel.swift": SOURCE}, coverage())
         self.assertEqual(tests, SMOKE)
 
-    def test_code_no_ui_test_reaches_builds_only(self):
+    def test_code_no_ui_test_reaches_runs_no_duo_job(self):
         head = {"iOS/Panel.swift": edit(SOURCE, "        retry()\n", "        retry()\n        log()\n")}
         tests, why = run(["iOS/Panel.swift"], head, {"iOS/Panel.swift": SOURCE}, coverage())
-        self.assertEqual(tests, BUILD_ONLY, why)
+        self.assertEqual(tests, "", why)
+
+    def test_simulator_only_code_still_builds_for_the_simulator(self):
+        source = SOURCE.replace("        retry()\n", "        #if targetEnvironment(simulator)\n        retry()\n        #endif\n")
+        cov = coverage({SMOKE: [[6, 7]]}, files={"iOS/Panel.swift": [[6, 7], [12, 12], [14, 14]]})
+        head = {"iOS/Panel.swift": edit(source, "        retry()\n", "        retry(1)\n")}
+        self.assertEqual(run(["iOS/Panel.swift"], head, {"iOS/Panel.swift": source}, cov)[0], BUILD_ONLY)
 
     def test_a_comment_takes_its_neighbours(self):
         inside = edit(SOURCE, '        Text("demo")\n', '        // A note.\n        Text("demo")\n')
@@ -135,7 +141,7 @@ class SwiftSources(unittest.TestCase):
         cov = Coverage({"commit": "c" * 40, "executable": {"Shared/Panel.swift": EXECUTABLE},
                         "classes": {c: {} for c in CI_CLASSES}})
         head = {"Shared/Panel.swift": edit(SOURCE, "retry()", "retry(1)")}
-        self.assertEqual(run(["Shared/Panel.swift"], head, {"Shared/Panel.swift": SOURCE}, cov)[0], BUILD_ONLY)
+        self.assertEqual(run(["Shared/Panel.swift"], head, {"Shared/Panel.swift": SOURCE}, cov)[0], "")
 
 
 class UITestSources(unittest.TestCase):
@@ -228,7 +234,7 @@ class Tiers(unittest.TestCase):
 
     def test_a_change_no_ui_test_reaches_skips_the_duo_job(self):
         ios_ui, tests = self.pull_request({"iOS/Panel.swift": edit(SOURCE, "retry()", "retry(1)")})
-        self.assertEqual((ios_ui, tests), ("true", BUILD_ONLY))
+        self.assertEqual((ios_ui, tests), ("false", ""))
 
     def test_a_reached_change_runs_only_its_classes(self):
         self.assertEqual(self.pull_request({"iOS/Panel.swift": edit(SOURCE, '"demo"', '"Demo"')}), ("true", SMOKE))

@@ -353,7 +353,8 @@ jobs:
   #     other push, and whenever there is no usable selection: every CI class;
   #   - pull requests into dev or a feature branch: the classes their change can reach
   #     (scripts/ci/ui_selection.py, by the gate's own line coverage), "build-only" when the
-  #     UI test bundle changed but no CI class is reached, and no job at all when nothing
+  #     UI test bundle (or simulator-only app code) changed but no CI class is reached, and no
+  #     job at all when nothing
   #     the UI tests run changed. The dev push after the merge runs every class.
   # Each class runs on its own and must report that it ran, so a renamed or missing class
   # fails instead of passing by running nothing. On a push to dev the build carries
