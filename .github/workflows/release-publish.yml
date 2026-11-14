@@ -52,6 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Reads the candidate's Tests run (promotion_gate.py verify).
+      actions: read
     steps:
       - name: Only release/<version>, at the candidate commit
         env:
@@ -66,6 +68,19 @@ jobs:
             *) echo "::error::v$VERSION is published only from release/$VERSION (got $GITHUB_REF)"; exit 1 ;;
           esac
           [ "$GITHUB_SHA" = "$SHA" ] || { echo "::error::release/$VERSION is at $GITHUB_SHA, not the candidate $SHA"; exit 1; }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      # Every Tests job, the complete iPhone Duo UI suite included, passed on this exact
+      # commit: its newest Tests run for the push to release/<version>, latest attempts.
+      - name: Tests passed on the candidate commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
+        run: python3 -I scripts/ci/promotion_gate.py verify "$SHA" "release/$VERSION"
 
   # The stores themselves, not the recorded state, decide that every
   # required platform is approved: one live observation (which can't move a

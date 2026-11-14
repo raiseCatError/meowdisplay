@@ -160,7 +160,8 @@ class Repository(unittest.TestCase):
         job = self.text[self.text.index("\n  ios-duo:\n"):self.text.index("\n  integration-report:\n")]
         fallback = re.search(r"^\s*all_classes=\"([\w ]+)\"$", job, re.M)
         self.assertEqual(fallback.group(1).split(), list(CI_CLASSES))
-        self.assertIn("if [[ \"$CHANGES\" == success && \"$EVENT\" == pull_request && -n \"$SELECTED\" ]]; then", job)
+        self.assertIn('if [[ "$CHANGES" == success && "$EVENT" == pull_request && "$BASE" != main && "$BASE" != release/* \\\n'
+                      '                && -n "$SELECTED" ]]; then', job)
         self.assertIn('[[ " $all_classes " == *" $c "* ]] || known=false', job)
         # Each class must have started and passed a test; a class that ran nothing fails.
         self.assertIn("grep -q \"Test Suite '$class' started\" \"$log\"", job)

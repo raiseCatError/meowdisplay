@@ -463,10 +463,18 @@ class GitHubMode(unittest.TestCase):
     def test_main_and_release_pushes_run_full_ci(self):
         before = self.git("rev-parse", "HEAD")
         self.commit({"README.md": "x\n"})
+        every = "DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests"
         for ref in ["refs/heads/main", "refs/heads/release/2.1.0"]:
             with self.subTest(ref=ref):
                 _, values = self.run_cli("push", ref, before=before)
                 self.assertEqual(self.selected(values), set(JOBS))
+                # A docs-only commit can't skip anything: the complete Duo suite runs again.
+                self.assertEqual(values["ios_ui_tests"], every)
+        for base_ref in ["main", "release/2.1.0"]:
+            with self.subTest(base_ref=base_ref):
+                _, values = self.run_cli("pull_request", "refs/pull/1/merge", base_ref=base_ref)
+                self.assertEqual(self.selected(values), set(JOBS))
+                self.assertEqual(values["ios_ui_tests"], every)
 
     def test_missing_history_runs_full_ci(self):
         # A shallow or root commit: there is no HEAD^1 to compare with.
