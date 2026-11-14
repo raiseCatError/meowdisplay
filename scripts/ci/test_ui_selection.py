@@ -161,15 +161,29 @@ class UITestSources(unittest.TestCase):
         tests, _ = run(list(head), head, {"iOSUITests/LiveSessionHomeTests.swift": text}, None)
         self.assertEqual(tests, BUILD_ONLY)
 
-    def test_shared_helpers_new_and_deleted_files_run_everything(self):
+    def test_shared_helpers_and_other_files_run_everything(self):
         helper = (ROOT / "iOSUITests/DemoDesktopWakePoint.swift").read_text()
         self.assertEqual(run(["iOSUITests/DemoDesktopWakePoint.swift"],
                              {"iOSUITests/DemoDesktopWakePoint.swift": helper + "\n"},
                              {"iOSUITests/DemoDesktopWakePoint.swift": helper}, None)[0], EVERY)
-        self.assertEqual(run(["iOSUITests/New.swift"], {"iOSUITests/New.swift": "class N: XCTestCase {}"}, {},
-                             None)[0], EVERY)
         self.assertEqual(run(["iOSUITests/Info.plist"], {"iOSUITests/Info.plist": "a"},
                              {"iOSUITests/Info.plist": "b"}, None)[0], EVERY)
+        for globals_ in ("func tapTwice(_ e: XCUIElement) {}", "protocol Tour {}", "infix operator <~>",
+                         "@MainActor func settle() {}", "extension XCUIElement { func x() {} }"):
+            with self.subTest(globals_=globals_):
+                text = "import XCTest\n" + globals_ + "\nfinal class NewTourTests: XCTestCase {}\n"
+                self.assertEqual(run(["iOSUITests/New.swift"], {"iOSUITests/New.swift": text}, {}, None)[0], EVERY)
+                old = "import XCTest\nfinal class NewTourTests: XCTestCase {}\n"
+                self.assertEqual(run(["iOSUITests/New.swift"], {"iOSUITests/New.swift": text},
+                                     {"iOSUITests/New.swift": old}, None)[0], EVERY)
+
+    def test_new_and_deleted_test_files_count_as_their_classes(self):
+        new = "import XCTest\n\nfinal class NewTourTests: XCTestCase {\n    func testIt() { helper() }\n}\n"
+        self.assertEqual(run(["iOSUITests/New.swift"], {"iOSUITests/New.swift": new}, {}, None)[0], BUILD_ONLY)
+        smoke = "import XCTest\nextension DemoModeSmokeTests {\n    func testMore() {}\n}\n"
+        self.assertEqual(run(["iOSUITests/More.swift"], {"iOSUITests/More.swift": smoke}, {}, None)[0], SMOKE)
+        self.assertEqual(run(["iOSUITests/More.swift"], {}, {"iOSUITests/More.swift": smoke}, None)[0], SMOKE)
+        self.assertEqual(run(["iOSUITests/X.swift"], {}, {}, None)[0], EVERY)
 
     def test_moving_a_test_out_of_a_ci_class_still_runs_that_class(self):
         base = f"final class {CALC}: XCTestCase {{ func testA() {{}} }}\n"

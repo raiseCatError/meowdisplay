@@ -8,10 +8,14 @@ class; classify_pr_paths.py only calls this for pull requests into dev or a
 feature branch, and only once its own rules already selected ios_ui.
 
 What a change reaches:
-  iOSUITests/ files   the CI classes the file defines or extends; a file
-                      that defines only test classes CI doesn't run is
-                      compiled but runs nothing ("build-only"); anything
-                      else there (helpers, new kinds of file) runs them all.
+  iOSUITests/ files   the CI classes the file defines or extends, before or
+                      after (a new file counts as empty before, a deleted
+                      one as empty after); a file that defines only test
+                      classes CI doesn't run is compiled but runs nothing
+                      ("build-only"). Anything else there runs them all:
+                      helpers, extensions of other types, top-level
+                      functions, protocols or operators (they can change
+                      what other tests call), other kinds of file.
   iOS/*.swift,        by line coverage, per class, from the dev integration
   Shared/*.swift      run (ui_coverage.py): a class runs if it executed a
                       line a hunk changes, or one of the two lines around a
@@ -164,6 +168,15 @@ def catalog_change(head: Optional[str], base: Optional[str]) -> Optional[str]:
     return None
 
 
+def declares_globals(text: Optional[str]) -> bool:
+    """A test file declares something other test files could start calling
+    without changing: a top-level function, protocol, operator or
+    precedence group."""
+    return text is not None and any(
+        TOP_LEVEL_FUNC.match(line) or (GLOBAL_DECL.match(line) and not EXTENSION_DECL.match(line))
+        for line in text.splitlines() if line[:1] not in (" ", "\t"))
+
+
 def classes_in_test_file(text: Optional[str]) -> Optional[frozenset]:
     """The test classes a UI test file defines or extends; None if it isn't a test file."""
     if text is None:
@@ -240,12 +253,12 @@ def select(paths: list[str], read_head: Callable[[str], Optional[str]], read_bas
                 sel.everything(f"{path} is not a Swift test file")
                 continue
             head, base = read_head(path), read_base(path)
-            if head is None or base is None:
-                sel.everything(f"{path} is added or deleted")
+            if head is None and base is None:
+                sel.everything(f"{path} can't be read")
                 continue
-            found = classes_in_test_file(head)
-            before = classes_in_test_file(base)
-            if found is None or before is None:
+            found = frozenset() if head is None else classes_in_test_file(head)
+            before = frozenset() if base is None else classes_in_test_file(base)
+            if found is None or before is None or declares_globals(head) or declares_globals(base):
                 sel.everything(f"{path} is shared by the UI tests")
                 continue
             ci = (found | before) & ALL_CLASSES
