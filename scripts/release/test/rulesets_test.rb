@@ -43,8 +43,13 @@ class RulesetFilesTest < Minitest::Test
   end
 
   def test_protected_branches_require_every_check_and_keep_history
+    # main and release/* also require promotion-gate: every Tests job passed on the exact
+    # commit, the complete iPhone Duo suite included. dev's gate is its push run instead.
+    expected = { "dev" => %w[android conventional mac release-tooling],
+                 "main" => %w[android conventional mac promotion-gate release-tooling],
+                 "release-branches" => %w[android conventional mac promotion-gate release-tooling] }
     %w[dev main release-branches].each do |name|
-      assert_equal %w[android conventional mac release-tooling], checks(rulesets[name]).sort, name
+      assert_equal expected[name], checks(rulesets[name]).sort, name
       types = rulesets[name]["rules"].map { |r| r["type"] }
       assert_includes types, "deletion", name
       assert_includes types, "non_fast_forward", name

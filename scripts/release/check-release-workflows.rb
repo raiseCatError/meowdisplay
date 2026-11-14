@@ -290,6 +290,10 @@ if (doc = load("release-publish.yml"))
   else
     err(name, "guard must reject any ref but release/<version>") unless release_ref_guard?(steps(guard).first || {}, version_from_input: true)
     err(name, "guard must require the branch to be at the candidate commit") unless run_text(steps(guard).first || {}).include?('"$GITHUB_SHA" = "$SHA"')
+    # Every Tests job, the complete iPhone Duo UI suite included, passed on that exact commit.
+    err(name, "guard must check that Tests passed on the candidate commit") unless steps(guard).any? { |s|
+      run_text(s).include?('scripts/ci/promotion_gate.py verify "$SHA" "release/$VERSION"')
+    } && guard.dig("permissions", "actions") == "read"
   end
   jobs.each do |id, job|
     next if id == "guard"

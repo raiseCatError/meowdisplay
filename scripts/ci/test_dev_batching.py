@@ -238,7 +238,8 @@ class Workflow(unittest.TestCase):
         report = self.text[self.text.index("\n  integration-report:\n"):]
         needs = re.search(r"needs: \[([^\]]*)\]", report).group(1).split(", ")
         # It waits for every other job, so none can fail unreported.
-        self.assertEqual(set(needs), set(jobs) - {"integration-report"})
+        # promotion-gate reports promotions, not the dev gate, and runs after the same jobs.
+        self.assertEqual(set(needs), set(jobs) - {"integration-report", "promotion-gate"})
         self.assertIn("if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}", report)
         self.assertIn('map(select(.value.result == "failure"))', report)
         # A run cancelled for a newer push never closes the issue.

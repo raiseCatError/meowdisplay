@@ -137,6 +137,15 @@ class WorkflowChecksTest < Minitest::Test
                   "release-candidate.yml" => ['candidate STATE --sha "$GITHUB_SHA"', 'candidate STATE --sha "$OLD"'])
   end
 
+  def test_publishing_without_passing_tests_is_caught
+    assert_caught("guard must check that Tests passed on the candidate commit",
+                  "release-publish.yml" => ['promotion_gate.py verify "$SHA" "release/$VERSION"',
+                                            'promotion_gate.py verify "$SHA" "release/2.0.0"'])
+    assert_caught("guard must check that Tests passed on the candidate commit",
+                  "release-publish.yml" => ["      actions: read\n    steps:\n      - name: Only release",
+                                            "    steps:\n      - name: Only release"])
+  end
+
   def test_an_incomplete_latest_release_is_caught
     assert_caught("publish-mac must create the release as a draft first",
                   "release-publish.yml" => ['--draft --target "$SHA"', '--target "$SHA"'])

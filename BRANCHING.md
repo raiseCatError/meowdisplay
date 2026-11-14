@@ -18,7 +18,8 @@ stay exactly as they are.
 | `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | No creation, update, deletion or force-push by anyone except its only bypass, the owner's dedicated release App (`meowdisplay-release`, App ID 5582030), whose token the release workflows use |
 
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
-title).
+title); on `main` and `release/*` also `promotion-gate` (Tests), once
+`.github/rulesets` is applied.
 
 ### What runs where
 
@@ -26,14 +27,16 @@ title).
 |---|---|---|
 | Pull request into `dev` or a feature branch | The jobs its files need. Every iOS change builds the receiver and its UI tests for iOS (`mac`), with the macOS unit tests. The iPhone Duo UI tests run only for changed UI test classes and for fold geometry (`scripts/ci/ui_selection.py`). | It compiles and passes the unit, security and protocol tests. **Not** that the Duo UI suite passes: its check reads "skipped" |
 | Push to `dev` (the integration gate) | Every job whose inputs changed since it last passed on `dev`, the complete Duo UI suite included, on the merged commit. Pushes that arrive during a run wait, and only the newest runs next. | The combined result passes. A failed job runs again on every later push until it passes, so a later change (documentation, say) can't skip past it. A failure opens the "dev integration gate failing" issue, which the first clean run closes |
-| Pull request into `main` or `release/*`; push to `main` or `release/*` | Every job, the complete Duo UI suite included | The promoted commit passes everything |
+| Pull request into `main` or `release/*`; push to `main` or `release/*` | Every job, the complete Duo UI suite included, then `promotion-gate` | `promotion-gate` passes only if every job passed on this exact commit and `ios-duo` ran the complete suite. It always runs, so it can't pass by being skipped (GitHub counts a skipped required check as passing) |
+| Publishing (`release-publish.yml`) | Its `guard` job, before anything else | The newest Tests run for the push of the exact candidate commit to `release/<version>` finished and succeeded, with every required job, `promotion-gate` and `ios-duo` included, passing on its latest attempt (`scripts/ci/promotion_gate.py verify`). The manual approvals that follow are unchanged |
 | On request | Run Tests by hand on any branch (Actions → Tests → Run workflow): every job | The same, before a merge |
 
 A merge into `dev` is not a verified integration until its gate run passes:
-cut a release branch only from a `dev` commit whose Tests run passed. `ios-duo`
-is not a required check yet, so on a pull request into `main` or `release/*`
-its result has to be read, not assumed. Physical-device QA stays a separate,
-manual release step.
+cut a release branch only from a `dev` commit whose Tests run passed.
+`promotion-gate` blocks merges into `main` and `release/*` only once
+`.github/rulesets/main.json` and `release-branches.json` are applied
+(`scripts/release/apply-rulesets.sh`); until then, read it rather than assume
+it. Physical-device QA stays a separate, manual release step.
 
 ## Product scope and branches
 

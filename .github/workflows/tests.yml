@@ -351,24 +351,30 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
     runs-on: xcode-27
     timeout-minutes: 60
+    outputs:
+      # The classes it ran: promotion-gate requires the complete suite.
+      classes: ${{ steps.select.outputs.classes }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      # Every class, except on a pull request whose selection (ui_selection.py) names
-      # known classes: never narrower on the dev gate, main, release/*, a manual run,
-      # or when the changes job failed.
+      # Every class, except on a pull request into dev or a feature branch whose selection
+      # (ui_selection.py) names known classes: never narrower on the dev gate, on a pull
+      # request into or a push to main or release/*, on a manual run, or when the changes
+      # job failed.
       - name: Choose the UI test classes
         id: select
         env:
           CHANGES: ${{ needs.changes.result }}
           EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
           SELECTED: ${{ needs.changes.outputs.ios_ui_tests }}
         run: |
           set -euo pipefail
           all_classes="DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests"
           classes=$all_classes
-          if [[ "$CHANGES" == success && "$EVENT" == pull_request && -n "$SELECTED" ]]; then
+          if [[ "$CHANGES" == success && "$EVENT" == pull_request && "$BASE" != main && "$BASE" != release/* \
+                && -n "$SELECTED" ]]; then
             known=true
             for c in $SELECTED; do [[ " $all_classes " == *" $c "* ]] || known=false; done
             if [[ "$known" == true ]]; then classes=$SELECTED; fi
@@ -472,3 +478,23 @@ jobs:
           if [[ "$cancelled" == 0 && -n "$issue" ]]; then
             gh issue close "$issue" --comment "Every Tests job passed (or wasn't needed) on dev at $GITHUB_SHA. $RUN_URL"
           fi
+
+  # The required check for main and release/* (.github/rulesets): every job above passed on
+  # this exact commit, ios-duo with the complete suite. It always runs, so it can't pass by
+  # being skipped the way a skipped required job does; a skipped, cancelled or failed job
+  # fails it. Anywhere else it passes and says so (scripts/ci/promotion_gate.py).
+  # release-publish.yml checks the same jobs again for the commit it publishes.
+  promotion-gate:
+    needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - name: Every job passed, the complete Duo UI suite included
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 -I scripts/ci/promotion_gate.py job
