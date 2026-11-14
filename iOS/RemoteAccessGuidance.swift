@@ -1,3 +1,4 @@
+// CI experiment: an iOS app change with no UI test of its own (never merged).
 import Foundation
 
 // The iPhone/iPad Remote Access setup and status wording, as pure values (Foundation only, so the
