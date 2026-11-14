@@ -246,6 +246,12 @@ class Tiers(unittest.TestCase):
     def test_documentation_needs_no_duo_job(self):
         self.assertEqual(self.pull_request({"README.md": "more\n"}), ("false", ""))
 
+    def test_documentation_beside_a_change_does_not_widen_it(self):
+        change = {"iOS/Panel.swift": edit(SOURCE, '"demo"', '"Demo"'), "README.md": "more\n"}
+        self.assertEqual(self.pull_request(change), ("true", SMOKE))
+        change = {"iOS/Panel.swift": edit(SOURCE, "retry()", "retry(1)"), "README.md": "more\n"}
+        self.assertEqual(self.pull_request(change), ("false", ""))
+
     def test_integration_and_release_run_every_class(self):
         change = {"iOS/Panel.swift": edit(SOURCE, "retry()", "retry(1)")}
         self.assertEqual(self.pull_request(change, base_ref="main"), ("true", EVERY))

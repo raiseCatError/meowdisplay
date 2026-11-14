@@ -404,7 +404,9 @@ def ui_tests_for(env: dict[str, str], jobs: frozenset, coverage_path: Optional[s
     if not fast or jobs == ALL:
         return jobs, every, ""
     paths, diff = changed_between("HEAD^1")
-    ui_paths = [p for p in paths if "ios_ui" in (path_jobs(p, diff) or ALL)]
+    # Paths that need no job (documentation) can't reach a UI test; a path
+    # path_jobs doesn't know (None) counts as reaching every one.
+    ui_paths = [p for p in paths if (needed := path_jobs(p, diff)) is None or "ios_ui" in needed]
     coverage = load_ui_coverage(coverage_path)
     tests, why = ui_selection.select(
         ui_paths,
