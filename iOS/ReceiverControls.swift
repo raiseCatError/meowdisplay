@@ -1542,20 +1542,43 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .trayButtonAccessibility { pressKeypadArrowOnce(direction) }
     }
 
-    /// The keypad's own ⇧ ⌥ ⌘: a row over the T (preferred), a column
-    /// beside it, or a row under it. Rounded squares the size of an arrow
-    /// key, lit (with a dot) while on.
+    /// The keypad's own ⇧ ⌥ ⌘: a row over the T (preferred), a 2×2 grid
+    /// beside it, or a row under it. A row is one segmented capsule; grid
+    /// keys are rounded squares. Every key is the size of an arrow key and
+    /// lit (with a dot) while on.
     private func arrowKeypadModifierStrip(frame: CGRect, placement: ArrowKeypadModifierPlacement,
                                           key: CGFloat) -> some View {
         let keys = ArrowKeypadGeometry.modifierKeyFrames(in: CGRect(origin: .zero, size: frame.size),
                                                          placement: placement, key: key, gap: Metrics.arrowGap)
         let hit = ArrowKeypadGeometry.touchSize(key: key, gap: Metrics.arrowGap)
         let available = keypadModifiersAvailable
+        // A row is one segmented capsule (the keypad modifiers' capsule look,
+        // now full height), so it never reads as three more round tray chips.
+        let segmented = !placement.isBeside
         return ZStack(alignment: .topLeading) {
+            if segmented {
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                    .opacity(0.45)
+                    .overlay(Capsule().fill(Color.white.opacity(0.07)))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.28), radius: 5, y: 1)
+                    .opacity(available ? 1 : 0.38)
+                    .frame(width: frame.width, height: frame.height)
+                    .accessibilityHidden(true)
+                ForEach(1..<ArrowKeypadModifiers.keys.count, id: \.self) { index in
+                    let left = keys[ArrowKeypadModifiers.keys[index - 1]] ?? .zero
+                    Rectangle()
+                        .fill(Color.white.opacity(0.18))
+                        .frame(width: 0.5, height: frame.height * 0.5)
+                        .position(x: left.maxX + Metrics.arrowGap / 2, y: frame.height / 2)
+                        .accessibilityHidden(true)
+                }
+            }
             ForEach(ArrowKeypadModifiers.keys) { modifier in
                 let key = keys[modifier] ?? .zero
                 ArrowKeypadModifierKey(
-                    modifier: modifier, size: key.size, hitSize: hit,
+                    modifier: modifier, size: key.size, hitSize: hit, segmented: segmented,
                     latched: keypadModifiers.latched.contains(modifier),
                     available: available, reduceMotion: reduceMotion,
                     onToggle: { toggleKeypadModifier(modifier) })
@@ -2744,6 +2767,9 @@ private struct ArrowKeypadModifierKey: View {
     /// The touch area: the key plus half the gap to each neighbour, the
     /// same 46pt as an arrow key.
     let hitSize: CGSize
+    /// A segment of the row's shared capsule: no background of its own
+    /// while off; a lit capsule inside the row while on.
+    let segmented: Bool
     let latched: Bool
     /// False on an older Mac while a tray modifier is on: dimmed, and its
     /// touches do nothing.
@@ -2762,15 +2788,22 @@ private struct ArrowKeypadModifierKey: View {
             .font(.system(size: 19, weight: .semibold))
             .foregroundStyle(on ? Color.black : Color.white)
             .frame(width: size.width, height: size.height)
-            .background(
-                RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .opacity(on ? 0.95 : 0.45)
-                    .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
-                        .fill(on ? Color.white.opacity(0.9) : Color.white.opacity(0.07)))
-                    .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
-                        .strokeBorder(.white.opacity(on ? 0.7 : 0.28), lineWidth: on ? 1 : 0.5))
-                    .shadow(color: .black.opacity(0.28), radius: 5, y: 1))
+            .background {
+                if segmented {
+                    Capsule()
+                        .fill(Color.white.opacity(on ? 0.9 : 0))
+                        .padding(3)
+                } else {
+                    RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(on ? 0.95 : 0.45)
+                        .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
+                            .fill(on ? Color.white.opacity(0.9) : Color.white.opacity(0.07)))
+                        .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
+                            .strokeBorder(.white.opacity(on ? 0.7 : 0.28), lineWidth: on ? 1 : 0.5))
+                        .shadow(color: .black.opacity(0.28), radius: 5, y: 1)
+                }
+            }
             // A small dot under the symbol while it's on, so the state reads
             // without relying on the fill alone (Differentiate Without Color,
             // Smart Invert).
