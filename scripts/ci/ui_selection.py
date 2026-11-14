@@ -25,8 +25,16 @@ What a change reaches:
                       removes an extension, protocol, operator or global
                       function can change overload resolution anywhere, so
                       it runs every class.
-  anything else       every class (string catalogs, assets, the project,
-                      Info.plist, entitlements, privacy manifest).
+  String Catalogs     iOS/*.xcstrings: nothing, when every entry added,
+                      removed or changed has no text of its own before and
+                      after (no localizations or variations, only a comment
+                      or extraction state): the app then shows the key
+                      itself, exactly as with no entry. Xcode adds such
+                      entries for each new string in the source, which is
+                      judged on its own. Any other catalog change runs
+                      every class.
+  anything else       every class (assets, the project, Info.plist,
+                      entitlements, privacy manifest).
 
 Fail closed: no coverage, a file the coverage doesn't know, lines that
 changed on dev since the coverage was recorded, or any error means every
@@ -47,6 +55,9 @@ BUILD_ONLY = "build-only"
 TEST_DIR = "iOSUITests/"
 SIMULATOR_ONLY = "targetEnvironment(simulator)"
 COVERED_DIRS = ("iOS/", "Shared/")
+CATALOG = ".xcstrings"
+# Entry fields that never change the text the app shows.
+NO_TEXT_FIELDS = frozenset({"comment", "extractionState"})
 
 CLASS_DECL = re.compile(r"^\s*(?:final\s+)?class\s+(\w+)\s*:\s*XCTestCase\b", re.M)
 EXTENSION_DECL = re.compile(r"^\s*extension\s+(\w+)\b", re.M)
@@ -128,6 +139,29 @@ def line_map(diff: str) -> Callable[[int], Optional[int]]:
         return line + delta
 
     return mapped
+
+
+def catalog_change(head: Optional[str], base: Optional[str]) -> Optional[str]:
+    """None when a String Catalog change can't change any text the app shows;
+    otherwise why it can."""
+    import json
+    try:
+        new, old = json.loads(head), json.loads(base)
+        new_strings, old_strings = new["strings"], old["strings"]
+        if not (isinstance(new_strings, dict) and isinstance(old_strings, dict)):
+            return "not a String Catalog"
+    except (TypeError, ValueError, KeyError):
+        return "not a String Catalog"
+    if {k: v for k, v in new.items() if k != "strings"} != {k: v for k, v in old.items() if k != "strings"}:
+        return "the catalog's own settings changed"
+    for key in set(new_strings) | set(old_strings):
+        before, after = old_strings.get(key, {}), new_strings.get(key, {})
+        if before == after:
+            continue
+        for entry in (before, after):
+            if not isinstance(entry, dict) or set(entry) - NO_TEXT_FIELDS:
+                return f"the text of \"{key[:60]}\" changed"
+    return None
 
 
 def classes_in_test_file(text: Optional[str]) -> Optional[frozenset]:
@@ -218,6 +252,13 @@ def select(paths: list[str], read_head: Callable[[str], Optional[str]], read_bas
             sel.classes |= ci
             sel.build = True
             sel.reasons.append(f"{path}: {' '.join(sorted(ci)) or 'no CI class'}")
+            continue
+        if path.startswith("iOS/") and path.endswith(CATALOG):
+            why = catalog_change(read_head(path), read_base(path))
+            if why:
+                sel.everything(f"{path}: {why}")
+            else:
+                sel.reasons.append(f"{path}: only entries without text of their own")
             continue
         if not (path.startswith(COVERED_DIRS) and path.endswith(".swift")):
             sel.everything(f"{path} can change any UI")

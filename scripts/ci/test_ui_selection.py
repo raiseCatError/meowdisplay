@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ui_selection import (  # noqa: E402
-    ALL_CLASSES, BUILD_ONLY, CI_CLASSES, Coverage, classes_in_test_file, line_map, select,
+    ALL_CLASSES, BUILD_ONLY, CI_CLASSES, Coverage, catalog_change, classes_in_test_file, line_map, select,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -176,6 +176,58 @@ class UITestSources(unittest.TestCase):
         head = "final class Elsewhere: XCTestCase { func testA() {} }\n"
         self.assertEqual(run(["iOSUITests/X.swift"], {"iOSUITests/X.swift": head}, {"iOSUITests/X.swift": base},
                              None)[0], CALC)
+
+
+class StringCatalogs(unittest.TestCase):
+    CATALOG = "iOS/Localizable.xcstrings"
+
+    @staticmethod
+    def catalog(strings, **settings):
+        import json
+        return json.dumps({"sourceLanguage": "en", "version": "1.0", **settings, "strings": strings})
+
+    def test_entries_without_text_of_their_own_change_nothing(self):
+        base = self.catalog({"Done": {}, "Old": {"comment": "gone"}})
+        head = self.catalog({"Done": {"comment": "now explained", "extractionState": "manual"},
+                             "%@ for Arrows": {"comment": "new"}, "Back": {}})
+        self.assertIsNone(catalog_change(head, base))
+        # With a Swift change no UI test reaches, the pull request runs no Duo job.
+        heads = {self.CATALOG: head, "iOS/Panel.swift": SOURCE.replace("retry()", "retry(1)")}
+        bases = {self.CATALOG: base, "iOS/Panel.swift": SOURCE}
+        tests, _ = select(list(heads), heads.get, bases.get,
+                          lambda p: unified(bases[p], heads[p]), lambda c, p: "", coverage())
+        self.assertEqual(tests, "")
+
+    def test_text_the_app_shows_runs_everything(self):
+        text = {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Close"}}}}
+        cases = [
+            ({"Done": {}}, {"Done": text}),                      # a key gets its own text
+            ({"Done": text}, {}),                                # a key with text is removed
+            ({"Done": text}, {"Done": {**text, "comment": "c"}}),  # an entry with text changes at all
+            ({}, {"%lld apps": {"variations": {}}}),             # plural or device variations
+            ({"Done": {}}, {"Done": {"shouldTranslate": False}}),  # a field this check doesn't know
+            ({"Done": {}}, {"Done": "Done"}),                    # not an entry
+        ]
+        for before, after in cases:
+            with self.subTest(after=after):
+                self.assertIsNotNone(catalog_change(self.catalog(after), self.catalog(before)))
+                tests, _ = run([self.CATALOG], {self.CATALOG: self.catalog(after)},
+                               {self.CATALOG: self.catalog(before)}, coverage())
+                self.assertEqual(tests, EVERY)
+
+    def test_catalog_settings_and_broken_files_run_everything(self):
+        base = self.catalog({})
+        for head in (self.catalog({}, sourceLanguage="de"), self.catalog({}, version="1.1"), "{", "[]",
+                     '{"strings": []}'):
+            with self.subTest(head=head):
+                self.assertEqual(run([self.CATALOG], {self.CATALOG: head}, {self.CATALOG: base}, coverage())[0], EVERY)
+        self.assertEqual(run([self.CATALOG], {self.CATALOG: base}, {}, coverage())[0], EVERY)  # added
+        self.assertEqual(run([self.CATALOG], {}, {self.CATALOG: base}, coverage())[0], EVERY)  # deleted
+
+    def test_other_catalogs_and_resources_still_run_everything(self):
+        for path in ("iOS/InfoPlist.xcstrings.bak", "iOS/Assets.xcassets/x.json", "project.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(run([path], {path: "{}"}, {path: "{}"}, coverage())[0], EVERY)
 
 
 class Tiers(unittest.TestCase):
