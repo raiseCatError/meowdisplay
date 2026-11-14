@@ -478,3 +478,45 @@ jobs:
           path: ui_coverage.json
           retention-days: 30
           if-no-files-found: error
+
+  # The integration gate's verdict, where people see it: a push to dev whose jobs failed
+  # opens (or adds to) one issue, and the first push on which they all pass again closes it.
+  # A failure can't be skipped past: the failed job's anchor stays where it last passed, so
+  # every later push to dev runs it again until it passes. Runs that were cancelled for a
+  # newer push say nothing either way.
+  integration-report:
+    needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the dev integration issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="dev integration gate failing"
+          failed=$(jq -r 'to_entries | map(select(.value.result == "failure")) | map(.key) | join(", ")' <<< "$RESULTS")
+          cancelled=$(jq -r 'to_entries | map(select(.value.result == "cancelled")) | length' <<< "$RESULTS")
+          issue=$(gh issue list --state open --author 'app/github-actions' --search "\"$title\" in:title" \
+            --json number,title --jq "map(select(.title == \"$title\"))[0].number // empty")
+          if [[ -n "$failed" ]]; then
+            body="Tests failed on dev at $GITHUB_SHA: $failed. $RUN_URL"
+            if [[ -n "$issue" ]]; then
+              gh issue comment "$issue" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body
+
+          Every later push to dev runs the failed jobs again (each job is judged against the commit it last passed on) until they pass; then this issue closes."
+            fi
+            echo "::error::dev integration gate failed: $failed"
+            exit 0
+          fi
+          if [[ "$cancelled" == 0 && -n "$issue" ]]; then
+            gh issue close "$issue" --comment "Every Tests job passed (or wasn't needed) on dev at $GITHUB_SHA. $RUN_URL"
+          fi

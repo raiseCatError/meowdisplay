@@ -280,7 +280,8 @@ class Repository(unittest.TestCase):
         self.assertIn("grep -q \"Test Suite '$class' started\" \"$log\"", job)
         # The gate's coverage needs every class and only comes from a passing run.
         self.assertIn("for class in DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests; do", job)
-        self.assertNotIn("always()", job[job.index("Keep the UI coverage"):])
+        coverage = job[job.index("Keep the UI coverage"):job.index("\n  integration-report:\n")]
+        self.assertNotIn("always()", coverage)
 
     def test_line_map_follows_git(self):
         old = "".join(f"l{i}\n" for i in range(1, 30))
