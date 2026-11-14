@@ -20,6 +20,19 @@ stay exactly as they are.
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
 title).
 
+### What runs where
+
+| Transition | What runs (Tests) | What it proves |
+|---|---|---|
+| Pull request into `dev` or a feature branch | The jobs its files need. Every iOS change builds the receiver and its UI tests for iOS (`mac`), with the macOS unit tests. The iPhone Duo UI tests run only for changed UI test classes and for fold geometry (`scripts/ci/ui_selection.py`). | It compiles and passes the unit, security and protocol tests. **Not** that the Duo UI suite passes: its check reads "skipped" |
+| Push to `dev` (the integration gate) | Every job whose inputs changed since it last passed on `dev`, the complete Duo UI suite included, on the merged commit. Pushes that arrive during a run wait, and only the newest runs next. | The combined result passes. A failed job runs again on every later push until it passes, so a later change (documentation, say) can't skip past it. A failure opens the "dev integration gate failing" issue, which the first clean run closes |
+| Pull request into `main` or `release/*`; push to `main` or `release/*` | Every job, the complete Duo UI suite included | The promoted commit passes everything |
+| On request | Run Tests by hand on any branch (Actions → Tests → Run workflow): every job | The same, before a merge |
+
+A merge into `dev` is not a verified integration until its gate run passes.
+Releases are cut from a `dev` baseline whose gate passed (RELEASE.md), and
+physical-device QA stays a separate, manual release step.
+
 ## Product scope and branches
 
 Windows and Linux senders or receivers
