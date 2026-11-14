@@ -64,7 +64,7 @@ class AnchoredDevPush(unittest.TestCase):
             self.assertFalse(out.exists(), "a failure writes no selection")
             return None
         values = dict(line.split("=", 1) for line in out.read_text().splitlines())
-        self.assertEqual(set(values), set(JOBS) | {"reason"})
+        self.assertEqual(set(values), set(JOBS) | {"reason", "ios_ui_tests"})
         self.reason = values["reason"]
         return {job for job in JOBS if values[job] == "true"}
 
@@ -224,7 +224,8 @@ class Workflow(unittest.TestCase):
         self.assertEqual(keys, set(JOBS))
 
     def test_dev_pushes_use_dev_copies_and_fall_back_to_full_ci(self):
-        self.assertIn("git show 'HEAD^1:scripts/ci/dev_anchors.py'", self.text)
+        self.assertIn("git archive 'HEAD^1' scripts/ci", self.text)
+        self.assertIn('anchors_script="$base/scripts/ci/dev_anchors.py"', self.text)
         self.assertIn("full_ci \"the base branch's classifier predates batched dev pushes\"", self.text)
         self.assertIn("full_ci \"the anchors could not be read\"", self.text)
         self.assertIn("args+=(--anchors \"$RUNNER_TEMP/anchors.json\")", self.text)

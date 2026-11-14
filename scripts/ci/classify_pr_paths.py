@@ -60,6 +60,10 @@ Usage:
   classify_pr_paths.py --github OUTPUT --anchors ANCHORS_JSON
                                           tests.yml, pushes to dev: per job,
                                           diffs its anchor..HEAD
+  classify_pr_paths.py --github OUTPUT --ui-coverage COVERAGE_JSON
+                                          tests.yml, pull requests: also
+                                          narrows the UI test classes
+                                          (ui_selection.py); ios_ui_tests
   classify_pr_paths.py CHANGED_PATHS_NUL GITIGNORE_DIFF [GITHUB_OUTPUT]
                                           the interface earlier tests.yml
                                           copies call; also writes the
@@ -346,8 +350,74 @@ def select_from_git(env: dict[str, str], anchors: Optional[dict[str, list[str]]]
     return select_jobs(paths, read_worktree, diff)
 
 
-def output_lines(jobs: frozenset, reason: str) -> list[str]:
-    return [f"{job}={str(job in jobs).lower()}" for job in JOBS] + ["reason=" + " ".join(reason.splitlines())]
+def output_lines(jobs: frozenset, reason: str, ui_tests: str = "") -> list[str]:
+    return ([f"{job}={str(job in jobs).lower()}" for job in JOBS] + [f"ios_ui_tests={ui_tests}"]
+            + ["reason=" + " ".join(reason.splitlines())])
+
+
+def git_text(*args: str) -> Optional[str]:
+    try:
+        return git(*args).decode("utf-8", "replace")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def import_ui_selection():
+    """ui_selection.py from beside this file (python3 -I leaves this directory off
+    sys.path). tests.yml copies both from the base branch; a missing copy fails
+    the run, and tests.yml then runs full CI."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import ui_selection
+    return ui_selection
+
+
+def load_ui_coverage(path: str):
+    """The integration run's UI coverage, if it is usable here: for an ancestor
+    of the pull request's base. None otherwise (every class runs)."""
+    ui_selection = import_ui_selection()
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    coverage = ui_selection.Coverage(data)
+    commit = coverage.commit
+    if not SHA.fullmatch(commit) or subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, "HEAD^1"], capture_output=True).returncode != 0:
+        return None
+    return coverage
+
+
+def ui_tests_for(env: dict[str, str], jobs: frozenset, coverage_path: Optional[str]) -> tuple[frozenset, str, str]:
+    """The UI test classes the ios-duo job runs (ios_ui_tests): every CI class,
+    except for pull requests into dev or a feature branch given --ui-coverage,
+    which run the classes their change can reach (ui_selection.py). None at
+    all drops the ios-duo job. Returns the jobs, the classes and why."""
+    ui_selection = import_ui_selection()
+    every = " ".join(ui_selection.CI_CLASSES)
+    if "ios_ui" not in jobs:
+        return jobs, "", ""
+    base_ref = env.get("GITHUB_BASE_REF", "")
+    fast = (coverage_path is not None and env.get("GITHUB_EVENT_NAME") == "pull_request"
+            and base_ref != "main" and not base_ref.startswith("release/"))
+    if not fast or jobs == ALL:
+        return jobs, every, ""
+    paths, diff = changed_between("HEAD^1")
+    ui_paths = [p for p in paths if "ios_ui" in (path_jobs(p, diff) or ALL)]
+    coverage = load_ui_coverage(coverage_path)
+    tests, why = ui_selection.select(
+        ui_paths,
+        lambda p: (Path(p).read_text(encoding="utf-8", errors="replace") if Path(p).is_file() else None),
+        lambda p: git_text("show", f"HEAD^1:{p}"),
+        lambda p: git("diff", "--no-renames", "-U0", "HEAD^1", "HEAD", "--", p).decode("utf-8", "replace"),
+        lambda commit, p: git("diff", "--no-renames", "-U0", commit, "HEAD^1", "--", p).decode("utf-8", "replace"),
+        coverage)
+    if coverage is None:
+        why = "no usable UI coverage; " + why
+    if not tests:
+        return jobs - {"ios_ui"}, "", "UI tests: " + why
+    return jobs, tests, "UI tests: " + why
 
 
 def append(path: str, lines: list[str]) -> None:
@@ -356,16 +426,24 @@ def append(path: str, lines: list[str]) -> None:
 
 
 def main(argv: list[str]) -> int:
-    github = len(argv) == 3 and argv[1] == "--github"
-    batched = len(argv) == 5 and argv[1] == "--github" and argv[3] == "--anchors"
-    if github or batched:
-        anchors = read_anchors(argv[4]) if batched else None
-        jobs, reason = select_from_git(dict(os.environ), anchors)
-        lines = output_lines(jobs, reason)
+    if len(argv) >= 3 and argv[1] == "--github":
+        options = argv[3:]
+        if len(options) % 2 or any(k not in ("--anchors", "--ui-coverage") for k in options[::2]):
+            print(__doc__, file=sys.stderr)
+            return 2
+        given = dict(zip(options[::2], options[1::2]))
+        anchors = read_anchors(given["--anchors"]) if "--anchors" in given else None
+        env = dict(os.environ)
+        jobs, reason = select_from_git(env, anchors)
+        jobs, ui_tests, ui_reason = ui_tests_for(env, jobs, given.get("--ui-coverage"))
+        if ui_reason:
+            reason = f"{reason}; {ui_reason}"
+        lines = output_lines(jobs, reason, ui_tests)
         append(argv[2], lines)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             selected = ", ".join(job for job in JOBS if job in jobs) or "none"
-            append(os.environ["GITHUB_STEP_SUMMARY"], [f"Selected Tests jobs: {selected}", "", f"Why: {reason}"])
+            append(os.environ["GITHUB_STEP_SUMMARY"], [f"Selected Tests jobs: {selected}",
+                                                       f"UI test classes: {ui_tests or 'none'}", "", f"Why: {reason}"])
         print(", ".join(lines))
         return 0
     if len(argv) not in (3, 4) or argv[1].startswith("-"):

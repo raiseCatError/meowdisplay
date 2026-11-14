@@ -51,7 +51,8 @@ jobs:
   # so a broken classifier never turns into skipped (= passing) checks.
   changes:
     runs-on: ubuntu-latest
-    # actions: read lists the earlier dev runs whose jobs are the anchors.
+    # actions: read lists the earlier dev runs: their jobs are the anchors of a
+    # push to dev, and their UI coverage narrows a pull request's UI tests.
     permissions:
       contents: read
       actions: read
@@ -62,12 +63,14 @@ jobs:
       android: ${{ steps.classify.outputs.android }}
       release_tooling: ${{ steps.classify.outputs.release_tooling }}
       press_kit: ${{ steps.classify.outputs.press_kit }}
+      ios_ui_tests: ${{ steps.classify.outputs.ios_ui_tests }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          # A dev push needs the history to tell which anchors are its ancestors.
-          fetch-depth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/dev') && '0' || '2' }}
+          # The history tells which anchors (dev pushes) and which UI coverage
+          # (pull requests) belong to ancestors.
+          fetch-depth: 0
       - name: Select the jobs this change needs
         id: classify
         shell: bash
@@ -94,9 +97,12 @@ jobs:
             full_ci "not a pull request or a push to dev"
             exit 0
           fi
-          # The base branch's classifier (dev's before the push), never the change's own copy.
-          classifier="$RUNNER_TEMP/classify_pr_paths.py"
-          if ! git show 'HEAD^1:scripts/ci/classify_pr_paths.py' > "$classifier" 2>/dev/null; then
+          # The base branch's classifier and its helpers (dev's before the push),
+          # never the change's own copies.
+          base="$RUNNER_TEMP/base"
+          mkdir -p "$base"
+          classifier="$base/scripts/ci/classify_pr_paths.py"
+          if ! git archive 'HEAD^1' scripts/ci | tar -x -C "$base" 2>/dev/null || [[ ! -f "$classifier" ]]; then
             full_ci "the base branch has no classifier"
             exit 0
           fi
@@ -111,9 +117,8 @@ jobs:
           # previous commit is no baseline. Judge each job against its anchor,
           # with dev's own copies of both scripts; without them, full CI.
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            anchors_script="$RUNNER_TEMP/dev_anchors.py"
-            if ! grep -q -- '--anchors' "$classifier" \
-                || ! git show 'HEAD^1:scripts/ci/dev_anchors.py' > "$anchors_script" 2>/dev/null; then
+            anchors_script="$base/scripts/ci/dev_anchors.py"
+            if ! grep -q -- '--anchors' "$classifier" || [[ ! -f "$anchors_script" ]]; then
               full_ci "the base branch's classifier predates batched dev pushes"
               exit 0
             fi
@@ -123,6 +128,16 @@ jobs:
               exit 0
             fi
             args+=(--anchors "$RUNNER_TEMP/anchors.json")
+          fi
+          # A pull request: the UI test classes its change can reach, from the
+          # newest UI coverage of the integration gate. Without that coverage
+          # (or a base that predates it) every class its change needs runs.
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && grep -q -- '--ui-coverage' "$classifier" \
+              && [[ -f "$base/scripts/ci/ui_coverage.py" ]]; then
+            if ! python3 -I "$base/scripts/ci/ui_coverage.py" fetch "$RUNNER_TEMP/ui_coverage.json"; then
+              echo "::notice::no UI coverage from the integration gate: every UI test class the change needs runs"
+            fi
+            args+=(--ui-coverage "$RUNNER_TEMP/ui_coverage.json")
           fi
           if python3 -I "$classifier" "${args[@]}"; then
             cat "$selection" >> "$GITHUB_OUTPUT"
@@ -331,13 +346,25 @@ jobs:
 
   # iPhone Duo: the receiver's UI tests on the Duo simulator, so adaptive layouts (the
   # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
-  # were made for. Not a required check yet: the first runs establish it.
+  # were made for. Not a required check yet.
   #
-  # The simulator boots before the build, so it has settled by the time the tests start. With
-  # the build first (#183), the tests began a few minutes after a fresh boot, while the Duo was
-  # still busy after `bootstatus`: about half of those runs then failed with "Timed out while
-  # evaluating UI query" or a test runner that crashed before starting. The build is slower with
-  # the Duo booted, but it stays a separate step so its time is visible.
+  # Which classes run (ios_ui_tests from the changes job):
+  #   - pushes to dev (the integration gate), pull requests into main or release/*, every
+  #     other push, and whenever there is no usable selection: every CI class;
+  #   - pull requests into dev or a feature branch: the classes their change can reach
+  #     (scripts/ci/ui_selection.py, by the gate's own line coverage), "build-only" when the
+  #     UI test bundle changed but no CI class is reached, and no job at all when nothing
+  #     the UI tests run changed. The dev push after the merge runs every class.
+  # Each class runs on its own and must report that it ran, so a renamed or missing class
+  # fails instead of passing by running nothing. On a push to dev the build carries
+  # coverage, and the job keeps each class's line coverage (the ui-coverage artifact) for
+  # the pull requests that follow.
+  #
+  # The simulator boots before the build, so it has settled by the time the tests start
+  # (#183: with the build first, about half the runs failed with "Timed out while
+  # evaluating UI query"). The CI campaign of November 2026 measured why: the 7 GB runner
+  # swaps for 15+ minutes after a fresh Duo boots, whichever comes first, so the build
+  # stays slow with the Duo booted and the order stays.
   ios-duo:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
@@ -347,6 +374,30 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Choose the UI test classes
+        id: select
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          SELECTED: ${{ needs.changes.outputs.ios_ui_tests }}
+          GATE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+        run: |
+          set -euo pipefail
+          all_classes="DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests"
+          classes=$all_classes
+          # Narrower only with a selection that names known classes, never on the gate.
+          if [[ "$CHANGES" == success && "$GATE" != true && -n "$SELECTED" ]]; then
+            if [[ "$SELECTED" == build-only ]]; then
+              classes=""
+            else
+              known=true
+              for c in $SELECTED; do [[ " $all_classes " == *" $c "* ]] || known=false; done
+              if [[ "$known" == true ]]; then classes=$SELECTED; fi
+            fi
+          fi
+          echo "classes=$classes" >> "$GITHUB_OUTPUT"
+          echo "coverage=$([[ "$GATE" == true ]] && echo YES || echo NO)" >> "$GITHUB_OUTPUT"
+          echo "UI test classes: ${classes:-none (build only)}"
+          echo "UI test classes: ${classes:-none (the UI test bundle is built only)}" >> "$GITHUB_STEP_SUMMARY"
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
       - name: Install XcodeGen
@@ -360,6 +411,7 @@ jobs:
           udid=$(scripts/ci/duo-simulator.sh)
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
       - name: Boot the iPhone Duo simulator
+        if: steps.select.outputs.classes != ''
         run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
       - name: Build the receiver and its UI tests
         run: |
@@ -368,21 +420,61 @@ jobs:
             -scheme OpenSidecariOS \
             -destination "id=${{ steps.duo.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+            -enableCodeCoverage "${{ steps.select.outputs.coverage }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
       # No paired Mac is ever reachable here, so the live-Mac tests in DemoModeSmokeTests skip
       # at once (MEOW_NO_LIVE_MAC) instead of first waiting out their connection timeouts.
       - name: UI tests on iPhone Duo
+        if: steps.select.outputs.classes != ''
         env:
           TEST_RUNNER_MEOW_NO_LIVE_MAC: "1"
+          CLASSES: ${{ steps.select.outputs.classes }}
+          COVERAGE: ${{ steps.select.outputs.coverage }}
         run: |
-          xcodebuild test-without-building \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecariOS \
-            -destination "id=${{ steps.duo.outputs.udid }}" \
-            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
-            -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
-            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
-            -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300
+          set -uo pipefail
+          failed=()
+          for class in $CLASSES; do
+            echo "::group::$class"
+            log="$RUNNER_TEMP/$class.log"
+            xcodebuild test-without-building \
+              -project MeowDisplay.xcodeproj \
+              -scheme OpenSidecariOS \
+              -destination "id=${{ steps.duo.outputs.udid }}" \
+              -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+              -enableCodeCoverage "$COVERAGE" \
+              -resultBundlePath "$RUNNER_TEMP/$class.xcresult" \
+              -only-testing:"OpenSidecariOSUITests/$class" \
+              -test-timeouts-enabled YES \
+              -default-test-execution-time-allowance 300 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            # A class that ran nothing (renamed, removed, filtered out) fails, never passes.
+            if [[ $status -ne 0 ]] || ! grep -q "Test Suite '$class' started" "$log" \
+                || ! grep -Eq "Test Case '-\[OpenSidecariOSUITests\.$class test[^]]*\]' passed" "$log"; then
+              echo "::error::$class failed or ran no test"
+              failed+=("$class")
+            fi
+          done
+          if (( ${#failed[@]} )); then
+            echo "Failed: ${failed[*]}"
+            exit 1
+          fi
+      # The integration gate keeps each class's line coverage for the pull requests after it.
+      - name: Keep the UI coverage
+        if: steps.select.outputs.coverage == 'YES'
+        run: |
+          set -euo pipefail
+          args=()
+          for class in DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests; do
+            scripts/ci/export-coverage.sh "$RUNNER_TEMP/$class.xcresult" "$RUNNER_TEMP/$class.jsonl"
+            args+=("$class=$RUNNER_TEMP/$class.jsonl")
+          done
+          python3 -I scripts/ci/ui_coverage.py build ui_coverage.json "$GITHUB_SHA" "${args[@]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.select.outputs.coverage == 'YES'
+        with:
+          name: ui-coverage
+          path: ui_coverage.json
+          retention-days: 30
+          if-no-files-found: error

@@ -241,7 +241,9 @@ class Workflows(Base):
         text = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         outputs = re.findall(r"^      (\w+): \$\{\{ steps\.classify\.outputs\.(\w+) \}\}$", text, re.M)
         self.assertEqual([a for a, b in outputs if a == b], [a for a, _ in outputs])
-        self.assertEqual({a for a, _ in outputs}, set(JOBS))
+        # Every job key, and the UI test classes (not a job: the ios-duo job reads it, and
+        # runs every class when it is empty, unknown or the changes job failed).
+        self.assertEqual({a for a, _ in outputs}, set(JOBS) | {"ios_ui_tests"})
         full_ci = re.search(r"for job in ([\w ]+); do echo \"\$job=true\"", text)
         self.assertEqual(full_ci.group(1).split(), list(JOBS))
         # Each job (or step) is skipped only on an explicit 'false', and runs if classification failed.
@@ -403,7 +405,7 @@ class GitHubMode(unittest.TestCase):
         return 0, values
 
     def selected(self, values):
-        self.assertEqual(set(values), set(JOBS) | {"reason"})
+        self.assertEqual(set(values), set(JOBS) | {"reason", "ios_ui_tests"})
         return {job for job in JOBS if values[job] == "true"}
 
     def test_single_commit_dev_push(self):
