@@ -5,7 +5,8 @@ import XCTest
 /// A Window view pane's live capture retune (#256): what the stream really has, one change at a
 /// time, the engine's latest decision last, and failures never counted as applied. No capture
 /// runs: a never-started stream stands in, and `FakeReconfigure` plays ScreenCaptureKit's
-/// `updateConfiguration`.
+/// `updateConfiguration` and `stopCapture`. The real `stopCapture` on a stream that never
+/// started can wait on the system capture service indefinitely.
 final class WindowTileCaptureRetuneTests: XCTestCase {
     private let small = CGSize(width: 800, height: 600)
     private let large = CGSize(width: 1600, height: 1200)
@@ -14,7 +15,8 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
 
     private func capture(_ fake: FakeReconfigure, size: CGSize = CGSize(width: 800, height: 600), fps: Int = 30) -> WindowTileCapture {
         let c = WindowTileCapture(tileID: "w1", windowID: 7, assignmentGeneration: 1,
-                                  reconfigure: { _, config in try await fake.apply(config) })
+                                  reconfigure: { _, config in try await fake.apply(config) },
+                                  stopCapture: { _ in fake.stopStream() })
         c.installStreamForTesting(SCStream(filter: SCContentFilter(), configuration: SCStreamConfiguration(), delegate: nil),
                                   size: size, fps: fps)
         return c
@@ -142,6 +144,7 @@ final class WindowTileCaptureRetuneTests: XCTestCase {
         let after = await c.applyRequested()
         XCTAssertEqual(after, TileRetuneResult(outcome: .stopped, accepted: 0))
         XCTAssertEqual(fake.calls, [call(large)], "the request made before the stop is not applied to the stopped stream")
+        XCTAssertEqual(fake.stops, 1, "the stream is asked to stop once")
     }
 
     func testAnUnchangedRequestDoesNothing() async {
@@ -195,6 +198,10 @@ final class FakeReconfigure: @unchecked Sendable {
 
     var calls: [Call] { lock.withLock { _calls } }
     var maxInFlight: Int { lock.withLock { _maxInFlight } }
+    private var _stops = 0
+    /// How many times the capture asked the stream to stop.
+    var stops: Int { lock.withLock { _stops } }
+    func stopStream() { lock.withLock { _stops += 1 } }
 
     func apply(_ config: SCStreamConfiguration) async throws {
         let interval = config.minimumFrameInterval

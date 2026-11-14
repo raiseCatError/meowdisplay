@@ -97,13 +97,18 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     /// Applies a configuration to the live stream: ScreenCaptureKit's `updateConfiguration`.
     /// Tests pass their own, so no capture runs there.
     private let reconfigure: @Sendable (SCStream, SCStreamConfiguration) async throws -> Void
+    /// Stops the stream: ScreenCaptureKit's `stopCapture`. Tests pass their own, so a stream
+    /// that never started is never handed to the system capture service.
+    private let stopCapture: @Sendable (SCStream) async throws -> Void
 
     init(tileID: String, windowID: UInt32, assignmentGeneration: UInt64,
-         reconfigure: @escaping @Sendable (SCStream, SCStreamConfiguration) async throws -> Void = { try await $0.updateConfiguration($1) }) {
+         reconfigure: @escaping @Sendable (SCStream, SCStreamConfiguration) async throws -> Void = { try await $0.updateConfiguration($1) },
+         stopCapture: @escaping @Sendable (SCStream) async throws -> Void = { try await $0.stopCapture() }) {
         self.tileID = tileID
         self.windowID = windowID
         self.assignmentGeneration = assignmentGeneration
         self.reconfigure = reconfigure
+        self.stopCapture = stopCapture
         // The first-frame wait counts from now: a Full Desktop pane asks macOS for its content
         // before its stream exists, and with no start time the watch called it stalled at once.
         health = Health(startedAt: ProcessInfo.processInfo.systemUptime)
@@ -155,7 +160,7 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
         // stop() may have run while startCapture was in flight: it took the stream and
         // asked it to stop before it had started, which doesn't stick. Stop it now.
         if lock.withLock({ stopRequested }) {
-            try? await s.stopCapture()
+            try? await stopCapture(s)
             throw CancellationError()
         }
     }
@@ -240,7 +245,7 @@ final class WindowTileCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             defer { stream = nil; latest = nil; stopRequested = true }
             return stream
         }
-        try? await s?.stopCapture()
+        if let s { try? await stopCapture(s) }
     }
 
     func latestFrame() -> Frame? { lock.withLock { latest } }
