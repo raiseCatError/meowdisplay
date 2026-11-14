@@ -12,12 +12,15 @@ on:
 permissions:
   contents: read
 
-# A superseded run tells us nothing, so drop in-flight runs for the same ref.
-# Except pushes to dev: each merge is validated as its own commit (a group per
-# SHA, never cancelled). Otherwise a later docs-only merge, which skips the app
-# jobs, would cancel the only full run of the code merged just before it.
+# A superseded pull request or branch run tells us nothing, so it is cancelled.
+# Pushes to dev are the integration gate: a run in progress always finishes (so
+# a steady stream of merges can't keep cancelling it), and of the pushes that
+# arrive meanwhile only the newest waits, so a burst of merges is tested once,
+# as the combined result. Nothing is lost by skipping the pushes in between:
+# each job of a dev run is judged against its own anchor, the newest dev commit
+# on which it last passed, so it covers every change since then (see changes).
 concurrency:
-  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && format('tests-dev-{0}', github.sha) || format('tests-{0}', github.ref) }}
+  group: tests-${{ github.ref }}
   cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev') }}
 
 jobs:
@@ -25,10 +28,12 @@ jobs:
   # the synthetic merge commit's first parent (the PR's base). Keep the test
   # jobs present, since the dev/main/release rulesets require their exact
   # check names; a skipped job reports success for branch protection.
-  # A push to dev that adds exactly one commit (a PR's merge or squash commit)
-  # is classified the same way against that commit's parent; every other push
-  # (main, release/**, several commits, a force-push) and every PR into main or
-  # release/* runs full CI.
+  # A push to dev is classified per job: each job against its anchor, the
+  # newest ancestor commit on which that job passed in an earlier dev run
+  # (scripts/ci/dev_anchors.py lists them from the Actions API). A job with no
+  # anchor runs, and so does every job when the anchors can't be read. Every
+  # other push (main, release/**) and every PR into main or release/* runs
+  # full CI.
   #
   # Each job runs only for the areas that can change its result: Mac sources
   # and tests → mac; iOS → mac (its tests read iOS sources), the iOS build and
@@ -47,6 +52,10 @@ jobs:
   # so a broken classifier never turns into skipped (= passing) checks.
   changes:
     runs-on: ubuntu-latest
+    # actions: read lists the earlier dev runs whose jobs are the anchors.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       mac: ${{ steps.classify.outputs.mac }}
       ios_build: ${{ steps.classify.outputs.ios_build }}
@@ -58,12 +67,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          fetch-depth: 2
+          # A dev push needs the history to tell which anchors are its ancestors.
+          fetch-depth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/dev') && '0' || '2' }}
       - name: Select the jobs this change needs
         id: classify
         shell: bash
         env:
           PUSH_BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           full_ci() {
@@ -96,7 +107,25 @@ jobs:
           fi
           # It writes its selection only once it has one; any failure is full CI.
           selection="$RUNNER_TEMP/selection"
-          if python3 -I "$classifier" --github "$selection"; then
+          args=(--github "$selection")
+          # A push to dev: earlier dev runs may have been cancelled, so the
+          # previous commit is no baseline. Judge each job against its anchor,
+          # with dev's own copies of both scripts; without them, full CI.
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            anchors_script="$RUNNER_TEMP/dev_anchors.py"
+            if ! grep -q -- '--anchors' "$classifier" \
+                || ! git show 'HEAD^1:scripts/ci/dev_anchors.py' > "$anchors_script" 2>/dev/null; then
+              full_ci "the base branch's classifier predates batched dev pushes"
+              exit 0
+            fi
+            if ! python3 -I "$anchors_script" "$RUNNER_TEMP/anchors.json"; then
+              echo "::warning::the earlier dev runs could not be read: running full CI"
+              full_ci "the anchors could not be read"
+              exit 0
+            fi
+            args+=(--anchors "$RUNNER_TEMP/anchors.json")
+          fi
+          if python3 -I "$classifier" "${args[@]}"; then
             cat "$selection" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::the base branch's classifier failed: running full CI"
@@ -358,3 +387,45 @@ jobs:
             -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300
+
+  # The integration gate's verdict, where people see it: a push to dev whose jobs failed
+  # opens (or adds to) one issue, and the first push on which they all pass again closes it.
+  # A failure can't be skipped past: the failed job's anchor stays where it last passed, so
+  # every later push to dev runs it again until it passes. Runs that were cancelled for a
+  # newer push say nothing either way.
+  integration-report:
+    needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the dev integration issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="dev integration gate failing"
+          failed=$(jq -r 'to_entries | map(select(.value.result == "failure")) | map(.key) | join(", ")' <<< "$RESULTS")
+          cancelled=$(jq -r 'to_entries | map(select(.value.result == "cancelled")) | length' <<< "$RESULTS")
+          issue=$(gh issue list --state open --author 'app/github-actions' --search "\"$title\" in:title" \
+            --json number,title --jq "map(select(.title == \"$title\"))[0].number // empty")
+          if [[ -n "$failed" ]]; then
+            body="Tests failed on dev at $GITHUB_SHA: $failed. $RUN_URL"
+            if [[ -n "$issue" ]]; then
+              gh issue comment "$issue" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body
+
+          Every later push to dev runs the failed jobs again (each job is judged against the commit it last passed on) until they pass; then this issue closes."
+            fi
+            echo "::error::dev integration gate failed: $failed"
+            exit 0
+          fi
+          if [[ "$cancelled" == 0 && -n "$issue" ]]; then
+            gh issue close "$issue" --comment "Every Tests job passed (or wasn't needed) on dev at $GITHUB_SHA. $RUN_URL"
+          fi

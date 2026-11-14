@@ -47,10 +47,19 @@ previous head, for pull requests into main or release/*, and whenever git or
 this script fails. A changed file containing the upstream App Store listing ID
 also gets the mac job, wherever it is (MacTests/AppStoreTests scans for it).
 
+Batched dev pushes (--anchors): tests.yml runs one dev push at a time, and of
+the pushes that arrive meanwhile only the newest waits, so a burst of merges
+is tested once, as the combined result. Each job is then judged against its own anchor, the newest ancestor
+on which it passed (dev_anchors.py lists them), and runs if anything it needs
+changed since then; a job with no anchor runs (select_from_anchors).
+
 Usage:
   classify_pr_paths.py --github OUTPUT    tests.yml: reads GITHUB_EVENT_NAME,
                                           GITHUB_REF, GITHUB_BASE_REF and
                                           PUSH_BEFORE, diffs HEAD^1..HEAD
+  classify_pr_paths.py --github OUTPUT --anchors ANCHORS_JSON
+                                          tests.yml, pushes to dev: per job,
+                                          diffs its anchor..HEAD
   classify_pr_paths.py CHANGED_PATHS_NUL GITIGNORE_DIFF [GITHUB_OUTPUT]
                                           the interface earlier tests.yml
                                           copies call; also writes the
@@ -59,6 +68,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -252,21 +262,87 @@ def read_worktree(path: str) -> Optional[bytes]:
     return file.read_bytes() if file.is_file() else None
 
 
-def select_from_git(env: dict[str, str]) -> tuple[frozenset, str]:
+SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def read_anchors(path: str) -> dict[str, list[str]]:
+    """The --anchors file that dev_anchors.py writes: for each job, the dev
+    commits (newest first) on which that job passed. Anything malformed
+    raises, and tests.yml then runs full CI."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not set(data) <= ALL:
+        raise ValueError("anchors: expected an object keyed by job")
+    for job, shas in data.items():
+        if not isinstance(shas, list) or not all(isinstance(s, str) and SHA.fullmatch(s) for s in shas):
+            raise ValueError(f"anchors: {job} must be a list of commit SHAs")
+    return data
+
+
+def changed_between(base: str) -> tuple[list[str], str]:
+    """Paths changed from `base` to HEAD, and the .gitignore diff."""
+    # --no-renames lists both sides of a rename, so code can't leave as a doc.
+    raw = git("diff", "--no-renames", "--name-only", "-z", base, "HEAD")
+    paths = [part.decode("utf-8") for part in raw.split(b"\0") if part]
+    diff = git("diff", "--no-renames", "-U0", base, "HEAD", "--", ".gitignore").decode("utf-8", "replace")
+    return paths, diff
+
+
+def is_ancestor(sha: str) -> bool:
+    """True when `sha` is HEAD or one of its ancestors. Needs the history (tests.yml
+    fetches all of it for pushes to dev); a commit git doesn't have is not one."""
+    return subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"], capture_output=True).returncode == 0
+
+
+def select_from_anchors(anchors: dict[str, list[str]]) -> tuple[frozenset, str]:
+    """Pushes to dev, which tests.yml batches: a newer push cancels the run for
+    an older one, so a burst of merges is tested once, as the combined result.
+
+    Each job is judged on its own, against its anchor: the newest commit that is
+    HEAD or an ancestor of it on which that job passed in an earlier dev run. The
+    job runs unless nothing it needs (the rules above) changed from its anchor to
+    HEAD; a job with no anchor runs. So every change since a job last passed is
+    tested by that job, whether or not the runs for the commits in between
+    finished. No changes at all since the anchor (a re-run) runs the job again.
+    The iOS build is a step of the mac job, so it brings the mac job."""
+    needed: set[str] = set()
+    notes: list[str] = []
+    selections: dict[str, frozenset] = {}
+    for job in JOBS:
+        anchor = next((sha for sha in anchors.get(job, []) if is_ancestor(sha)), None)
+        if anchor is None:
+            needed.add(job)
+            notes.append(f"{job}: no earlier pass")
+            continue
+        if anchor not in selections:
+            paths, diff = changed_between(anchor)
+            selections[anchor] = select_jobs(paths, read_worktree, diff)[0]
+        if job in selections[anchor]:
+            needed.add(job)
+            notes.append(f"{job}: changed since {anchor[:12]}")
+        else:
+            notes.append(f"{job}: unchanged since {anchor[:12]}")
+    if "ios_build" in needed:
+        needed.add("mac")
+    return frozenset(needed), "batched dev push; " + "; ".join(notes)
+
+
+def select_from_git(env: dict[str, str], anchors: Optional[dict[str, list[str]]] = None) -> tuple[frozenset, str]:
     """Selection for the checked-out commit, whose first parent is the PR's
-    base (the synthetic merge commit's) or dev's previous head."""
+    base (the synthetic merge commit's) or dev's previous head. With anchors, a
+    push to dev is judged per job against them instead (select_from_anchors)."""
     try:
         parent = git("rev-parse", "--verify", "--quiet", "HEAD^1^{commit}").decode().strip()
     except subprocess.CalledProcessError:
         return ALL, "no base commit"
+    if anchors is not None:
+        if env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF") == "refs/heads/dev":
+            return select_from_anchors(anchors)
+        return ALL, "anchors are only for pushes to dev"
     reason = full_ci_reason(env.get("GITHUB_EVENT_NAME", ""), env.get("GITHUB_REF", ""),
                             env.get("GITHUB_BASE_REF", ""), env.get("PUSH_BEFORE", ""), parent)
     if reason:
         return ALL, reason
-    # --no-renames lists both sides of a rename, so code can't leave as a doc.
-    raw = git("diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD")
-    paths = [part.decode("utf-8") for part in raw.split(b"\0") if part]
-    diff = git("diff", "--no-renames", "-U0", "HEAD^1", "HEAD", "--", ".gitignore").decode("utf-8", "replace")
+    paths, diff = changed_between("HEAD^1")
     return select_jobs(paths, read_worktree, diff)
 
 
@@ -280,8 +356,11 @@ def append(path: str, lines: list[str]) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 3 and argv[1] == "--github":
-        jobs, reason = select_from_git(dict(os.environ))
+    github = len(argv) == 3 and argv[1] == "--github"
+    batched = len(argv) == 5 and argv[1] == "--github" and argv[3] == "--anchors"
+    if github or batched:
+        anchors = read_anchors(argv[4]) if batched else None
+        jobs, reason = select_from_git(dict(os.environ), anchors)
         lines = output_lines(jobs, reason)
         append(argv[2], lines)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
