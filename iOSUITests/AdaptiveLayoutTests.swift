@@ -1,3 +1,4 @@
+// CI experiment: a change to one UI test class (never merged).
 import XCTest
 
 /// Adaptive layouts on whatever device the run uses (CI runs it on the iPhone Duo simulator):
