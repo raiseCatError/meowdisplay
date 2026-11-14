@@ -111,6 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
         let sender = senderPID.flatMap { NSRunningApplication(processIdentifier: pid_t($0))?.bundleIdentifier }
         let systemEnding = PrivacyShieldPolicy.isSystemEnding(quitReason: reason, senderBundleID: sender)
+        // Never block a logout/restart/shutdown with a prompt; the setting
+        // and MEOW's record survive, and the next launch shows the state.
+        if !systemEnding { SenderController.shared.offerClosedLidRestoreBeforeQuit() }
         let lockFirst = PrivacyShield.shared.isCovering && !systemEnding
         let stopReceiver = ReceiverController.shared.active
         guard lockFirst || stopReceiver else { return .terminateNow }
@@ -484,6 +487,85 @@ final class SenderController: ObservableObject {
     func releaseKeepMacAvailable() {
         keepAvailableAssertion.disable()
         keepMacAvailableActive = false
+    }
+
+    // MARK: - Closed-Lid Availability (global SleepDisabled; see CLOSED_LID.md)
+
+    private let closedLidModel = ClosedLidAvailabilityModel(
+        reader: PmsetSleepDisabledReader(),
+        writer: AdministratorPromptSleepDisabledWriter(),
+        utilities: RunningPowerUtilityDetector(),
+        store: UserDefaultsClosedLidOwnershipStore())
+    @Published private(set) var closedLidState: ClosedLidState = .unknown
+    @Published private(set) var closedLidNotice: ClosedLidNotice?
+    private var closedLidObservers: [NSObjectProtocol] = []
+
+    /// Re-reads the real OS value. Event-driven only (launch, Settings
+    /// appearing, app activation, wake); never on a timer.
+    func refreshClosedLidState() {
+        guard closedLidState != .authorizing else { return }
+        closedLidModel.refresh()
+        publishClosedLid()
+    }
+
+    /// The toggle's action. The administrator prompt runs on the next
+    /// main-loop turn so "Waiting for authorization" renders first.
+    func setClosedLidAvailability(_ on: Bool, confirmedDespiteUtilities: Bool = false) {
+        guard closedLidState != .authorizing else { return }
+        closedLidState = .authorizing
+        closedLidNotice = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if on { self.closedLidModel.enable() }
+            else { self.closedLidModel.disable(confirmedDespiteUtilities: confirmedDespiteUtilities) }
+            Log.info("closedLid: \(on ? "enable" : "restore") → \(self.closedLidModel.state)")
+            self.publishClosedLid()
+        }
+    }
+
+    func dismissClosedLidNotice() {
+        closedLidModel.clearNotice()
+        publishClosedLid()
+    }
+
+    private func publishClosedLid() {
+        closedLidState = closedLidModel.state
+        closedLidNotice = closedLidModel.notice
+    }
+
+    private func startObservingClosedLidState() {
+        refreshClosedLidState()
+        let refresh: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshClosedLidState() }
+        }
+        closedLidObservers = [
+            NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                   object: nil, queue: .main, using: refresh),
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                              object: nil, queue: .main, using: refresh),
+        ]
+    }
+
+    /// Quit: if MEOW turned sleep off, offer to restore it, because the
+    /// setting outlives the app. Restoring still asks for the administrator
+    /// password; declining leaves the setting (and the record) as they are.
+    func offerClosedLidRestoreBeforeQuit() {
+        refreshClosedLidState()
+        guard closedLidState == .onByMEOW else { return }
+        let alert = NSAlert()
+        alert.messageText = "Turn sleep back on before quitting?"
+        var info = "MEOW turned off sleep on this Mac. If you keep it off, the Mac stays awake — even with the lid closed — until you turn it back on in MEOW or run “sudo pmset -a disablesleep 0”."
+        let others = RunningPowerUtilityDetector().runningPowerUtilities()
+        if !others.isEmpty {
+            info += "\n\n\(others.joined(separator: ", ")) is also running. Turning sleep back on changes the setting for every app."
+        }
+        alert.informativeText = info
+        alert.addButton(withTitle: "Turn Sleep Back On")
+        alert.addButton(withTitle: "Keep Sleep Off")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        closedLidModel.disable(confirmedDespiteUtilities: true)
+        Log.info("closedLid: restore at quit → \(closedLidModel.state)")
+        publishClosedLid()
     }
 
     // MARK: - Use This Mac as a Display
@@ -1151,6 +1233,7 @@ final class SenderController: ObservableObject {
         pairingPrompt.trustPinLookup = { TrustStore.shared.pin(peerID: $0) }
         autoConnectPolicy.setAutoReconnectEnabled(autoReconnectEnabled)
         if keepMacAvailableRequested { keepMacAvailableActive = keepAssertionEnable() }
+        startObservingClosedLidState()
         startObservingPhysicalDisplayAvailability()
         observeLoginSessionSwitching()
         observeMacLock()
