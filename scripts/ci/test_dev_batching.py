@@ -230,6 +230,17 @@ class Workflow(unittest.TestCase):
         self.assertIn("args+=(--anchors \"$RUNNER_TEMP/anchors.json\")", self.text)
         self.assertRegex(self.text, r"concurrency:\n  group: tests-\$\{\{ github\.ref \}\}\n  cancel-in-progress: true\n")
 
+    def test_a_failed_gate_is_reported_on_every_dev_push(self):
+        jobs = re.findall(r"^  ([\w-]+):\n", self.text[self.text.index("\njobs:\n"):], re.M)
+        report = self.text[self.text.index("\n  integration-report:\n"):]
+        needs = re.search(r"needs: \[([^\]]*)\]", report).group(1).split(", ")
+        # It waits for every other job, so none can fail unreported.
+        self.assertEqual(set(needs), set(jobs) - {"integration-report"})
+        self.assertIn("if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}", report)
+        self.assertIn('map(select(.value.result == "failure"))', report)
+        # A run cancelled for a newer push never closes the issue.
+        self.assertIn('if [[ "$cancelled" == 0 && -n "$issue" ]]; then', report)
+
 
 if __name__ == "__main__":
     unittest.main()
