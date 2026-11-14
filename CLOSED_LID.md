@@ -35,17 +35,20 @@ So MEOW can't guarantee ownership. It uses a conservative protocol and states it
 |---|---|---|---|
 | 0 | none | Off | turn it on when asked |
 | 1 | present | On, turned on by MEOW | turn it off when asked |
-| 1 | none | On, set outside MEOW (toggle disabled) | never write |
+| 1 | none, or from an earlier boot | On, no current MEOW record (toggle disabled) | never write, unless the person picks **Turn Sleep Back On…** and confirms |
 | 0 | present | Off, with "changed outside MEOW, or reset by a restart" | drop the record, never write |
-| unreadable | any | Unavailable (toggle disabled) | never write (fail closed) |
+| unreadable | any | Unknown (no switch: Off would be a guess) | never write (fail closed) |
 
 - **Reading.** `/usr/bin/pmset -g` with fixed arguments. It is read-only and needs no
-  privileges. macOS has no public API for this value. If the `SleepDisabled` line is missing
-  or malformed, the value counts as unreadable.
+  privileges. macOS has no public API for this value. pmset prints `SleepDisabled` only after
+  the value has been stored, so on otherwise normal output (with a "Currently in use:"
+  section) a missing line reads as 0, the default. A malformed value or unrecognised output
+  counts as unreadable.
 - **Turning on.** MEOW reads first. If the value is already 1, MEOW does nothing and claims
   nothing. If it is 0, MEOW writes 1 and reads again. It records ownership
-  (`closedLidAvailability.ownership` in its defaults: time and prior value 0) only after
-  that read confirms 1. If the write isn't verified, MEOW records nothing. The setting then
+  (`closedLidAvailability.ownership` in its defaults: time, prior value 0 and
+  `kern.bootsessionuuid`) only after that read confirms 1. A record from an earlier boot is
+  dropped: something else may have set the value since the restart. If the write isn't verified, MEOW records nothing. The setting then
   shows as external, so MEOW never clears it blindly.
 - **Turning off.** MEOW acts only when its record exists and a fresh read shows 1. If a
   known sleep utility is running (Amphetamine, KeepingYouAwake, Lungo, Caffeine), MEOW asks
@@ -57,15 +60,25 @@ So MEOW can't guarantee ownership. It uses a conservative protocol and states it
   becomes active and after wake. It never polls. A change made outside MEOW wins: MEOW drops
   its claim and doesn't fight the change.
 
-Known limit: suppose another tool also sets 1 while MEOW's record is held, and that tool
-isn't a running app MEOW recognises. Then MEOW can't tell, and turning the feature off
+- **The person can always undo it.** When sleep is off and MEOW has no current record of
+  turning it off, the row says so and offers **Turn Sleep Back On…**. That option explains
+  whose setting it may be and needs confirmation, then shows the usual administrator prompt.
+- **While a change is pending,** the switch keeps its previous value, so it never shows Off
+  while sleep is still disabled.
+
+Known limit: suppose another tool sets 1 again, within the same boot, after something else
+had restored 0 while MEOW was in the background without refreshing. Or suppose that tool
+sets 1 while MEOW's record is held, and it isn't a running app MEOW recognises. Then MEOW can't tell, and turning the feature off
 clears it for both. The confirmation for running utilities narrows this case, but the OS
 gives no way to close it fully.
 
 ## Privileges
 
 Each change shows the standard macOS administrator prompt. MEOW runs `do shell script` with
-`administrator privileges` in-process. The command is a fixed string (`/usr/bin/pmset -a
+`administrator privileges` in a fresh `/usr/bin/osascript` process for each change, off the
+main thread. A separate process caches no authorization: an in-process `do shell script`
+would skip the password for about five minutes. A separate process also keeps the app
+responsive while the prompt is up. The command is a fixed string (`/usr/bin/pmset -a
 disablesleep 0|1`), and nothing user-supplied goes into it. No helper is installed. There is
 no sudoers entry, no stored credential and no general command runner. Cancelling the prompt
 changes nothing.
@@ -80,9 +93,9 @@ authentication review. That is a separate security decision, and it isn't part o
 
 | Event | Result |
 |---|---|
-| Quit (menu, ⌘Q, Sparkle update) while MEOW owns it | Alert: **Turn Sleep Back On** (asks for the password) or **Keep Sleep Off** |
-| Logout, restart, shutdown | No prompt, so shutdown isn't blocked. The setting and record stay; the next launch shows the state. |
-| Crash or force quit | The setting stays on. The next launch reads 1 plus the record and shows "turned on by MEOW". |
+| Quit (menu, ⌘Q, Sparkle update) while MEOW owns it | Alert: **Turn Sleep Back On** (asks for the password) or **Keep Sleep Off**. If restoring fails or is cancelled, a second alert says sleep is still off and gives the command. pmset isn't run on quit unless MEOW holds a record. |
+| Logout, restart, shutdown, or Privacy Shield covering the screen | No prompt: shutdown is never blocked, and nobody could see an alert under the shield. The setting and record stay; the next launch shows the state. |
+| Crash or force quit | The setting stays on. The next launch reads 1 plus the record and shows "turned on by MEOW" (same boot), or "no current MEOW record" with **Turn Sleep Back On…** (after a restart). |
 | Prompt cancelled or write failed | Nothing changes. A notice explains why. |
 | Changed elsewhere | Picked up at the next refresh trigger. MEOW drops its claim. |
 | MEOW deleted while on | The setting stays on. Recover with `sudo pmset -a disablesleep 0`. The quit alert tells you this command. |

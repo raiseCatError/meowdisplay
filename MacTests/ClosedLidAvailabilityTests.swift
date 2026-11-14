@@ -39,16 +39,19 @@ private final class MemoryOwnershipStore: ClosedLidOwnershipStore {
 final class ClosedLidAvailabilityTests: XCTestCase {
     private var setting: FakeSleepSetting!
     private var store: MemoryOwnershipStore!
+    private var boot: String? = "boot-A"
 
     override func setUp() {
         setting = FakeSleepSetting()
         store = MemoryOwnershipStore()
+        boot = "boot-A"
     }
 
     private func model(utilities: [String] = []) -> ClosedLidAvailabilityModel {
         ClosedLidAvailabilityModel(reader: setting, writer: setting,
                                    utilities: FakeUtilities(names: utilities), store: store,
-                                   now: { Date(timeIntervalSince1970: 1_000) })
+                                   now: { Date(timeIntervalSince1970: 1_000) },
+                                   bootSession: { [unowned self] in self.boot })
     }
 
     // MARK: Reading and ownership
@@ -87,7 +90,7 @@ final class ClosedLidAvailabilityTests: XCTestCase {
         XCTAssertEqual(setting.writes, [true])
         XCTAssertEqual(m.state, .onByMEOW)
         XCTAssertEqual(store.record, ClosedLidOwnershipRecord(enabledAt: Date(timeIntervalSince1970: 1_000),
-                                                              priorSleepDisabled: false))
+                                                              priorSleepDisabled: false, bootSessionUUID: "boot-A"))
     }
 
     func testEnableWhenAlreadyOnExternallyDoesNotWriteOrClaim() {
@@ -249,14 +252,16 @@ final class ClosedLidAvailabilityTests: XCTestCase {
         }
         let writer = ReentrantWriter(setting: setting)
         let m = ClosedLidAvailabilityModel(reader: setting, writer: writer,
-                                           utilities: FakeUtilities(), store: store)
+                                           utilities: FakeUtilities(), store: store, bootSession: { "boot-A" })
         writer.model = m
         m.enable()
         XCTAssertEqual(m.state, .onByMEOW)
     }
 
     func testUserDefaultsStoreRoundTrip() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ClosedLidTests-\(UUID().uuidString)"))
+        let suite = "ClosedLidTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let s = UserDefaultsClosedLidOwnershipStore(defaults: defaults)
         XCTAssertNil(s.record)
         let r = ClosedLidOwnershipRecord(enabledAt: Date(timeIntervalSince1970: 5), priorSleepDisabled: false)
@@ -275,8 +280,16 @@ final class ClosedLidAvailabilityTests: XCTestCase {
         XCTAssertEqual(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: off), false)
     }
 
+    func testMissingLineOnNormalOutputMeansNeverSet() {
+        // pmset prints SleepDisabled only once it has been stored.
+        XCTAssertEqual(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: "Currently in use:\n sleep 1\n"), false)
+        XCTAssertEqual(PmsetSettingsParser.sleepDisabled(fromPmsetOutput:
+            "System-wide power settings:\nCurrently in use:\n standby 1\n"), false)
+    }
+
     func testMissingOrMalformedPmsetValueIsUnreadable() {
-        XCTAssertNil(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: "Currently in use:\n sleep 1\n"))
+        XCTAssertNil(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: ""))
+        XCTAssertNil(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: "pmset: unexpected output\n"))
         XCTAssertNil(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: " SleepDisabled\t\tmaybe\n"))
         XCTAssertNil(PmsetSettingsParser.sleepDisabled(fromPmsetOutput: " SleepDisabledX 1\n"))
     }
@@ -292,5 +305,80 @@ final class ClosedLidAvailabilityTests: XCTestCase {
             XCTAssertFalse(s.contains("&&"))
             XCTAssertFalse(s.contains("sudo"))
         }
+    }
+
+    // MARK: Review follow-ups
+
+    func testARecordFromBeforeARestartIsNotTrusted() {
+        model().enable()
+        boot = "boot-B"   // restarted; something may have set 1 since
+        let m = model()
+        m.refresh()
+        XCTAssertEqual(m.state, .onExternally, "never claims a value it can't vouch for")
+        XCTAssertNil(store.record)
+        m.disable(confirmedDespiteUtilities: true)
+        XCTAssertEqual(setting.writes, [true], "and never clears it without an explicit request")
+    }
+
+    func testALegacyRecordWithoutABootSessionStillCounts() {
+        setting.value = true
+        store.record = ClosedLidOwnershipRecord(enabledAt: Date(), priorSleepDisabled: false)
+        let m = model()
+        m.refresh()
+        XCTAssertEqual(m.state, .onByMEOW)
+    }
+
+    func testExternalRestoreNeedsAnExplicitConfirmation() {
+        setting.value = true
+        let m = model()
+        m.requestExternalRestore()
+        XCTAssertEqual(m.notice, .confirmExternalRestore)
+        XCTAssertTrue(setting.writes.isEmpty, "asking writes nothing")
+        m.restoreExternalAfterConfirmation()
+        XCTAssertEqual(setting.writes, [false])
+        XCTAssertEqual(m.state, .off)
+        XCTAssertNil(m.notice)
+    }
+
+    func testExternalRestoreCancelledOrNotApplicable() {
+        setting.value = true
+        setting.writeResult = .cancelled
+        let m = model()
+        m.restoreExternalAfterConfirmation()
+        XCTAssertEqual(m.state, .onExternally)
+        XCTAssertEqual(m.notice, .authorizationCancelled)
+        // Not for a value MEOW owns (that's `disable`) or one that is off.
+        let owned = model()
+        setting.writeResult = .success
+        setting.value = false
+        owned.enable()
+        owned.requestExternalRestore()
+        XCTAssertNil(owned.notice)
+        let writes = setting.writes
+        owned.restoreExternalAfterConfirmation()
+        XCTAssertEqual(setting.writes, writes)
+    }
+
+    func testAStaleRestoreConfirmationIsCleared() {
+        let m = model(utilities: ["Amphetamine"])
+        m.enable()
+        m.disable()
+        XCTAssertEqual(m.notice, .confirmRestoreWithUtilities(["Amphetamine"]))
+        setting.value = false  // someone else turned sleep back on
+        m.refresh()
+        XCTAssertNotEqual(m.notice, .confirmRestoreWithUtilities(["Amphetamine"]))
+    }
+
+    func testOsascriptResultMapping() {
+        XCTAssertEqual(AdministratorPromptSleepDisabledWriter.result(status: 0, stderr: ""), .success)
+        XCTAssertEqual(AdministratorPromptSleepDisabledWriter.result(
+            status: 1, stderr: "0:120: execution error: User canceled. (-128)\n"), .cancelled)
+        XCTAssertEqual(AdministratorPromptSleepDisabledWriter.result(status: 1, stderr: "  boom \n"), .failed("boom"))
+        XCTAssertEqual(AdministratorPromptSleepDisabledWriter.result(status: 1, stderr: ""),
+                       .failed("macOS refused the change."))
+    }
+
+    func testBootSessionIsReadable() {
+        XCTAssertNotNil(BootSession.current(), "read-only sysctl")
     }
 }

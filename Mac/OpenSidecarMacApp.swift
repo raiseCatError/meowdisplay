@@ -109,9 +109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
         let sender = senderPID.flatMap { NSRunningApplication(processIdentifier: pid_t($0))?.bundleIdentifier }
         let systemEnding = PrivacyShieldPolicy.isSystemEnding(quitReason: reason, senderBundleID: sender)
-        // Never block a logout/restart/shutdown with a prompt; the setting
-        // and MEOW's record survive, and the next launch shows the state.
-        if !systemEnding { SenderController.shared.offerClosedLidRestoreBeforeQuit() }
+        // Never block a logout/restart/shutdown with a prompt, and never show
+        // one under the Privacy Shield (nobody could see it, and it would hold
+        // up the lock below). The setting and MEOW's record survive; the next
+        // launch shows the state.
+        if !systemEnding && !PrivacyShield.shared.isCovering {
+            SenderController.shared.offerClosedLidRestoreBeforeQuit()
+        }
         let lockFirst = PrivacyShield.shared.isCovering && !systemEnding
         let stopReceiver = ReceiverController.shared.active
         guard lockFirst || stopReceiver else { return .terminateNow }
@@ -484,32 +488,66 @@ final class SenderController: ObservableObject {
         store: UserDefaultsClosedLidOwnershipStore())
     @Published private(set) var closedLidState: ClosedLidState = .unknown
     @Published private(set) var closedLidNotice: ClosedLidNotice?
+    /// Whether sleep was prevented when the pending action started: the
+    /// toggle keeps showing it while the password prompt is up, so it never
+    /// shows Off while sleep is still disabled.
+    @Published private(set) var closedLidPreventedSleepBeforeAction = false
+    /// A write runs on a background queue. Nothing else touches the model
+    /// until it finishes (see `ClosedLidAvailabilityModel`).
+    private var closedLidActionPending = false
+    private let closedLidQueue = DispatchQueue(label: "closedLid.write", qos: .userInitiated)
     private var closedLidObservers: [NSObjectProtocol] = []
 
     /// Re-reads the real OS value. Event-driven only (launch, Settings
     /// appearing, app activation, wake); never on a timer.
     func refreshClosedLidState() {
-        guard closedLidState != .authorizing else { return }
+        guard !closedLidActionPending else { return }
         closedLidModel.refresh()
         publishClosedLid()
     }
 
-    /// The toggle's action. The administrator prompt runs on the next
-    /// main-loop turn so "Waiting for authorization" renders first.
+    /// The toggle's action.
     func setClosedLidAvailability(_ on: Bool, confirmedDespiteUtilities: Bool = false) {
-        guard closedLidState != .authorizing else { return }
+        runClosedLidAction(on ? "enable" : "restore") { model in
+            if on { model.enable() } else { model.disable(confirmedDespiteUtilities: confirmedDespiteUtilities) }
+        }
+    }
+
+    /// "Turn Sleep Back On…" when MEOW has no record of turning it off: asks first.
+    func requestExternalClosedLidRestore() {
+        guard !closedLidActionPending else { return }
+        closedLidModel.requestExternalRestore()
+        publishClosedLid()
+    }
+
+    func confirmExternalClosedLidRestore() {
+        runClosedLidAction("external restore") { $0.restoreExternalAfterConfirmation() }
+    }
+
+    /// The administrator prompt (a separate osascript process) blocks until
+    /// answered, so it runs off the main thread; the UI shows "Waiting".
+    private func runClosedLidAction(_ name: String, _ action: @escaping @Sendable (ClosedLidAvailabilityModel) -> Void) {
+        guard !closedLidActionPending else { return }
+        closedLidActionPending = true
+        closedLidPreventedSleepBeforeAction = closedLidState.preventsSleep
         closedLidState = .authorizing
         closedLidNotice = nil
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if on { self.closedLidModel.enable() }
-            else { self.closedLidModel.disable(confirmedDespiteUtilities: confirmedDespiteUtilities) }
-            Log.info("closedLid: \(on ? "enable" : "restore") → \(self.closedLidModel.state)")
-            self.publishClosedLid()
+        let model = closedLidModel
+        closedLidQueue.async { [weak self] in
+            action(model)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.closedLidActionPending = false
+                    Log.info("closedLid: \(name) → \(model.state)")
+                    self.publishClosedLid()
+                }
+            }
         }
     }
 
     func dismissClosedLidNotice() {
+        guard !closedLidActionPending else { return }
         closedLidModel.clearNotice()
         publishClosedLid()
     }
@@ -533,11 +571,17 @@ final class SenderController: ObservableObject {
     }
 
     /// Quit: if MEOW turned sleep off, offer to restore it, because the
-    /// setting outlives the app. Restoring still asks for the administrator
+    /// setting outlives the app. Restoring asks for the administrator
     /// password; declining leaves the setting (and the record) as they are.
+    /// Synchronous on purpose: the person chose to quit and is answering.
+    /// Skipped (by the caller) for logout/restart/shutdown and while the
+    /// Privacy Shield covers the screen, where nobody could see the alert.
     func offerClosedLidRestoreBeforeQuit() {
+        // No record, nothing to offer: don't even run pmset on quit.
+        guard closedLidModel.ownsSetting, !closedLidActionPending else { return }
         refreshClosedLidState()
         guard closedLidState == .onByMEOW else { return }
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Turn sleep back on before quitting?"
         var info = "MEOW turned off sleep on this Mac. If you keep it off, the Mac stays awake — even with the lid closed — until you turn it back on in MEOW or run “sudo pmset -a disablesleep 0”."
@@ -552,6 +596,12 @@ final class SenderController: ObservableObject {
         closedLidModel.disable(confirmedDespiteUtilities: true)
         Log.info("closedLid: restore at quit → \(closedLidModel.state)")
         publishClosedLid()
+        guard closedLidModel.state != .off else { return }
+        let failed = NSAlert()
+        failed.messageText = "Sleep is still turned off"
+        failed.informativeText = "MEOW couldn't turn sleep back on, so this Mac still won't sleep. To turn it on yourself, run “sudo pmset -a disablesleep 0” in Terminal, or open MEOW again."
+        failed.addButton(withTitle: "Quit")
+        failed.runModal()
     }
 
     // MARK: - Use This Mac as a Display
