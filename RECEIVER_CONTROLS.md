@@ -107,6 +107,39 @@ ignore Touch Style.
 | Custom layout share code | n/a | Yes | Yes. Copy and paste a code | n/a |
 | Show Surface Grid while Video is off | Yes | Yes | Yes | No |
 
+### Default shortcut palettes (audit #131)
+
+Holding or latching a modifier opens the palette for exactly that combination. Any mix of ⌘ ⌥ ⌃ ⇧ is a chord; three have defaults, the rest open an empty palette that says "No shortcuts for …" on purpose. Every default is an ordinary key press with its modifiers, so any Mac build accepts it.
+
+| Chord | Default shortcuts |
+| --- | --- |
+| ⌘ | Copy, Paste, Cut, Undo, Select All, Close ⌘W, **New Tab ⌘T**, Spotlight |
+| ⌘⌥ | Move Item Here, Force Quit ⌘⌥Esc, Toggle Dock, Hide Others, Close All Windows |
+| ⌘⇧ | Redo, New Folder, Reopen Closed Tab ⇧⌘T, Screenshot, Screenshot Selection, Screenshot Controls |
+| ⌥, ⌃, ⇧, ⌘⌃, ⌃⇧, ⌥⇧ and every other combination | None. Left empty on purpose: a palette is not filled for its own sake, and ⌃Tab, ⌃⌘Q and the like are one tap on the latched modifier plus the Tab key or the keyboard. |
+
+**Added: ⌘T New Tab** (after Close, so Close keeps its place). It is universal: Safari, Chrome, Firefox, Terminal, Finder and most tabbed apps use it, it only opens something, and it pairs with Reopen Closed Tab and Close. That makes eight keys in the ⌘ palette, which is the most a phone shows on one line (portrait wraps to two rows above eight, landscape never wraps), so no further default goes in without something coming out.
+
+**Existing profiles.** A saved profile is stored whole, so a new default never reaches it by itself. Schema 22 inserts New Tab after Close only in a Command palette that still equals the previous default exactly (same items, order, faces). A palette the user reordered, trimmed, extended, renamed or restyled is left alone, a New Tab deleted afterwards stays deleted (the schema number records that the step ran), and Reset Profile gives the new default. The Android receiver keeps its own copy of the defaults and is not changed here.
+
+| Considered | Decision | Reason |
+| --- | --- | --- |
+| ⌘T New Tab | Added | Universal, harmless, frequent. |
+| ⇧⌘T Reopen Closed Tab | Already there | In ⌘⇧; not repeated in ⌘. |
+| ⌘N New Window | Not added | Universal but means New Document, New Window or nothing by app; the ⌘ palette is full. |
+| ⌘F Find | Not added | Universal and safe, but the ⌘ palette is full and ⌘ latched plus F on the keyboard is one more tap. Users can add it in the editor. |
+| ⌘S Save | Not added | Universal; opens a sheet in untitled documents, and has no use in browsers or Finder. |
+| ⌘R Reload, ⌘L Location Bar | Not added | Browser-specific. |
+| ⌃Tab, ⇧⌃Tab, ⇧⌘] / ⇧⌘[ Switch Tabs | Not added | ⌃ has no palette and stays that way. Tab keys differ by app (Chrome and Safari accept ⌃Tab, Terminal and Finder use ⇧⌘] / ⇧⌘[). The tray Tab key with ⌃ latched sends ⌃Tab. |
+| ⌘` Cycle Windows | Not added | Covered by the window switcher and Window mode. |
+| ⌘[ / ⌘] Back / Forward | Not added | App-specific. They are also the default Rotate Left / Right App Gesture Commands, so one key would mean two things. |
+| ⌘M Minimise | Not added | Universal, but the window leaves the screen and a touch user can't easily bring it back. |
+| ⌘H Hide | Not added | Universal, but hides the foreground app. ⌘⌥H Hide Others is already there. |
+| ⌘Q Quit | Rejected | Can lose unsaved work from one small key. Force Quit ⌘⌥Esc is already there and only opens the Force Quit window. |
+| ⌘, Settings | Not added | Only for apps with settings, rarely used, and easily mistaken for the tray's gear, which opens MeowDisplay's own settings. |
+
+Already in the palettes and unchanged: Close ⌘W and Close All Windows ⌘⌥W are the most surprising defaults (an app may show a Save sheet, or close several windows at once), and Move Item Here, New Folder and Reopen Closed Tab only mean something in Finder or a browser.
+
 ## Keyboard and haptics
 
 | Control | iPhone | iPad | Android | Mac Receiver |
