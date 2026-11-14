@@ -12,15 +12,16 @@ on:
 permissions:
   contents: read
 
-# A superseded run tells us nothing, so drop in-flight runs for the same ref.
-# That includes pushes to dev: a burst of merges is tested once, as the combined
-# result, instead of once per merge on the five macOS runners an account gets.
-# Nothing is lost by cancelling: each job of a dev run is judged against its own
-# anchor, the newest dev commit on which it last passed, so it covers every
-# change since then, including those of runs that were cancelled (see changes).
+# A superseded pull request or branch run tells us nothing, so it is cancelled.
+# Pushes to dev are the integration gate: a run in progress always finishes (so
+# a steady stream of merges can't keep cancelling it), and of the pushes that
+# arrive meanwhile only the newest waits, so a burst of merges is tested once,
+# as the combined result. Nothing is lost by skipping the pushes in between:
+# each job of a dev run is judged against its own anchor, the newest dev commit
+# on which it last passed, so it covers every change since then (see changes).
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev') }}
 
 jobs:
   # Decide which jobs this change needs from the files it changes, against

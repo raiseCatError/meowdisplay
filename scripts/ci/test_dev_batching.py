@@ -228,7 +228,10 @@ class Workflow(unittest.TestCase):
         self.assertIn("full_ci \"the base branch's classifier predates batched dev pushes\"", self.text)
         self.assertIn("full_ci \"the anchors could not be read\"", self.text)
         self.assertIn("args+=(--anchors \"$RUNNER_TEMP/anchors.json\")", self.text)
-        self.assertRegex(self.text, r"concurrency:\n  group: tests-\$\{\{ github\.ref \}\}\n  cancel-in-progress: true\n")
+        # One group per ref; a dev run in progress is never cancelled, only the pushes queued behind it.
+        self.assertRegex(self.text, r"concurrency:\n  group: tests-\$\{\{ github\.ref \}\}\n"
+                                    r"  cancel-in-progress: \$\{\{ !\(github\.event_name == 'push' && "
+                                    r"github\.ref == 'refs/heads/dev'\) \}\}\n")
 
     def test_a_failed_gate_is_reported_on_every_dev_push(self):
         jobs = re.findall(r"^  ([\w-]+):\n", self.text[self.text.index("\njobs:\n"):], re.M)
