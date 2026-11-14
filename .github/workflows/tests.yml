@@ -484,7 +484,11 @@ jobs:
   # being skipped the way a skipped required job does; a skipped, cancelled or failed job
   # fails it. Anywhere else it passes and says so (scripts/ci/promotion_gate.py).
   # release-publish.yml checks the same jobs again for the commit it publishes.
+  # Only a promotion reports the required check name. A dev push or a PR into dev runs on the
+  # same commit a dev -> main PR later has as its head, and GitHub matches required checks by
+  # name on that commit: a "not a promotion" pass there must never answer for main.
   promotion-gate:
+    name: ${{ ((github.event_name == 'pull_request' && (github.base_ref == 'main' || startsWith(github.base_ref, 'release/'))) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')))) && 'promotion-gate' || 'promotion-gate (not a promotion)' }}
     needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
     if: ${{ always() }}
     runs-on: ubuntu-latest
