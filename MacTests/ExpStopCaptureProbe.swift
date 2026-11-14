@@ -4,7 +4,7 @@ import XCTest
 /// Experiment only (never merged): how long ScreenCaptureKit's stopCapture takes on a stream
 /// that never started, alone and three at a time. A call still running after 20 s counts as hung.
 final class ExpStopCaptureProbe: XCTestCase {
-    private func timedStop(limit: Double = 20) async -> Double? {
+    private static func timedStop(limit: Double = 20) async -> Double? {
         let s = SCStream(filter: SCContentFilter(), configuration: SCStreamConfiguration(), delegate: nil)
         let start = ProcessInfo.processInfo.systemUptime
         return await withTaskGroup(of: Double?.self) { group in
@@ -25,7 +25,7 @@ final class ExpStopCaptureProbe: XCTestCase {
 
     func testSequential() async {
         var results: [Double?] = []
-        for _ in 0..<60 { results.append(await timedStop()) }
+        for _ in 0..<60 { results.append(await Self.timedStop()) }
         report("sequential", results)
     }
 
@@ -33,7 +33,7 @@ final class ExpStopCaptureProbe: XCTestCase {
         var results: [Double?] = []
         for _ in 0..<20 {
             let batch = await withTaskGroup(of: Double?.self) { group in
-                for _ in 0..<3 { group.addTask { await self.timedStop() } }
+                for _ in 0..<3 { group.addTask { await ExpStopCaptureProbe.timedStop() } }
                 var out: [Double?] = []
                 for await r in group { out.append(r) }
                 return out
