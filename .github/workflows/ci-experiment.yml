@@ -1,7 +1,9 @@
 name: CI experiment (never merged)
 
-# Measurement only: the mac job's macOS tests, serial (as today) and with parallel test
-# processes, same commit, same runner type. Eight parallel reps after the stop fix.
+# Measurement only. (1) Root cause of the WindowTileCaptureRetuneTests hang: how long
+# ScreenCaptureKit's stopCapture takes on a never-started stream, and the retune tests repeated
+# on the original and the fixed code. (2) The macOS tests serial and with 3 parallel test
+# processes on the fixed code, with every test's identity and result kept for comparison.
 on:
   push:
     branches: ['ci-exp/**']
@@ -9,42 +11,83 @@ on:
 permissions:
   contents: read
 
+env:
+  XCB_FLAGS: CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+
 jobs:
-  mac-tests:
+  hang:
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        rep: [1, 2, 3, 4, 5, 6, 7, 8]
-        workers: [parallel-3]
+        code: [original]
     runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Select Xcode (.xcode-version)
-        run: scripts/ci/select-xcode.sh
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Generate project
-        run: xcodegen generate
-      - name: Build the macOS tests
+          fetch-depth: 0
+      - name: Use the original code
+        if: matrix.code == 'original'
+        run: git checkout 11eeafe7c24fa24bb9344d2d155900eac7dbca35 -- Mac/WindowWorkspaceEngine.swift MacTests/WindowTileCaptureRetuneTests.swift && git status --short
+      - run: scripts/ci/select-xcode.sh
+      - run: brew install xcodegen && xcodegen generate
+      - name: Build
+        run: xcodebuild build-for-testing -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac" $XCB_FLAGS
+      - name: Probe stopCapture on never-started streams
         run: |
-          xcodebuild build-for-testing -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/mac" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          xcodebuild test-without-building -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/mac" -only-testing:OpenSidecarMacTests/ExpStopCaptureProbe 2>&1 | grep -E "PROBE|passed|failed|error" || true
+      - name: Retune tests, 40 iterations, 3 parallel processes
+        run: |
+          set +e
+          start=$(date +%s)
+          xcodebuild test-without-building -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/mac" -only-testing:OpenSidecarMacTests/WindowTileCaptureRetuneTests \
+            -test-iterations 40 -parallel-testing-enabled YES -parallel-testing-worker-count 3 \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 60 > "$RUNNER_TEMP/retune.log" 2>&1
+          echo "exit=$? seconds=$(( $(date +%s) - start ))"
+          echo "passed=$(grep -c "' passed on" "$RUNNER_TEMP/retune.log") failed=$(grep -c "' failed on" "$RUNNER_TEMP/retune.log")"
+          grep "' failed on" "$RUNNER_TEMP/retune.log" | sed -E "s/.*Test case '([^']+)'.*\(([0-9.]+) seconds\).*/\1 \2s/" | sort | uniq -c
+
+  mac-tests:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        rep: [1, 2, 3]
+        workers: [serial, parallel-3]
+        exclude:
+          - {workers: serial, rep: 2}
+          - {workers: serial, rep: 3}
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Leave out the probe
+        run: rm MacTests/ExpStopCaptureProbe.swift
+      - run: scripts/ci/select-xcode.sh
+      - run: brew install xcodegen && xcodegen generate
+      - name: Build the macOS tests
+        run: xcodebuild build-for-testing -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac" $XCB_FLAGS
       - name: Run the macOS tests
         env:
           TEST_RUNNER_MEOW_REQUIRE_SECURITY_TESTS: "1"
         run: |
           if [ "${{ matrix.workers }}" = serial ]; then par=(-parallel-testing-enabled NO); else par=(-parallel-testing-enabled YES -parallel-testing-worker-count 3); fi
+          set +e
           xcodebuild test-without-building -project MeowDisplay.xcodeproj -scheme OpenSidecarMac -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/mac" "${par[@]}" \
+            -derivedDataPath "$RUNNER_TEMP/mac" "${par[@]}" -resultBundlePath "$RUNNER_TEMP/r.xcresult" \
             -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -maximum-test-execution-time-allowance 600 \
-            2>&1 | tee "$RUNNER_TEMP/test.log"
-          status=${PIPESTATUS[0]}
-          grep -E "Executed [0-9]+ tests|with [0-9]+ failures" "$RUNNER_TEMP/test.log" | tail -3
-          echo "test cases passed: $(grep -c "' passed (" "$RUNNER_TEMP/test.log"), failed: $(grep -c "' failed (" "$RUNNER_TEMP/test.log"), skipped: $(grep -c "' skipped (" "$RUNNER_TEMP/test.log")"
-          xcrun xcresulttool get test-results summary --path "$(ls -d "$RUNNER_TEMP"/mac/Logs/Test/*.xcresult | head -1)" --compact \
-            | jq -c '{result, totalTestCount, passedTests, failedTests, skippedTests, expectedFailures}' || true
+            > "$RUNNER_TEMP/test.log" 2>&1
+          status=$?
+          xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/r.xcresult" --compact | jq -c '{result, totalTestCount, passedTests, failedTests, skippedTests}'
+          xcrun xcresulttool get test-results tests --path "$RUNNER_TEMP/r.xcresult" --compact \
+            | jq -r '.. | objects | select(.nodeType? == "Test Case") | "\(.nodeIdentifier)\t\(.result)"' | sort > "$RUNNER_TEMP/tests.tsv"
+          wc -l < "$RUNNER_TEMP/tests.tsv"
+          grep -v "Passed$" "$RUNNER_TEMP/tests.tsv" || true
+          echo "test identities: $(cut -f1 "$RUNNER_TEMP/tests.tsv" | shasum | cut -c1-12)"
           exit $status
