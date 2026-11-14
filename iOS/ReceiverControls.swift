@@ -430,6 +430,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// The keypad's own ⇧ ⌥ ⌘, apart from the tray's chord. Cleared whenever
     /// the keypad closes and on every input reset.
     @State private var keypadModifiers = ArrowKeypadModifiers()
+    /// The arrow just sent, kept readable for a moment after its key goes up.
+    @State private var arrowPreviewLinger: ArrowKeyPreview?
+    @State private var arrowPreviewLingerTask: Task<Void, Never>?
     @GestureState private var keypadFinger: CGPoint?
     @GestureState private var arrowButtonDrag: CGSize?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -868,16 +871,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .offset(autoHideOffset)
                     .allowsHitTesting(!autoHiding)
                     .animation(.snappy(duration: 0.24), value: arrows.toggle)
-                if let keypad = arrows.keypad {
-                    arrowKeypad(frame: keypad, frozen: computedArrows)
-                        .transition(reduceMotion ? .opacity
-                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
-                }
-                if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
-                    arrowKeypadModifierStrip(frame: strip, placement: placement)
-                        .transition(reduceMotion ? .opacity
-                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
-                }
+                arrowKeypadCluster(arrows, frozen: computedArrows)
             }
             // The full tray's gear fades out with Auto-hide (a tap there
             // first reveals it); the collapsed gear never hides.
@@ -1180,14 +1174,33 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// Shows the combination the finger is currently on — the live chord,
     /// not the shortcut's stored one, so a latched modifier reads correctly.
     private func shortcutHUD(_ action: ShortcutItem) -> some View {
-        Text(interaction.activeChord.hudText(for: action.displayKey))
-        .font(.system(size: 16, weight: .semibold, design: .rounded))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 13)
-        .padding(.vertical, 7)
-        .background(Capsule().fill(.ultraThinMaterial).opacity(0.5))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.3), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 6, y: 1)
+        hudCapsule(interaction.activeChord.hudText(for: action.displayKey))
+    }
+
+    /// The arrow keypad's label: what the next arrow will carry (subdued,
+    /// "⇧ ⌘ ·"), or the arrow just sent ("⇧ ⌘ ↓"). It reports what MEOW
+    /// sent, never a Mac acknowledgement (the protocol has none). Repeats of
+    /// a held key don't change it, so holding never flickers.
+    private func arrowPreviewHUD(_ preview: ArrowKeyPreview) -> some View {
+        hudCapsule(preview.text, subdued: !preview.isSent)
+            .accessibilityElement()
+            .accessibilityLabel(Text(preview.spokenText))
+            .accessibilityIdentifier("arrowKeyPreview")
+    }
+
+    /// One look for every key preview: the shortcut palettes' and the arrow
+    /// keypad's. `subdued`: an intention, not yet sent.
+    private func hudCapsule(_ text: String, subdued: Bool = false) -> some View {
+        Text(text)
+            .font(.system(size: 16, weight: .semibold, design: .rounded))
+            .foregroundStyle(.white.opacity(subdued ? 0.7 : 1))
+            .padding(.horizontal, 13)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(.ultraThinMaterial).opacity(subdued ? 0.35 : 0.5))
+            .overlay(Capsule().strokeBorder(.white.opacity(subdued ? 0.22 : 0.3),
+                                            style: StrokeStyle(lineWidth: subdued ? 1 : 0.5,
+                                                               dash: subdued ? [3, 3] : [])))
+            .shadow(color: .black.opacity(0.3), radius: 6, y: 1)
     }
 
     private func frameReader(_ id: String) -> some View {
@@ -1426,33 +1439,82 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .accessibilityIdentifier("arrowKeysButton")
     }
 
+    /// The open keypad: a near-miss catcher under the whole block, the T,
+    /// the ⇧ ⌥ ⌘ strip and the key preview above them. Nothing while closed.
+    @ViewBuilder
+    private func arrowKeypadCluster(_ arrows: ArrowKeysLayout, frozen: ArrowKeysLayout?) -> some View {
+        if let keypad = arrows.keypad {
+            let block = arrows.modifiers.map { keypad.union($0) } ?? keypad
+            let key = arrows.key ?? Metrics.arrowKey
+            let appear: AnyTransition = reduceMotion ? .opacity
+                : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity)
+            arrowKeypadNearMissCatcher(block)
+            arrowKeypad(frame: keypad, frozen: frozen, key: key)
+                .transition(appear)
+            if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
+                arrowKeypadModifierStrip(frame: strip, placement: placement, key: key)
+                    .transition(appear)
+            }
+            if let preview = arrowKeyPreview {
+                arrowPreviewHUD(preview)
+                    .position(x: min(max(block.midX, 70), containerSize.width - 70),
+                              y: max(safeInsets.top + 20, block.minY - 24))
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// Touches inside the keypad's block that miss every key (the T's empty
+    /// corners, the gaps) do nothing here, instead of clicking the Mac and
+    /// closing the keypad, which would also drop every modifier.
+    private func arrowKeypadNearMissCatcher(_ block: CGRect) -> some View {
+        Color.clear
+            .frame(width: block.width, height: block.height)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0))
+            .position(x: block.midX, y: block.midY)
+            .accessibilityHidden(true)
+    }
+
+    /// See `ArrowKeyPreview.current`.
+    private var arrowKeyPreview: ArrowKeyPreview? {
+        ArrowKeyPreview.current(held: arrowHold.held, heldModifiers: arrowHold.heldModifiers,
+                                lingering: arrowPreviewLinger,
+                                armed: keypadModifiersAvailable ? keypadModifiers.latched : [])
+    }
+
     /// ↑ above ← ↓ →. One drag covers the whole T, so a finger can slide
-    /// from key to key; the empty top corners pass touches to the Mac.
+    /// from key to key; the empty top corners fall to the near-miss catcher.
     /// `frozen` is this pass's layout, kept while a finger is down.
-    private func arrowKeypad(frame: CGRect, frozen: ArrowKeysLayout?) -> some View {
-        let keys = ArrowKeypadGeometry.keyFrames(key: Metrics.arrowKey, gap: Metrics.arrowGap)
+    private func arrowKeypad(frame: CGRect, frozen: ArrowKeysLayout?, key: CGFloat) -> some View {
+        let keys = ArrowKeypadGeometry.keyFrames(key: key, gap: Metrics.arrowGap)
         let half = Metrics.arrowGap / 2
         return ZStack(alignment: .topLeading) {
             ForEach(ArrowKeyDirection.allCases) { direction in
-                let key = keys[direction] ?? .zero
-                arrowKey(direction, pressed: arrowHold.held == direction)
-                    .position(x: key.midX, y: key.midY)
+                let frame = keys[direction] ?? .zero
+                arrowKey(direction, pressed: arrowHold.held == direction, key: key)
+                    .position(x: frame.midX, y: frame.midY)
             }
         }
         .frame(width: frame.width, height: frame.height, alignment: .topLeading)
         .contentShape(ControlRegionShape(rects: ArrowKeyDirection.allCases.compactMap {
             keys[$0]?.insetBy(dx: -half, dy: -half)
         }))
+        // The key goes down from inside the gesture callback, not from an
+        // `onChange` after the next render: a tap whose down and up land
+        // before a render (a fast tap, a busy main thread) still sends.
         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
-            .updating($keypadFinger) { value, state, _ in state = value.location }
+            .updating($keypadFinger) { value, state, _ in
+                state = value.location
+                if heldArrowLayout == nil { heldArrowLayout = frozen }
+                arrowFinger(on: ArrowKeypadGeometry.direction(at: value.location, key: key,
+                                                              gap: Metrics.arrowGap))
+            }
             .onEnded { _ in releaseArrowKey() })
         // `@GestureState` resets on a cancelled touch too, where `onEnded`
         // never runs: this is what guarantees the key up.
         .onChange(of: keypadFinger) { location in
-            if location != nil, heldArrowLayout == nil { heldArrowLayout = frozen }
-            arrowFinger(on: location.flatMap {
-                ArrowKeypadGeometry.direction(at: $0, key: Metrics.arrowKey, gap: Metrics.arrowGap)
-            })
             if location == nil { releaseArrowKey() }
         }
         .position(x: frame.midX, y: frame.midY)
@@ -1461,14 +1523,14 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .accessibilityIdentifier("arrowKeypad")
     }
 
-    private func arrowKey(_ direction: ArrowKeyDirection, pressed: Bool) -> some View {
+    private func arrowKey(_ direction: ArrowKeyDirection, pressed: Bool, key: CGFloat) -> some View {
         // VoiceOver hears which of the keypad's own modifiers the key adds.
         let modifiers = keypadModifiersAvailable
             ? ArrowKeypadModifiers.keys.filter(keypadModifiers.active.contains).map(\.title) : []
         return Image(systemName: direction.symbol)
             .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(pressed ? Color.black : Color.white)
-            .frame(width: Metrics.arrowKey, height: Metrics.arrowKey)
+            .frame(width: key, height: key)
             .background(chip(selected: pressed))
             .scaleEffect(pressed && !reduceMotion ? 0.94 : 1)
             .animation(.snappy(duration: 0.1), value: pressed)
@@ -1480,26 +1542,22 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .trayButtonAccessibility { pressKeypadArrowOnce(direction) }
     }
 
-    /// The keypad's own ⇧ ⌥ ⌘: a column beside the T or a row under it.
-    /// Capsules, unlike the round tray keys, and lit while they apply.
-    private func arrowKeypadModifierStrip(frame: CGRect, placement: ArrowKeypadModifierPlacement) -> some View {
+    /// The keypad's own ⇧ ⌥ ⌘: a row over the T (preferred), a column
+    /// beside it, or a row under it. Rounded squares the size of an arrow
+    /// key, lit (with a dot) while on.
+    private func arrowKeypadModifierStrip(frame: CGRect, placement: ArrowKeypadModifierPlacement,
+                                          key: CGFloat) -> some View {
         let keys = ArrowKeypadGeometry.modifierKeyFrames(in: CGRect(origin: .zero, size: frame.size),
-                                                         placement: placement,
-                                                         key: Metrics.arrowKey, gap: Metrics.arrowGap)
-        let between = ArrowKeypadGeometry.modifierGap(placement, key: Metrics.arrowKey, gap: Metrics.arrowGap)
+                                                         placement: placement, key: key, gap: Metrics.arrowGap)
+        let hit = ArrowKeypadGeometry.touchSize(key: key, gap: Metrics.arrowGap)
         let available = keypadModifiersAvailable
         return ZStack(alignment: .topLeading) {
             ForEach(ArrowKeypadModifiers.keys) { modifier in
                 let key = keys[modifier] ?? .zero
                 ArrowKeypadModifierKey(
-                    modifier: modifier, size: key.size,
-                    hitSize: CGSize(width: key.width + between, height: key.height + between),
+                    modifier: modifier, size: key.size, hitSize: hit,
                     latched: keypadModifiers.latched.contains(modifier),
-                    touched: keypadModifiers.touched[modifier] != nil,
                     available: available, reduceMotion: reduceMotion,
-                    onTouchDown: { keypadModifierTouched(modifier) },
-                    onLift: { keypadModifierLifted(modifier) },
-                    onCancel: { keypadModifiers.cancelTouch(modifier) },
                     onToggle: { toggleKeypadModifier(modifier) })
                     .position(x: key.midX, y: key.midY)
             }
@@ -1512,20 +1570,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .accessibilityIdentifier("arrowKeypadModifiers")
     }
 
-    private func keypadModifierTouched(_ modifier: ControlModifier) {
-        guard keypadModifiersAvailable else { return }
-        haptics.prepareForModifier()
-        store.beginAutoHideActivity()
-        keypadModifiers.touchDown(modifier)
-    }
-
-    private func keypadModifierLifted(_ modifier: ControlModifier) {
-        if keypadModifiers.lift(modifier) { haptics.play(.latch) }
-    }
-
-    /// VoiceOver, Voice Control and Switch Control: a tap toggles the latch.
+    /// A touch on a keypad modifier (on touch down), or a tap from
+    /// VoiceOver, Voice Control or Switch Control: turns it on or off.
     private func toggleKeypadModifier(_ modifier: ControlModifier) {
         guard keypadModifiersAvailable, keypadModifiers.toggle(modifier) else { return }
+        store.beginAutoHideActivity()
         haptics.play(.latch)
     }
 
@@ -1576,6 +1625,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let modifiers = direction == nil ? [] : keypadModifiers.keyDown(available: keypadModifiersAvailable)
         let events = arrowHold.move(to: direction, now: CACurrentMediaTime(), modifiers: modifiers)
         guard !events.isEmpty else { return }
+        if let sent = events.lazy.compactMap({ event -> ArrowKeyPreview? in
+            if case .down(let d, let m) = event { return .sent(d, m) } else { return nil }
+        }).first {
+            arrowPreviewLingerTask?.cancel()
+            arrowPreviewLinger = sent
+        }
         if events.contains(where: { if case .down = $0 { return true } else { return false } }) {
             store.beginAutoHideActivity()
             // One tick per key, never one per repeat.
@@ -1607,7 +1662,15 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func releaseArrowKey() {
         arrowRepeatTask?.cancel()
         arrowRepeatTask = nil
-        if let event = arrowHold.release() { sendArrowEvents([event]) }
+        if let event = arrowHold.release() {
+            sendArrowEvents([event])
+            arrowPreviewLingerTask?.cancel()
+            arrowPreviewLingerTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(ArrowKeyPreview.linger))
+                guard !Task.isCancelled else { return }
+                arrowPreviewLinger = nil
+            }
+        }
         heldArrowLayout = nil
     }
 
@@ -1617,6 +1680,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func resetArrowKeypad() {
         releaseArrowKey()
         keypadModifiers.clear()
+        arrowPreviewLingerTask?.cancel()
+        arrowPreviewLinger = nil
     }
 
     private func closeArrowKeys() {
@@ -1871,16 +1936,7 @@ extension ReceiverControlOverlay {
             if let barArrows {
                 let arrows = barArrows.shown
                 arrowKeysButton(frame: arrows.toggle, onBar: true)
-                if let keypad = arrows.keypad {
-                    arrowKeypad(frame: keypad, frozen: barArrows.computed)
-                        .transition(reduceMotion ? .opacity
-                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
-                }
-                if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
-                    arrowKeypadModifierStrip(frame: strip, placement: placement)
-                        .transition(reduceMotion ? .opacity
-                                    : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity))
-                }
+                arrowKeypadCluster(arrows, frozen: barArrows.computed)
             }
         }
         .coordinateSpace(name: "receiverControls")
@@ -2685,60 +2741,60 @@ struct PadChip: View {
 private struct ArrowKeypadModifierKey: View {
     let modifier: ControlModifier
     let size: CGSize
-    /// The touch area: the key plus half the gap to each neighbour.
+    /// The touch area: the key plus half the gap to each neighbour, the
+    /// same 46pt as an arrow key.
     let hitSize: CGSize
     let latched: Bool
-    let touched: Bool
     /// False on an older Mac while a tray modifier is on: dimmed, and its
     /// touches do nothing.
     let available: Bool
     let reduceMotion: Bool
-    let onTouchDown: () -> Void
-    let onLift: () -> Void
-    let onCancel: () -> Void
+    /// Runs once per touch, on touch down.
     let onToggle: () -> Void
 
+    /// True from touch down until the touch ends or is cancelled. Only for
+    /// the pressed look: the toggle itself already happened.
     @GestureState private var down = false
 
     var body: some View {
-        let on = available && (latched || touched)
+        let on = available && latched
         Text(modifier.symbol)
-            .font(.system(size: size.height * 0.56, weight: .semibold))
+            .font(.system(size: 19, weight: .semibold))
             .foregroundStyle(on ? Color.black : Color.white)
             .frame(width: size.width, height: size.height)
             .background(
-                Capsule()
+                RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
                     .fill(.ultraThinMaterial)
-                    .opacity(on ? 0.9 : 0.45)
-                    .overlay(Capsule().fill(on ? Color.white.opacity(0.86) : Color.white.opacity(0.07)))
-                    .overlay(Capsule().strokeBorder(.white.opacity(on ? 0.6 : 0.28), lineWidth: on ? 1 : 0.5))
+                    .opacity(on ? 0.95 : 0.45)
+                    .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
+                        .fill(on ? Color.white.opacity(0.9) : Color.white.opacity(0.07)))
+                    .overlay(RoundedRectangle(cornerRadius: size.height * 0.3, style: .continuous)
+                        .strokeBorder(.white.opacity(on ? 0.7 : 0.28), lineWidth: on ? 1 : 0.5))
                     .shadow(color: .black.opacity(0.28), radius: 5, y: 1))
-            .scaleEffect(touched && !reduceMotion ? 0.94 : 1)
-            .animation(.snappy(duration: 0.1), value: on)
+            // A small dot under the symbol while it's on, so the state reads
+            // without relying on the fill alone (Differentiate Without Color,
+            // Smart Invert).
+            .overlay(alignment: .bottom) {
+                if on {
+                    Circle().fill(Color.black.opacity(0.75)).frame(width: 4, height: 4).padding(.bottom, 5)
+                }
+            }
+            .scaleEffect(down && !reduceMotion ? 0.94 : 1)
+            .animation(reduceMotion ? nil : .snappy(duration: 0.08), value: on)
             .opacity(available ? 1 : 0.38)
             .frame(width: hitSize.width, height: hitSize.height)
             .contentShape(Rectangle())
+            // The toggle runs inside the gesture callback on the first touch
+            // event, not after a render: no wait for lift, and a fast tap
+            // can't slip between renders. `@GestureState` resets on end and
+            // on a system cancel, so every touch toggles exactly once.
             .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                .updating($down) { _, state, _ in state = true }
-                .onEnded { value in
-                    // Lifting off the key cancels, like a button.
-                    if CGRect(origin: .zero, size: hitSize).insetBy(dx: -12, dy: -12).contains(value.location) {
-                        onLift()
-                    } else {
-                        onCancel()
-                    }
+                .updating($down) { _, state, _ in
+                    guard !state else { return }
+                    state = true
+                    onToggle()
                 })
-            // `@GestureState` resets on a cancelled touch too, where `onEnded`
-            // never runs. The hop lets a normal lift's `onEnded` go first; it
-            // leaves nothing for this cancel to undo.
-            .onChange(of: down) { isDown in
-                if isDown {
-                    onTouchDown()
-                } else {
-                    DispatchQueue.main.async { onCancel() }
-                }
-            }
-            // Unavailable keys still take their touches (the callbacks ignore
+            // Unavailable keys still take their touches (the callback ignores
             // them), so a tap on a dimmed key never lands on the Mac.
             .accessibilityElement()
             .accessibilityLabel(Text("\(modifier.title) for Arrows",

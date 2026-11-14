@@ -436,21 +436,16 @@ final class ArrowKeyNavigationTests: XCTestCase {
         XCTAssertFalse(layout.keypad!.intersects(occlusion.frame))
     }
 
-    // MARK: - Keypad modifiers: tap, latch, hold
+    // MARK: - Keypad modifiers: tap to toggle
 
-    func testATapLatchesAModifierAndASecondTapUnlatchesIt() {
+    func testATouchTurnsAModifierOnAndTheNextTouchTurnsItOff() {
         var modifiers = ArrowKeypadModifiers()
-        modifiers.touchDown(.shift)
-        XCTAssertEqual(modifiers.active, [.shift], "on while the finger is down")
-        XCTAssertTrue(modifiers.lift(.shift))
-        XCTAssertEqual(modifiers.latched, [.shift])
-        XCTAssertEqual(modifiers.active, [.shift], "a latch stays on after the lift")
+        XCTAssertTrue(modifiers.toggle(.shift))
+        XCTAssertEqual(modifiers.latched, [.shift], "on at once, no lift needed")
         XCTAssertEqual(modifiers.keyDown(available: true), [.shift])
-        XCTAssertEqual(modifiers.keyDown(available: true), [.shift], "and applies to every arrow")
-
-        modifiers.touchDown(.shift)
-        XCTAssertTrue(modifiers.lift(.shift))
-        XCTAssertTrue(modifiers.latched.isEmpty)
+        XCTAssertEqual(modifiers.keyDown(available: true), [.shift], "and applies to every arrow until turned off")
+        XCTAssertTrue(modifiers.toggle(.shift))
+        XCTAssertTrue(modifiers.isEmpty)
         XCTAssertEqual(modifiers.keyDown(available: true), [])
     }
 
@@ -460,63 +455,26 @@ final class ArrowKeyNavigationTests: XCTestCase {
         modifiers.toggle(.shift)
         modifiers.toggle(.option)
         XCTAssertEqual(modifiers.keyDown(available: true), [.shift, .option, .command])
+        modifiers.toggle(.option)
+        XCTAssertEqual(modifiers.keyDown(available: true), [.shift, .command], "turning one off leaves the others")
         XCTAssertEqual(ArrowKeypadModifiers.wireNames([.shift, .option, .command]), ["command", "option", "shift"])
         XCTAssertEqual(ArrowKeypadModifiers.wireNames([.shift]), ["shift"])
         XCTAssertEqual(ArrowKeypadModifiers.wireNames([]), [])
     }
 
-    func testHoldingAModifierAppliesItOnlyWhileHeld() {
+    func testAnArrowNeverChangesWhichModifiersAreOn() {
+        // The old hold mode: an arrow pressed while a modifier was touched
+        // stopped it latching. Now nothing an arrow does changes them.
         var modifiers = ArrowKeypadModifiers()
-        modifiers.touchDown(.option)
-        XCTAssertEqual(modifiers.keyDown(available: true), [.option], "an arrow pressed while ⌥ is held")
-        XCTAssertFalse(modifiers.lift(.option), "a hold that carried an arrow doesn't latch")
-        XCTAssertTrue(modifiers.isEmpty)
-        XCTAssertEqual(modifiers.keyDown(available: true), [])
-    }
-
-    func testAHoldOnALatchedModifierKeepsTheLatch() {
-        var modifiers = ArrowKeypadModifiers()
-        modifiers.toggle(.command)
-        modifiers.touchDown(.command)
-        XCTAssertEqual(modifiers.keyDown(available: true), [.command])
-        XCTAssertFalse(modifiers.lift(.command))
-        XCTAssertEqual(modifiers.latched, [.command])
-    }
-
-    func testHoldingOneWhileAnotherIsLatched() {
-        var modifiers = ArrowKeypadModifiers()
-        modifiers.toggle(.shift)
-        modifiers.touchDown(.command)
-        XCTAssertEqual(modifiers.keyDown(available: true), [.shift, .command])
-        modifiers.lift(.command)
-        XCTAssertEqual(modifiers.keyDown(available: true), [.shift])
-    }
-
-    func testSlidingOffOrACancelledTouchChangesNothing() {
-        var modifiers = ArrowKeypadModifiers()
-        modifiers.touchDown(.shift)
-        modifiers.cancelTouch(.shift)
-        XCTAssertTrue(modifiers.isEmpty)
-        // A late lift after the cancel finds nothing to toggle.
-        XCTAssertFalse(modifiers.lift(.shift))
-        XCTAssertTrue(modifiers.latched.isEmpty)
-
         modifiers.toggle(.option)
-        modifiers.touchDown(.option)
-        modifiers.cancelTouch(.option)
-        XCTAssertEqual(modifiers.latched, [.option], "a cancelled touch never unlatches")
-    }
-
-    func testALiftWithoutATouchDoesNothing() {
-        var modifiers = ArrowKeypadModifiers()
-        XCTAssertFalse(modifiers.lift(.shift))
-        XCTAssertTrue(modifiers.isEmpty)
+        _ = modifiers.keyDown(available: true)
+        _ = modifiers.keyDown(available: false)
+        XCTAssertEqual(modifiers.latched, [.option])
     }
 
     func testOnlyShiftOptionAndCommandBelongToTheKeypad() {
         XCTAssertEqual(ArrowKeypadModifiers.keys, [.shift, .option, .command])
         var modifiers = ArrowKeypadModifiers()
-        modifiers.touchDown(.control)
         XCTAssertFalse(modifiers.toggle(.control))
         XCTAssertTrue(modifiers.isEmpty)
     }
@@ -524,13 +482,10 @@ final class ArrowKeyNavigationTests: XCTestCase {
     func testClosingTheKeypadOrAResetClearsEverything() {
         var modifiers = ArrowKeypadModifiers()
         modifiers.toggle(.shift)
-        modifiers.touchDown(.command)
+        modifiers.toggle(.command)
         modifiers.clear()
         XCTAssertTrue(modifiers.isEmpty)
         XCTAssertEqual(modifiers.keyDown(available: true), [])
-        // A finger still on a key when the keypad closed lifts into nothing.
-        XCTAssertFalse(modifiers.lift(.command))
-        XCTAssertTrue(modifiers.isEmpty)
     }
 
     // MARK: - Keypad modifiers: an older Mac
@@ -549,7 +504,7 @@ final class ArrowKeyNavigationTests: XCTestCase {
     func testUnavailableModifiersAreDroppedNotHidden() {
         var modifiers = ArrowKeypadModifiers()
         modifiers.toggle(.shift)
-        modifiers.touchDown(.option)
+        modifiers.toggle(.option)
         XCTAssertFalse(modifiers.reconcile(available: true), "nothing changes while available")
         XCTAssertEqual(modifiers.active, [.shift, .option])
         // A tray modifier on an older Mac: the arrow carries none of the
@@ -576,6 +531,9 @@ final class ArrowKeyNavigationTests: XCTestCase {
         XCTAssertEqual(hold.tick(now: ArrowKeyHold.initialDelay), .repeat(.right, modifiers: [.shift]))
         XCTAssertEqual(hold.release(), .up(.right, modifiers: [.shift]))
         XCTAssertTrue(hold.heldModifiers.isEmpty)
+        // The next arrow takes the new set.
+        XCTAssertEqual(hold.move(to: .left, now: 1, modifiers: modifiers.keyDown(available: true)),
+                       [.down(.left, modifiers: [.command])])
     }
 
     func testSlidingToAnotherKeyReleasesWithTheOldModifiersAndPressesWithTheNew() {
@@ -594,18 +552,68 @@ final class ArrowKeyNavigationTests: XCTestCase {
         XCTAssertEqual(hold.release(), .up(.up, modifiers: []))
     }
 
-    // MARK: - Keypad modifiers: geometry
-
-    func testTheModifierStripMatchesTheT() {
-        XCTAssertEqual(ArrowKeypadGeometry.modifierKeySize(key: 42), CGSize(width: 42, height: 28))
-        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.leading, key: 42, gap: 4), CGSize(width: 42, height: 88))
-        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.trailing, key: 42, gap: 4), CGSize(width: 42, height: 88))
-        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.below, key: 42, gap: 4), CGSize(width: 134, height: 28))
-        XCTAssertEqual(ArrowKeypadGeometry.blockSize(.leading, key: 42, gap: 4), CGSize(width: 180, height: 88))
-        XCTAssertEqual(ArrowKeypadGeometry.blockSize(.below, key: 42, gap: 4), CGSize(width: 134, height: 120))
+    func testAQuickTapIsOneDownAndOneUp() {
+        // Down and up in the same instant (the gesture runs both before any
+        // render): exactly one press reaches the Mac, never zero or a repeat.
+        var hold = ArrowKeyHold()
+        XCTAssertEqual(hold.move(to: .up, now: 5, modifiers: [.command]), [.down(.up, modifiers: [.command])])
+        XCTAssertNil(hold.tick(now: 5))
+        XCTAssertEqual(hold.release(), .up(.up, modifiers: [.command]))
+        XCTAssertNil(hold.release(), "a second release (onEnded, then the gesture state reset) sends nothing")
     }
 
-    func testTheBlockSplitsIntoTheTAndAStripOnTheChosenSide() {
+    // MARK: - Key preview
+
+    func testThePreviewNamesTheModifiersInMacOrderThenTheArrow() {
+        XCTAssertEqual(ArrowKeyPreview.sent(.up, []).text, "↑")
+        XCTAssertEqual(ArrowKeyPreview.sent(.up, [.shift]).text, "⇧ ↑")
+        XCTAssertEqual(ArrowKeyPreview.sent(.right, [.option]).text, "⌥ →")
+        XCTAssertEqual(ArrowKeyPreview.sent(.left, [.command]).text, "⌘ ←")
+        XCTAssertEqual(ArrowKeyPreview.sent(.down, [.command, .shift]).text, "⇧ ⌘ ↓")
+        XCTAssertEqual(ArrowKeyPreview.sent(.down, [.command, .shift, .option]).text, "⌥ ⇧ ⌘ ↓")
+        XCTAssertEqual(ArrowKeyPreview.sent(.down, [.command, .shift]).spokenText, "Shift Command Down Arrow")
+    }
+
+    func testArmedModifiersAreAnIntentionNotASentKey() {
+        let armed = ArrowKeyPreview.armed([.shift, .command])
+        XCTAssertEqual(armed.text, "⇧ ⌘ ·")
+        XCTAssertFalse(armed.isSent)
+        XCTAssertTrue(ArrowKeyPreview.sent(.up, []).isSent)
+    }
+
+    func testWhichPreviewShows() {
+        // Nothing on, nothing held: nothing.
+        XCTAssertNil(ArrowKeyPreview.current(held: nil, heldModifiers: [], lingering: nil, armed: []))
+        // Modifiers on: what the next arrow will carry.
+        XCTAssertEqual(ArrowKeyPreview.current(held: nil, heldModifiers: [], lingering: nil, armed: [.shift]),
+                       .armed([.shift]))
+        // A held key wins, with the modifiers it went down with (not the
+        // ones on now), so repeats never change the label.
+        XCTAssertEqual(ArrowKeyPreview.current(held: .down, heldModifiers: [.shift], lingering: nil, armed: [.command]),
+                       .sent(.down, [.shift]))
+        // Just released: the sent key lingers over the armed state.
+        XCTAssertEqual(ArrowKeyPreview.current(held: nil, heldModifiers: [], lingering: .sent(.up, [.shift]),
+                                               armed: [.shift]),
+                       .sent(.up, [.shift]))
+        XCTAssertGreaterThan(ArrowKeyPreview.linger, 0.3)
+        XCTAssertLessThan(ArrowKeyPreview.linger, 1.5)
+    }
+
+    // MARK: - Keypad modifiers: geometry
+
+    func testModifierKeysAreAsBigAsArrowKeys() {
+        XCTAssertEqual(ArrowKeypadGeometry.modifierKeySize(key: 42), CGSize(width: 42, height: 42))
+        XCTAssertEqual(ArrowKeypadGeometry.touchSize(key: 42, gap: 4), CGSize(width: 46, height: 46))
+        XCTAssertGreaterThanOrEqual(ArrowKeypadGeometry.touchSize(key: 42, gap: 4).height, 44, "HIG minimum")
+        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.above, key: 42, gap: 4), CGSize(width: 134, height: 42))
+        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.below, key: 42, gap: 4), CGSize(width: 134, height: 42))
+        XCTAssertEqual(ArrowKeypadGeometry.modifierStripSize(.leading, key: 42, gap: 4), CGSize(width: 88, height: 88))
+        XCTAssertEqual(ArrowKeypadGeometry.blockSize(.above, key: 42, gap: 4), CGSize(width: 134, height: 134))
+        XCTAssertEqual(ArrowKeypadGeometry.blockSize(.below, key: 42, gap: 4), CGSize(width: 134, height: 134))
+        XCTAssertEqual(ArrowKeypadGeometry.blockSize(.trailing, key: 42, gap: 4), CGSize(width: 226, height: 88))
+    }
+
+    func testTheBlockSplitsIntoTheTAndItsModifiers() {
         let key: CGFloat = 42, gap: CGFloat = 4
         let t = ArrowKeypadGeometry.size(key: key, gap: gap)
         for placement in ArrowKeypadModifierPlacement.allCases {
@@ -617,22 +625,23 @@ final class ArrowKeyNavigationTests: XCTestCase {
             XCTAssertTrue(block.contains(parts.modifiers), "\(placement)")
             XCTAssertFalse(parts.keypad.intersects(parts.modifiers), "\(placement)")
             switch placement {
+            case .above:
+                XCTAssertEqual(parts.keypad.minY - parts.modifiers.maxY, gap)
+                XCTAssertEqual(parts.modifiers.width, parts.keypad.width)
+            case .below:
+                XCTAssertEqual(parts.modifiers.minY - parts.keypad.maxY, gap)
+                XCTAssertEqual(parts.modifiers.width, parts.keypad.width)
             case .leading:
                 XCTAssertEqual(parts.keypad.minX - parts.modifiers.maxX, gap)
-                XCTAssertEqual(parts.modifiers.minY, parts.keypad.minY)
                 XCTAssertEqual(parts.modifiers.height, parts.keypad.height)
             case .trailing:
                 XCTAssertEqual(parts.modifiers.minX - parts.keypad.maxX, gap)
-                XCTAssertEqual(parts.modifiers.minY, parts.keypad.minY)
-            case .below:
-                XCTAssertEqual(parts.modifiers.minY - parts.keypad.maxY, gap)
-                XCTAssertEqual(parts.modifiers.minX, parts.keypad.minX)
-                XCTAssertEqual(parts.modifiers.width, parts.keypad.width)
+                XCTAssertEqual(parts.modifiers.height, parts.keypad.height)
             }
         }
     }
 
-    func testModifierKeysStackInOrderAndFillTheirStrip() {
+    func testModifierKeysSitInReadingOrderWithoutOverlapping() {
         let key: CGFloat = 42, gap: CGFloat = 4
         for placement in ArrowKeypadModifierPlacement.allCases {
             let strip = CGRect(origin: CGPoint(x: 10, y: 20),
@@ -642,23 +651,21 @@ final class ArrowKeyNavigationTests: XCTestCase {
             XCTAssertEqual(ordered.count, 3)
             for (index, frame) in ordered.enumerated() {
                 XCTAssertTrue(strip.contains(frame), "\(placement)")
-                XCTAssertEqual(frame.size, CGSize(width: 42, height: 28))
-                if index > 0 {
-                    let previous = ordered[index - 1]
-                    XCTAssertFalse(previous.intersects(frame))
-                    if placement.isColumn {
-                        XCTAssertLessThan(previous.maxY, frame.minY, "⇧ above ⌥ above ⌘")
-                    } else {
-                        XCTAssertLessThan(previous.maxX, frame.minX, "⇧ ⌥ ⌘ left to right")
-                    }
+                XCTAssertEqual(frame.size, CGSize(width: 42, height: 42))
+                for other in ordered[..<index] {
+                    // Touch areas (key + half the gap each side) never overlap.
+                    XCTAssertFalse(other.insetBy(dx: -gap / 2 + 0.01, dy: -gap / 2 + 0.01)
+                        .intersects(frame.insetBy(dx: -gap / 2 + 0.01, dy: -gap / 2 + 0.01)), "\(placement)")
                 }
             }
-            // The three keys span the strip exactly.
-            if placement.isColumn {
-                XCTAssertEqual(ordered[0].minY, strip.minY)
-                XCTAssertEqual(ordered[2].maxY, strip.maxY, accuracy: 0.001)
+            XCTAssertLessThan(ordered[0].minX, ordered[1].minX, "⇧ left of ⌥")
+            if placement.isBeside {
+                XCTAssertGreaterThan(ordered[2].minY, ordered[0].minY, "⌘ under ⇧ ⌥")
+                // ⌘ sits on the side nearest the T.
+                if placement == .leading { XCTAssertEqual(ordered[2].maxX, strip.maxX) }
+                else { XCTAssertEqual(ordered[2].minX, strip.minX) }
             } else {
-                XCTAssertEqual(ordered[0].minX, strip.minX)
+                XCTAssertLessThan(ordered[1].maxX, ordered[2].minX, "⇧ ⌥ ⌘ left to right")
                 XCTAssertEqual(ordered[2].maxX, strip.maxX, accuracy: 0.001)
             }
         }
@@ -666,26 +673,23 @@ final class ArrowKeyNavigationTests: XCTestCase {
 
     // MARK: - Keypad modifiers: placement among the other controls
 
-    func testInPortraitTheModifiersAreAColumnBesideTheTOnTheSideWithRoom() {
-        for side in LandscapeTraySide.allCases {
-            let scene = phone(portrait: true, arrowSide: side, keypadOpen: true, withModifiers: true)
-            assertClear(scene)
-            let toggle = scene.arrows.toggle
-            let keypad = try! XCTUnwrap(scene.arrows.keypad)
-            let modifiers = try! XCTUnwrap(scene.arrows.modifiers)
-            // Toward the middle of the screen, where there is room.
-            XCTAssertEqual(scene.arrows.modifierPlacement, side == .trailing ? .leading : .trailing, "\(side)")
-            if side == .trailing {
-                XCTAssertEqual(keypad.minX - modifiers.maxX, 4, accuracy: 0.5)
-            } else {
-                XCTAssertEqual(modifiers.minX - keypad.maxX, 4, accuracy: 0.5)
+    func testTheModifiersPreferARowOverTheT() {
+        for portrait in [true, false] {
+            for side in LandscapeTraySide.allCases {
+                let scene = phone(portrait: portrait, arrowSide: side, keypadOpen: true, withModifiers: true)
+                assertClear(scene)
+                let toggle = scene.arrows.toggle
+                let keypad = try! XCTUnwrap(scene.arrows.keypad)
+                let modifiers = try! XCTUnwrap(scene.arrows.modifiers)
+                XCTAssertEqual(scene.arrows.modifierPlacement, .above, "\(side) portrait=\(portrait)")
+                XCTAssertEqual(keypad.minY - modifiers.maxY, 4, accuracy: 0.5)
+                XCTAssertEqual(modifiers.minX, keypad.minX, accuracy: 0.5)
+                XCTAssertNil(scene.arrows.key, "full-size keys")
+                // The T still opens above the button, and the row never
+                // borders it.
+                XCTAssertLessThanOrEqual(keypad.maxY, toggle.minY)
+                XCTAssertLessThan(modifiers.maxY, keypad.minY)
             }
-            XCTAssertEqual(modifiers.minY, keypad.minY, accuracy: 0.5, "a compact column, the T's height")
-            XCTAssertEqual(modifiers.height, keypad.height, accuracy: 0.5)
-            // The T still opens above the button and over it.
-            XCTAssertLessThanOrEqual(keypad.maxY, toggle.minY)
-            XCTAssertLessThanOrEqual(keypad.minX, toggle.midX)
-            XCTAssertGreaterThanOrEqual(keypad.maxX, toggle.midX)
         }
     }
 
@@ -721,12 +725,12 @@ final class ArrowKeyNavigationTests: XCTestCase {
     }
 
     func testTheCalculatorAndOtherObstaclesAreAvoided() {
-        // A calculator panel right where the column would go.
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let main = CGRect(x: 20, y: 760, width: 353, height: 44)
         let plain = ControlTrayGeometry.arrowKeysLayoutWithModifiers(
             container: container, safeInsets: .zero, portrait: true, side: .trailing, toggleSize: Self.toggle,
             keypadOpen: true, key: 42, gap: 4, mainTrayFrame: main, obstacles: [main], avoidNotch: false)
+        // A calculator panel right where the row would go.
         let panel = try! XCTUnwrap(plain.modifiers).insetBy(dx: -20, dy: -20)
         let layout = ControlTrayGeometry.arrowKeysLayoutWithModifiers(
             container: container, safeInsets: .zero, portrait: true, side: .trailing, toggleSize: Self.toggle,
@@ -739,16 +743,18 @@ final class ArrowKeyNavigationTests: XCTestCase {
         XCTAssertEqual(layout.toggle, plain.toggle)
     }
 
-    func testWhenNoColumnFitsTheModifiersGoInARowUnderTheT() {
-        // A narrow window: 180 pt of keypad and column don't fit across, 134 do.
-        let container = CGRect(x: 0, y: 0, width: 190, height: 600)
+    func testWhenHeightIsShortTheModifiersGoBesideTheT() {
+        // 200 pt tall: no room for a 134 pt block over the button, but an
+        // 88 pt one fits, with the grid toward the middle.
+        let container = CGRect(x: 0, y: 0, width: 600, height: 200)
         let layout = ControlTrayGeometry.arrowKeysLayoutWithModifiers(
-            container: container, safeInsets: .zero, portrait: true, side: .trailing, toggleSize: Self.toggle,
+            container: container, safeInsets: .zero, portrait: false, side: .trailing, toggleSize: Self.toggle,
             keypadOpen: true, key: 42, gap: 4, mainTrayFrame: .zero, obstacles: [], avoidNotch: false)
-        XCTAssertEqual(layout.modifierPlacement, .below)
+        XCTAssertEqual(layout.modifierPlacement, .leading)
         let keypad = try! XCTUnwrap(layout.keypad), modifiers = try! XCTUnwrap(layout.modifiers)
-        XCTAssertEqual(modifiers.minY - keypad.maxY, 4, accuracy: 0.5)
-        XCTAssertLessThanOrEqual(modifiers.maxY, layout.toggle.minY, "under the T, above the button")
+        XCTAssertEqual(keypad.minX - modifiers.maxX, 4, accuracy: 0.5)
+        XCTAssertEqual(modifiers.height, keypad.height, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(keypad.maxY, layout.toggle.minY)
         XCTAssertTrue(container.insetBy(dx: 12, dy: 12).contains(keypad.union(modifiers)))
     }
 
@@ -757,7 +763,7 @@ final class ArrowKeyNavigationTests: XCTestCase {
         let plain = ControlTrayGeometry.arrowKeysLayoutWithModifiers(
             container: container, safeInsets: .zero, portrait: false, side: .trailing, toggleSize: Self.toggle,
             keypadOpen: true, key: 42, gap: 4, mainTrayFrame: .zero, obstacles: [], avoidNotch: true)
-        // A system-reserved occlusion right where the column would go.
+        // A system-reserved occlusion right where the row would go.
         let occlusion = ControlReservedRegion(kind: .occlusion, frame: try! XCTUnwrap(plain.modifiers).insetBy(dx: -4, dy: -4))
         let layout = ControlTrayGeometry.arrowKeysLayoutWithModifiers(
             container: container, safeInsets: .zero, portrait: false, side: .trailing, toggleSize: Self.toggle,
@@ -769,7 +775,7 @@ final class ArrowKeyNavigationTests: XCTestCase {
 
     // MARK: - Keypad modifiers: the keyboard bar
 
-    func testWithTheKeyboardUpTheModifierColumnOpensWithTheKeypadAboveTheBar() {
+    func testWithTheKeyboardUpTheModifierRowOpensWithTheKeypadAboveTheBar() {
         let safe = CGRect(x: 0, y: 59, width: 393, height: 759)
         let bar = CGRect(x: 23, y: 400, width: 347, height: 44)
         let item = CGRect(x: 290, y: 406, width: 32, height: 32)
@@ -777,28 +783,30 @@ final class ArrowKeyNavigationTests: XCTestCase {
                                                                     key: 42, gap: 4, palette: nil)
         let keypad = try! XCTUnwrap(layout.keypad), modifiers = try! XCTUnwrap(layout.modifiers)
         XCTAssertEqual(layout.toggle, item)
-        XCTAssertEqual(layout.modifierPlacement, .leading, "toward the middle, where there is room")
-        XCTAssertEqual(keypad.minX - modifiers.maxX, 4, accuracy: 0.5)
+        XCTAssertEqual(layout.modifierPlacement, .above)
+        XCTAssertNil(layout.key)
         XCTAssertEqual(keypad.maxY, bar.minY - 10, accuracy: 0.5)
-        XCTAssertEqual(modifiers.maxY, keypad.maxY, accuracy: 0.5)
+        XCTAssertEqual(keypad.minY - modifiers.maxY, 4, accuracy: 0.5)
         for frame in [keypad, modifiers] {
             XCTAssertTrue(safe.insetBy(dx: 12, dy: 12).contains(frame))
             XCTAssertFalse(frame.intersects(bar))
         }
     }
 
-    func testInLandscapeWithTheKeyboardUpTheModifiersAreARowBesideTheBar() {
-        // iPhone landscape: no room above the bar, and 180 pt don't fit beside it.
+    func testInLandscapeWithTheKeyboardUpTheKeysShrinkJustEnoughToFitBesideTheBar() {
+        // iPhone landscape: ~121 pt beside the bar; no full-size block fits.
         let safe = CGRect(x: 59, y: 0, width: 734, height: 372)
         let bar = CGRect(x: 225, y: 89, width: 402, height: 44)
         let item = CGRect(x: 540, y: 95, width: 38, height: 38)
         let layout = ControlTrayGeometry.keyboardBarArrowKeysLayout(safe: safe, bar: bar, item: item,
                                                                     key: 42, gap: 4, palette: nil)
         let keypad = try! XCTUnwrap(layout.keypad), modifiers = try! XCTUnwrap(layout.modifiers)
-        XCTAssertEqual(layout.modifierPlacement, .below)
+        let key = try! XCTUnwrap(layout.key)
+        XCTAssertEqual(key, 37)
+        XCTAssertGreaterThanOrEqual(ArrowKeypadGeometry.touchSize(key: key, gap: 4).height, 41)
+        XCTAssertEqual(layout.modifierPlacement, .above)
         XCTAssertEqual(keypad.minX, bar.maxX + 10, accuracy: 0.5)
-        XCTAssertEqual(modifiers.maxY, bar.maxY, accuracy: 0.5, "bottoms aligned, never over the keyboard")
-        XCTAssertEqual(modifiers.minY - keypad.maxY, 4, accuracy: 0.5)
+        XCTAssertEqual(keypad.maxY, bar.maxY, accuracy: 0.5, "bottoms aligned, never over the keyboard")
         for frame in [keypad, modifiers] {
             XCTAssertTrue(safe.insetBy(dx: 12, dy: 12).contains(frame))
             XCTAssertFalse(frame.intersects(bar))
