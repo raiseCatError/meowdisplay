@@ -8,6 +8,8 @@ on:
   pull_request:
   push:
     branches: [main, dev, 'release/**']
+  # The complete suite, iPhone Duo UI tests included, on any branch, on request.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -63,6 +65,7 @@ jobs:
       android: ${{ steps.classify.outputs.android }}
       release_tooling: ${{ steps.classify.outputs.release_tooling }}
       press_kit: ${{ steps.classify.outputs.press_kit }}
+      ios_ui_tests: ${{ steps.classify.outputs.ios_ui_tests }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -105,6 +108,8 @@ jobs:
             full_ci "the base branch's classifier predates per-job selection"
             exit 0
           fi
+          # Its UI test selection, beside it (a classifier that needs it fails without it).
+          git show 'HEAD^1:scripts/ci/ui_selection.py' > "$RUNNER_TEMP/ui_selection.py" 2>/dev/null || true
           # It writes its selection only once it has one; any failure is full CI.
           selection="$RUNNER_TEMP/selection"
           args=(--github "$selection")
@@ -288,10 +293,12 @@ jobs:
       # simulator runtime and no signing. Skipped (with the gate below) only
       # when the classifier says nothing the iOS app compiles changed: Mac,
       # MacReceiver and MacTests changes.
+      # build-for-testing: the receiver and its UI tests, so a pull request that
+      # breaks the UI tests' build fails here even when no UI test runs on it.
       - name: Build iOS receiver app
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios_build != 'false' }}
         run: |
-          xcodebuild build \
+          xcodebuild build-for-testing \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination 'generic/platform=iOS' \
@@ -348,6 +355,29 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      # Every class, except on a pull request whose selection (ui_selection.py) names
+      # known classes: never narrower on the dev gate, main, release/*, a manual run,
+      # or when the changes job failed.
+      - name: Choose the UI test classes
+        id: select
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          EVENT: ${{ github.event_name }}
+          SELECTED: ${{ needs.changes.outputs.ios_ui_tests }}
+        run: |
+          set -euo pipefail
+          all_classes="DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests"
+          classes=$all_classes
+          if [[ "$CHANGES" == success && "$EVENT" == pull_request && -n "$SELECTED" ]]; then
+            known=true
+            for c in $SELECTED; do [[ " $all_classes " == *" $c "* ]] || known=false; done
+            if [[ "$known" == true ]]; then classes=$SELECTED; fi
+          fi
+          only=()
+          for c in $classes; do only+=("-only-testing:OpenSidecariOSUITests/$c"); done
+          echo "classes=$classes" >> "$GITHUB_OUTPUT"
+          echo "only=${only[*]}" >> "$GITHUB_OUTPUT"
+          echo "Duo UI test classes: $classes" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
       - name: Install XcodeGen
@@ -376,17 +406,30 @@ jobs:
       - name: UI tests on iPhone Duo
         env:
           TEST_RUNNER_MEOW_NO_LIVE_MAC: "1"
+          CLASSES: ${{ steps.select.outputs.classes }}
+          ONLY: ${{ steps.select.outputs.only }}
         run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/ui-tests.log"
+          # shellcheck disable=SC2086 # ONLY is one -only-testing argument per class
           xcodebuild test-without-building \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination "id=${{ steps.duo.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
-            -only-testing:OpenSidecariOSUITests/DemoModeSmokeTests \
-            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests \
-            -only-testing:OpenSidecariOSUITests/LocalCalculatorTourTests \
+            $ONLY \
             -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300
+            -default-test-execution-time-allowance 300 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          # A class that ran nothing (renamed, removed, filtered out) fails, never passes.
+          for class in $CLASSES; do
+            if ! grep -q "Test Suite '$class' started" "$log" \
+                || ! grep -Eq "Test Case '-\[OpenSidecariOSUITests\.$class test[^]]*\]' passed" "$log"; then
+              echo "::error::$class ran no passing test"
+              status=1
+            fi
+          done
+          exit "$status"
 
   # The integration gate's verdict, where people see it: a push to dev whose jobs failed
   # opens (or adds to) one issue, and the first push on which they all pass again closes it.
