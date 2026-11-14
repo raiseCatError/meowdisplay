@@ -15,8 +15,11 @@ import Foundation
 //   - restores (writes 0) only when it still holds its ownership record, the
 //     value is still 1, and nothing it can see suggests another tool now relies
 //     on it — otherwise it asks the person first (fails closed);
-//   - writes only through a per-change macOS administrator prompt. No helper,
-//     no sudoers entry, no stored credentials.
+//   - forgets its claim after a restart (boot session changed): it can't
+//     tell any more who set the value;
+//   - writes only through a per-change macOS administrator prompt, in a
+//     fresh `osascript` process each time (no cached authorization). No
+//     helper, no sudoers entry, no stored credentials.
 // See CLOSED_LID.md.
 
 /// Reads the effective global `SleepDisabled` value. nil = could not read.
@@ -49,6 +52,21 @@ struct ClosedLidOwnershipRecord: Codable, Equatable {
     /// What MEOW read immediately before writing. MEOW only claims ownership
     /// when this was false, so restoring always means writing false.
     var priorSleepDisabled: Bool
+    /// `kern.bootsessionuuid` when MEOW wrote. A record from another boot is
+    /// not trusted: something else may have set the value since.
+    var bootSessionUUID: String? = nil
+}
+
+/// The current boot session (`kern.bootsessionuuid`), or nil.
+enum BootSession {
+    static func current() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else { return nil }
+        let value = String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        return value.isEmpty ? nil : value
+    }
 }
 
 protocol ClosedLidOwnershipStore: AnyObject {
@@ -75,8 +93,9 @@ enum ClosedLidState: Equatable {
     case off
     /// SleepDisabled is 1 and MEOW turned it on.
     case onByMEOW
-    /// SleepDisabled is 1 and MEOW did not turn it on (another app, an
-    /// administrator, or a MEOW record that was lost). MEOW leaves it alone.
+    /// SleepDisabled is 1 and MEOW has no current record of turning it on
+    /// (another app, an administrator, MEOW before a restart, the other MEOW
+    /// build). MEOW leaves it alone unless the person explicitly asks.
     case onExternally
     /// Waiting for the administrator prompt.
     case authorizing
@@ -100,15 +119,23 @@ enum ClosedLidNotice: Equatable {
     case alreadyOnExternally
     /// Restoring would also undo sleep prevention another tool may rely on.
     case confirmRestoreWithUtilities([String])
+    /// The person asked to turn sleep back on although MEOW has no record of
+    /// turning it off: confirm first.
+    case confirmExternalRestore
 }
 
 /// The state machine. Pure apart from the injected seams; never polls.
-final class ClosedLidAvailabilityModel {
+///
+/// Not thread-safe by itself: the controller serializes every call (it makes
+/// no other call while a write it started on a background queue is running),
+/// hence `@unchecked Sendable`.
+final class ClosedLidAvailabilityModel: @unchecked Sendable {
     private let reader: SleepDisabledReading
     private let writer: SleepDisabledWriting
     private let utilities: PowerUtilityDetecting
     private let store: ClosedLidOwnershipStore
     private let now: () -> Date
+    private let bootSession: () -> String?
 
     private(set) var state: ClosedLidState = .unknown
     private(set) var notice: ClosedLidNotice?
@@ -117,12 +144,14 @@ final class ClosedLidAvailabilityModel {
          writer: SleepDisabledWriting,
          utilities: PowerUtilityDetecting,
          store: ClosedLidOwnershipStore,
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         bootSession: @escaping () -> String? = BootSession.current) {
         self.reader = reader
         self.writer = writer
         self.utilities = utilities
         self.store = store
         self.now = now
+        self.bootSession = bootSession
     }
 
     /// Whether MEOW holds an ownership record (it turned the setting on).
@@ -146,10 +175,19 @@ final class ClosedLidAvailabilityModel {
             state = .off
             notice = .restoredOutsideMEOW
         case (true, true):
-            state = .onByMEOW
+            if let recorded = store.record?.bootSessionUUID, let current = bootSession(), recorded != current {
+                // Written before a restart: another tool may have set it
+                // since. Not MEOW's to claim or clear any more.
+                store.record = nil
+                state = .onExternally
+            } else {
+                state = .onByMEOW
+            }
         case (true, false):
             state = .onExternally
         }
+        if state != .onByMEOW, case .confirmRestoreWithUtilities = notice { notice = nil }
+        if state != .onExternally, notice == .confirmExternalRestore { notice = nil }
     }
 
     /// Turn sleep prevention on. Claims ownership only when MEOW changed 0 → 1.
@@ -185,7 +223,8 @@ final class ClosedLidAvailabilityModel {
                 return
             }
             if after {
-                store.record = ClosedLidOwnershipRecord(enabledAt: now(), priorSleepDisabled: false)
+                store.record = ClosedLidOwnershipRecord(enabledAt: now(), priorSleepDisabled: false,
+                                                        bootSessionUUID: bootSession())
                 notice = nil
                 state = .onByMEOW
             } else {
@@ -237,6 +276,33 @@ final class ClosedLidAvailabilityModel {
         }
     }
 
+    /// Step one of turning sleep back on when MEOW has no record of turning
+    /// it off: ask for confirmation (the row explains whose it may be).
+    func requestExternalRestore() {
+        refresh()
+        guard state == .onExternally else { return }
+        notice = .confirmExternalRestore
+    }
+
+    /// The person confirmed: write 0 although MEOW doesn't own the value.
+    /// Only ever called from that explicit confirmation.
+    func restoreExternalAfterConfirmation() {
+        refresh()
+        guard state == .onExternally else { return }
+        state = .authorizing
+        let result = writer.setSleepDisabled(false)
+        state = .unknown
+        switch result {
+        case .cancelled: notice = .authorizationCancelled
+        case .failed(let message): notice = .writeFailed(message)
+        case .success: notice = nil
+        }
+        refresh()
+        if result == .success, notice == nil {
+            if state == .unknown { notice = .readFailed } else if state != .off { notice = .notApplied }
+        }
+    }
+
     func clearNotice() { notice = nil }
 }
 
@@ -244,8 +310,10 @@ final class ClosedLidAvailabilityModel {
 
 /// Parses `pmset -g` output. Exposed for tests.
 enum PmsetSettingsParser {
-    /// Returns the `SleepDisabled` value, or nil when the line is absent or
-    /// malformed (treated as unreadable: MEOW then changes nothing).
+    /// Returns the `SleepDisabled` value. pmset prints the line only once the
+    /// setting has been stored, so on otherwise normal output (it lists
+    /// "Currently in use:") a missing line means 0, the default. nil for a
+    /// malformed value or unrecognised output: MEOW then changes nothing.
     static func sleepDisabled(fromPmsetOutput output: String) -> Bool? {
         for line in output.split(whereSeparator: \.isNewline) {
             let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
@@ -256,7 +324,7 @@ enum PmsetSettingsParser {
             default: return nil
             }
         }
-        return nil
+        return output.contains("Currently in use:") ? false : nil
     }
 }
 
@@ -279,26 +347,38 @@ struct PmsetSleepDisabledReader: SleepDisabledReading {
 
 /// Changes the value through the standard macOS administrator prompt, once per
 /// change. The command is a constant: nothing user-supplied is interpolated.
-/// Must run on the main thread (NSAppleScript is not thread-safe).
+/// Each change runs in a fresh `/usr/bin/osascript` process, so no
+/// authorization is cached between changes (an in-process `do shell script`
+/// keeps it for about five minutes) and the caller needn't be on the main
+/// thread. Blocks until the person answers the prompt.
 struct AdministratorPromptSleepDisabledWriter: SleepDisabledWriting {
     static func script(disabled: Bool) -> String {
         let value = disabled ? "1" : "0"
         let reason = disabled
             ? "MEOW wants to turn off sleep so this Mac stays awake with its lid closed."
-            : "MEOW wants to restore normal sleep on this Mac."
+            : "MEOW wants to turn sleep back on for this Mac."
         return "do shell script \"/usr/bin/pmset -a disablesleep \(value)\" with prompt \"\(reason)\" with administrator privileges"
     }
 
+    /// Maps osascript's exit status and stderr to a result. Exposed for tests.
+    static func result(status: Int32, stderr: String) -> SleepSettingWriteResult {
+        if status == 0 { return .success }
+        if stderr.contains("(-128)") { return .cancelled }
+        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .failed(message.isEmpty ? "macOS refused the change." : message)
+    }
+
     func setSleepDisabled(_ disabled: Bool) -> SleepSettingWriteResult {
-        dispatchPrecondition(condition: .onQueue(.main))
-        guard let script = NSAppleScript(source: Self.script(disabled: disabled)) else {
-            return .failed("Couldn't prepare the request.")
-        }
-        var error: NSDictionary?
-        script.executeAndReturnError(&error)
-        guard let error else { return .success }
-        if (error[NSAppleScript.errorNumber] as? Int) == -128 { return .cancelled }
-        return .failed((error[NSAppleScript.errorMessage] as? String) ?? "macOS refused the change.")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", Self.script(disabled: disabled)]
+        let errors = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errors
+        do { try process.run() } catch { return .failed("Couldn't ask macOS for permission.") }
+        let data = errors.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return Self.result(status: process.terminationStatus, stderr: String(data: data, encoding: .utf8) ?? "")
     }
 }
 
@@ -312,10 +392,14 @@ struct RunningPowerUtilityDetector: PowerUtilityDetecting {
         "com.sindresorhus.Lungo": "Lungo",
         "com.lightheadsw.caffeine": "Caffeine",
         "com.intelliscapesolutions.caffeine": "Caffeine",
+        // The other MEOW build keeps its own record of the same setting.
+        "com.raisecaterror.meowdisplay.mac": "MeowDisplay",
+        "com.raisecaterror.meowdisplay.mac.debug": "MeowDisplay Dev",
     ]
 
     func runningPowerUtilities() -> [String] {
-        let ids = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        return Self.known.filter { ids.contains($0.key) }.map(\.value).sorted()
+        let own = Bundle.main.bundleIdentifier
+        let ids = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)).subtracting([own].compactMap { $0 })
+        return Array(Set(Self.known.filter { ids.contains($0.key) }.map(\.value))).sorted()
     }
 }
