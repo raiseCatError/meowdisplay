@@ -245,6 +245,7 @@ targets:
       - Mac/CanonicalRuntimeStatus.swift
       - Mac/PendingConnectPolicy.swift
       - Mac/KeepMacAvailable.swift
+      - Mac/ClosedLidAvailability.swift
       - Mac/SettingsCategory.swift
       - Mac/ForgetDeviceAction.swift
       - Mac/ReceiverInputAuthorizationStore.swift
