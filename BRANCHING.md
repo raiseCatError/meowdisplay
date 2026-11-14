@@ -18,7 +18,8 @@ stay exactly as they are.
 | `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | No creation, update, deletion or force-push by anyone except its only bypass, the owner's dedicated release App (`meowdisplay-release`, App ID 5582030), whose token the release workflows use |
 
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
-title).
+title); on `main` and `release/*` also `promotion-gate` (Tests), once
+`.github/rulesets` is applied.
 
 ### What runs where
 

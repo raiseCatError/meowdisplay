@@ -54,6 +54,10 @@
           {
             "context": "android",
             "integration_id": 15368
+          },
+          {
+            "context": "promotion-gate",
+            "integration_id": 15368
           }
         ]
       }
