@@ -64,7 +64,7 @@ class AnchoredDevPush(unittest.TestCase):
             self.assertFalse(out.exists(), "a failure writes no selection")
             return None
         values = dict(line.split("=", 1) for line in out.read_text().splitlines())
-        self.assertEqual(set(values), set(JOBS) | {"reason"})
+        self.assertEqual(set(values), set(JOBS) | {"reason", "ios_ui_tests"})
         self.reason = values["reason"]
         return {job for job in JOBS if values[job] == "true"}
 

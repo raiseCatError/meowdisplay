@@ -53,6 +53,12 @@ is tested once, as the combined result. Each job is then judged against its own 
 on which it passed (dev_anchors.py lists them), and runs if anything it needs
 changed since then; a job with no anchor runs (select_from_anchors).
 
+UI tests (ios_ui_tests): the classes the ios-duo job runs. Every CI class,
+except for pull requests into dev or a feature branch, which run only the
+UI tests that target their change (ui_selection.py), and none at all, dropping
+the ios-duo job, when nothing targets it. The dev integration gate then runs
+every class on the merged result.
+
 Usage:
   classify_pr_paths.py --github OUTPUT    tests.yml: reads GITHUB_EVENT_NAME,
                                           GITHUB_REF, GITHUB_BASE_REF and
@@ -346,8 +352,51 @@ def select_from_git(env: dict[str, str], anchors: Optional[dict[str, list[str]]]
     return select_jobs(paths, read_worktree, diff)
 
 
-def output_lines(jobs: frozenset, reason: str) -> list[str]:
-    return [f"{job}={str(job in jobs).lower()}" for job in JOBS] + ["reason=" + " ".join(reason.splitlines())]
+def output_lines(jobs: frozenset, reason: str, ui_tests: str = "") -> list[str]:
+    return ([f"{job}={str(job in jobs).lower()}" for job in JOBS] + [f"ios_ui_tests={ui_tests}"]
+            + ["reason=" + " ".join(reason.splitlines())])
+
+
+def git_text(*args: str) -> Optional[str]:
+    try:
+        return git(*args).decode("utf-8", "replace")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def import_ui_selection():
+    """ui_selection.py from beside this file (python3 -I leaves this directory
+    off sys.path). tests.yml copies both from the base branch; a missing copy
+    fails the classifier, and tests.yml then runs full CI."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import ui_selection
+    return ui_selection
+
+
+def ui_tests_for(env: dict[str, str], jobs: frozenset) -> tuple[frozenset, str, str]:
+    """The UI test classes the ios-duo job runs (ios_ui_tests), the jobs (without
+    ios_ui when no class runs) and why."""
+    ui_selection = import_ui_selection()
+    if "ios_ui" not in jobs:
+        return jobs, "", ""
+    base_ref = env.get("GITHUB_BASE_REF", "")
+    fast = env.get("GITHUB_EVENT_NAME") == "pull_request" and base_ref != "main" and not base_ref.startswith("release/")
+    if not fast or jobs == ALL:
+        return jobs, " ".join(ui_selection.CI_CLASSES), ""
+    paths, diff = changed_between("HEAD^1")
+    # Paths that need no job (documentation) reach no UI test.
+    ui_paths = [p for p in paths if (needed := path_jobs(p, diff)) is None or "ios_ui" in needed]
+    classes, why = ui_selection.select(
+        ui_paths,
+        lambda p: Path(p).read_text(encoding="utf-8", errors="replace") if Path(p).is_file() else None,
+        lambda p: git_text("show", f"HEAD^1:{p}"))
+    tests = " ".join(c for c in ui_selection.CI_CLASSES if c in classes)
+    if any(p.startswith(ui_selection.TEST_DIR) for p in ui_paths):
+        # The mac job's iOS build compiles every UI test, run or not.
+        jobs = jobs | {"ios_build", "mac"}
+    return (jobs if tests else jobs - {"ios_ui"}), tests, "UI tests: " + why
 
 
 def append(path: str, lines: list[str]) -> None:
@@ -360,12 +409,18 @@ def main(argv: list[str]) -> int:
     batched = len(argv) == 5 and argv[1] == "--github" and argv[3] == "--anchors"
     if github or batched:
         anchors = read_anchors(argv[4]) if batched else None
-        jobs, reason = select_from_git(dict(os.environ), anchors)
-        lines = output_lines(jobs, reason)
+        env = dict(os.environ)
+        jobs, reason = select_from_git(env, anchors)
+        jobs, ui_tests, ui_reason = ui_tests_for(env, jobs)
+        if ui_reason:
+            reason = f"{reason}; {ui_reason}"
+        lines = output_lines(jobs, reason, ui_tests)
         append(argv[2], lines)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             selected = ", ".join(job for job in JOBS if job in jobs) or "none"
-            append(os.environ["GITHUB_STEP_SUMMARY"], [f"Selected Tests jobs: {selected}", "", f"Why: {reason}"])
+            append(os.environ["GITHUB_STEP_SUMMARY"], [
+                f"Selected Tests jobs: {selected}", f"Duo UI test classes: {ui_tests or 'none on this run'}",
+                "", f"Why: {reason}"])
         print(", ".join(lines))
         return 0
     if len(argv) not in (3, 4) or argv[1].startswith("-"):
