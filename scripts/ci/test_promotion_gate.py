@@ -201,6 +201,24 @@ class Workflows(unittest.TestCase):
         self.assertIn("RESULTS: ${{ toJSON(needs) }}", job)
         self.assertIn("python3 -I scripts/ci/promotion_gate.py job", job)
 
+    def test_only_a_promotion_reports_the_required_check_name(self):
+        # A dev push (or PR into dev) on the commit a dev -> main PR has as its head must not
+        # report "promotion-gate": GitHub matches required checks by name on the commit.
+        job = self.tests[self.tests.index("\n  promotion-gate:\n"):]
+        expression = re.search(r"^    name: \$\{\{ (.*) \}\}$", job, re.M).group(1)
+        python = re.sub(r"startsWith\(([\w.]+), ('[^']*')\)", r"\1.startswith(\2)", expression)
+        python = python.replace("&&", " and ").replace("||", " or ").replace("github.", "g_")
+        contexts = PROMOTIONS + [("pull_request", "refs/pull/9/merge", "dev"), ("push", "refs/heads/dev", ""),
+                                 ("pull_request", "refs/pull/9/merge", "feature/main"),
+                                 ("push", "refs/heads/feature/release/x", ""),
+                                 ("workflow_dispatch", "refs/heads/main", ""),
+                                 ("workflow_dispatch", "refs/heads/release/2.2.0", "")]
+        for event, ref, base in contexts:
+            with self.subTest(event=event, ref=ref, base=base):
+                name = eval(python, {}, {"g_event_name": event, "g_ref": ref, "g_base_ref": base})
+                expected = "promotion-gate" if gate.is_promotion(event, ref, base) else "promotion-gate (not a promotion)"
+                self.assertEqual(name, expected)
+
     def test_the_duo_job_reports_its_classes_and_never_narrows_a_promotion(self):
         duo = self.tests[self.tests.index("\n  ios-duo:\n"):self.tests.index("\n  integration-report:\n")]
         self.assertIn("classes: ${{ steps.select.outputs.classes }}", duo)
