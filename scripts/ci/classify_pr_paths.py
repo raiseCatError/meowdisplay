@@ -47,9 +47,9 @@ previous head, for pull requests into main or release/*, and whenever git or
 this script fails. A changed file containing the upstream App Store listing ID
 also gets the mac job, wherever it is (MacTests/AppStoreTests scans for it).
 
-Batched dev pushes (--anchors): tests.yml lets a newer push to dev cancel the
-run for an older one, so a burst of merges is tested once, as the combined
-result. Each job is then judged against its own anchor, the newest ancestor
+Batched dev pushes (--anchors): tests.yml runs one dev push at a time, and of
+the pushes that arrive meanwhile only the newest waits, so a burst of merges
+is tested once, as the combined result. Each job is then judged against its own anchor, the newest ancestor
 on which it passed (dev_anchors.py lists them), and runs if anything it needs
 changed since then; a job with no anchor runs (select_from_anchors).
 
