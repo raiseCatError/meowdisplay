@@ -18,8 +18,7 @@ stay exactly as they are.
 | `release-state` | The release workflows' persistent records (`releases/<version>.json`). No source code. | No creation, update, deletion or force-push by anyone except its only bypass, the owner's dedicated release App (`meowdisplay-release`, App ID 5582030), whose token the release workflows use |
 
 Required checks: `mac`, `release-tooling`, `android` (Tests) and `conventional` (PR
-title); on `main` and `release/*` also `promotion-gate` (Tests), once
-`.github/rulesets` is applied.
+title); on `main` and `release/*` also `promotion-gate` (Tests).
 
 ### What runs where
 
@@ -33,10 +32,18 @@ title); on `main` and `release/*` also `promotion-gate` (Tests), once
 
 A merge into `dev` is not a verified integration until its gate run passes:
 cut a release branch only from a `dev` commit whose Tests run passed.
-`promotion-gate` blocks merges into `main` and `release/*` only once
-`.github/rulesets/main.json` and `release-branches.json` are applied
-(`scripts/release/apply-rulesets.sh`); until then, read it rather than assume
-it. Physical-device QA stays a separate, manual release step.
+The `main` and `release/*` rulesets require `promotion-gate` (applied
+2026-11-14). Physical-device QA stays a separate, manual release step.
+
+> [!WARNING]
+> **Legacy release branches lack the publishing guard.** Publishing runs
+> `release-publish.yml` from the release branch itself, so only branches that
+> contain #273 and #275 (`dev` at or after `82a816b1`) check Tests before
+> publishing. Every `release/*` branch cut before then publishes without that
+> check, and a PR into it that doesn't bring in those workflows waits for a
+> `promotion-gate` check that never reports.
+> Cut every new release branch, a patch line such as 2.1.x included, from
+> `dev` at or after `82a816b1`, or merge #273 and #275 into it first.
 
 ## Product scope and branches
 
