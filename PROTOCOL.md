@@ -2298,6 +2298,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
 | 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
+| 2026-11-15 | Additive, no `pv` change: hidden `cursor` reports may carry `x`, `y` outside 0..1 with `"why":"display"` and optional `rx`, `ry`; Window mode `"why":"pane"` with `px`, `py`, `pw`, `ph` (section 6.2, `cursor`) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
