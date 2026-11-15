@@ -636,6 +636,9 @@ final class WorkspaceModel: ObservableObject {
             if displayOverviewOpen != oldValue { overviewCursorWatchChanged() }
         }
     }
+    /// The display arrangement editor is open (over Stage Peek's gallery, like the overview): Stage
+    /// Peek stays open under it through a resize, so its pending edit survives.
+    @Published var displayArrangementEditorOpen = false
     /// Where the Mac cursor is while the overview is open and the Mac reports it.
     @Published private(set) var overviewCursor: OverviewCursor?
     private var overviewCursorRenewal: DispatchWorkItem?
@@ -1034,7 +1037,7 @@ final class WorkspaceModel: ObservableObject {
             sendTask?.cancel()
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
-            displayOverviewOpen = false
+            displayOverviewOpen = false; displayArrangementEditorOpen = false
             launchpadOpen = false; launching = []; planner.reset(); inventory.reset()
             if var o = appOpening {
                 let step = o.disconnected()
@@ -1087,7 +1090,7 @@ final class WorkspaceModel: ObservableObject {
             performAppOpening(step)
         }
         appDrop = nil
-        stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false
+        stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false; displayArrangementEditorOpen = false
         overviewCursor = nil
         if overviewOpen { closeOverview() }
         catalog = nil
