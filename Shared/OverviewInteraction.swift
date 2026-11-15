@@ -13,6 +13,22 @@
 import CoreGraphics
 import Foundation
 
+/// Where the overview draws the Mac cursor's glyph (pure, tested).
+enum OverviewCursorGlyph {
+    /// On-screen size of the glyph, in view points; never scaled with the camera.
+    static let pointSize: Double = 18
+
+    /// The view point of the cursor's tip, or nil when it is outside the viewport (or the
+    /// inputs are unusable): nothing is drawn then.
+    static func viewPoint(world: CGPoint, camera: OverviewCamera, viewport: CGSize) -> CGPoint? {
+        guard world.x.isFinite, world.y.isFinite, viewport.width > 0, viewport.height > 0 else { return nil }
+        let point = camera.viewPoint(world: world, viewport: viewport)
+        guard point.x.isFinite, point.y.isFinite,
+              point.x >= 0, point.y >= 0, point.x <= viewport.width, point.y <= viewport.height else { return nil }
+        return point
+    }
+}
+
 struct OverviewInteraction: Equatable {
     /// What a point of the view lands on.
     enum Target: Equatable {

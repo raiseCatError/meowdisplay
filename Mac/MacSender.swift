@@ -6211,7 +6211,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
             textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
-             WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor:
+             WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor,
+             DisplayActionsWire.overviewCursorWatch:
             // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
             // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
             // Launching still needs control (checked by the service).
