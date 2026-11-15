@@ -142,9 +142,10 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Controls"].waitForExistence(timeout: 5))
     }
 
-    /// Whether the open Controls page has a setting, scrolling the whole page: rows below the
-    /// fold are not in the accessibility tree until they are near the screen. Only scrolls up,
-    /// so a sheet is never dragged away by it.
+    /// Whether the open Controls page has a setting (by accessibility identifier or label),
+    /// scrolling the whole page: rows below the fold are not in the accessibility tree until
+    /// they are near the screen. Segmented pickers show no label, so they are found by their
+    /// identifier. Only scrolls up, so a sheet is never dragged away by it.
     @MainActor
     private func controlsPageHas(_ app: XCUIApplication, _ label: String) -> Bool {
         let target = app.descendants(matching: .any)[label].firstMatch
@@ -164,13 +165,13 @@ final class AdaptiveLayoutTests: XCTestCase {
             let roomy = try isRoomy(app)
             openSettings(app)
             openControlsPage(app)
-            let hasLayout = controlsPageHas(app, "Control Layout")
+            let hasLayout = controlsPageHas(app, "controlLayoutPicker")
             XCTAssertEqual(hasLayout, roomy, "Control Layout is offered exactly on a roomy window (\(orientation.rawValue))")
             // Back to the top of the page for the next row: reopen it.
             leaveSettings(app)
             openSettings(app)
             openControlsPage(app)
-            let hasTraySide = controlsPageHas(app, "Landscape Tray Side")
+            let hasTraySide = controlsPageHas(app, "landscapeTraySidePicker")
             XCTAssertEqual(hasTraySide, !roomy, "Landscape Tray Side is offered exactly on a compact window (\(orientation.rawValue))")
             keep(app, "controls-settings-\(orientation.rawValue)-roomy-\(roomy)")
             leaveSettings(app)
