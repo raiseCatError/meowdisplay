@@ -41,7 +41,12 @@ extension DemoModeSmokeTests {
         let dockApps = app.descendants(matching: .any).matching(identifier: "stagePeekDockApp")
         XCTAssertTrue(dockApps.firstMatch.waitForExistence(timeout: 8), "the sample Mac's apps fill the bar")
         let lastIcon = app.buttons["stagePeekLaunchpad"]
-        for _ in 0..<4 where !lastIcon.isHittable { dockApps.firstMatch.swipeUp(velocity: .slow) }
+        // On a small screen even all rows scroll: swipe the grid itself (an icon scrolls away).
+        let grid = app.scrollViews.containing(.button, identifier: "stagePeekLaunchpad").firstMatch
+        for _ in 0..<6 where !lastIcon.isHittable {
+            if grid.exists { grid.swipeUp() } else { dockApps.allElementsBoundByIndex.last { $0.isHittable }?.swipeUp() }
+            sleep(1)
+        }
         XCTAssertTrue(lastIcon.isHittable, "All Apps, the grid's last icon")
         allAppsSnapshot(app, "all-apps-0-grid")
 
