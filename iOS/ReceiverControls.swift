@@ -696,7 +696,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let actions = paletteChord.map(profile.actions(for:)) ?? []
         let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
         let safe = safeInsets
-        let layout = ControlTrayGeometry.layout(
+        let baseLayout = ControlTrayGeometry.layout(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
@@ -707,6 +707,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             avoidNotch: store.preferences.avoidNotch,
             notchSide: notchSide,
             reservedRegions: reservedRegions)
+        // A row too wide for the piece beside a vertical fold is split around
+        // it; nil (the layout above, unchanged) in every other case.
+        let foldedTray = foldedTrayRow(baseFrame: baseLayout.trayFrame, traySize: traySize, count: count,
+                                       collapsed: collapsed, portrait: portrait)
+        let layout = foldedTray.map { baseLayout.replacingTrayFrame($0.frame) } ?? baseLayout
+        let renderedTraySize = foldedTray?.frame.size ?? traySize
+        let trayRegions: [CGRect] = autoHiding ? [CGRect.zero] : (foldedTray?.groups ?? [layout.trayFrame])
         // Retreats toward the edge the tray actually uses this pass, which a
         // fold can move away from the stored preference.
         let autoHideOffset: CGSize = autoHiding
@@ -737,10 +744,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // to the visible screen, so reconstruct the actual rendered
         // footprint for collision detection instead of under-reporting it.
         let renderedMainTrayFrame = CGRect(
-            x: layout.trayFrame.midX - traySize.width / 2,
-            y: layout.trayFrame.midY - traySize.height / 2,
-            width: traySize.width,
-            height: traySize.height)
+            x: layout.trayFrame.midX - renderedTraySize.width / 2,
+            y: layout.trayFrame.midY - renderedTraySize.height / 2,
+            width: renderedTraySize.width,
+            height: renderedTraySize.height)
         // The palette's Grid has the same intrinsic-overflow behavior as
         // the Main Tray stack. Use its live intrinsic footprint whenever
         // `paletteChord` is non-nil; closing the palette passes nil again,
@@ -838,7 +845,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
             } else {
-                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem)
+                controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem,
+                            fold: foldedTray)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
                     .opacity(autoHideOpacity)
@@ -870,7 +878,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
             Color.clear
                 .frame(width: containerSize.width, height: containerSize.height)
-                .contentShape(ControlRegionShape(rects: [autoHiding ? .zero : layout.trayFrame]
+                .contentShape(ControlRegionShape(rects: trayRegions
                                                     + (paletteChord == nil ? [] : [layout.paletteFrame])))
                 .gesture(controlGesture())
 
@@ -1044,17 +1052,57 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             .shadow(color: .black.opacity(0.28), radius: 5, y: 1)
     }
 
+    /// The compact tray's row split around a vertical fold (see
+    /// `ControlFoldGeometry.trayRow`); nil when the row keeps its usual
+    /// single-piece placement. `baseFrame` is that placement.
+    private func foldedTrayRow(baseFrame: CGRect, traySize: CGSize, count: Int,
+                               collapsed: Bool, portrait: Bool) -> ControlFoldGeometry.TrayRow? {
+        guard portrait, !collapsed else { return nil }
+        var visible = CGRect(origin: .zero, size: containerSize)
+        if let keyboardVisibleRect { visible = visible.intersection(keyboardVisibleRect) }
+        return ControlFoldGeometry.trayRow(
+            count: count, item: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack,
+            placed: baseFrame, wantedWidth: traySize.width, container: visible,
+            divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
+    }
+
     @ViewBuilder
-    private func controlsRow(axis: Axis, item diameter: CGFloat) -> some View {
-        let stack = axis == .horizontal
-            ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
-            : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
-        stack {
-            ForEach(controls) { item in
-                if let modifier = item.modifier {
-                    modifierButton(modifier, diameter: diameter)
-                } else {
-                    actionButton(item, diameter: diameter)
+    private func trayControl(_ item: ControlTrayItem, diameter: CGFloat) -> some View {
+        if let modifier = item.modifier {
+            modifierButton(modifier, diameter: diameter)
+        } else {
+            actionButton(item, diameter: diameter)
+        }
+    }
+
+    @ViewBuilder
+    private func controlsRow(axis: Axis, item diameter: CGFloat, fold: ControlFoldGeometry.TrayRow?) -> some View {
+        if let fold {
+            foldedControlsRow(fold)
+        } else {
+            let stack = axis == .horizontal
+                ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
+                : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
+            stack {
+                ForEach(controls) { item in
+                    trayControl(item, diameter: diameter)
+                }
+            }
+        }
+    }
+
+    /// The chips in one row with an empty gap where the fold is, so each
+    /// group sits where `ControlFoldGeometry.trayRow` put it.
+    private func foldedControlsRow(_ fold: ControlFoldGeometry.TrayRow) -> some View {
+        let items = controls
+        let ranges = fold.itemRanges
+        return HStack(spacing: Metrics.trayGap) {
+            ForEach(Array(ranges.enumerated()), id: \.offset) { index, range in
+                if index > 0 {
+                    Color.clear.frame(width: max(0, fold.spacers[index - 1]), height: fold.item)
+                }
+                ForEach(Array(items[range])) { item in
+                    trayControl(item, diameter: fold.item)
                 }
             }
         }
