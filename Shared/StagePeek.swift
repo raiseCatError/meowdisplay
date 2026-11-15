@@ -718,10 +718,11 @@ enum StagePeekGalleryLayout {
 /// What shows while Stage Peek's All Apps is open (tested). All Apps takes the peek's place
 /// instead of sitting on it: opened from the last icon of the apps bar's grid, it used to leave
 /// that grid, the peek's search and its buttons showing through a light dim, competing with its
-/// own search and names (owner report, 2026-11-15). Now the peek's pieces stay as they are, so
-/// going back finds them unchanged, but they aren't drawn, take no touches and VoiceOver skips
-/// them; the receiver's floating controls step aside too; and All Apps' own background is dense
-/// enough that the Mac picture behind it never competes with its white text.
+/// own search and names (owner report, 2026-11-15). Now the apps bar, gallery and card stack
+/// make way for it (their rows, search and filter are kept for going back), the peek's buttons
+/// and the receiver's floating controls are hidden, untouchable and skipped by VoiceOver, and All
+/// Apps' own background is dense enough that the Mac picture behind it never competes with its
+/// white text.
 struct StagePeekAllAppsLayering: Equatable {
     var open: Bool
 

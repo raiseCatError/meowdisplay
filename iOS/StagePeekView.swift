@@ -109,7 +109,10 @@ struct StagePeekOverlay: View {
                     .opacity(model.drag != nil ? 0.001 : 1)
                     .transition(.opacity)
                     .stepsAside(forAllApps: launchpad)
-                if machine.expansion < 0.999 {
+                // All Apps replaces the card stack, the gallery and the apps bar (`StagePeekAllAppsLayering`):
+                // hidden in place, their cells stayed in the accessibility tree (hosted UI test,
+                // runs 43729529563-43737338921). Rows, search and filter live here, so Back keeps them.
+                if machine.expansion < 0.999, !launchpad {
                     ZStack(alignment: .topLeading) {
                         ForEach(cards, id: \.index) { card in
                             cardView(card)
@@ -121,23 +124,21 @@ struct StagePeekOverlay: View {
                     // Compact Dock: cards fade and clip at the band's edges, never under the controls.
                     .mask(alignment: .topLeading) { dockMask }
                     .animation(.spring(response: 0.3, dampingFraction: 0.85), value: machine.closeRevealed)
-                    .stepsAside(forAllApps: launchpad)
                     if machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
-                        title(for: focus).stepsAside(forAllApps: launchpad)
+                        title(for: focus)
                     }
                     if machine.expansion < 0.5, model.drag == nil, let id = machine.closeRevealed,
                        let i = machine.ids.firstIndex(of: id), let card = cards.first(where: { $0.index == i }),
                        let w = windows.first(where: { $0.id == id }) {
-                        compactCloseButton(w, card: card).stepsAside(forAllApps: launchpad)
+                        compactCloseButton(w, card: card)
                     }
                 }
-                if machine.expansion > 0.001 {
+                if machine.expansion > 0.001, !launchpad {
                     gallery
                         // A card dragged from here (search results too) carries the finger's
                         // gesture: barely there, never 0 or removed, so the drag keeps its view.
                         .opacity(model.drag != nil ? 0.001 : machine.expansion)
                         .allowsHitTesting(machine.expanded)
-                        .stepsAside(forAllApps: launchpad)
                 }
                 toolbar(cards: cards)
                     .opacity(model.drag != nil ? 0 : 1)
@@ -146,12 +147,11 @@ struct StagePeekOverlay: View {
                 if let notice = model.closeNotice {
                     closeToast(notice).stepsAside(forAllApps: launchpad)
                 }
-                topControls
-                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
-                    .transition(.opacity)
-                    // All Apps takes the peek's place (`StagePeekAllAppsLayering`): its grid, search
-                    // and buttons stay as they were for Back, unseen and untouchable meanwhile.
-                    .stepsAside(forAllApps: launchpad)
+                if !launchpad {
+                    topControls
+                        .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
+                        .transition(.opacity)
+                }
             }
             if launchpad {
                 launchpadView.transition(.opacity)
@@ -1092,8 +1092,9 @@ private struct RemoteFinderHost: View {
 }
 
 /// Hidden, untouchable and skipped by VoiceOver while Stage Peek's All Apps is open
-/// (`StagePeekAllAppsLayering`), yet still laid out and still there: nothing under All Apps moves,
-/// and going back finds it as it was (an `if` would rebuild it and lose its state).
+/// (`StagePeekAllAppsLayering`), yet still laid out: nothing under All Apps moves. For views
+/// without scrolling cells (the peek's buttons, the receiver's controls); the apps bar and gallery
+/// are left out of the hierarchy instead (see `body`).
 struct StepsAsideForAllApps: ViewModifier {
     let allAppsOpen: Bool
 
@@ -1102,19 +1103,6 @@ struct StepsAsideForAllApps: ViewModifier {
             .opacity(allAppsOpen ? 0 : 1)
             .allowsHitTesting(!allAppsOpen)
             .accessibilityHidden(allAppsOpen)
-            .environment(\.coveredByAllApps, allAppsOpen)
-    }
-}
-
-/// Set by `StepsAsideForAllApps`. A container's `accessibilityHidden` didn't reach the cells of a
-/// scroll view inside it (the hosted iPhone Duo UI test found a scrolled-away apps bar icon still
-/// in the tree under All Apps), so the cells hide themselves too.
-private struct CoveredByAllAppsKey: EnvironmentKey { static let defaultValue = false }
-
-extension EnvironmentValues {
-    var coveredByAllApps: Bool {
-        get { self[CoveredByAllAppsKey.self] }
-        set { self[CoveredByAllAppsKey.self] = newValue }
     }
 }
 
