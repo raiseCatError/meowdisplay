@@ -14,10 +14,15 @@ import UIKit
 /// receiver preferences.
 @MainActor
 enum DemoControlStoreFactory {
-    static func make() -> ReceiverControlStore {
+    /// `horizontalRegular`/`verticalRegular`: the window's size classes now,
+    /// so the demo starts in the same layout (roomy or compact) as a live
+    /// session in this window instead of the device idiom's. Applied before
+    /// the first save, so a roomy window's first-run defaults still apply.
+    static func make(horizontalRegular: Bool, verticalRegular: Bool) -> ReceiverControlStore {
         DemoSession.discardPreferences()
         let defaults = DemoSession.preferenceDefaults(demoActive: true)
         let store = ReceiverControlStore(repository: ReceiverControlPreferencesRepository(defaults: defaults))
+        store.updateLayoutClass(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular)
         store.update { $0.audioPreferred = true }
         store.applySessionInputState(.allowed)
         return store
@@ -28,10 +33,12 @@ enum DemoControlStoreFactory {
     }
 }
 
-/// The sample stream size: this device's own screen in pixels, landscape.
+/// The sample stream size: this app window in pixels (its bounds at its own
+/// display scale, so a folded or resized window gets its own shape), landscape.
+/// The screen's native size only stands in before a window exists.
 @MainActor
 func demoVideoSize() -> CGSize {
-    let bounds = ActiveScene.screen.nativeBounds.size
+    let bounds = ActiveScene.windowPixels ?? ActiveScene.screen.nativeBounds.size
     return CGSize(width: max(bounds.width, bounds.height), height: min(bounds.width, bounds.height))
 }
 
@@ -88,8 +95,10 @@ struct DemoSettingsPage: View {
         String(localized: "\(value) (Sample)", comment: "A demo value, such as 60 fps (Sample).")
     }
 
-    /// This device's screen in pixels, current orientation.
+    /// This app window in pixels (bounds at the window's own display scale),
+    /// current shape.
     private var receiverPixels: CGSize {
+        if let pixels = ActiveScene.windowPixels { return pixels }
         let screen = ActiveScene.screen
         return CGSize(width: screen.bounds.width * screen.scale, height: screen.bounds.height * screen.scale)
     }

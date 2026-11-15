@@ -861,6 +861,7 @@ struct CustomLayoutEditorScreen: View {
                 ForEach([ControlTrayItem.escape, .tab, .keyboard, .dock]) { item in
                     Button(item.title) { add(.tray(item)) }.disabled(placed.contains(.tray(item)))
                 }
+                Button("Arrow Keys") { add(.arrowKeys) }.disabled(placed.contains(.arrowKeys))
                 Button("Move View") { add(.moveView) }.disabled(placed.contains(.moveView))
                 Button("Calculator") { addCalculator() }.disabled(placed.contains(.calculator))
             }
@@ -899,6 +900,7 @@ struct CustomLayoutEditorScreen: View {
         switch kind {
         case .tray(let item): return item.title
         case .moveView: return String(localized: "Move View")
+        case .arrowKeys: return String(localized: "Arrow Keys")
         case .function(let id): return functionItems.first { $0.id == id }?.title ?? id
         case .shortcut(let item): return item.title
         case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")
@@ -926,9 +928,11 @@ struct CustomLayoutEditorScreen: View {
     }
 }
 
-/// The device's full-screen size and safe insets, for the editor canvas.
+/// The app window's size and safe insets, for the editor canvas. The window,
+/// not the screen: a fold or resize changes the window the layout will fill.
 private enum EditorDevice {
     @MainActor static var screenBounds: CGRect {
+        if let window = ActiveScene.window { return window.bounds }
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         return scene?.screen.bounds ?? CGRect(x: 0, y: 0, width: 1194, height: 834)
     }
@@ -1221,7 +1225,7 @@ private struct CustomLayoutCanvas: View {
                 if let item = functionItems.first(where: { $0.id == id }) { onPreviewAction(item) }
             case .shortcut(let item):
                 onPreviewAction(item)
-            case .moveView, .calculator:
+            case .moveView, .arrowKeys, .calculator:
                 break
             }
         }
@@ -1258,6 +1262,7 @@ private struct CustomLayoutCanvas: View {
         switch kind {
         case .tray(let item): return item.title
         case .moveView: return String(localized: "Move View")
+        case .arrowKeys: return String(localized: "Arrow Keys")
         case .function(let id): return functionItems.first { $0.id == id }?.title ?? id
         case .shortcut(let item): return item.title
         case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")
@@ -1399,6 +1404,9 @@ struct CustomControlGlyph: View {
         case .moveView:
             Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
                 .font(.system(size: diameter * 0.38, weight: .semibold))
+        case .arrowKeys:
+            Image(systemName: "arrowkeys")
+                .font(.system(size: diameter * 0.4, weight: .semibold))
         case .calculator:
             Image(systemName: LocalCalculatorPanel.symbolName)
                 .font(.system(size: diameter * 0.4, weight: .semibold))

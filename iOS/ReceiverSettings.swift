@@ -22,6 +22,10 @@ struct SettingsView: View {
     /// Unified Clipboard with the connected Mac.
     var clipboard: ClipboardModel?
     @Environment(\.dismiss) private var dismiss
+    // Deliberately the horizontal class alone, not `ReceiverLayoutClass.isRoomy`:
+    // a sidebar needs width, not height, so a landscape iPhone Max that is
+    // regular-wide still gets the standard NavigationSplitView. Only the
+    // control layout (Strip/Overlay/Custom) uses the roomy rule.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection: MobileSettingsCategory?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
@@ -935,11 +939,21 @@ private struct ControlSettingsPage: View {
                     }
                     .pickerStyle(.segmented)
                     .settingsAnchor("trayPlacement")
+                }
+                // One preference for both layouts: the compact arrow button and
+                // the roomy Arrow Keys control.
+                if visibility.showsArrowKeys {
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle("Show Arrow Keys", isOn: preferenceBinding(controlStore, \.arrowKeysEnabled))
-                        SettingNote("Tap the arrow button for ↑ ← ↓ →, or swipe it for one press.")
+                        if controlStore.isPad {
+                            SettingNote("Shows the Arrow Keys control on the Strip, Overlay or a Custom layout. Tap it for ↑ ← ↓ →.")
+                        } else {
+                            SettingNote("Tap the arrow button for ↑ ← ↓ →, or swipe it for one press.")
+                        }
                     }
                     .settingsAnchor("arrowKeys")
+                }
+                if visibility.showsPhoneTrayPlacement {
                     if controlStore.preferences.arrowKeysEnabled {
                         Picker("Arrow Keys Side", selection: preferenceBinding(controlStore, \.arrowKeysSide)) {
                             ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
@@ -1105,7 +1119,7 @@ private struct ControlSettingsPage: View {
         } header: {
             Text("Standard Controls")
         } footer: {
-            Text("Shown on the Strip and Overlay rail, grouped as system actions, then keys, then view controls. Settings always stays on the rail. Move View also needs Allow Local View Navigation.")
+            Text("Shown on the Strip and Overlay rail, grouped as system actions, then keys, then view controls. Settings always stays on the rail. Move View also needs Allow Local View Navigation, and Arrow Keys needs Show Arrow Keys.")
         }
         .settingsAnchor("standardControls")
     }
