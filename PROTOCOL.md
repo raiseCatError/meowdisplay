@@ -2395,6 +2395,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-11-15 | Additive, no `pv` change: display arrangement editing (section 6.10), `welcome.features` `displayArrange`, `displayArrangeRequest`, `displayArrangeState`, `displayArrangeKeep`, `displayArrangeRevert` |
 | 2026-11-15 | Additive, no `pv` change: display actions under `welcome.features` `displayArrange`: `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
 | 2026-11-15 | Additive, no `pv` change: overview cursor under `welcome.features` `displayArrange`: `overviewCursorWatch`, `overviewCursor` (section 6.10) |
+| 2026-11-15 | Additive, no `pv` change: hidden `cursor` reports may carry `x`, `y` outside 0..1 with `"why":"display"` and optional `rx`, `ry`; Window mode `"why":"pane"` with `px`, `py`, `pw`, `ph` (section 6.2, `cursor`) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
