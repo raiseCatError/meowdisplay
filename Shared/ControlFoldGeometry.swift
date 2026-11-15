@@ -117,4 +117,171 @@ enum ControlFoldGeometry {
         let second = row(trailingCount, item: item, centreX: right.midX, y: startY)
         return KeyboardBar(bars: [first.0, second.0], cells: first.1 + second.1, item: item, paletteArea: left)
     }
+
+    // MARK: - Compact phone tray
+
+    /// The vertical divisions that cross a horizontal band, clipped to `container`.
+    private static func verticalCuts(crossing band: CGRect, in container: CGRect, divisions: [CGRect]) -> [CGRect] {
+        divisions.map { $0.intersection(container) }
+            .filter { !$0.isNull && !$0.isEmpty && $0.height >= $0.width && $0.intersects(band) }
+    }
+
+    /// The compact phone tray's chips split around a vertical fold.
+    struct TrayRow: Equatable {
+        /// The row as drawn: from the first chip to the last, fold included.
+        var frame: CGRect
+        /// One touch region per piece the chips sit in, left to right.
+        var groups: [CGRect]
+        /// One chip per item, in item order.
+        var cells: [CGRect]
+        /// Chips in each group, left to right.
+        var counts: [Int]
+        /// Empty width to leave between a group and the next, left to right,
+        /// once the stack's own spacing on both sides of it is counted.
+        var spacers: [CGFloat]
+        /// Chip diameter after fitting.
+        var item: CGFloat
+
+        /// The item indexes each group holds.
+        var itemRanges: [Range<Int>] {
+            var start = 0
+            var ranges: [Range<Int>] = []
+            for count in counts {
+                ranges.append(start..<(start + count))
+                start += count
+            }
+            return ranges
+        }
+    }
+
+    /// Splits a bottom-aligned row of `count` chips around the vertical folds
+    /// that cross it, for a row that is too wide for the piece it would
+    /// otherwise be squeezed into. Chips keep their order; each piece gets as
+    /// many as fit it best and they are centred in it, all at one chip size
+    /// (shrunk, down to `minimumItem`, only as far as the fullest piece needs).
+    /// `nil` when the row was not squeezed (`placed`, where the layout put it,
+    /// is as wide as the `wantedWidth` it asked for) or no vertical fold
+    /// crosses it, so the caller keeps its own placement.
+    ///
+    /// - Parameters:
+    ///   - placed: the frame the layout gave the row as one piece; the split
+    ///     row keeps its bottom edge.
+    ///   - wantedWidth: the width that row asked for.
+    ///   - slack: the touch slack the row's frame adds around the chips.
+    ///   - container: the visible area the row lives in.
+    static func trayRow(count: Int, item preferredItem: CGFloat, gap: CGFloat, slack: CGFloat,
+                        placed: CGRect, wantedWidth: CGFloat, container: CGRect, divisions: [CGRect],
+                        margin: CGFloat = 12, minimumItem: CGFloat = 24) -> TrayRow? {
+        guard count > 1, placed.width + 0.5 < wantedWidth else { return nil }
+        let bottom = placed.maxY
+        let preferredBand = CGRect(x: container.minX, y: bottom - preferredItem - slack,
+                                   width: container.width, height: preferredItem + slack)
+        let cuts = verticalCuts(crossing: preferredBand, in: container, divisions: divisions)
+        guard !cuts.isEmpty else { return nil }
+        let pieces = ControlPlacementArea.segments(of: container, removing: cuts, horizontal: true)
+            .filter { $0.width - margin * 2 - slack >= minimumItem }
+        guard !pieces.isEmpty else { return nil }
+
+        // The chip size `n` chips could have in a piece.
+        func capacity(_ piece: CGRect, _ n: Int) -> CGFloat {
+            (piece.width - margin * 2 - slack - CGFloat(n - 1) * gap) / CGFloat(n)
+        }
+        // Each chip goes to the piece where the chips would stay largest.
+        var counts = Array(repeating: 0, count: pieces.count)
+        for _ in 0..<count {
+            var best = 0
+            for index in pieces.indices
+            where capacity(pieces[index], counts[index] + 1) > capacity(pieces[best], counts[best] + 1) + 0.001 {
+                best = index
+            }
+            counts[best] += 1
+        }
+        let used = pieces.indices.filter { counts[$0] > 0 }
+        let item = used.map { index in
+            ControlTrayGeometry.fittedChipDiameter(count: counts[index], length: pieces[index].width,
+                                                   preferred: preferredItem, gap: gap, slack: slack,
+                                                   margin: margin, minimum: minimumItem)
+        }.min() ?? preferredItem
+
+        let thickness = item + slack
+        var cells: [CGRect] = []
+        var groups: [CGRect] = []
+        var spacers: [CGFloat] = []
+        for index in used {
+            let n = counts[index]
+            let width = CGFloat(n) * item + CGFloat(n - 1) * gap
+            let startX = pieces[index].midX - width / 2
+            let row = (0..<n).map { step in
+                CGRect(x: startX + CGFloat(step) * (item + gap), y: bottom - slack / 2 - item,
+                       width: item, height: item)
+            }
+            if let previous = cells.last, let first = row.first {
+                spacers.append(first.minX - previous.maxX - gap * 2)
+            }
+            cells += row
+            groups.append(CGRect(x: startX - slack / 2, y: bottom - thickness, width: width + slack,
+                                 height: thickness))
+        }
+        guard let first = groups.first else { return nil }
+        let frame = groups.dropFirst().reduce(first) { $0.union($1) }
+        return TrayRow(frame: frame, groups: groups, cells: cells, counts: used.map { counts[$0] },
+                       spacers: spacers, item: item)
+    }
+
+    /// Function Tray groups placed along one row around the vertical folds
+    /// that cross it. Each group stays whole; groups go in order into the
+    /// first piece with room left, and each piece's groups are centred in it.
+    struct GroupRow: Equatable {
+        /// One frame per group, in group order.
+        var frames: [CGRect]
+        /// The pieces the groups sit in; each frame lies inside one of them.
+        var pieces: [CGRect]
+    }
+
+    /// `nil` when no vertical fold crosses the row `y ..< y + height`.
+    static func groupRow(sizes: [CGSize], groupGap: CGFloat, y: CGFloat, height: CGFloat, container: CGRect,
+                         divisions: [CGRect], margin: CGFloat = 12) -> GroupRow? {
+        guard let narrowest = sizes.map(\.width).min() else { return nil }
+        let band = CGRect(x: container.minX, y: y, width: container.width, height: height)
+        let cuts = verticalCuts(crossing: band, in: container, divisions: divisions)
+        guard !cuts.isEmpty else { return nil }
+        let pieces = ControlPlacementArea.segments(of: container, removing: cuts, horizontal: true)
+            .filter { $0.width - margin * 2 >= narrowest }
+        guard !pieces.isEmpty else { return nil }
+
+        var assigned = Array(repeating: [Int](), count: pieces.count)
+        var column = 0
+        var used: CGFloat = 0
+        for (index, size) in sizes.enumerated() {
+            let needed = assigned[column].isEmpty ? size.width : used + groupGap + size.width
+            if needed > pieces[column].width - margin * 2, !assigned[column].isEmpty, column < pieces.count - 1 {
+                column += 1
+                used = size.width
+            } else {
+                used = needed
+            }
+            assigned[column].append(index)
+        }
+        var frames = Array(repeating: CGRect.zero, count: sizes.count)
+        for (index, members) in assigned.enumerated() where !members.isEmpty {
+            let room = max(0, pieces[index].width - margin * 2)
+            let widths = members.map { min(sizes[$0].width, room) }
+            let total = widths.reduce(0, +) + CGFloat(members.count - 1) * groupGap
+            var x = pieces[index].midX - total / 2
+            for (member, width) in zip(members, widths) {
+                frames[member] = CGRect(x: x, y: y, width: width, height: sizes[member].height)
+                x += width + groupGap
+            }
+        }
+        return GroupRow(frames: frames, pieces: pieces.indices.filter { !assigned[$0].isEmpty }.map { pieces[$0] })
+    }
+}
+
+extension ControlTrayLayout {
+    /// The same layout drawing its tray in `frame`.
+    func replacingTrayFrame(_ frame: CGRect) -> ControlTrayLayout {
+        var copy = self
+        copy.trayFrame = frame
+        return copy
+    }
 }
