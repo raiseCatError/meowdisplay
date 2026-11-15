@@ -1545,6 +1545,18 @@ more), `control` (no input grant: View Only cannot close), `accessibility`
 (the Mac lacks the permission), `noButton` or `ambiguous` (more than one
 window matched; nothing was pressed). A fresh `windowCatalog` follows.
 
+**Display actions** (welcome feature `displayActions`, Window mode
+allowed, admitted sessions): `displayIdentify {}` shows a label (the
+display's position in the latest `windowCatalog` `displays`, main first,
+and its name) on each listed Mac screen for about 3 s; at most one every
+2 s; no control needed. `cursorToDisplay {id}` moves the Mac cursor to the
+centre of a display from the latest listing; it needs control (checked
+again right before the move), at most 4 per second; any other id, or a
+display that moved since the listing, is ignored. Neither has a reply; the
+cursor report shows the move. While a session is browsing, the Mac also
+sends a fresh `windowCatalog` when its displays change (attached, removed,
+rearranged or resized), so an overview never keeps an old arrangement.
+
 **Fill Window on Mac / Restore Previous Size on Mac** (welcome feature
 `windowFrame`, listed only while Window mode is allowed; Window mode only).
 The only messages that change the size of a real Mac window. Receivers send
@@ -2288,6 +2300,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
 | 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
+| 2026-11-15 | Additive, no `pv` change: `welcome.features` `displayActions`, `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.

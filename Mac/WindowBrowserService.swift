@@ -294,8 +294,74 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
             case WireMessage.windowClose:
                 closeWindow(obj, inputGranted: inputGranted)
+            case DisplayActionsWire.identify:
+                identifyDisplays()
+            case DisplayActionsWire.moveCursor:
+                moveCursor(obj, inputGranted: inputGranted, controlStillAllowed: controlStillAllowed)
             default:
                 break
+            }
+        }
+    }
+
+    // MARK: Display actions (overview)
+
+    private var identifyLimit = DisplayActionRateLimit()
+    private var moveLimit = DisplayActionRateLimit()
+    private var displaysChangePending = false
+
+    /// Identify Displays: labels on the Mac screens this session was listed (main first, as the
+    /// receiver numbers them). Shows nothing of the receiver's own on the Mac beyond the label.
+    private func identifyDisplays() {
+        guard identifyLimit.admit(now: ProcessInfo.processInfo.systemUptime, interval: DisplayActionPolicy.identifyInterval),
+              !displays.isEmpty else { return }
+        var labels: [UInt32: String] = [:]
+        for (index, d) in displays.prefix(8).enumerated() {
+            labels[d.displayID] = DisplayActionPolicy.identifyLabel(index: index, name: d.name)
+        }
+        Log.info("workspace: identify displays (\(labels.count))")
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { DisplayIdentifyOverlay.show(labels, duration: DisplayActionPolicy.identifyDuration) }
+        }
+    }
+
+    /// Move Cursor Here: the centre of a listed display, with control (asked again right
+    /// before moving). The cursor echo then reports it like any other move.
+    private func moveCursor(_ obj: [String: Any], inputGranted: Bool, controlStillAllowed: @escaping @Sendable () -> Bool) {
+        guard moveLimit.admit(now: ProcessInfo.processInfo.systemUptime, interval: DisplayActionPolicy.moveInterval) else { return }
+        let listed = Dictionary(displays.prefix(8).map { ($0.displayID, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        switch DisplayActionPolicy.moveCursor(obj, inputGranted: inputGranted, listed: listed) {
+        case .refuse(let why):
+            Log.info("workspace: cursorToDisplay refused (\(why))")
+        case .move(let id, let point):
+            DispatchQueue.main.async {
+                guard controlStillAllowed() else {
+                    Log.info("workspace: cursorToDisplay refused (control, at move)")
+                    return
+                }
+                // Only if the display is still where it was listed; otherwise nothing moves.
+                guard CGDisplayBounds(id).contains(point) else {
+                    Log.info("workspace: cursorToDisplay refused (display moved)")
+                    return
+                }
+                CGWarpMouseCursorPosition(point)
+                CGAssociateMouseAndMouseCursorPosition(1)
+                Log.info("workspace: cursorToDisplay \(id)")
+            }
+        }
+    }
+
+    /// The Mac's displays changed (attached, removed, rearranged, resized): a receiver showing
+    /// the overview gets a fresh listing instead of an old arrangement. Coalesced; only while
+    /// this session is browsing.
+    func displaysChanged() {
+        queue.async { [self] in
+            guard active, !stopped, !displaysChangePending else { return }
+            displaysChangePending = true
+            queue.asyncAfter(deadline: .now() + 0.5) { [self] in
+                displaysChangePending = false
+                guard active, !stopped else { return }
+                refresh(sendCatalog: true)
             }
         }
     }

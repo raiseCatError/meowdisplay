@@ -6200,7 +6200,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
             textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
-             WireMessage.appLaunch, WireMessage.windowClose:
+             WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor:
             // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
             // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
             // Launching still needs control (checked by the service).
@@ -7584,6 +7584,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(WindowWorkspaceWire.floatFeature)
             features.append(WindowWorkspaceWire.floatLiftFeature)
             features.append(WindowFrameWire.welcomeFeature)
+            features.append(DisplayActionsWire.welcomeFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         features.append(ExactKeyModifiersWire.welcomeFeature)
@@ -7690,6 +7691,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let self = selfBox.currentOnQueue() else { return }
                 self.sendMirrorDisplayState()
                 self.topologyChanged(reason: "didChangeScreenParameters")
+                // The overview's arrangement follows the Mac's (a no-op unless browsing).
+                self.windowBrowser?.displaysChanged()
             }
         }
     }

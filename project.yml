@@ -292,6 +292,8 @@ targets:
       - Mac/ConsentInputPolicy.swift
       - Mac/MacScreenLock.swift
       - Mac/WindowBrowserService.swift
+      - Mac/DisplayActionPolicy.swift
+      - Mac/DisplayIdentifyOverlay.swift
       - Mac/RemoteFileBrowser.swift
       - Mac/RemoteFileTransfers.swift
       - Mac/RemoteFilesAuthorization.swift
