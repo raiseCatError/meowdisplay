@@ -776,7 +776,9 @@ struct ReceiverScreen: View {
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
-                            .stepsAside(forAllApps: model.workspace.launchpadOpen)
+                            // Stage Peek has its own Request Control; this one drew under its
+                            // Compact/Close bar, both legible at once (owner's screenshot, 2026-11-15).
+                            .stepsAside(forAllApps: model.workspace.launchpadOpen || model.workspace.stagePeekOpen)
                     }
                     if videoOffStatusShown {
                         // Video off is the user's choice: one quiet line saying so, with the way back.
