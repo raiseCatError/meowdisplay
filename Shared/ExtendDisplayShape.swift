@@ -50,22 +50,71 @@ enum ExtendDisplayShape: String, Codable, CaseIterable, Identifiable {
     static let defaultAutomaticAspect = 16.0 / 10.0
 }
 
+/// How large the Extend desktop's text and controls appear on the receiver.
+///
+/// A smaller virtual desktop in points means bigger text: the capture is
+/// 2 x points, so macOS still renders everything at 2x and the stream just
+/// carries fewer pixels. `.largest` trades some sharpness for size. Factors
+/// above 1 ("More Space") are deliberately not offered: they need a larger
+/// virtual-display resize reservation than the standard size and can exceed
+/// receiver decode ceilings.
+enum ExtendDesktopSize: String, Codable, CaseIterable, Sendable, Identifiable {
+    case standard
+    case larger
+    case largest
+
+    var id: String { rawValue }
+
+    /// Multiplier applied to the standard desktop point size.
+    var factor: Double {
+        switch self {
+        case .standard: return 1.0
+        case .larger: return 0.8
+        case .largest: return 0.65
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .standard: return String(localized: "Default")
+        case .larger: return String(localized: "Larger Text")
+        case .largest: return String(localized: "Largest Text")
+        }
+    }
+}
+
 /// The full Extend shape setting: a shape plus Automatic's one dependent
-/// option. Kept as a single value (never two independently-persisted
+/// option, plus the Desktop Size. Kept as a single value (never two independently-persisted
 /// booleans/enums) so it travels atomically through persistence and the wire
 /// — see PROTOCOL.md's `extendShapeRequest`/`extendShapeState`.
 struct ExtendDisplayShapePreference: Codable, Equatable {
     var shape: ExtendDisplayShape
     /// Only meaningful while `shape == .automatic`.
     var useFullDisplay: Bool
+    /// Text/control size of the Extend desktop. Absent in records and
+    /// messages from older builds, which means `.standard`.
+    var desktopSize: ExtendDesktopSize
 
-    /// Automatic + Use Full Display OFF: the default for every peer that has
-    /// never made an explicit choice.
+    /// Automatic + Use Full Display OFF + default Desktop Size: the default
+    /// for every peer that has never made an explicit choice.
     static let standard = ExtendDisplayShapePreference(shape: .automatic, useFullDisplay: false)
 
-    init(shape: ExtendDisplayShape, useFullDisplay: Bool) {
+    init(shape: ExtendDisplayShape, useFullDisplay: Bool, desktopSize: ExtendDesktopSize = .standard) {
         self.shape = shape
         self.useFullDisplay = useFullDisplay
+        self.desktopSize = desktopSize
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case shape, useFullDisplay, desktopSize
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        shape = try container.decode(ExtendDisplayShape.self, forKey: .shape)
+        useFullDisplay = try container.decode(Bool.self, forKey: .useFullDisplay)
+        // An unknown/absent value from an older or newer build is `.standard`.
+        desktopSize = (try? container.decodeIfPresent(ExtendDesktopSize.self, forKey: .desktopSize)) ?? .standard
     }
 
     /// The aspect ratio (width / height) MEOW should build the Extend
@@ -89,11 +138,19 @@ struct ExtendDisplayShapePreference: Codable, Equatable {
               let shape = ExtendDisplayShape(rawValue: rawShape) else { return nil }
         self.shape = shape
         useFullDisplay = (message["useFullDisplay"] as? Bool) ?? false
+        desktopSize = Self.desktopSize(inMessage: message) ?? .standard
+    }
+
+    /// The optional `desktopSize` field: `nil` when absent or unrecognized
+    /// (the peer does not speak it), so callers can tell "standard" from
+    /// "not reported". A Mac that sends `extendShapeState` always includes it.
+    static func desktopSize(inMessage message: [String: Any]) -> ExtendDesktopSize? {
+        (message["desktopSize"] as? String).flatMap(ExtendDesktopSize.init(rawValue:))
     }
 
     /// Merged into a `{"type": ...}` dict by the caller before sending.
     var wireFields: [String: Any] {
-        ["shape": shape.rawValue, "useFullDisplay": useFullDisplay]
+        ["shape": shape.rawValue, "useFullDisplay": useFullDisplay, "desktopSize": desktopSize.rawValue]
     }
 }
 
@@ -114,7 +171,23 @@ enum ExtendDisplaySizing {
     /// the long edge of the receiver's own panel sets the overall scale (so
     /// picking a different ratio doesn't also make the desktop dramatically
     /// bigger or smaller) and the short edge is derived from the ratio.
-    static func pointSize(receiverPixelsWide: Int, receiverPixelsHigh: Int, aspect: Double) -> (wide: Int, high: Int) {
+    ///
+    /// `desktopScale` (Desktop Size) scales that standard result: each axis
+    /// is multiplied, rounded down to even, minimum 2. A smaller desktop in
+    /// points means bigger text; the default of 1 returns the standard size
+    /// unchanged.
+    static func pointSize(receiverPixelsWide: Int, receiverPixelsHigh: Int, aspect: Double,
+                          desktopScale: Double = 1) -> (wide: Int, high: Int) {
+        let unscaled = unscaledPointSize(
+            receiverPixelsWide: receiverPixelsWide, receiverPixelsHigh: receiverPixelsHigh, aspect: aspect)
+        guard desktopScale.isFinite, desktopScale > 0, desktopScale != 1 else { return unscaled }
+        let wide = max(Int((Double(unscaled.wide) * desktopScale).rounded(.down)) & ~1, 2)
+        let high = max(Int((Double(unscaled.high) * desktopScale).rounded(.down)) & ~1, 2)
+        return (wide, high)
+    }
+
+    private static func unscaledPointSize(receiverPixelsWide: Int, receiverPixelsHigh: Int,
+                                          aspect: Double) -> (wide: Int, high: Int) {
         guard receiverPixelsWide > 0, receiverPixelsHigh > 0, aspect.isFinite, aspect > 0 else {
             return (960, 600)   // never reached in practice; a safe 16:10 fallback
         }
@@ -128,6 +201,42 @@ enum ExtendDisplaySizing {
         let wide = max((longEdge / 2) & ~1, 2)
         let high = max((Int((Double(wide) / aspect).rounded()) & ~1), 2)
         return (wide, high)
+    }
+}
+
+/// The points a Mac creates/reserves for one Extend display. Pure, so the
+/// rule "the declared size and the resize reservation always come from the
+/// UNSCALED (Default) points" is testable.
+struct ExtendDisplayPlan: Equatable {
+    /// Points the virtual display actually publishes (Desktop Size applied).
+    let wide: Int
+    let high: Int
+    /// Points at Default Desktop Size. Declared physical size must derive
+    /// from these, so text size is the only thing Desktop Size changes.
+    let unscaledWide: Int
+    let unscaledHigh: Int
+
+    /// Long edge reserved on both axes at creation, so switching Desktop
+    /// Size (or rotating) later always fits through an in-place resize.
+    var reservedPointsPerAxis: Int { max(unscaledWide, unscaledHigh) }
+
+    static func resolve(receiverPixelsWide: Int, receiverPixelsHigh: Int, aspect: Double,
+                        desktopSize: ExtendDesktopSize) -> ExtendDisplayPlan {
+        let unscaled = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: receiverPixelsWide, receiverPixelsHigh: receiverPixelsHigh, aspect: aspect)
+        let scaled = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: receiverPixelsWide, receiverPixelsHigh: receiverPixelsHigh, aspect: aspect,
+            desktopScale: desktopSize.factor)
+        return ExtendDisplayPlan(wide: scaled.wide, high: scaled.high,
+                                 unscaledWide: unscaled.wide, unscaledHigh: unscaled.high)
+    }
+
+    /// Reconfigure-loop decision: another pass is needed when the points
+    /// resolved from the CURRENT stored preference and receiver size differ
+    /// from what the pass just applied (a preference saved while a
+    /// reconfigure was running must not be lost).
+    static func needsAnotherPass(applied: ExtendDisplayPlan, current: ExtendDisplayPlan) -> Bool {
+        applied.wide != current.wide || applied.high != current.high
     }
 }
 
@@ -183,12 +292,15 @@ enum ExtendDisplayShapeStore {
         guard let raw = UserDefaults.standard.dictionary(forKey: key(peerID)),
               let rawShape = raw["shape"] as? String,
               let shape = ExtendDisplayShape(rawValue: rawShape) else { return nil }
-        return ExtendDisplayShapePreference(shape: shape, useFullDisplay: raw["useFullDisplay"] as? Bool ?? false)
+        return ExtendDisplayShapePreference(
+            shape: shape, useFullDisplay: raw["useFullDisplay"] as? Bool ?? false,
+            desktopSize: (raw["desktopSize"] as? String).flatMap(ExtendDesktopSize.init(rawValue:)) ?? .standard)
     }
 
     static func save(_ preference: ExtendDisplayShapePreference, peerID: String) {
         UserDefaults.standard.set(["shape": preference.shape.rawValue,
-                                    "useFullDisplay": preference.useFullDisplay], forKey: key(peerID))
+                                    "useFullDisplay": preference.useFullDisplay,
+                                    "desktopSize": preference.desktopSize.rawValue], forKey: key(peerID))
     }
 
     private static func key(_ peerID: String) -> String { "extendShape.\(peerID)" }
