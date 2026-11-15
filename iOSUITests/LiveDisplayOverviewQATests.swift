@@ -55,7 +55,7 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         open.tap()
         let done = app.buttons["displayOverviewDone"]
         XCTAssertTrue(done.waitForExistence(timeout: 5), "the overview opens")
-        let window = app.windows.firstMatch.frame
+        let window = mainWindow(app).frame
         let tiles = overviewTiles(app)
         XCTAssertGreaterThanOrEqual(tiles.count, 2, "every Mac display is drawn")
         for tile in tiles { XCTAssertTrue(window.intersects(tile.frame), "\(tile.label) is in view after opening") }
@@ -67,7 +67,7 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         target.tap()
         let showInPane = app.buttons["displayOverviewShowInPane"]
         XCTAssertTrue(showInPane.waitForExistence(timeout: 3), "a selected display offers Show in Pane")
-        let canvas = app.windows.firstMatch
+        let canvas = mainWindow(app)
         canvas.pinch(withScale: 2.5, velocity: 2)
         canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
             .press(forDuration: 0.05, thenDragTo: canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)))
@@ -79,7 +79,7 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         snapshot(app, "overview-04-landscape")
         app.buttons["displayOverviewFitAll"].firstMatch.tap()
         sleep(1)
-        let rotated = app.windows.firstMatch.frame
+        let rotated = mainWindow(app).frame
         for tile in overviewTiles(app) {
             XCTAssertTrue(rotated.contains(tile.frame.insetBy(dx: 2, dy: 2)) || rotated.intersects(tile.frame),
                           "\(tile.label) is back in view after Fit All")
@@ -154,6 +154,14 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         if expand.label != "Compact" { expand.tap() }
         XCTAssertTrue(waitUntil(5) { expand.label == "Compact" }, "the gallery expands")
         snapshot(app, "overview-00-expanded")
+    }
+
+    /// The app's main window. On iPad the first window in the tree can be an empty, zero-size one,
+    /// so the largest window is the one showing the app.
+    @MainActor
+    private func mainWindow(_ app: XCUIApplication) -> XCUIElement {
+        app.windows.allElementsBoundByIndex
+            .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height } ?? app.windows.firstMatch
     }
 
     /// Scrolls the gallery until `element` can be tapped. False when it never appears.
