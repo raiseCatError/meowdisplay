@@ -1059,6 +1059,19 @@ struct StepsAsideForAllApps: ViewModifier {
             .opacity(allAppsOpen ? 0 : 1)
             .allowsHitTesting(!allAppsOpen)
             .accessibilityHidden(allAppsOpen)
+            .environment(\.coveredByAllApps, allAppsOpen)
+    }
+}
+
+/// Set by `StepsAsideForAllApps`. A container's `accessibilityHidden` didn't reach the cells of a
+/// scroll view inside it (the hosted iPhone Duo UI test found a scrolled-away apps bar icon still
+/// in the tree under All Apps), so the cells hide themselves too.
+private struct CoveredByAllAppsKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var coveredByAllApps: Bool {
+        get { self[CoveredByAllAppsKey.self] }
+        set { self[CoveredByAllAppsKey.self] = newValue }
     }
 }
 
