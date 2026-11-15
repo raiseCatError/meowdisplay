@@ -943,6 +943,7 @@ private struct ControlSettingsPage: View {
                         ForEach(LandscapeTraySide.allCases) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    .accessibilityIdentifier("landscapeTraySidePicker")
                     .settingsAnchor("trayPlacement")
                 }
                 // One preference for both layouts: the compact arrow button and
@@ -1147,6 +1148,8 @@ private struct ControlSettingsPage: View {
                 ForEach(PadControlLayoutMode.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+            // A segmented picker shows no label, so UI tests find it by this identifier.
+            .accessibilityIdentifier("controlLayoutPicker")
             .settingsAnchor("controlLayout")
             if visibility.showsEdgePickers {
                 Picker("Main Controls", selection: preferenceBinding(controlStore, \.padMainEdge)) {
