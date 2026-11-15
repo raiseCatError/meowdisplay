@@ -16,10 +16,12 @@ struct DisplayOverviewPresentation: ViewModifier {
     let model: WorkspaceModel
     let onShowInPane: (CatalogDisplayItem) -> Void
     let onAddAsNewPane: (CatalogDisplayItem) -> Void
+    @Environment(\.displayScale) private var displayScale
 
     func body(content: Content) -> some View {
         content.fullScreenCover(isPresented: $isPresented) {
-            DisplayOverviewScreen(model: model, onShowInPane: onShowInPane, onAddAsNewPane: onAddAsNewPane)
+            DisplayOverviewScreen(model: model, displayScale: displayScale,
+                                  onShowInPane: onShowInPane, onAddAsNewPane: onAddAsNewPane)
         }
     }
 }
@@ -35,19 +37,23 @@ struct DisplayOverviewScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSize
+    @Environment(\.displayScale) private var environmentDisplayScale
 
     /// How far past the canvas a tile is still drawn, so the corners and border that the
     /// canvas clips are never the visible edge of a tile that is cut off by the screen.
     private static let overscan: CGFloat = 12
 
-    init(model: WorkspaceModel, onShowInPane: @escaping (CatalogDisplayItem) -> Void,
+    /// The scale comes from the presenting view's environment, never `UIScreen.main`: on
+    /// iPhone Duo the window can be on either display, and the main screen is not necessarily
+    /// the one showing this view.
+    init(model: WorkspaceModel, displayScale: CGFloat, onShowInPane: @escaping (CatalogDisplayItem) -> Void,
          onAddAsNewPane: @escaping (CatalogDisplayItem) -> Void) {
         self.model = model
         self.onShowInPane = onShowInPane
         self.onAddAsNewPane = onAddAsNewPane
         _interaction = State(initialValue: OverviewInteraction(
             model: DisplayOverviewModel(catalog: model.catalog?.displays ?? []),
-            viewDisplayScale: Double(UIScreen.main.scale)))
+            viewDisplayScale: Double(displayScale)))
     }
 
     var body: some View {
@@ -62,6 +68,7 @@ struct DisplayOverviewScreen: View {
         .onAppear { model.displayOverviewOpen = true }
         .onDisappear { model.displayOverviewOpen = false }
         .onChange(of: model.catalog?.displays) { displays in refreshModel(displays) }
+        .onChange(of: environmentDisplayScale) { scale in interaction.setViewDisplayScale(Double(scale)) }
     }
 
     // MARK: Toolbar

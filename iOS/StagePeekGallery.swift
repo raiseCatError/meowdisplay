@@ -636,26 +636,6 @@ struct StagePeekGallery: View {
         .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangeOverview))
     }
 
-    /// "Displays", with Arrange… beside it when the map is shown, the Mac offers display
-    /// arrangement and this device has control (the Mac also asks its owner every time).
-    @ViewBuilder private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
-        let overview = DisplayOverviewModel(catalog: displays)
-        if inputAllowed, model.canArrangeDisplays, overview.drawnDisplays.count >= 2, overview.hasArrangement {
-            HStack(alignment: .firstTextBaseline) {
-                sectionTitle(String(localized: "Displays"))
-                Spacer()
-                Button { arrangeOverview = overview } label: {
-                    Text("Arrange…").font(.subheadline.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(meowAccent)
-                .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
-            }
-        } else {
-            sectionTitle(String(localized: "Displays"))
-        }
-    }
-
     /// The Mac's displays: in their real arrangement when the Mac sent it for two or more of them,
     /// otherwise (one display, or an older Mac) the grid of cards.
     @ViewBuilder private func displaysSection(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
@@ -672,13 +652,24 @@ struct StagePeekGallery: View {
         return overview.drawnDisplays.count >= 2 && overview.hasArrangement ? overview : nil
     }
 
-    /// The section title; with the arrangement map it also carries the button that opens the
-    /// full-screen overview.
+    /// The section title. With the arrangement map it also carries Overview (the full-screen
+    /// overview) and, when the Mac offers display arrangement and this device has control,
+    /// Arrange… (the Mac also asks its owner every time).
     private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
-        HStack(spacing: 8) {
+        let overview = arrangementOverview(displays)
+        return HStack(spacing: 12) {
             sectionTitle(String(localized: "Displays"))
             Spacer(minLength: 8)
-            if arrangementOverview(displays) != nil {
+            if let overview {
+                if inputAllowed, model.canArrangeDisplays {
+                    Button { arrangeOverview = overview } label: {
+                        Text("Arrange…").font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(meowAccent)
+                    .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
+                    .accessibilityIdentifier("displayArrangeButton")
+                }
                 Button { showDisplayOverview = true } label: {
                     Label("Overview", systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))

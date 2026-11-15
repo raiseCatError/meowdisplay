@@ -41,8 +41,8 @@ struct OverviewInteraction: Equatable {
     /// The area the camera draws into, in view points. Zero until the view is laid out.
     private(set) var viewport: CGSize
     private(set) var safeInsets: OverviewInsets
-    /// Receiver pixels per view point (`UIScreen.scale`), for `ZoomLimits`.
-    let viewDisplayScale: Double
+    /// Receiver pixels per view point (the view's display scale), for `ZoomLimits`.
+    private(set) var viewDisplayScale: Double
     /// True until the person moves the camera: while it holds, a new viewport or a
     /// changed arrangement refits instead of leaving the picture off-centre.
     private(set) var followsFitAll = true
@@ -58,6 +58,11 @@ struct OverviewInteraction: Equatable {
         self.safeInsets = safeInsets
         self.viewDisplayScale = OverviewCamera.sanitized(viewDisplayScale)
         self.camera = OverviewCamera.fitAll(bounds: model.arrangementBounds, viewport: viewport, safeInsets: safeInsets)
+    }
+
+    /// The view moved to a display with another scale (iPhone Duo outer and inner displays).
+    mutating func setViewDisplayScale(_ scale: Double) {
+        viewDisplayScale = OverviewCamera.sanitized(scale)
     }
 
     // MARK: Derived state
