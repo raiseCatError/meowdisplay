@@ -135,6 +135,20 @@ struct DisplayOverviewModel: Equatable, Sendable {
         self.init(catalog: entries)
     }
 
+    /// Builds the model from the receiver's parsed catalog. Items carrying no arrangement data (older
+    /// Macs, or when `overview` is nil) are built from their id, name, size and main/virtual flags, so
+    /// the model lays them out in its fallback row with `hasArrangement == false`. Items without a
+    /// positive size are dropped.
+    init(catalog items: [CatalogDisplayItem]) {
+        self.init(displays: items.compactMap { item in
+            if let overview = item.overview { return overview }
+            guard item.width > 0, item.height > 0 else { return nil }
+            return OverviewDisplay(id: item.id, name: String(item.name.prefix(OverviewDisplay.maxNameLength)),
+                                   frame: CGRect(x: 0, y: 0, width: CGFloat(item.width), height: CGFloat(item.height)),
+                                   isMain: item.isMain, isVirtual: item.isVirtual, hasArrangement: false)
+        })
+    }
+
     init(displays input: [OverviewDisplay]) {
         var seen = Set<UInt32>()
         var kept: [OverviewDisplay] = []

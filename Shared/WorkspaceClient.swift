@@ -244,7 +244,7 @@ enum WorkspaceEvent: Sendable {
                 guard let id = u32(d, "id") else { return nil }
                 return CatalogDisplayItem(id: id, name: str(d, "name", 80) ?? "Display", width: d["w"] as? Int ?? 0,
                                           height: d["h"] as? Int ?? 0, isMain: d["main"] as? Bool ?? false,
-                                          isVirtual: d["virtual"] as? Bool ?? false)
+                                          isVirtual: d["virtual"] as? Bool ?? false, overview: OverviewDisplay(wire: d))
             }
             return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
                                                    installed: Array(installed),
@@ -1061,13 +1061,19 @@ final class WorkspaceModel: ObservableObject {
         let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
         let wantedIcons = iconPlanner.plan(c.windows.map(\.bundleID) + c.apps.map(\.bundleID), has: { icons[$0] != nil },
                                            now: Date().timeIntervalSinceReferenceDate)
-        let displays = (stagePeekOpen || overviewOpen) ? c.displays.map(\.id) : []
+        let displays = (stagePeekOpen || overviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
         if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
             iconPlanner.unsent(wantedIcons)
         }
         scheduleIconRetry()
+    }
+
+    /// The displays worth a live thumbnail: MeowDisplay virtual displays (this session's or another's)
+    /// are drawn as placeholders and never captured, or a preview would show itself.
+    nonisolated static func thumbnailDisplayIDs(_ displays: [CatalogDisplayItem]) -> [UInt32] {
+        displays.filter { !($0.overview?.isOwn ?? false) && !($0.overview?.isMeow ?? false) }.map(\.id)
     }
 
     /// Icons for the app carousel and Launchpad, a page at a time.
