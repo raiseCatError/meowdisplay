@@ -607,6 +607,69 @@ final class ReceiverVideoView: NSView {
     private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
     private var cursorVisible = false
 
+    /// Off-screen locator (`OffscreenCursorLocator`): an arrow at the edge of the picture
+    /// pointing at the Mac pointer while it is on another display (or, in Window mode, over no
+    /// pane). Not a pointer: a different shape from the sprite, and it never affects input. This
+    /// app has no locator preference, so it is always on.
+    private let locatorLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        let s = ReceiverVideoView.locatorSize.width / 2
+        let path = CGMutablePath()   // points along +x, centred on the origin
+        path.move(to: CGPoint(x: s, y: 0))
+        path.addLine(to: CGPoint(x: -0.8 * s, y: -0.8 * s))
+        path.addLine(to: CGPoint(x: -0.35 * s, y: 0))
+        path.addLine(to: CGPoint(x: -0.8 * s, y: 0.8 * s))
+        path.closeSubpath()
+        layer.path = path
+        layer.fillColor = NSColor.white.cgColor
+        layer.strokeColor = NSColor.black.withAlphaComponent(0.85).cgColor
+        layer.lineWidth = 1.5
+        layer.lineJoin = .round
+        layer.shadowColor = NSColor.black.cgColor
+        layer.shadowOpacity = 0.35
+        layer.shadowRadius = 2
+        layer.shadowOffset = .zero
+        layer.isHidden = true
+        layer.zPosition = 11
+        layer.actions = ["position": NSNull(), "transform": NSNull(), "hidden": NSNull()]
+        return layer
+    }()
+    static let locatorSize = CGSize(width: 24, height: 24)
+    /// Re-entry marker (`CursorLocatorTarget.resume`): a hollow ring where this Mac's input
+    /// takes over while the sender's pointer is on another display. A ring, so it is not read as
+    /// the Mac pointer or the arrow. The dark ring under the white one keeps it visible on light
+    /// and dark pictures; the container carries the 60% opacity so the two fade together.
+    private let resumeMarkerLayer: CALayer = {
+        let size = ReceiverVideoView.resumeMarkerSize
+        let container = CALayer()
+        container.bounds = CGRect(origin: .zero, size: size)
+        let ringRect = CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+        let path = CGPath(ellipseIn: ringRect, transform: nil)
+        let rings: [(color: NSColor, width: CGFloat)] = [(NSColor.black.withAlphaComponent(0.85), 4), (NSColor.white, 2)]
+        for ring in rings {
+            let shape = CAShapeLayer()
+            shape.frame = container.bounds
+            shape.path = path
+            shape.fillColor = nil
+            shape.strokeColor = ring.color.cgColor
+            shape.lineWidth = ring.width
+            container.addSublayer(shape)
+        }
+        container.allowsGroupOpacity = true
+        container.opacity = 0.6
+        container.isHidden = true
+        container.zPosition = 11
+        container.actions = ["position": NSNull(), "hidden": NSNull()]
+        return container
+    }()
+    /// The ring is 14 pt across; the extra 4 pt holds the outline's outer half.
+    static let resumeMarkerSize = CGSize(width: 18, height: 18)
+    private var cursorOffDisplay: CursorLocatorTarget?
+    /// Whether this Mac's pointer input reaches the sender (`ReceiverInputController`): the
+    /// ring means "your click lands here", which is not so while viewing only.
+    private var controlling = false
+    private var statusObserver: AnyCancellable?
+
     private let workspace: WorkspaceModel
     private var workspaceObserver: AnyCancellable?
     private var lockCoverObserver: AnyCancellable?
@@ -623,6 +686,8 @@ final class ReceiverVideoView: NSView {
         displayLayer.frame = bounds
         layer?.addSublayer(displayLayer)
         layer?.addSublayer(cursorLayer)
+        layer?.addSublayer(locatorLayer)
+        layer?.addSublayer(resumeMarkerLayer)
 
         receiver.onCursor = { [weak self] x, y, visible in
             guard let self else { return }
@@ -639,6 +704,19 @@ final class ReceiverVideoView: NSView {
         receiver.onCursorImage = { [weak self] image, anchor, normSize in
             self?.setCursorSprite(image, anchor: anchor, normSize: normSize)
         }
+        receiver.onCursorOffDisplay = { [weak self] target in
+            self?.setCursorOffDisplay(target)
+        }
+        controlling = input.echoesCursor
+        statusObserver = input.$status
+            .map { $0 == .controlling }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] controlling in
+                guard let self else { return }
+                self.controlling = controlling
+                self.updateLocators()
+            }
         // Replay the sprite/position that arrived before this view existed —
         // the sender re-sends them only on change, so without this the
         // cursor stays invisible until it happens to change shape.
@@ -647,6 +725,7 @@ final class ReceiverVideoView: NSView {
         }
         let state = receiver.cursorState
         moveCursor(x: state.x, y: state.y, visible: state.visible)
+        setCursorOffDisplay(receiver.cursorOffDisplay)
         // videoSize arrives after the format description — re-fit the layers.
         videoSizeObserver = receiver.$videoSize
             .receive(on: DispatchQueue.main)
@@ -773,7 +852,66 @@ final class ReceiverVideoView: NSView {
         CATransaction.setDisableActions(true)
         displayLayer.frame = bounds
         updateCursorLayout()
+        updateLocators()
         CATransaction.commit()
+    }
+
+    private func setCursorOffDisplay(_ target: CursorLocatorTarget?) {
+        guard target != cursorOffDisplay else { return }
+        cursorOffDisplay = target
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        updateLocators()
+        CATransaction.commit()
+    }
+
+    private func updateLocators() {
+        updateLocatorArrow()
+        updateResumeMarker()
+    }
+
+    /// The arrow, on the edge of the picture (or of the active pane's part of it) nearest the
+    /// Mac pointer. `OffscreenCursorLocator` works with y growing downward and this view's y
+    /// grows upward, so the geometry is done in the downward space and the result flipped back.
+    private func updateLocatorArrow() {
+        guard let target = cursorOffDisplay, let picture = videoRect() else {
+            locatorLayer.isHidden = true
+            return
+        }
+        let height = bounds.height
+        let pictureDown = CGRect(x: picture.minX, y: height - picture.maxY, width: picture.width, height: picture.height)
+        var content = pictureDown
+        if let pane = target.pane {
+            // Window mode, over no pane: point from the active pane's part of the picture.
+            let paneRect = CGRect(x: pictureDown.minX + pane.minX * pictureDown.width,
+                                  y: pictureDown.minY + pane.minY * pictureDown.height,
+                                  width: pane.width * pictureDown.width, height: pane.height * pictureDown.height)
+            content = pictureDown.intersection(paneRect)
+        }
+        content = content.insetBy(dx: 4, dy: 4)
+        let cursor = CGPoint(x: pictureDown.minX + target.point.x * pictureDown.width,
+                             y: pictureDown.minY + target.point.y * pictureDown.height)
+        guard !content.isNull, !content.isEmpty,
+              let placement = OffscreenCursorLocator.placement(cursor: cursor, content: content,
+                                                               indicatorSize: Self.locatorSize) else {
+            locatorLayer.isHidden = true
+            return
+        }
+        locatorLayer.position = CGPoint(x: placement.center.x, y: height - placement.center.y)
+        locatorLayer.setAffineTransform(CGAffineTransform(rotationAngle: -placement.angle)
+            .scaledBy(x: placement.scale, y: placement.scale))
+        locatorLayer.isHidden = false
+    }
+
+    /// The ring, while the sender's pointer is elsewhere and this Mac's input is live.
+    private func updateResumeMarker() {
+        guard controlling, let resume = cursorOffDisplay?.resume, let picture = videoRect() else {
+            resumeMarkerLayer.isHidden = true
+            return
+        }
+        resumeMarkerLayer.position = CGPoint(x: picture.minX + resume.x * picture.width,
+                                             y: picture.maxY - resume.y * picture.height)
+        resumeMarkerLayer.isHidden = false
     }
 
     /// Aspect-fit rect of the video inside the view (same math as iOS).

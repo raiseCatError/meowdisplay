@@ -374,6 +374,7 @@ targets:
       - Shared/PointerGestureEngine.swift
       - Shared/ScrollMomentum.swift
       - Shared/CursorPresentationPacer.swift
+      - Shared/OffscreenCursorLocator.swift
       - Shared/KeyboardEditPlanner.swift
       - Shared/TypedTextEcho.swift
       - Shared/LockScreenKeyboard.swift

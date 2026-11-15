@@ -92,6 +92,9 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Command shortcuts | Yes | Partial | Yes | Android needs Control Key Types ⌘ (Android keeps Meta for itself) |
 | Typing goes only to the active tile's window | Yes | Yes | Yes | Mac checks focus; verified with Android |
 | Typing strip above the keyboard; Zoom While Typing follows the Mac's text caret | Yes | Yes | — | Strip checked on both phones; caret follow needs Accessibility on the Mac and is unit-tested only |
+| Receiver input keeps the Mac cursor on the receiver's display (Mirror, Extend) | Yes | Yes | Yes | Mac-side change, so every receiver gets it. Unit-tested, no physical QA yet |
+| Off-display cursor locator, re-entry ring | Yes | No | Yes | Android ignores the extra `cursor` fields safely. Unit-tested and built, no physical QA yet |
+| Off-pane cursor locator (Window mode) | Yes | No | Yes | Unit-tested and built, no physical QA yet |
 
 ## Files and clipboard
 
