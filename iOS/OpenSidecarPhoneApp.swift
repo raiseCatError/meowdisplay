@@ -536,6 +536,7 @@ struct ReceiverScreen: View {
                                    // The dotted trackpad only while touches reach the Mac: with video
                                    // and control both unavailable, nothing suggests a working pad.
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid && inputReachesMac,
+                                   showCursorLocator: controlStore.preferences.showCursorLocator,
                                    pinchTarget: controlStore.preferences.pinchTarget,
                                    rotateTarget: controlStore.preferences.rotateTarget,
                                    snapRotation: controlStore.preferences.snapRotation,
@@ -3008,6 +3009,8 @@ struct VideoLayerView: UIViewRepresentable {
     /// while this is false because it is also the mapped input surface.
     let videoEnabled: Bool
     let showSurfaceGrid: Bool
+    /// An arrow at the picture's edge pointing at a Mac pointer that is out of view.
+    let showCursorLocator: Bool
     let pinchTarget: ReceiverGestureTarget
     let rotateTarget: ReceiverGestureTarget
     let snapRotation: Bool
@@ -3080,6 +3083,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.workspaceZoomPreview = workspaceZoomPreview
         view.workspaceViewReset = onWorkspaceViewReset
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        view.setCursorLocatorEnabled(showCursorLocator)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
@@ -3195,6 +3199,9 @@ struct VideoLayerView: UIViewRepresentable {
         receiver.onCursorPaneSize = { [weak view] size in
             view?.setCursorPaneSize(size)
         }
+        receiver.onCursorOffDisplay = { [weak view] point in
+            view?.setCursorOffDisplay(point)
+        }
         // The Mac's focused text caret steers Zoom While Typing while the
         // keyboard is open. Not replayed: a new view starts with the
         // keyboard closed, and the Mac sends the caret as it opens.
@@ -3208,6 +3215,7 @@ struct VideoLayerView: UIViewRepresentable {
             view.setCursorSprite(sprite.image, anchor: sprite.anchor, normSize: sprite.normSize)
         }
         view.setCursorPaneSize(receiver.cursorPaneSize)
+        view.setCursorOffDisplay(receiver.cursorOffDisplay)
         let state = receiver.cursorState
         view.moveCursor(x: state.x, y: state.y, visible: state.visible)
         return view
@@ -3229,6 +3237,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.workspaceZoomPreview = workspaceZoomPreview
         uiView.workspaceViewReset = onWorkspaceViewReset
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        uiView.setCursorLocatorEnabled(showCursorLocator)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
@@ -3430,6 +3439,37 @@ struct VideoLayerView: UIViewRepresentable {
                              "bounds": NSNull(), "hidden": NSNull()]
             return layer
         }()
+        /// Off-screen locator (`OffscreenCursorLocator`): an arrow at the edge of the visible
+        /// picture pointing at the Mac pointer while it is out of view: on another display
+        /// (`cursorOffDisplay`, from hidden reports) or zoomed/panned off the visible picture.
+        /// It is not a pointer: a different shape from the Mac's sprite, never drawn together
+        /// with the sprite in view, and it never affects input.
+        private let locatorLayer: CAShapeLayer = {
+            let layer = CAShapeLayer()
+            let s = VideoView.locatorSize.width / 2
+            let path = CGMutablePath()   // points along +x, centred on the origin
+            path.move(to: CGPoint(x: s, y: 0))
+            path.addLine(to: CGPoint(x: -0.8 * s, y: -0.8 * s))
+            path.addLine(to: CGPoint(x: -0.35 * s, y: 0))
+            path.addLine(to: CGPoint(x: -0.8 * s, y: 0.8 * s))
+            path.closeSubpath()
+            layer.path = path
+            layer.fillColor = UIColor.white.cgColor
+            layer.strokeColor = UIColor.black.withAlphaComponent(0.85).cgColor
+            layer.lineWidth = 1.5
+            layer.lineJoin = .round
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOpacity = 0.35
+            layer.shadowRadius = 2
+            layer.shadowOffset = .zero
+            layer.isHidden = true
+            layer.zPosition = 11
+            layer.actions = ["position": NSNull(), "transform": NSNull(), "hidden": NSNull()]
+            return layer
+        }()
+        static let locatorSize = CGSize(width: 24, height: 24)
+        private var cursorOffDisplay: CGPoint?
+        private var cursorLocatorEnabled = true
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
@@ -4371,6 +4411,7 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             if cursorLayer.superlayer == nil { layer.addSublayer(cursorLayer) }
+            if locatorLayer.superlayer == nil { layer.addSublayer(locatorLayer) }
             updateCursorLayout()
             updateSurfaceLayout()
             CATransaction.commit()
@@ -4742,6 +4783,52 @@ struct VideoLayerView: UIViewRepresentable {
         /// (correctly) landing outside the clipped view when the Mac
         /// cursor itself is currently outside the visible crop.
         private func updateCursorLayout() {
+            layoutCursorSprite()
+            updateCursorLocator()
+        }
+
+        func setCursorOffDisplay(_ point: CGPoint?) {
+            guard point != cursorOffDisplay else { return }
+            cursorOffDisplay = point
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updateCursorLocator()
+            CATransaction.commit()
+        }
+
+        func setCursorLocatorEnabled(_ enabled: Bool) {
+            guard enabled != cursorLocatorEnabled else { return }
+            cursorLocatorEnabled = enabled
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updateCursorLocator()
+            CATransaction.commit()
+        }
+
+        /// Shows the locator while the Mac pointer is known and out of the visible picture.
+        /// No animation, so it never pulses or slides (Reduce Motion needs nothing extra).
+        private func updateCursorLocator() {
+            // Where the pointer is: on another display, or the drawn one (maybe out of view).
+            let target = cursorOffDisplay ?? (cursorVisible && cursorLayer.contents != nil ? cursorNorm : nil)
+            guard cursorLocatorEnabled, currentTransform.isValid, let target else {
+                locatorLayer.isHidden = true
+                return
+            }
+            let visible = currentTransform.displayedRect.intersection(bounds.inset(by: safeAreaInsets)).insetBy(dx: 4, dy: 4)
+            guard !visible.isNull, !visible.isEmpty,
+                  let placement = OffscreenCursorLocator.placement(
+                      cursor: currentTransform.viewPoint(forRemote: target), content: visible,
+                      indicatorSize: Self.locatorSize) else {
+                locatorLayer.isHidden = true
+                return
+            }
+            locatorLayer.position = placement.center
+            locatorLayer.setAffineTransform(CGAffineTransform(rotationAngle: placement.angle)
+                .scaledBy(x: placement.scale, y: placement.scale))
+            locatorLayer.isHidden = false
+        }
+
+        private func layoutCursorSprite() {
             guard currentTransform.isValid else { return }
             let displayedRect = currentTransform.displayedRect
             let crop = currentTransform.remoteCrop

@@ -297,29 +297,29 @@ final class OffscreenCursorLocatorTests: XCTestCase {
     // MARK: Invalid input
 
     func testNonFiniteCursorReturnsNil() {
-        XCTAssertNil(place(CGPoint(x: .nan, y: 250)))
-        XCTAssertNil(place(CGPoint(x: 700, y: .nan)))
-        XCTAssertNil(place(CGPoint(x: .infinity, y: 250)))
-        XCTAssertNil(place(CGPoint(x: 300, y: -.infinity)))
+        XCTAssertNil(place(CGPoint(x: CGFloat.nan, y: 250)))
+        XCTAssertNil(place(CGPoint(x: 700, y: CGFloat.nan)))
+        XCTAssertNil(place(CGPoint(x: CGFloat.infinity, y: 250)))
+        XCTAssertNil(place(CGPoint(x: 300, y: -CGFloat.infinity)))
     }
 
     func testNonFiniteContentReturnsNil() {
         let cursor = CGPoint(x: 700, y: 250)
-        XCTAssertNil(place(cursor, in: CGRect(x: .nan, y: 0, width: 400, height: 300)))
-        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: .infinity, width: 400, height: 300)))
-        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: 0, width: .infinity, height: 300)))
-        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: 0, width: 400, height: .nan)))
+        XCTAssertNil(place(cursor, in: CGRect(x: CGFloat.nan, y: 0, width: 400, height: 300)))
+        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: CGFloat.infinity, width: 400, height: 300)))
+        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 300)))
+        XCTAssertNil(place(cursor, in: CGRect(x: 0, y: 0, width: 400, height: CGFloat.nan)))
     }
 
     func testNonFiniteIndicatorOrScaleReturnsNil() {
         let cursor = CGPoint(x: 700, y: 250)
-        XCTAssertNil(place(cursor, size: CGSize(width: .nan, height: 30)))
-        XCTAssertNil(place(cursor, size: CGSize(width: 40, height: .infinity)))
+        XCTAssertNil(place(cursor, size: CGSize(width: CGFloat.nan, height: 30)))
+        XCTAssertNil(place(cursor, size: CGSize(width: 40, height: CGFloat.infinity)))
         XCTAssertNil(OffscreenCursorLocator.placement(
-            cursor: cursor, content: content, indicatorSize: indicator, minimumScale: .nan
+            cursor: cursor, content: content, indicatorSize: indicator, minimumScale: CGFloat.nan
         ))
         XCTAssertNil(OffscreenCursorLocator.placement(
-            cursor: cursor, content: content, indicatorSize: indicator, maximumScale: .infinity
+            cursor: cursor, content: content, indicatorSize: indicator, maximumScale: CGFloat.infinity
         ))
     }
 

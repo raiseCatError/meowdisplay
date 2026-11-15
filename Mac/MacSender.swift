@@ -984,6 +984,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// before (a rebuild keeps its connection), so the next poll sends either a position or
     /// one hidden report.
     private static let cursorEchoUnsent: (x: Double, y: Double, visible: Bool) = (-1, -1, true)
+    /// Mirror/Extend: hidden reports with the cursor's position on another display.
+    private var offDisplayCursor = OffDisplayCursorReports()
     private var lastCursorPNGHash = 0
     private var cursorSeq: UInt64 = 0
     // Caret-following Zoom While Typing (PROTOCOL.md 6.11): while this
@@ -5562,9 +5564,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // This session's re-entry point for receiver input (`DisplayReentryPoint`).
                 inputInjector?.noteCursor(loc)
             }
-        } else if lastCursorSent.visible {
-            lastCursorSent.visible = false
-            sendCursor("\"v\":0")
+            offDisplayCursor.reset()
+        } else {
+            // On another display (or none): hidden here, with where it is for a locator.
+            let wire = CursorWirePosition(x: (loc.x - bounds.minX) / bounds.width,
+                                          y: (loc.y - bounds.minY) / bounds.height)
+            let leaving = lastCursorSent.visible
+            if offDisplayCursor.shouldSend(wire, at: ProcessInfo.processInfo.systemUptime, leaving: leaving) {
+                lastCursorSent.visible = false
+                sendCursor("\"v\":0," + OffDisplayCursorReports.fields(wire))
+            }
         }
         #if DEBUG
         logCursorTraceIfDue(reason: "polling: loc=\(loc) bounds=\(bounds) visible=\(lastCursorSent.visible) "

@@ -151,6 +151,10 @@ final class ReceiverUISink: Sendable {
         target?.applyCursorPositionUpdate(x: x, y: y, visible: visible)
     }
 
+    func publishCursorOffDisplay(_ p: CGPoint?) {
+        target?.applyCursorOffDisplayUpdate(p)
+    }
+
     func publishTextCaret(_ rect: CGRect?) {
         target?.applyTextCaretUpdate(rect)
     }
@@ -294,5 +298,20 @@ enum PaneCursorSizing {
         guard longest > 0, longest.isFinite else { return size }
         let f = min(max(longest, minLongestSide), maxLongestSide) / longest
         return CGSize(width: size.width * f, height: size.height * f)
+    }
+}
+
+/// A hidden `cursor` report that says where the Mac cursor is on another display
+/// (PROTOCOL.md 6.2, `"why":"display"`). Pure, for tests.
+enum CursorOffDisplayReport {
+    /// Positions this far outside the display are clamped: the locator only needs a direction
+    /// and a rough distance, and a bogus value must not overflow view geometry.
+    static let limit = 64.0
+
+    /// The off-display position, or nil: visible reports, hidden ones without a reason or
+    /// position, and non-finite values carry none.
+    static func position(visible: Bool, why: String?, x: Double?, y: Double?) -> CGPoint? {
+        guard !visible, why == "display", let x, let y, x.isFinite, y.isFinite else { return nil }
+        return CGPoint(x: min(max(x, -limit), limit), y: min(max(y, -limit), limit))
     }
 }

@@ -1400,6 +1400,10 @@ final class StreamReceiver: ObservableObject {
     /// that pane's rotation; nil in Mirror/Extend, where the sprite's own `normSize` applies.
     var onCursorPaneSize: ((CursorPaneSize?) -> Void)?
     private(set) var cursorPaneSize: CursorPaneSize?
+    /// Where the Mac cursor is while it is on another display (normalized to this one, so
+    /// outside 0...1), for an off-screen locator; nil otherwise. Never drawn as the cursor.
+    var onCursorOffDisplay: ((CGPoint?) -> Void)?
+    @MainActor private(set) var cursorOffDisplay: CGPoint?
     var onDisplayStateChange: ((DisplayState) -> Void)?
     // The video view attaches only once frames are on screen — usually AFTER
     // the connect-time sprite already arrived (the sender re-sends it only
@@ -3084,8 +3088,13 @@ final class StreamReceiver: ObservableObject {
         #if DEBUG
         logCursorPositionTraceIfDue(x: x, y: y, visible: visible)
         #endif
+        let offDisplay = CursorOffDisplayReport.position(visible: visible, why: obj["why"] as? String,
+                                                         x: obj["x"] as? Double, y: obj["y"] as? Double)
         let uiSink = self.uiSink
-        DispatchQueue.main.async { uiSink.publishCursorPosition(x: x, y: y, visible: visible) }
+        DispatchQueue.main.async {
+            uiSink.publishCursorPosition(x: x, y: y, visible: visible)
+            uiSink.publishCursorOffDisplay(offDisplay)
+        }
     }
 
     /// The Mac's focused text caret (PROTOCOL.md 6.11). Malformed frames and
@@ -6163,8 +6172,16 @@ final class StreamReceiver: ObservableObject {
         cursorState = (0.5, 0.5, false)
         cursorSprite = nil
         cursorPaneSize = nil
+        cursorOffDisplay = nil
         onCursorPaneSize?(nil)
         onCursor?(0.5, 0.5, false)
+        onCursorOffDisplay?(nil)
+    }
+
+    @MainActor func applyCursorOffDisplayUpdate(_ p: CGPoint?) {
+        guard p != cursorOffDisplay else { return }
+        cursorOffDisplay = p
+        onCursorOffDisplay?(p)
     }
 
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {

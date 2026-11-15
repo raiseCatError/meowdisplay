@@ -937,6 +937,13 @@ informational only. Note the asymmetry: the receiver's `ping` solicits a
 
 **`cursor`**: `v` is 1 (visible) or 0 (hidden). When visible, `x`, `y`
 give the normalized position (section 7); when hidden they MAY be absent.
+In Mirror and Extend the official sender's hidden reports carry `x`, `y`
+while the Mac cursor is on another display: normalized to the receiver's
+display, so outside 0..1, with `"why":"display"`. They are at most 30 per
+second and only when the position changed. A receiver MAY use them to point
+at the cursor (an off-screen locator) and MUST NOT draw the cursor itself
+from a hidden report; receivers that ignore them behave as before. A
+visible report's `x`, `y` are always inside 0..1.
 The cursor rides the control path rather than being baked into the video
 so it moves at input rate, not at video latency; the official sender reads
 the Mac cursor every 8 ms and sends a position whenever its four-decimal

@@ -20,8 +20,9 @@ import Foundation
 ///   whole circumscribed circle stays inside `content`. A circle, not the rectangle, so that the
 ///   marker can rotate to point at the cursor without ever poking out.
 /// - The circle's radius includes the scale the marker is drawn at (the scale depends on
-///   distance only, so it is known before the position is). The caller scales the marker about
-///   its centre and it still fits.
+///   distance and the content size only, so it is known before the position is). The caller
+///   scales the marker about its centre and it still fits. In content that fits the marker
+///   only at a smaller size, it stops growing at the size that fits.
 /// - Content too small for the marker on an axis centres the marker on that axis: there is no
 ///   position that fits, and a stable one is better than one that jumps between edges.
 struct OffscreenCursorLocator {
@@ -91,11 +92,18 @@ struct OffscreenCursorLocator {
         let diagonal = hypot(content.size.width, content.size.height)
         guard distance.isFinite, diagonal.isFinite, diagonal > 0 else { return nil }
 
-        let scale = scale(
+        let baseRadius = hypot(indicatorSize.width, indicatorSize.height) / 2
+        var scale = scale(
             distance: distance, diagonal: diagonal,
             minimum: minimumScale, maximum: maximumScale
         )
-        let radius = hypot(indicatorSize.width, indicatorSize.height) / 2 * scale
+        // Growing must not push the marker out of content that fits it at a smaller scale:
+        // stop growing where the circle just fits, but never below the minimum.
+        if baseRadius > 0 {
+            let fitting = min(content.size.width, content.size.height) / 2 / baseRadius
+            scale = max(min(scale, fitting), min(minimumScale, maximumScale))
+        }
+        let radius = baseRadius * scale
 
         // Where the ray from the content centre to the cursor leaves the content. The cursor is
         // outside, so on at least one axis it is farther out than the half extent and the
