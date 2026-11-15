@@ -509,8 +509,11 @@ final class WindowBrowserService: @unchecked Sendable {
     private func sendIcons(_ bundles: [String]) {
         DispatchQueue.main.async { [weak self] in
             for bundle in bundles {
-                guard AppCatalog.shared.isKnown(bundle) || NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil,
-                      let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle),
+                // The listed copy's icon (an app on an external drive or behind a link may not be
+                // the copy Launch Services knows); nothing when no copy is there.
+                let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil
+                guard AppCatalog.shared.isKnown(bundle) || running,
+                      let url = AppCatalog.shared.availableURL(for: bundle, running: running),
                       let png = Self.png(NSWorkspace.shared.icon(forFile: url.path), side: 96) else {
                     self?.queue.async { self?.icons.noIcon(bundle) }
                     continue
@@ -561,9 +564,25 @@ final class WindowBrowserService: @unchecked Sendable {
 
 // MARK: - Installed apps (one per Mac, shared by every session)
 
+/// A mounted volume, as the app list sees it (tests make their own).
+struct AppCatalogVolume: Equatable, Sendable {
+    /// Its mount point, "/Volumes/Name".
+    var path: String
+    var isLocal: Bool
+    var isBrowsable: Bool
+}
+
 /// Every launchable app the Mac can find, from Spotlight's own index
 /// (NSMetadataQuery, live-updated on installs and removals) with a folder scan
-/// as fallback when Spotlight is off. Deduplicated by bundle id; Finder first.
+/// as fallback when Spotlight is off.
+///
+/// Where it looks: the Mac's app folders, ~/Applications, and the top-level Applications folder
+/// of each mounted local volume (where the App Store installs to an external drive), never a
+/// whole volume. Spotlight doesn't follow symlinks or Finder aliases, so links to apps in those
+/// folders are resolved too (one level, never mounting anything). Apps Launch Services merely
+/// knows about elsewhere (build products, caches, the Trash, drives long gone) are not listed;
+/// one that's running still is (`sendAppCatalog`). Deduplicated by bundle id, never by name, so
+/// two apps with the same name both stay. An app whose drive goes away leaves the list. Finder first.
 final class AppCatalog: @unchecked Sendable {
     static let shared = AppCatalog()
     static let wireLimit = 900
@@ -581,15 +600,63 @@ final class AppCatalog: @unchecked Sendable {
     private var revision = 0
     private var ready = false
     private var waiters: [([Entry], Int) -> Void] = []
+    /// Main thread only.
     private var query: NSMetadataQuery?
+    private var scopes: [URL] = []
     private var observers: [NSObjectProtocol] = []
 
-    static var searchFolders: [URL] {
-        let fm = FileManager.default
-        var dirs = ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/Applications/Utilities"]
-            .map { URL(fileURLWithPath: $0) }
-        dirs.append(fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications"))
+    static let standardFolders = ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/Applications/Utilities"]
+
+    /// Where to look (tested): the standard folders and ~/Applications, then each mounted, local,
+    /// browsable volume's top-level Applications folder when `directory` finds one there (links
+    /// resolved) that isn't a folder already listed (an installer disk image's Applications is
+    /// a link to /Applications). Network volumes are left out: a stalled share must never hold up
+    /// the list.
+    static func searchFolders(home: URL, volumes: [AppCatalogVolume], directory: (URL) -> URL?) -> [URL] {
+        var dirs = standardFolders.map { URL(fileURLWithPath: $0) } + [home.appendingPathComponent("Applications")]
+        var seen = Set(dirs.map { (directory($0) ?? $0).standardizedFileURL.path })
+        for v in volumes.sorted(by: { $0.path < $1.path }) where v.isLocal && v.isBrowsable && v.path.hasPrefix("/Volumes/") {
+            let apps = URL(fileURLWithPath: v.path).appendingPathComponent("Applications")
+            guard let resolved = directory(apps), seen.insert(resolved.standardizedFileURL.path).inserted else { continue }
+            dirs.append(apps)
+        }
         return dirs
+    }
+
+    static var searchFolders: [URL] {
+        searchFolders(home: FileManager.default.homeDirectoryForCurrentUser, volumes: mountedVolumes, directory: existingDirectory)
+    }
+
+    /// The Mac's mounted volumes, hidden ones (the system's own) left out.
+    static var mountedVolumes: [AppCatalogVolume] {
+        let keys: [URLResourceKey] = [.volumeIsLocalKey, .volumeIsBrowsableKey]
+        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        return urls.map { url in
+            let v = try? url.resourceValues(forKeys: Set(keys))
+            return AppCatalogVolume(path: url.standardizedFileURL.path, isLocal: v?.volumeIsLocal ?? false,
+                                    isBrowsable: v?.volumeIsBrowsable ?? false)
+        }
+    }
+
+    static var mountedVolumeRoots: Set<String> { Set(mountedVolumes.map(\.path)) }
+
+    static func existingDirectory(_ url: URL) -> URL? {
+        let resolved = url.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDirectory) && isDirectory.boolValue ? resolved : nil
+    }
+
+    /// The external volume a path is on ("/Volumes/Name"); nil for the startup disk.
+    static func volumeRoot(of path: String) -> String? {
+        let parts = path.split(separator: "/")
+        guard parts.count >= 2, parts[0] == "Volumes" else { return nil }
+        return "/Volumes/" + parts[1]
+    }
+
+    /// The entries whose volume is still mounted (tested). An unplugged drive's apps leave the
+    /// list without the drive being touched.
+    static func available(_ entries: [String: Entry], mounted: Set<String>) -> [String: Entry] {
+        entries.filter { _, e in volumeRoot(of: e.path).map(mounted.contains) ?? true }
     }
 
     /// Sorted list (Finder first, then by name) and its revision. Starts the query on first use.
@@ -604,20 +671,27 @@ final class AppCatalog: @unchecked Sendable {
 
     func isKnown(_ bundle: String) -> Bool { lock.withLock { entries[bundle] != nil } }
 
+    /// Finder first, then by name; two apps with the same name in a fixed order (by where they are).
     static func sorted(_ list: [Entry]) -> [Entry] {
         list.sorted { a, b in
             if (a.bundleID == finderBundle) != (b.bundleID == finderBundle) { return a.bundleID == finderBundle }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            let byName = a.name.localizedCaseInsensitiveCompare(b.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return (a.path, a.bundleID) < (b.path, b.bundleID)
         }
     }
 
-    /// Merge rule (tested): one entry per bundle id; /Applications beats other folders; never MeowDisplay itself.
+    /// Merge rule (tested): one entry per bundle id; /Applications beats the system folders, which
+    /// beat anywhere else on this Mac, which beats an external drive (it may be unplugged);
+    /// otherwise the shorter path, then the first by path, so the result never depends on the
+    /// order Spotlight answered in. Never MeowDisplay itself, never an app inside another app.
     static func merge(_ found: [Entry], ownBundle: String?) -> [String: Entry] {
         var out: [String: Entry] = [:]
-        func rank(_ p: String) -> Int { p.hasPrefix("/Applications/") ? 0 : p.hasPrefix("/System/") ? 1 : 2 }
+        func rank(_ p: String) -> Int { p.hasPrefix("/Applications/") ? 0 : p.hasPrefix("/System/") ? 1 : p.hasPrefix("/Volumes/") ? 3 : 2 }
+        func better(_ a: String, than b: String) -> Bool { (rank(a), a.count, a) < (rank(b), b.count, b) }
         for e in found where !e.bundleID.isEmpty && e.bundleID != ownBundle && !e.path.contains(".app/") {
             if let old = out[e.bundleID] {
-                if rank(e.path) < rank(old.path) { out[e.bundleID] = Entry(bundleID: e.bundleID, name: e.name, path: e.path, lastUsed: e.lastUsed ?? old.lastUsed) }
+                if better(e.path, than: old.path) { out[e.bundleID] = Entry(bundleID: e.bundleID, name: e.name, path: e.path, lastUsed: e.lastUsed ?? old.lastUsed) }
                 else if old.lastUsed == nil, let used = e.lastUsed { out[e.bundleID]?.lastUsed = used }
             } else {
                 out[e.bundleID] = e
@@ -627,21 +701,48 @@ final class AppCatalog: @unchecked Sendable {
     }
 
     private func start() {
-        DispatchQueue.main.async { [self] in
-            guard query == nil else { return }
-            let q = NSMetadataQuery()
-            q.predicate = NSPredicate(format: "kMDItemContentType == 'com.apple.application-bundle'")
-            q.searchScopes = Self.searchFolders
-            q.notificationBatchingInterval = 2
-            let center = NotificationCenter.default
-            observers.append(center.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: q, queue: .main) { [weak self] _ in self?.collect() })
-            observers.append(center.addObserver(forName: .NSMetadataQueryDidUpdate, object: q, queue: .main) { [weak self] _ in self?.collect() })
-            query = q
-            if !q.start() { DispatchQueue.global(qos: .utility).async { self.publish(Self.scanFolders()) } }
-            // Spotlight off or slow: never leave the receiver waiting.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) { [weak self] in
-                guard let self, !self.lock.withLock({ self.ready }) else { return }
-                self.publish(Self.scanFolders())
+        // Finding the folders touches each drive, so not on the main thread.
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let folders = Self.searchFolders
+            DispatchQueue.main.async { [self] in
+                guard query == nil else { return }
+                scopes = folders
+                let q = NSMetadataQuery()
+                q.predicate = NSPredicate(format: "kMDItemContentType == 'com.apple.application-bundle'")
+                q.searchScopes = folders
+                q.notificationBatchingInterval = 2
+                let center = NotificationCenter.default
+                observers.append(center.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: q, queue: .main) { [weak self] _ in self?.collect() })
+                observers.append(center.addObserver(forName: .NSMetadataQueryDidUpdate, object: q, queue: .main) { [weak self] _ in self?.collect() })
+                // A drive plugged in or out: its Applications folder joins or leaves the search.
+                let workspace = NSWorkspace.shared.notificationCenter
+                for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
+                    observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.volumesChanged() })
+                }
+                query = q
+                if !q.start() { DispatchQueue.global(qos: .utility).async { self.publish(Self.scanFolders(folders)) } }
+                // Spotlight off or slow: never leave the receiver waiting.
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) { [weak self] in
+                    guard let self, !self.lock.withLock({ self.ready }) else { return }
+                    self.publish(Self.scanFolders(folders))
+                }
+            }
+        }
+    }
+
+    private func volumesChanged() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let folders = Self.searchFolders
+            let mounted = Self.mountedVolumeRoots
+            // Gone now, not after Spotlight's next pass.
+            self?.prune(mounted: mounted)
+            DispatchQueue.main.async {
+                guard let self, let q = self.query, folders != self.scopes else { return }
+                Log.info("workspace: app folders now \(folders.count) (a volume came or went)")
+                self.scopes = folders
+                q.stop()
+                q.searchScopes = folders
+                if !q.start() { DispatchQueue.global(qos: .utility).async { self.publish(Self.scanFolders(folders)) } }
             }
         }
     }
@@ -659,26 +760,74 @@ final class AppCatalog: @unchecked Sendable {
         }
         q.enableUpdates()
         found.append(Self.finderEntry)
-        DispatchQueue.global(qos: .utility).async { [self] in publish(found.count > 1 ? found : Self.scanFolders()) }
+        let folders = scopes
+        DispatchQueue.global(qos: .utility).async { [self, found] in
+            publish(found.count > 1 ? found + Self.linkedApps(in: folders) + Self.scanFolders(Self.externalFolders(folders))
+                                    : Self.scanFolders(folders))
+        }
     }
+
+    /// External drives' Applications folders: listed (one level) as well as searched, since
+    /// Spotlight often doesn't index a drive (turned off for it, or a format it skips).
+    static func externalFolders(_ folders: [URL]) -> [URL] { folders.filter { volumeRoot(of: $0.path) != nil } }
 
     static var finderEntry: Entry { Entry(bundleID: finderBundle, name: "Finder", path: "/System/Library/CoreServices/Finder.app", lastUsed: nil) }
 
-    static func scanFolders() -> [Entry] {
+    /// The app a symlink or Finder alias points at, resolved without asking anyone or mounting
+    /// anything; nil when `url` isn't a link, or its target isn't an app that's there now (an
+    /// unplugged drive, a deleted app).
+    static func linkedApp(_ url: URL) -> URL? {
+        guard let v = try? url.resourceValues(forKeys: [.isSymbolicLinkKey, .isAliasFileKey]) else { return nil }
+        let target: URL?
+        if v.isSymbolicLink == true {
+            target = url.resolvingSymlinksInPath()
+        } else if v.isAliasFile == true {
+            target = try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting])
+        } else {
+            return nil
+        }
+        guard let app = target?.standardizedFileURL, app.pathExtension.lowercased() == "app",
+              let r = try? app.resourceValues(forKeys: [.isDirectoryKey]), r.isDirectory == true else { return nil }
+        return app
+    }
+
+    /// An app bundle as an entry; nil without a bundle id.
+    static func entry(app url: URL) -> Entry? {
+        guard let b = Bundle(url: url), let id = b.bundleIdentifier, !id.isEmpty else { return nil }
+        let name = (b.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (b.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? url.deletingPathExtension().lastPathComponent
+        return Entry(bundleID: id, name: name, path: url.path, lastUsed: nil)
+    }
+
+    /// Apps the folders link to (one level), at the app's own path: Spotlight lists neither the
+    /// link nor, often, the app (its folder isn't searched).
+    static func linkedApps(in folders: [URL]) -> [Entry] {
+        folders.flatMap { dir -> [Entry] in
+            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isSymbolicLinkKey, .isAliasFileKey],
+                                                                      options: [.skipsHiddenFiles])) ?? []
+            return items.compactMap { linkedApp($0).flatMap(entry(app:)) }
+        }
+    }
+
+    /// Spotlight off: each folder's apps and links to apps (one level).
+    static func scanFolders(_ folders: [URL] = searchFolders) -> [Entry] {
         var found = [finderEntry]
-        for dir in searchFolders {
-            for url in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "app" {
-                guard let b = Bundle(url: url), let id = b.bundleIdentifier else { continue }
-                let name = (b.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
-                    ?? (b.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? url.deletingPathExtension().lastPathComponent
-                found.append(Entry(bundleID: id, name: name, path: url.path, lastUsed: nil))
+        for dir in folders {
+            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isSymbolicLinkKey, .isAliasFileKey],
+                                                                      options: [.skipsHiddenFiles])) ?? []
+            for url in items {
+                if let app = linkedApp(url) {
+                    if let e = entry(app: app) { found.append(e) }
+                } else if url.pathExtension == "app", let e = entry(app: url) {
+                    found.append(e)
+                }
             }
         }
         return found
     }
 
     private func publish(_ found: [Entry]) {
-        let merged = Self.merge(found, ownBundle: Bundle.main.bundleIdentifier)
+        let merged = Self.available(Self.merge(found, ownBundle: Bundle.main.bundleIdentifier), mounted: Self.mountedVolumeRoots)
         let (list, rev, toCall): ([Entry], Int, [([Entry], Int) -> Void]) = lock.withLock {
             if merged != entries || !ready { entries = merged; revision += 1 }
             ready = true
@@ -686,6 +835,44 @@ final class AppCatalog: @unchecked Sendable {
             return (Self.sorted(Array(entries.values)), revision, w)
         }
         for w in toCall { w(list, rev) }
+    }
+
+    /// Drops the apps of volumes no longer mounted; the receiver sees a new revision.
+    private func prune(mounted: Set<String>) {
+        lock.withLock {
+            let kept = Self.available(entries, mounted: mounted)
+            if kept.count != entries.count { entries = kept; revision += 1 }
+        }
+    }
+
+    /// A listed app that can't be found any more leaves the list.
+    private func forget(_ bundle: String) {
+        lock.withLock { if entries.removeValue(forKey: bundle) != nil { revision += 1 } }
+    }
+
+    /// Where to open (or take the icon of) an app (tested): its listed copy while that's there;
+    /// otherwise (its drive unplugged, the app moved or deleted) the copy Launch Services has now,
+    /// if that one is there. An app the Mac only runs (not listed) opens from where it runs.
+    /// Nothing else: an app neither listed nor running is never opened.
+    static func openURL(listed: String?, running: Bool, mounted: Set<String>,
+                        exists: (String) -> Bool, registered: () -> URL?) -> URL? {
+        func present(_ p: String) -> Bool { (volumeRoot(of: p).map(mounted.contains) ?? true) && exists(p) }
+        if let listed, present(listed) { return URL(fileURLWithPath: listed) }
+        guard listed != nil || running, let url = registered(), present(url.path) else { return nil }
+        return url
+    }
+
+    /// `openURL` for this Mac.
+    func availableURL(for bundle: String, running: Bool) -> URL? {
+        let listed: String? = lock.withLock { entries[bundle]?.path }
+        let url = Self.openURL(listed: listed, running: running, mounted: Self.mountedVolumeRoots,
+                               exists: { FileManager.default.fileExists(atPath: $0) },
+                               registered: { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) })
+        if url == nil, listed != nil {
+            Log.info("workspace: \(bundle) is no longer where it was listed; removed from the app list")
+            forget(bundle)
+        }
+        return url
     }
 
     /// How long after a background open of an app that was running without a window to look for one.
@@ -697,16 +884,18 @@ final class AppCatalog: @unchecked Sendable {
     /// right before opening; false: nothing opens. An app that was running with no on-screen
     /// window and still has none `windowCheckDelay` after a background open is reported
     /// `window: false` (Ghostty, 2026-11-09: the background open succeeds and shows nothing).
+    /// A listed app whose copy is gone (its drive unplugged) opens from another copy Launch
+    /// Services knows, or reports a failure and leaves the list.
     func launch(_ bundle: String, reveal: Bool = false, stillAllowed: @escaping @Sendable () -> Bool = { true },
                 completion: @escaping @Sendable (AppLaunchOutcome) -> Void) {
-        let path: String? = lock.withLock { entries[bundle]?.path }
         DispatchQueue.main.async {
             guard stillAllowed() else {
                 Log.info("workspace: launch \(bundle) not opened: control ended")
                 completion(AppLaunchOutcome(ok: false)); return
             }
             let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first
-            guard let url = path.map(URL.init(fileURLWithPath:)) ?? (runningApp != nil ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) : nil) else {
+            guard let url = self.availableURL(for: bundle, running: runningApp != nil) else {
+                Log.info("workspace: launch \(bundle) not opened: no copy of it is available")
                 completion(AppLaunchOutcome(ok: false)); return
             }
             let windowless = runningApp.map { AppWindowPresence.onScreenNormalWindowCount(pid: $0.processIdentifier) == 0 } ?? false
