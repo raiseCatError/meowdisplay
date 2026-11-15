@@ -77,10 +77,15 @@ final class ReceiverControlStore: ObservableObject {
         userTurnedOffInput = turnedOff
     }
 
+    /// The roomy decision and the first-run defaults on a roomy window (see
+    /// `updateLayoutClass`).
+    private var layoutClass: ReceiverLayoutClassState
+
     init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository(),
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
         self.isPad = isPad
+        layoutClass = ReceiverLayoutClassState(startsRoomy: isPad)
         preferences = repository.load(initial: .initial(isPad: isPad))
     }
 
@@ -92,12 +97,18 @@ final class ReceiverControlStore: ObservableObject {
     }
 
     /// The window's size classes changed (rotation, fold, resize): roomy
-    /// only when it is regular in both directions, so a phone in landscape
-    /// stays compact.
+    /// only when it is regular in both directions (`ReceiverLayoutClass`), so
+    /// a phone in landscape stays compact.
+    ///
+    /// The first report on a device that started compact (an iPhone idiom
+    /// that opened unfolded) with nothing saved yet adopts the iPad initial
+    /// defaults once; saved preferences are never replaced.
     func updateLayoutClass(horizontalRegular: Bool, verticalRegular: Bool) {
-        let roomy = horizontalRegular && verticalRegular
-        guard roomy != isPad else { return }
-        isPad = roomy
+        let change = layoutClass.update(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular,
+                                        hasSavedPreferences: repository.hasSavedPreferences)
+        if let defaults = change.adoptedPreferences { preferences = defaults }
+        guard change.roomyChanged else { return }
+        isPad = layoutClass.isRoomy
         beginAutoHideActivity()
     }
 
@@ -399,6 +410,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
+    /// A touch began on the roomy Arrow Keys control: a tap toggles the keypad.
+    @State private var initiatingArrowKeys = false
     @State private var initiatingReturn = false
     /// The Wheel palette on screen, for hit-testing its wedges.
     @State private var wheelHit: WheelHitTarget?
@@ -1211,6 +1224,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     initiatingItem = trayItem(at: value.startLocation)
                     initiatingMoveView = initiatingItem == nil
                         && frames["control:moveView"]?.contains(value.startLocation) == true
+                    initiatingArrowKeys = initiatingItem == nil
+                        && frames["control:arrowKeys"]?.contains(value.startLocation) == true
                     initiatingReturn = initiatingItem == nil
                         && frames["control:return"]?.contains(value.startLocation) == true
                     if let modifier = initiatingItem?.modifier {
@@ -1283,12 +1298,16 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                           frames["control:moveView"]?.contains(value.location) == true {
                     store.setMoveViewActive(!store.moveViewActive)
                     haptics.play(.selection)
+                } else if initiatingArrowKeys,
+                          frames["control:arrowKeys"]?.contains(value.location) == true {
+                    toggleArrowKeypad()
                 } else if interaction.paletteChord != nil {
                     apply(interaction.finish(with: nil))
                 }
                 initiatingModifier = nil
                 initiatingItem = nil
                 initiatingMoveView = false
+                initiatingArrowKeys = false
                 initiatingReturn = false
                 lastHoveredModifier = nil
                 gestureActive = false
@@ -1307,6 +1326,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         initiatingModifier = nil
         initiatingItem = nil
         initiatingMoveView = false
+        initiatingArrowKeys = false
         initiatingReturn = false
         lastHoveredModifier = nil
         gestureActive = false
@@ -1354,12 +1374,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     // MARK: Arrow keys (#179)
 
-    /// The compact arrow button: the iPhone tray (and compact iPad windows).
-    /// Same gates as the keyboard button.
+    /// The arrow keys are on offer: the compact arrow button and keyboard-bar
+    /// key, and the roomy Arrow Keys control. Same gates as the keyboard
+    /// button, and the one Show Arrow Keys preference for both layouts.
     private var arrowKeysShown: Bool {
-        !store.isPad && ArrowKeysAvailability.isShown(enabled: store.preferences.arrowKeysEnabled,
-                                                      allowInput: store.preferences.allowInput,
-                                                      keyboardAvailable: keyboardAvailable)
+        ArrowKeysAvailability.isShown(enabled: store.preferences.arrowKeysEnabled,
+                                      allowInput: store.preferences.allowInput,
+                                      keyboardAvailable: keyboardAvailable)
     }
 
     /// The collapsed button's swipe and its named actions: the chord the
@@ -2012,13 +2033,15 @@ extension ReceiverControlOverlay {
             keyboardBarShown: false)
         let mainEdge = store.preferences.padMainEdge
         let functionEdge = store.preferences.padFunctionEdge
+        // A fold (iPhone Duo) is skipped over by the rails, never crossed.
+        let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
         let pass: (CGFloat?) -> PadEdgeLayout = { keyboardTop in
             PadEdgeGeometry.layout(container: container, safeInsets: safeInsets, reservesStrips: strip,
                                    mainEdge: mainEdge, functionEdge: functionEdge,
                                    mainGroupCounts: mainGroups.map(\.count),
                                    mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
                                    functionGroupCounts: (showsCalculator ? [1] : []) + groups.map(\.count),
-                                   metrics: metrics, keyboardTop: keyboardTop)
+                                   metrics: metrics, keyboardTop: keyboardTop, divisions: divisions)
         }
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
@@ -2030,7 +2053,8 @@ extension ReceiverControlOverlay {
             container: container, safeInsets: safeInsets, reservesStrips: false,
             mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1], mainGroupAlignments: [.end],
             functionGroupCounts: [],
-            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop).mainFrame : nil
+            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop,
+            divisions: divisions).mainFrame : nil
         let mainControls: [PadPlacedControl] = zip(mainKinds, layout.mainCells).map { kind, cell in
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
@@ -2075,12 +2099,26 @@ extension ReceiverControlOverlay {
                 return (action, CGRect(origin: origin, size: keySize))
             }
         } ?? []
+        // The roomy Arrow Keys control opens the existing keypad beyond the rail,
+        // centred on the control.
+        let arrowControl: CGRect? = mainControls.first { $0.kind == .arrowKeys }?.frame
+        let arrowAnchor: CGRect? = arrowControl.flatMap { control in
+            paletteAnchor.map { rail in
+                mainEdge.stacksVertically
+                    ? CGRect(x: rail.minX, y: control.minY, width: rail.width, height: control.height)
+                    : CGRect(x: control.minX, y: rail.minY, width: control.width, height: rail.height)
+            }
+        }
+        let arrowsShown: ArrowKeysLayout? = roomyArrowKeysLayout(anchor: arrowAnchor, edge: mainEdge,
+                                                                 bounds: paletteBounds)
+        let arrowFrames: [CGRect] = [arrowsShown?.keypad, arrowsShown?.modifiers].compactMap { $0 }
         // Overlay groups sit in compact floating trays; the Strip's solid
         // rail already holds its controls.
         let trays: [CGRect] = strip ? [] : (layout.mainSegments + layout.functionSegments)
             .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
-        let occupied = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
-            + [gearFrame, paletteFrame].compactMap { $0 } + calculatorPanelFrames
+        let railFrames: [CGRect] = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
+        let floatingFrames: [CGRect] = [gearFrame, paletteFrame].compactMap { $0 }
+        let occupied: [CGRect] = railFrames + floatingFrames + calculatorPanelFrames + arrowFrames
         // The touch region, built from typed pieces: as one `+`/`??` chain
         // inside the ZStack it exceeded Xcode 26's type-checking budget.
         let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
@@ -2151,6 +2189,7 @@ extension ReceiverControlOverlay {
                 .frame(width: containerSize.width, height: containerSize.height)
                 .contentShape(ControlRegionShape(rects: mainRegion + gearRegion + paletteRegion))
                 .gesture(controlGesture())
+            roomyArrowKeypadViews(arrowsShown)
             // Overlay's rail gear fades with Auto-hide like the rest of the rail (a tap
             // there reaches the Mac and reveals it); the collapsed gear and the Strip never hide.
             settingsHoldTarget(reachable: padCollapsed || !autoHiding)
@@ -2174,6 +2213,35 @@ extension ReceiverControlOverlay {
     }
 
     static var trayPadding: CGFloat { 6 }
+
+    /// Where the open keypad goes for the roomy Arrow Keys control at
+    /// `anchor`: beyond the control toward the middle, inside `bounds` and
+    /// clear of any fold. `nil` while it is closed or the control isn't
+    /// placed. While a finger is down the pass that opened it is kept
+    /// (`heldArrowLayout`), so nothing moves under the finger.
+    private func roomyArrowKeysLayout(anchor: CGRect?, edge: ControlEdge, bounds: CGRect,
+                                      obstacles: [CGRect] = []) -> ArrowKeysLayout? {
+        guard store.arrowKeypadOpen, arrowKeysShown, let anchor else { return nil }
+        let computed = PadEdgeGeometry.arrowKeypadLayout(
+            anchor: anchor, edge: edge, bounds: bounds, key: Metrics.arrowKey, gap: Metrics.arrowGap,
+            obstacles: obstacles, divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
+        return heldArrowLayout ?? computed
+    }
+
+    /// The keypad and its ⇧ ⌥ ⌘ strip, drawn above the controls' gesture layer.
+    @ViewBuilder
+    private func roomyArrowKeypadViews(_ arrows: ArrowKeysLayout?) -> some View {
+        if let arrows {
+            if let keypad = arrows.keypad {
+                arrowKeypad(frame: keypad, frozen: arrows)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+            }
+            if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
+                arrowKeypadModifierStrip(frame: strip, placement: placement)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+            }
+        }
+    }
 
     /// Chord palettes and previews stay above the software keyboard.
     static func boundsAboveKeyboard(_ bounds: CGRect, keyboardTop: CGFloat?) -> CGRect {
@@ -2199,7 +2267,8 @@ extension ReceiverControlOverlay {
             visibility: store.preferences.padStandardControls,
             availability: .init(modifiers: modifiers,
                                 keyboardAvailable: capabilityAllows(.keyboard),
-                                moveViewAvailable: padShowsMoveView))
+                                moveViewAvailable: padShowsMoveView,
+                                arrowKeysAvailable: arrowKeysShown))
     }
 
     /// Any Function Tray item by id, visible in the tray or not.
@@ -2227,7 +2296,11 @@ extension ReceiverControlOverlay {
             safeInsets: keyboardTop == nil ? safeInsets
                 : ControlSafeInsets(top: safeInsets.top, leading: safeInsets.leading, bottom: 0,
                                     trailing: safeInsets.trailing))
-        let allFrames = CustomLayoutGeometry.frames(for: arrangement, in: area, baseDiameter: metrics.item)
+        // A fold (iPhone Duo) never cuts a control: one that would straddle it
+        // moves into the piece holding most of it.
+        let allFrames = CustomLayoutGeometry.frames(
+            for: arrangement, in: area, baseDiameter: metrics.item,
+            divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions))
         let functionItems = store.preferences.functionTrayProfile(
             for: layout.functionProfile ?? store.preferences.activeFunctionTrayProfile).allItems
         let item: (String) -> ShortcutItem? = { id in functionItems.first { $0.id == id } }
@@ -2279,8 +2352,16 @@ extension ReceiverControlOverlay {
             CGRect(x: $0.x - metrics.item / 2, y: $0.y - metrics.item / 2, width: metrics.item, height: metrics.item)
         }
         let regionControls = controlsPlaced.filter { !$0.kind.isOneTapAction }
-        let occupied = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
-            + (wheel.map { [$0.frame] } ?? []) + calculatorPanelFrames
+        // The roomy Arrow Keys control opens the existing keypad beside it, on
+        // the side facing the middle of the screen and clear of the other controls.
+        let arrowControl: CGRect? = controlsPlaced.first { $0.kind == .arrowKeys }?.frame
+        let arrowEdge: ControlEdge = (arrowControl?.midX ?? 0) > containerSize.width / 2 ? .trailing : .leading
+        let arrowObstacles: [CGRect] = controlsPlaced.filter { $0.kind != .arrowKeys }.map(\.frame) + assistFrames
+        let arrowsShown: ArrowKeysLayout? = roomyArrowKeysLayout(anchor: arrowControl, edge: arrowEdge, bounds: area,
+                                                                 obstacles: arrowObstacles)
+        let arrowFrames: [CGRect] = [arrowsShown?.keypad, arrowsShown?.modifiers].compactMap { $0 }
+        let placedFrames: [CGRect] = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
+        let occupied: [CGRect] = placedFrames + (wheel.map { [$0.frame] } ?? []) + calculatorPanelFrames + arrowFrames
         // Drawn by `LocalCalculatorLayer` (one, even if a shared layout
         // placed more).
         let calculatorButton = controlsPlaced.first { $0.kind == .calculator }?.frame
@@ -2295,7 +2376,7 @@ extension ReceiverControlOverlay {
                         }
                     case .shortcut(let item):
                         padFunctionChip(item, frame: control.frame, onRail: false, hint: nil)
-                    case .tray, .moveView:
+                    case .tray, .moveView, .arrowKeys:
                         padControlChip(control.kind, frame: control.frame, onRail: false, hint: nil)
                     case .calculator:
                         EmptyView()
@@ -2338,6 +2419,7 @@ extension ReceiverControlOverlay {
                         + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) }
                         + (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])))
                 .gesture(controlGesture())
+            roomyArrowKeypadViews(arrowsShown)
             settingsHoldTarget(reachable: true)   // Custom keeps Settings through Auto-hide
             LocalCalculatorLayer(
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
@@ -2375,6 +2457,7 @@ extension ReceiverControlOverlay {
             case .function: return store.preferences.functionTrayCanBeShown && !padCollapsed
             case .shortcut: return store.preferences.trayCanBeShown && !padCollapsed
             case .moveView: return padShowsMoveView
+            case .arrowKeys: return arrowKeysShown && !padCollapsed
             // Local: shown in View Only too, never sent to the Mac.
             case .calculator:
                 return LocalCalculatorPolicy.showsButton(added: true, trayCollapsed: store.preferences.trayCollapsed,
@@ -2429,6 +2512,7 @@ extension ReceiverControlOverlay {
         case .tray(let item): return "tray-\(item.rawValue)"
         case .function(let id): return "function-\(id)"
         case .moveView: return "moveView"
+        case .arrowKeys: return "arrowKeys"
         case .shortcut(let item): return "shortcut-\(item.id)"
         case .calculator: return "calculator"
         }
@@ -2451,6 +2535,7 @@ extension ReceiverControlOverlay {
         case .function(let id): return id
         case .shortcut(let item): return item.title.lowercased()
         case .moveView: return String(localized: "move view", comment: "Strip control hint.")
+        case .arrowKeys: return String(localized: "arrows", comment: "Strip control hint.")
         case .calculator: return String(localized: "calculator", comment: "Strip control hint.")
         }
     }
@@ -2469,6 +2554,7 @@ extension ReceiverControlOverlay {
                     || interaction.temporaryModifiers.contains(modifier)
                     || interaction.phase == .pressed(modifier)
             case .moveView: return store.moveViewActive
+            case .arrowKeys: return store.arrowKeypadOpen
             case .function, .shortcut, .calculator: return false
             }
         }()
@@ -2477,6 +2563,7 @@ extension ReceiverControlOverlay {
             case .tray(let item):
                 return item.modifier.map { "modifier:\($0.rawValue)" } ?? "tray:\(item.rawValue)"
             case .moveView: return "control:moveView"
+            case .arrowKeys: return "control:arrowKeys"
             case .function(let id): return "function:\(id)"
             case .shortcut(let item): return "shortcut:\(item.id)"
             case .calculator: return "control:calculator"
@@ -2495,6 +2582,9 @@ extension ReceiverControlOverlay {
                 case .moveView:
                     Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
                         .font(.system(size: diameter * 0.38, weight: .semibold))
+                case .arrowKeys:
+                    Image(systemName: "arrowkeys")
+                        .font(.system(size: diameter * 0.4, weight: .semibold))
                 case .function, .shortcut, .calculator:
                     EmptyView()
                 }
@@ -2517,7 +2607,7 @@ extension ReceiverControlOverlay {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(padAccessibilityLabel(kind))
         .accessibilityInputLabels(padSpokenNames(kind))
-        .accessibilityValue(kind.modifier != nil || kind == .moveView ? (selected ? "On" : "Off") : "")
+        .accessibilityValue(padAccessibilityValue(kind, selected: selected))
         .trayButtonAccessibility {
             switch kind {
             case .tray(let item):
@@ -2525,11 +2615,19 @@ extension ReceiverControlOverlay {
             case .moveView:
                 store.setMoveViewActive(!store.moveViewActive)
                 haptics.play(.selection)
+            case .arrowKeys:
+                toggleArrowKeypad()
             case .function, .shortcut, .calculator:
                 break
             }
         }
         .sessionActionsAccessibility(kind == .tray(.settings) && onSessionActions != nil ? { openSessionActions() } : nil)
+    }
+
+    private func padAccessibilityValue(_ kind: CustomControlKind, selected: Bool) -> LocalizedStringKey {
+        if kind.modifier != nil || kind == .moveView { return selected ? "On" : "Off" }
+        if kind == .arrowKeys { return selected ? "Shown" : "Hidden" }
+        return ""
     }
 
     private func padSpokenNames(_ kind: CustomControlKind) -> [String] {
@@ -2541,6 +2639,7 @@ extension ReceiverControlOverlay {
         switch kind {
         case .tray(let item): return item.title
         case .moveView: return String(localized: "Move View")
+        case .arrowKeys: return String(localized: "Arrow Keys")
         case .function(let id): return id
         case .shortcut(let item): return item.title
         case .calculator: return String(localized: "Calculator", comment: "The local calculator's control and panel.")

@@ -91,7 +91,10 @@ struct StagePeekOverlay: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     /// Roomier chrome when the window is regular in both directions (a full iPad, an unfolded
     /// iPhone Duo), whatever the device; a phone in landscape stays compact.
-    private var roomy: Bool { horizontalSizeClass == .regular && verticalSizeClass == .regular }
+    private var roomy: Bool {
+        ReceiverLayoutClass.isRoomy(horizontalRegular: horizontalSizeClass == .regular,
+                                    verticalRegular: verticalSizeClass == .regular)
+    }
 
     var body: some View {
         let cards = revealShifted(layout())

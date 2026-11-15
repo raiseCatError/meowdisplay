@@ -94,8 +94,9 @@ enum MobileSettingsCategory: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-/// Which iPad-only control settings a device shows. The iPhone keeps its
-/// compact tray, so none of these appear there.
+/// Which roomy-only control settings a window shows. A compact window keeps
+/// its compact tray, so none of these appear there. (`isPad` is the roomy
+/// presentation — see `ReceiverLayoutClass` — not the device idiom.)
 struct PadControlSettingsVisibility: Equatable {
     let isPad: Bool
     let layout: PadControlLayoutMode
@@ -107,4 +108,7 @@ struct PadControlSettingsVisibility: Equatable {
     var showsCustomLayouts: Bool { isPad && layout == .custom }
     /// The iPhone's landscape side / Same–Opposite Side pickers.
     var showsPhoneTrayPlacement: Bool { !isPad }
+    /// Show Arrow Keys applies to both layouts: the compact arrow button and
+    /// the roomy Arrow Keys standard control share the one preference.
+    var showsArrowKeys: Bool { true }
 }

@@ -385,6 +385,7 @@ targets:
       - Shared/ControlTrayGeometry.swift
       - Shared/ControlFoldGeometry.swift
       - Shared/PadControlLayout.swift
+      - Shared/ReceiverLayoutClass.swift
       - Shared/CustomControlLayout.swift
       - Shared/LocalCalculator.swift
       - Shared/LocalCalculatorPlacement.swift
