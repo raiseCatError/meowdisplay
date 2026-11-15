@@ -38,57 +38,29 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         app.buttons["stagePeekClose"].tap()
     }
 
-    /// Overview on a Mac with several displays: select, zoom, pan, Fit All, rotate, Show in Pane.
+    /// Overview on a Mac with several displays: select, zoom, pan, Fit All, tap targeting, Show in Pane.
     @MainActor
     func testOverviewNavigationAndShowInPane() throws {
-        guard on("MEOW_LIVE_SESSION_TESTS") else {
-            throw XCTSkip("live session test: set MEOW_LIVE_SESSION_TESTS=1 with a paired Mac nearby")
-        }
-        guard on("MEOW_LIVE_OVERVIEW_MULTI") else {
-            throw XCTSkip("needs two or more Mac displays: set MEOW_LIVE_OVERVIEW_MULTI=1 once they exist")
-        }
-        let app = XCUIApplication()
-        app.launch()
-        try openStagePeekInWindowMode(app)
-        let open = app.buttons["displayOverviewButton"]
-        XCTAssertTrue(scrollTo(open, in: app), "Overview is offered")
-        open.tap()
+        let app = try launchIntoOverview()
         let done = app.buttons["displayOverviewDone"]
-        XCTAssertTrue(done.waitForExistence(timeout: 5), "the overview opens")
-        let window = mainWindow(app).frame
         let tiles = overviewTiles(app)
-        XCTAssertGreaterThanOrEqual(tiles.count, 2, "every Mac display is drawn")
-        for tile in tiles { XCTAssertTrue(window.intersects(tile.frame), "\(tile.label) is in view after opening") }
-        snapshot(app, "overview-02-fit")
 
         // Select the second display, then zoom and pan the camera.
-        let target = tiles[1]
-        let targetLabel = target.label
-        target.tap()
+        let targetLabel = tiles[1].label
+        tiles[1].tap()
         let showInPane = app.buttons["displayOverviewShowInPane"]
         XCTAssertTrue(showInPane.waitForExistence(timeout: 3), "a selected display offers Show in Pane")
-        let canvas = mainWindow(app)
-        canvas.pinch(withScale: 2.5, velocity: 2)
-        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.05, thenDragTo: canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)))
+        zoomAndPan(app)
         snapshot(app, "overview-03-zoomed-panned")
 
-        // Rotate with the overview open: it keeps the camera; Fit All brings every display back.
-        XCUIDevice.shared.orientation = .landscapeLeft
-        sleep(2)
-        snapshot(app, "overview-04-landscape")
-        app.buttons["displayOverviewFitAll"].firstMatch.tap()
-        sleep(1)
-        let rotated = mainWindow(app).frame
+        // Fit All brings every display back into view.
+        tapFitAll(app)
+        let window = mainWindow(app).frame
         for tile in overviewTiles(app) {
-            XCTAssertTrue(rotated.contains(tile.frame.insetBy(dx: 2, dy: 2)) || rotated.intersects(tile.frame),
-                          "\(tile.label) is back in view after Fit All")
+            XCTAssertTrue(window.intersects(tile.frame), "\(tile.label) is back in view after Fit All")
         }
-        XCUIDevice.shared.orientation = .portrait
-        sleep(2)
-        app.buttons["displayOverviewFitAll"].firstMatch.tap()
 
-        // A tap after all those viewport changes still hits the display drawn there.
+        // A tap after those viewport changes still hits the display drawn there.
         let again = overviewTiles(app).first { $0.label == targetLabel }
         XCTAssertNotNil(again, "the selected display is still drawn")
         again?.tap()
@@ -116,7 +88,69 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         snapshot(app, "overview-07-shown-in-pane")
     }
 
+    /// Rotating the iPad with the overview open keeps it open; Fit All then frames every display
+    /// in the new orientation.
+    @MainActor
+    func testOverviewStaysOpenThroughARotation() throws {
+        let app = try launchIntoOverview()
+        let done = app.buttons["displayOverviewDone"]
+        zoomAndPan(app)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        sleep(2)
+        snapshot(app, "overview-04-landscape")
+        XCTAssertTrue(done.waitForExistence(timeout: 3), "the overview is still open after rotating")
+        tapFitAll(app)
+        let rotated = mainWindow(app).frame
+        for tile in overviewTiles(app) {
+            XCTAssertTrue(rotated.intersects(tile.frame), "\(tile.label) is in view after Fit All in landscape")
+        }
+        XCUIDevice.shared.orientation = .portrait
+        sleep(2)
+        XCTAssertTrue(done.waitForExistence(timeout: 3), "the overview is still open after rotating back")
+        done.tap()
+    }
+
     // MARK: - Helpers
+
+    /// Window mode, Stage Peek, Overview; checks every Mac display is drawn and in view.
+    @MainActor
+    private func launchIntoOverview() throws -> XCUIApplication {
+        guard on("MEOW_LIVE_SESSION_TESTS") else {
+            throw XCTSkip("live session test: set MEOW_LIVE_SESSION_TESTS=1 with a paired Mac nearby")
+        }
+        guard on("MEOW_LIVE_OVERVIEW_MULTI") else {
+            throw XCTSkip("needs two or more Mac displays: set MEOW_LIVE_OVERVIEW_MULTI=1 once they exist")
+        }
+        let app = XCUIApplication()
+        app.launch()
+        try openStagePeekInWindowMode(app)
+        let open = app.buttons["displayOverviewButton"]
+        XCTAssertTrue(scrollTo(open, in: app), "Overview is offered")
+        open.tap()
+        XCTAssertTrue(app.buttons["displayOverviewDone"].waitForExistence(timeout: 5), "the overview opens")
+        let window = mainWindow(app).frame
+        let tiles = overviewTiles(app)
+        XCTAssertGreaterThanOrEqual(tiles.count, 2, "every Mac display is drawn")
+        for tile in tiles { XCTAssertTrue(window.intersects(tile.frame), "\(tile.label) is in view after opening") }
+        snapshot(app, "overview-02-fit")
+        return app
+    }
+
+    @MainActor
+    private func zoomAndPan(_ app: XCUIApplication) {
+        let canvas = mainWindow(app)
+        canvas.pinch(withScale: 2.5, velocity: 2)
+        canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)))
+    }
+
+    @MainActor
+    private func tapFitAll(_ app: XCUIApplication) {
+        let fit = app.buttons["displayOverviewFitAll"].firstMatch
+        XCTAssertTrue(fit.waitForExistence(timeout: 3), "the overview offers Fit All")
+        fit.tap()
+        sleep(1)
+    }
 
     @MainActor
     private func openStagePeekInWindowMode(_ app: XCUIApplication) throws {
