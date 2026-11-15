@@ -376,6 +376,7 @@ targets:
       - Shared/DisplayOverviewModel.swift
       - Shared/OverviewCamera.swift
       - Shared/DisplayArrangementLayout.swift
+      - Shared/OverviewInteraction.swift
       - Shared/KeyboardEditPlanner.swift
       - Shared/TypedTextEcho.swift
       - Shared/LockScreenKeyboard.swift

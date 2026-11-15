@@ -565,6 +565,9 @@ final class WorkspaceModel: ObservableObject {
     /// catalog and thumbnails fresh. Read-only requests; never a layout,
     /// capture or focus change.
     @Published var stagePeekOpen = false { didSet { if stagePeekOpen, !oldValue { startRefreshing() } } }
+    /// The full-screen display overview is open (over Stage Peek's gallery): keeps the catalog and
+    /// the display stills refreshing on its own, whatever Stage Peek does underneath it.
+    @Published var displayOverviewOpen = false { didSet { if displayOverviewOpen, !oldValue { startRefreshing() } } }
     @Published var railEdge: WorkspaceRailEdge { didSet { defaults.set(railEdge.rawValue, forKey: Self.railKey) } }
     @Published var arranging = false
     @Published private(set) var hovered: String?
@@ -941,6 +944,7 @@ final class WorkspaceModel: ObservableObject {
             sendTask?.cancel()
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
+            displayOverviewOpen = false
             launchpadOpen = false; launching = []; planner.reset(); inventory.reset()
             if var o = appOpening {
                 let step = o.disconnected()
@@ -992,7 +996,7 @@ final class WorkspaceModel: ObservableObject {
             performAppOpening(step)
         }
         appDrop = nil
-        stagePeekOpen = false; launchpadOpen = false
+        stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false
         if overviewOpen { closeOverview() }
         catalog = nil
         thumbnails = [:]; thumbAge = [:]; displayThumbnails = [:]
@@ -1053,7 +1057,7 @@ final class WorkspaceModel: ObservableObject {
         advanceAppOpening()
     }
 
-    private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
+    private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen || displayOverviewOpen }
 
     /// Visible cards first; nothing asked twice within a few seconds; failures back off.
     private func requestThumbnails() {
@@ -1061,10 +1065,10 @@ final class WorkspaceModel: ObservableObject {
         let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
         let wantedIcons = iconPlanner.plan(c.windows.map(\.bundleID) + c.apps.map(\.bundleID), has: { icons[$0] != nil },
                                            now: Date().timeIntervalSinceReferenceDate)
-        let displays = (stagePeekOpen || overviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
+        let displays = (stagePeekOpen || overviewOpen || displayOverviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
-        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
             iconPlanner.unsent(wantedIcons)
         }
         scheduleIconRetry()
@@ -2568,7 +2572,7 @@ final class WorkspaceModel: ObservableObject {
         askForApps(opening: true)
         refreshTask = Task { [weak self] in
             while let self, self.browsing {
-                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen ? 3_000_000_000 : 5_000_000_000)
+                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen || self.displayOverviewOpen ? 3_000_000_000 : 5_000_000_000)
                 guard !Task.isCancelled, self.browsing else { break }
                 self.requestCatalog()
                 self.askForApps(opening: false)

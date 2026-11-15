@@ -434,7 +434,8 @@ private struct StagePeekArrangementDisplayTile: View {
 
 /// A MeowDisplay virtual display in the arrangement map: this device's own, or another MeowDisplay
 /// screen. Never captured, never tappable; only a dashed outline that keeps the arrangement honest.
-private struct StagePeekArrangementPlaceholderTile: View {
+/// The full-screen overview draws the same tile.
+struct StagePeekArrangementPlaceholderTile: View {
     let kind: DisplayArrangementLayout.Tile.Kind
     let size: CGSize
 
@@ -511,6 +512,7 @@ struct StagePeekGallery: View {
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
+    @State private var showDisplayOverview = false
     @Environment(\.controlRequest) private var controlRequest
     /// The card showing its Close Window button (swiped left), and a swipe in progress.
     @State private var revealed: UInt32?
@@ -581,7 +583,7 @@ struct StagePeekGallery: View {
                     if windows.isEmpty { emptyApp(app) } else { windowsView(windows, cols) }
                 } else {
                     if let displays = model.catalog?.displays, !displays.isEmpty {
-                        sectionTitle(String(localized: "Displays"))
+                        displaysHeader(displays)
                         displaysSection(displays, cols)
                     }
                     sectionTitle(String(localized: "Windows"))
@@ -609,6 +611,8 @@ struct StagePeekGallery: View {
             if toward > 90, toward > abs(v.translation.height) * 1.5 { onCompact() }
         })
         .onChange(of: visible) { model.thumbnailPriority = $0 }
+        .modifier(DisplayOverviewPresentation(isPresented: $showDisplayOverview, model: model, onShowInPane: onDisplay,
+                                              onAddAsNewPane: { d in onAddTile(model.displayWindow(d)) }))
         .onChange(of: model.closingWindows) { closing in if let r = revealed, closing.contains(r) { revealed = nil } }
         .confirmationDialog(menuWindow.map { $0.title.isEmpty ? $0.app : $0.title } ?? "",
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
@@ -632,11 +636,34 @@ struct StagePeekGallery: View {
     /// The Mac's displays: in their real arrangement when the Mac sent it for two or more of them,
     /// otherwise (one display, or an older Mac) the grid of cards.
     @ViewBuilder private func displaysSection(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
-        let overview = DisplayOverviewModel(catalog: displays)
-        if overview.drawnDisplays.count >= 2, overview.hasArrangement {
+        if let overview = arrangementOverview(displays) {
             arrangementMap(overview, displays)
         } else {
             displayGrid(displays, cols)
+        }
+    }
+
+    /// The arrangement to draw, or nil when the section shows the card grid instead.
+    private func arrangementOverview(_ displays: [CatalogDisplayItem]) -> DisplayOverviewModel? {
+        let overview = DisplayOverviewModel(catalog: displays)
+        return overview.drawnDisplays.count >= 2 && overview.hasArrangement ? overview : nil
+    }
+
+    /// The section title; with the arrangement map it also carries the button that opens the
+    /// full-screen overview.
+    private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
+        HStack(spacing: 8) {
+            sectionTitle(String(localized: "Displays"))
+            Spacer(minLength: 8)
+            if arrangementOverview(displays) != nil {
+                Button { showDisplayOverview = true } label: {
+                    Label("Overview", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("displayOverviewButton")
+            }
         }
     }
 
