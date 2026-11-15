@@ -170,11 +170,21 @@ struct StagePeekDock: View {
                 }
                 .frame(height: CGFloat(shown) * Self.rowHeight + 16, alignment: .top)
                 .clipped()
+                // Scrolling: a row half under the top or bottom edge fades out, so its names
+                // don't read as sitting on the next row's icons (owner's screenshot, 2026-11-15).
+                .mask { edgeFade(height: CGFloat(shown) * Self.rowHeight + 16, scrolls: layout.needsScroll(rows: shown)) }
             }
             grabber(layout: layout, shown: shown)
         }
         .legibleGlass(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: shown)
+    }
+
+    private func edgeFade(height: CGFloat, scrolls: Bool) -> some View {
+        let f = scrolls ? min(10 / max(height, 1), 0.2) : 0
+        return LinearGradient(stops: [.init(color: scrolls ? .clear : .black, location: 0), .init(color: .black, location: f),
+                                      .init(color: .black, location: 1 - f), .init(color: scrolls ? .clear : .black, location: 1)],
+                              startPoint: .top, endPoint: .bottom)
     }
 
     /// The handle under the bar: pull it down for more rows, up for fewer; a tap shows every app
@@ -262,6 +272,7 @@ struct StagePeekDock: View {
                                            : String(localized: "Running, \(app.windowCount) windows"))
                                         : String(localized: "Not running"))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier("stagePeekDockApp")
     }
 }
 
@@ -1083,12 +1094,15 @@ struct StagePeekLaunchpad: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close All Apps")
+                .accessibilityIdentifier("stagePeekAllAppsClose")
             }
             .frame(maxWidth: 560)
+            .padding(.horizontal, 16)   // off the screen's edges (owner's screenshot, 2026-11-15)
             if !inputAllowed {
                 // Open on Mac (in each app's menu) needs control and is hidden without it.
                 MoreActionsNeedControl(detail: String(localized: "Request Control for more actions, like opening apps on the Mac."))
                     .frame(maxWidth: 560)
+                    .padding(.horizontal, 16)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
@@ -1154,6 +1168,7 @@ struct StagePeekLaunchpad: View {
                     .accessibilityLabel(app.name)
                     .accessibilityValue((app.running ? String(localized: "Running") : String(localized: "Not running"))
                                         + (favorites.contains(app.bundleID) ? ", " + String(localized: "Favorite") : ""))
+                    .accessibilityIdentifier("stagePeekAllAppsItem")
                 }
             }
         }
