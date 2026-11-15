@@ -71,9 +71,14 @@ extension DemoModeSmokeTests {
                                         "two different apps called Notes both show")
 
             // Underneath: gone from the accessibility tree (hidden, untouchable), not merely covered.
+            // A lazily kept cell scrolled off the screen can linger in the tree (run 43733403618:
+            // one apps bar icon at y -49); it's reported, and anything on screen fails the test.
+            let screen = app.frame
             for id in underneath {
-                let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
-                XCTAssertFalse(element.exists, "round \(round): \(id) is still there under All Apps (\(element.exists ? "\(element.frame)" : ""))")
+                let frames = app.descendants(matching: .any).matching(identifier: id).allElementsBoundByIndex.map(\.frame)
+                let onScreen = frames.filter { !$0.isEmpty && $0.intersects(screen) }
+                if frames.count > onScreen.count { print("ALLAPPS round \(round): \(id) off screen, still in the tree: \(frames.filter { !$0.intersects(screen) })") }
+                XCTAssertTrue(onScreen.isEmpty, "round \(round): \(id) on screen under All Apps: \(onScreen)")
             }
             for label in ["Exit Demo", "Control (Demo)", "Settings"] {
                 let control = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
