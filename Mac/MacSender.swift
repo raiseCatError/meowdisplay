@@ -5589,7 +5589,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let leaving = lastCursorSent.visible
             if offDisplayCursor.shouldSend(wire, at: ProcessInfo.processInfo.systemUptime, leaving: leaving) {
                 lastCursorSent.visible = false
-                sendCursor("\"v\":0," + OffDisplayCursorReports.fields(wire))
+                // With where the receiver's own input would resume (the marker's place).
+                let resume = inputInjector.map { injector -> CursorWirePosition in
+                    let p = injector.reentryNormalizedPoint()
+                    return CursorWirePosition(x: Double(p.x), y: Double(p.y))
+                }
+                sendCursor("\"v\":0," + OffDisplayCursorReports.fields(wire, resume: resume))
             }
         }
         #if DEBUG

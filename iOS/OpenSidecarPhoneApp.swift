@@ -3468,6 +3468,35 @@ struct VideoLayerView: UIViewRepresentable {
             return layer
         }()
         static let locatorSize = CGSize(width: 24, height: 24)
+        /// Re-entry marker (`CursorLocatorTarget.resume`): a hollow ring where this receiver's
+        /// input takes over while the Mac pointer is on another display. A ring, not a sprite
+        /// or an arrow, so it reads as "your touch lands here" and not as the Mac pointer. The
+        /// dark ring under the white one keeps it visible on light and dark pictures; the
+        /// container carries the 60% opacity so the two rings fade together.
+        private let resumeMarkerLayer: CALayer = {
+            let size = VideoView.resumeMarkerSize
+            let container = CALayer()
+            container.bounds = CGRect(origin: .zero, size: size)
+            let path = CGPath(ellipseIn: CGRect(x: 0, y: 0, width: size.width, height: size.height)
+                                .insetBy(dx: 2, dy: 2), transform: nil)
+            for (color, width) in [(UIColor.black.withAlphaComponent(0.85), CGFloat(4)), (UIColor.white, CGFloat(2))] {
+                let ring = CAShapeLayer()
+                ring.frame = container.bounds
+                ring.path = path
+                ring.fillColor = nil
+                ring.strokeColor = color.cgColor
+                ring.lineWidth = width
+                container.addSublayer(ring)
+            }
+            container.allowsGroupOpacity = true
+            container.opacity = 0.6
+            container.isHidden = true
+            container.zPosition = 11
+            container.actions = ["position": NSNull(), "hidden": NSNull()]
+            return container
+        }()
+        /// The ring is 14 pt across; the extra 4 pt holds the outline's outer half.
+        static let resumeMarkerSize = CGSize(width: 18, height: 18)
         private var cursorOffDisplay: CursorLocatorTarget?
         private var cursorLocatorEnabled = true
         private var cursorNormSize = CGSize.zero
@@ -4240,6 +4269,10 @@ struct VideoLayerView: UIViewRepresentable {
             allowsInput = allowed
             refreshPictureAccessibility()
             updateInputGate()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updateResumeMarker()
+            CATransaction.commit()
             guard !allowed else { return }
             clearInputStateForPause()
         }
@@ -4412,6 +4445,7 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.setDisableActions(true)
             if cursorLayer.superlayer == nil { layer.addSublayer(cursorLayer) }
             if locatorLayer.superlayer == nil { layer.addSublayer(locatorLayer) }
+            if resumeMarkerLayer.superlayer == nil { layer.addSublayer(resumeMarkerLayer) }
             updateCursorLayout()
             updateSurfaceLayout()
             CATransaction.commit()
@@ -4808,6 +4842,30 @@ struct VideoLayerView: UIViewRepresentable {
         /// Shows the locator while the Mac pointer is known and out of the visible picture.
         /// No animation, so it never pulses or slides (Reduce Motion needs nothing extra).
         private func updateCursorLocator() {
+            updateLocatorArrow()
+            updateResumeMarker()
+        }
+
+        /// Shows the re-entry ring while the Mac pointer is on another display and a touch
+        /// would take over at a known spot: only when the locator is on and input reaches the
+        /// Mac (view-only has no spot to take over). It goes with the report, so it is gone
+        /// once the pointer is back.
+        private func updateResumeMarker() {
+            guard cursorLocatorEnabled, allowsInput, currentTransform.isValid,
+                  let resume = cursorOffDisplay?.resume else {
+                resumeMarkerLayer.isHidden = true
+                return
+            }
+            let p = currentTransform.viewPoint(forRemote: resume)
+            guard p.x.isFinite, p.y.isFinite else {
+                resumeMarkerLayer.isHidden = true
+                return
+            }
+            resumeMarkerLayer.position = p
+            resumeMarkerLayer.isHidden = false
+        }
+
+        private func updateLocatorArrow() {
             // Where the pointer is: on another display, or the drawn one (maybe out of view).
             let target = cursorOffDisplay?.point ?? (cursorVisible && cursorLayer.contents != nil ? cursorNorm : nil)
             guard cursorLocatorEnabled, currentTransform.isValid, let target else {

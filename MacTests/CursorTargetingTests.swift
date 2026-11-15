@@ -157,6 +157,21 @@ final class CursorTargetingTests: XCTestCase {
         injector.cancelActiveInput()
     }
 
+    func testReentryPointReadsAsTheCentreUntilTheCursorWasSeenOnTheDisplay() {
+        let injector = makeInjector(cursor: elsewhere)
+        XCTAssertEqual(injector.reentryNormalizedPoint(), CGPoint(x: 0.5, y: 0.5))
+    }
+
+    func testReentryPointReadsAsTheLastSpotSeenOnTheDisplay() throws {
+        try XCTSkipIf(display.isEmpty, "needs a display")
+        let injector = makeInjector(cursor: elsewhere)
+        injector.noteCursor(CGPoint(x: display.minX + display.width / 4, y: display.minY + display.height * 3 / 4))
+        injector.noteCursor(elsewhere)         // the physical mouse left: the spot stays
+        let point = injector.reentryNormalizedPoint()
+        XCTAssertEqual(point.x, CGFloat(0.25), accuracy: CGFloat(0.0001))
+        XCTAssertEqual(point.y, CGFloat(0.75), accuracy: CGFloat(0.0001))
+    }
+
     func testNothingMovesWithoutInputPermission() throws {
         try XCTSkipIf(display.isEmpty, "needs a display")
         grant.set(false)

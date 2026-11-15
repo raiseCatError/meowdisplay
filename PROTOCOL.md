@@ -942,8 +942,12 @@ while the Mac cursor is on another display: normalized to the receiver's
 display, so outside 0..1, with `"why":"display"`. They are at most 30 per
 second and only when the position changed. A receiver MAY use them to point
 at the cursor (an off-screen locator) and MUST NOT draw the cursor itself
-from a hidden report; receivers that ignore them behave as before. A
-visible report's `x`, `y` are always inside 0..1. In Window mode, while the
+from a hidden report; receivers that ignore them behave as before. They
+also carry `rx`, `ry` (optional, four decimals, 0..1): where the
+receiver's own pointer input takes over on its display while the Mac
+cursor is elsewhere, normalized like `x`, `y`. A receiver MAY mark that
+point; it is never a cursor position, and `"why":"pane"` reports do not
+carry it. A visible report's `x`, `y` are always inside 0..1. In Window mode, while the
 Mac cursor is over no pane and the receiver is not driving the workspace
 pointer, hidden reports carry `x`, `y` in canvas coordinates extended from
 the active pane's mapping, with `"why":"pane"` and that pane's visible

@@ -3092,7 +3092,8 @@ final class StreamReceiver: ObservableObject {
         let offDisplay = CursorOffDisplayReport.target(visible: visible, why: obj["why"] as? String,
                                                        x: obj["x"] as? Double, y: obj["y"] as? Double,
                                                        px: obj["px"] as? Double, py: obj["py"] as? Double,
-                                                       pw: obj["pw"] as? Double, ph: obj["ph"] as? Double)
+                                                       pw: obj["pw"] as? Double, ph: obj["ph"] as? Double,
+                                                       rx: obj["rx"] as? Double, ry: obj["ry"] as? Double)
         let uiSink = self.uiSink
         DispatchQueue.main.async {
             uiSink.publishCursorPosition(x: x, y: y, visible: visible)

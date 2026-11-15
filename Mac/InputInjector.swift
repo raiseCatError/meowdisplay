@@ -871,6 +871,17 @@ final class InputInjector {
         return (bounds, scale > 0 ? scale : 2)
     }
 
+    /// Mirror/Extend: where receiver input takes over on this display while the Mac cursor is
+    /// elsewhere (`DisplayReentryPoint`), normalized to the display: the last spot the cursor
+    /// was seen here, else the centre. Normalized, so it is right for the display's current
+    /// bounds. Read only, and safe from any thread (the cursor echo poll reads it off the
+    /// input path).
+    func reentryNormalizedPoint() -> CGPoint {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        return reentry.normalized ?? CGPoint(x: 0.5, y: 0.5)
+    }
+
     /// Mirror/Extend: the Mac cursor was seen at `p` (global points). When that is on this
     /// display it becomes this session's re-entry point (`DisplayReentryPoint`). Read only:
     /// never moves the cursor.

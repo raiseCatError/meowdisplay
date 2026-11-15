@@ -46,8 +46,14 @@ struct OffDisplayCursorReports {
     /// The cursor is on the receiver's display again (or reporting was reset).
     mutating func reset() { last = nil }
 
-    /// The fields after `"v":0` in such a report.
-    static func fields(_ wire: CursorWirePosition) -> String { wire.fields + ",\"why\":\"display\"" }
+    /// The fields after `"v":0` in such a report. `resume`: where the receiver's input takes
+    /// over on its display (`DisplayReentryPoint`), normalized to it, as `rx`,`ry`: the
+    /// receiver can mark the spot. Omitted when the sender has no input path to say.
+    static func fields(_ wire: CursorWirePosition, resume: CursorWirePosition? = nil) -> String {
+        var fields = wire.fields + ",\"why\":\"display\""
+        if let resume { fields += String(format: ",\"rx\":%.4f,\"ry\":%.4f", resume.x, resume.y) }
+        return fields
+    }
 
     /// Window mode: the fields after `"v":0` while the cursor is over no pane. `wire` is in
     /// canvas coordinates (outside `pane`), `pane` the active pane's visible rectangle,

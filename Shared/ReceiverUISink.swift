@@ -304,14 +304,19 @@ enum PaneCursorSizing {
 /// Where the Mac cursor is while it is not drawn: `point` in the stream's normalized
 /// coordinates (outside the picture, or outside `pane`). `pane` (Window mode) is the active
 /// pane's visible rectangle, normalized to the canvas: the locator points from that pane.
+/// `resume` (Mirror/Extend, `"why":"display"` only) is where this receiver's pointer input
+/// would take over on its display, normalized to the picture and inside 0...1: the place to
+/// mark so the user sees where a touch or click lands while the Mac cursor is elsewhere.
 struct CursorLocatorTarget: Equatable, Sendable {
     var point: CGPoint
     var pane: CGRect?
+    var resume: CGPoint?
 }
 
 /// A hidden `cursor` report that says where the Mac cursor is (PROTOCOL.md 6.2): on another
 /// display (`"why":"display"`, Mirror/Extend) or over no pane (`"why":"pane"` with the
-/// active pane's `px`,`py`,`pw`,`ph`, Window mode). Pure, for tests.
+/// active pane's `px`,`py`,`pw`,`ph`, Window mode). A display report may also carry the
+/// re-entry point `rx`,`ry`. Pure, for tests.
 enum CursorOffDisplayReport {
     /// Positions this far outside the display are clamped: the locator only needs a direction
     /// and a rough distance, and a bogus value must not overflow view geometry.
@@ -325,11 +330,22 @@ enum CursorOffDisplayReport {
     }
 
     /// The locator target of a report, or nil. `"pane"` needs a pane rectangle inside the canvas
-    /// with a positive size; otherwise the report says nothing usable.
+    /// with a positive size; otherwise the report says nothing usable. A display report's
+    /// `rx`,`ry` become `resume` when both are finite (clamped into the picture, since the
+    /// point is on the receiver's own display); otherwise the report still locates the cursor
+    /// and just has no resume point. A pane report never carries one: its pointer is the
+    /// workspace's, not a display point.
     static func target(visible: Bool, why: String?, x: Double?, y: Double?,
-                       px: Double? = nil, py: Double? = nil, pw: Double? = nil, ph: Double? = nil) -> CursorLocatorTarget? {
+                       px: Double? = nil, py: Double? = nil, pw: Double? = nil, ph: Double? = nil,
+                       rx: Double? = nil, ry: Double? = nil) -> CursorLocatorTarget? {
         guard let point = position(visible: visible, why: why, x: x, y: y) else { return nil }
-        guard why == "pane" else { return CursorLocatorTarget(point: point, pane: nil) }
+        guard why == "pane" else {
+            var resume: CGPoint?
+            if let rx, let ry, rx.isFinite, ry.isFinite {
+                resume = CGPoint(x: min(max(rx, 0), 1), y: min(max(ry, 0), 1))
+            }
+            return CursorLocatorTarget(point: point, pane: nil, resume: resume)
+        }
         guard let px, let py, let pw, let ph, [px, py, pw, ph].allSatisfy(\.isFinite) else { return nil }
         let pane = CGRect(x: px, y: py, width: pw, height: ph).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
         guard !pane.isNull, pane.width > 0, pane.height > 0 else { return nil }

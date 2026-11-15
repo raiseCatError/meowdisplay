@@ -59,6 +59,49 @@ final class OffDisplayCursorReportsTests: XCTestCase {
                        CursorLocatorTarget(point: CGPoint(x: 1.4, y: 0.2), pane: nil))
     }
 
+    func testADisplayReportCarriesTheReentryPointWhenGiven() {
+        XCTAssertEqual(OffDisplayCursorReports.fields(CursorWirePosition(x: -1.25, y: 2.5),
+                                                      resume: CursorWirePosition(x: 0.123456, y: 0.5)),
+                       "\"x\":-1.2500,\"y\":2.5000,\"why\":\"display\",\"rx\":0.1235,\"ry\":0.5000")
+        XCTAssertEqual(OffDisplayCursorReports.fields(CursorWirePosition(x: -1.25, y: 2.5), resume: nil),
+                       OffDisplayCursorReports.fields(CursorWirePosition(x: -1.25, y: 2.5)),
+                       "no injector: the report is the one older senders sent")
+    }
+
+    func testOnlyADisplayReportGivesAResumePoint() {
+        XCTAssertEqual(CursorOffDisplayReport.target(visible: false, why: "display", x: 1.4, y: 0.2,
+                                                     rx: 0.25, ry: 0.75),
+                       CursorLocatorTarget(point: CGPoint(x: 1.4, y: 0.2), pane: nil,
+                                           resume: CGPoint(x: 0.25, y: 0.75)))
+        let pane = CursorOffDisplayReport.target(visible: false, why: "pane", x: 1, y: 0.5,
+                                                 px: 0.25, py: 0, pw: 0.5, ph: 1, rx: 0.25, ry: 0.75)
+        XCTAssertNotNil(pane)
+        XCTAssertNil(pane?.resume, "a pane report never carries one")
+        XCTAssertNil(CursorOffDisplayReport.target(visible: true, why: "display", x: 0.5, y: 0.5,
+                                                   rx: 0.25, ry: 0.75), "a visible report is no locator at all")
+    }
+
+    func testAResumePointIsClampedIntoThePicture() {
+        let target = CursorOffDisplayReport.target(visible: false, why: "display", x: 1.4, y: 0.2,
+                                                   rx: -3, ry: 9)
+        XCTAssertEqual(target?.resume, CGPoint(x: 0, y: 1))
+    }
+
+    func testAResumePointNeedsBothFiniteValues() {
+        for (rx, ry) in [(Double.nan, 0.5), (0.5, Double.infinity), (0.5, -Double.infinity)] as [(Double, Double)] {
+            let target = CursorOffDisplayReport.target(visible: false, why: "display", x: 1.4, y: 0.2,
+                                                       rx: rx, ry: ry)
+            XCTAssertNotNil(target, "the report still locates the cursor")
+            XCTAssertNil(target?.resume)
+        }
+        let incomplete: [(Double?, Double?)] = [(nil, 0.5), (0.5, nil), (nil, nil)]
+        for (rx, ry) in incomplete {
+            let target = CursorOffDisplayReport.target(visible: false, why: "display", x: 1.4, y: 0.2,
+                                                       rx: rx, ry: ry)
+            XCTAssertEqual(target, CursorLocatorTarget(point: CGPoint(x: 1.4, y: 0.2), pane: nil, resume: nil))
+        }
+    }
+
     func testAPaneReportNeedsAUsablePane() {
         XCTAssertEqual(CursorOffDisplayReport.target(visible: false, why: "pane", x: 1, y: 0.5,
                                                      px: 0.25, py: 0, pw: 0.5, ph: 1),
