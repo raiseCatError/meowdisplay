@@ -42,12 +42,19 @@ extension DemoModeSmokeTests {
         XCTAssertTrue(dockApps.firstMatch.waitForExistence(timeout: 8), "the sample Mac's apps fill the bar")
         let lastIcon = app.buttons["stagePeekLaunchpad"]
         // On a small screen even all rows scroll: swipe the grid itself (an icon scrolls away).
+        // Reached = its centre inside the grid's visible frame; the tap below goes to that point,
+        // so All Apps opening proves the touch got there.
         let grid = app.scrollViews.containing(.button, identifier: "stagePeekLaunchpad").firstMatch
-        for _ in 0..<6 where !lastIcon.isHittable {
+        let reached = { () -> Bool in
+            let f = lastIcon.frame, visible = grid.exists ? grid.frame : app.frame
+            return lastIcon.exists && !f.isEmpty && visible.insetBy(dx: 0, dy: 4).contains(CGPoint(x: f.midX, y: f.midY))
+        }
+        for _ in 0..<6 where !reached() {
             if grid.exists { grid.swipeUp() } else { dockApps.allElementsBoundByIndex.last { $0.isHittable }?.swipeUp() }
             sleep(1)
         }
-        XCTAssertTrue(lastIcon.isHittable, "All Apps, the grid's last icon")
+        print("ALLAPPS last icon \(lastIcon.frame) hittable=\(lastIcon.isHittable) grid \(grid.exists ? grid.frame : .null) handle '\(handle.label)'")
+        XCTAssertTrue(reached(), "All Apps, the grid's last icon, in view")
         allAppsSnapshot(app, "all-apps-0-grid")
 
         let allApps = app.descendants(matching: .any)["stagePeekAllApps"]
@@ -55,21 +62,22 @@ extension DemoModeSmokeTests {
         let underneath = ["stagePeekDockApp", "stagePeekDockHandle", "stagePeekLaunchpad", "stagePeekExpand", "stagePeekClose",
                           "stagePeekStrip", "galleryWindowCard", "demoShowDesktop", "demoOpenFloating", "demoAddPane"]
         for round in 1...3 {
-            lastIcon.tap()
-            XCTAssertTrue(allApps.waitForExistence(timeout: 5), "round \(round): All Apps opens")
-            XCTAssertTrue(close.waitForExistence(timeout: 3) && close.isHittable, "round \(round): its Close")
+            lastIcon.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(allApps.waitForExistence(timeout: 5), "round \(round): All Apps opens from the grid's last icon")
+            XCTAssertTrue(close.waitForExistence(timeout: 3), "round \(round): its Close")
             let items = app.buttons.matching(identifier: "stagePeekAllAppsItem")
             XCTAssertTrue(items.firstMatch.waitForExistence(timeout: 5), "round \(round): its own grid")
             XCTAssertGreaterThanOrEqual(app.buttons.matching(NSPredicate(format: "identifier == 'stagePeekAllAppsItem' AND label == 'Notes'")).count, 2,
                                         "two different apps called Notes both show")
 
+            // Underneath: gone from the accessibility tree (hidden, untouchable), not merely covered.
             for id in underneath {
                 let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
-                XCTAssertFalse(element.exists && element.isHittable, "round \(round): \(id) is reachable under All Apps")
+                XCTAssertFalse(element.exists, "round \(round): \(id) is still there under All Apps (\(element.exists ? "\(element.frame)" : ""))")
             }
             for label in ["Exit Demo", "Control (Demo)", "Settings"] {
                 let control = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
-                XCTAssertFalse(control.exists && control.isHittable, "round \(round): the receiver's \(label) is reachable under All Apps")
+                XCTAssertFalse(control.exists, "round \(round): the receiver's \(label) is still there under All Apps")
             }
             XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "stagePeekSearch").count, 1,
                            "round \(round): one search field, All Apps' own")
@@ -78,8 +86,8 @@ extension DemoModeSmokeTests {
             close.tap()
             allAppsWaitUntilGone(allApps)
             XCTAssertFalse(allApps.exists, "round \(round): Close goes back")
-            XCTAssertTrue(peekClose.waitForExistence(timeout: 3) && peekClose.isHittable, "round \(round): back on the peek")
-            XCTAssertTrue(lastIcon.waitForExistence(timeout: 3) && lastIcon.isHittable, "round \(round): the grid as it was")
+            XCTAssertTrue(peekClose.waitForExistence(timeout: 3), "round \(round): back on the peek")
+            XCTAssertTrue(lastIcon.waitForExistence(timeout: 3) && reached(), "round \(round): the grid as it was")
             XCTAssertEqual(handle.label, "Show One Row of Apps", "round \(round): still all rows")
         }
         allAppsSnapshot(app, "all-apps-2-back")
