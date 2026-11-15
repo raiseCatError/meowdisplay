@@ -736,6 +736,7 @@ struct ReceiverScreen: View {
                                         onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
                         .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
                         .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
+                        .stepsAside(forAllApps: model.workspace.launchpadOpen)
                     if controlStore.preferences.windowSwitcher == .rail {
                         WindowRailView(model: model.workspace)
                             .padding(effectiveSafeInsets.edgeInsets)
@@ -756,6 +757,8 @@ struct ReceiverScreen: View {
                         onCanvasChange: { padCanvas = $0 },
                         surfaceOrigin: canvas.origin,
                         onSessionActions: sessionActionsAvailable ? { openSessionActions() } : nil)
+                        // Stage Peek's All Apps covers the controls (`StagePeekAllAppsLayering`).
+                        .stepsAside(forAllApps: model.workspace.launchpadOpen)
                     if let kind = inputPrompt.kind {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
                         // window needs control; the pane, its tabs, zoom and pan stay as they are.
@@ -773,6 +776,7 @@ struct ReceiverScreen: View {
                         InputPromptButton(kind: kind) { requestInputFromPrompt() }
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
+                            .stepsAside(forAllApps: model.workspace.launchpadOpen)
                     }
                     if videoOffStatusShown {
                         // Video off is the user's choice: one quiet line saying so, with the way back.
@@ -782,6 +786,7 @@ struct ReceiverScreen: View {
                                                    size: CGSize(width: 300, height: 44), container: geo.size,
                                                    regions: reservedRegions))
                             .transition(slideTransition(from: .top))
+                            .stepsAside(forAllApps: model.workspace.launchpadOpen)
                     }
                     if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
@@ -818,7 +823,7 @@ struct ReceiverScreen: View {
                         .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
-                       !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown {
+                       !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown, !model.workspace.launchpadOpen {
                         // Full-desktop view: offer Window mode once per launch, never forced.
                         WindowModePrompt(
                             extending: model.receiver.confirmedDisplayMode == .extend,
