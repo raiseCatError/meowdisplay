@@ -891,7 +891,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let generation: UInt64
     }
     private var helloContinuation: CheckedContinuation<ApplicationReadySession, Error>?
-    private var inputInjector: InputInjector?
+    /// A replaced injector first releases whatever it holds: the new one would ignore the
+    /// matching ups, leaving a button or key down on the Mac.
+    private var inputInjector: InputInjector? {
+        willSet { if newValue !== inputInjector { inputInjector?.cancelActiveInput() } }
+    }
     /// Where every injector this sender creates posts its events: the HID
     /// event tap, except in the DEBUG input test harness.
     private var inputEventSink: SyntheticEventSink = HIDEventTapSink()
@@ -976,6 +980,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // and dial generation all live on `transportController` now — see
     // MacSenderTransportController.swift.
     private var lastCursorSent: (x: Double, y: Double, visible: Bool) = (-1, -1, false)
+    /// After a reset: nothing counts as sent, and the receiver may still show a cursor from
+    /// before (a rebuild keeps its connection), so the next poll sends either a position or
+    /// one hidden report.
+    private static let cursorEchoUnsent: (x: Double, y: Double, visible: Bool) = (-1, -1, true)
     private var lastCursorPNGHash = 0
     private var cursorSeq: UInt64 = 0
     // Caret-following Zoom While Typing (PROTOCOL.md 6.11): while this
@@ -1650,7 +1658,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// weren't allowed must not count as sent).
     private func resetCursorEcho() {
         lastCursorPNGHash = 0
-        lastCursorSent = (-1, -1, false)
+        lastCursorSent = Self.cursorEchoUnsent
         lastCursorPane = nil
     }
 
@@ -3370,7 +3378,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             invalidateCapturePipeline(discardingLastFrame: true)
             _ = updateCaptureState { $0.captureStarted() }
             lastCursorPNGHash = 0
-            lastCursorSent = (-1, -1, false)
+            lastCursorSent = Self.cursorEchoUnsent
             lastCursorPane = nil
             startCursorEcho()
             sendDisplayState(captureStateSnapshot().receiverDisplayState)
@@ -3480,7 +3488,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         audioEnabled = plan.capture.capturesAudio
         liveCapture = LiveCaptureConfiguration(stream: stream, settings: plan.capture)
         lastCursorPNGHash = 0      // rotation rebuilds: re-send the sprite
-        lastCursorSent = (-1, -1, false)
+        lastCursorSent = Self.cursorEchoUnsent
         lastCursorPane = nil
         startCursorEcho()
         // A capture that came back through any path (recovery, rotation,
@@ -3733,6 +3741,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// grant an earlier connection held. A receiver that never requested/was
     /// never granted control stays gated out here even while the Mac master
     /// is fully on.
+    /// The same gates as `receiverInputIsAllowed()`, without its side effect (it cancels held
+    /// input when a gate is closed). For presentation decisions polled at the cursor rate.
+    private func receiverMayMovePointer() -> Bool {
+        sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
+            && captureStateSnapshot().allowsInput && privacyGate.allowsInput
+    }
+
     private func receiverInputIsAllowed() -> Bool {
         guard sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput()),
               captureStateSnapshot().allowsInput else {
@@ -5496,7 +5511,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // (The sprite's hash is left alone here: resetting it on every poll would re-encode the
         // sprite 30 times a second while locked. Begin, end and unlock reset it.)
         guard cursorEchoAllowed else {
-            lastCursorSent = (-1, -1, false)
+            lastCursorSent = Self.cursorEchoUnsent
             lastCursorPane = nil
             return
         }
@@ -5511,7 +5526,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if mode == .window {
             // One workspace pointer: the Mac cursor in canvas coordinates
             // while it is over a tile's window, hidden elsewhere.
-            if let p = workspaceEngine?.cursorPlacement(forGlobal: loc) {
+            if let p = workspaceEngine?.cursorPlacement(forGlobal: loc,
+                                                        receiverMayMovePointer: receiverMayMovePointer()) {
                 // With the pane's scale and rotation: the canvas isn't the Mac display's shape, so
                 // the sprite's display-normalized size would stretch it (PROTOCOL.md 6.10).
                 let scaleChanged = lastCursorPane.map { abs($0.kx - p.kx) > $0.kx * 0.01 || $0.rotation != p.rotation } ?? true
@@ -5543,6 +5559,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if !lastCursorSent.visible || wire != CursorWirePosition(x: lastCursorSent.x, y: lastCursorSent.y) {
                 lastCursorSent = (wire.x, wire.y, true)
                 sendCursor(wire.fields + ",\"v\":1")
+                // This session's re-entry point for receiver input (`DisplayReentryPoint`).
+                inputInjector?.noteCursor(loc)
             }
         } else if lastCursorSent.visible {
             lastCursorSent.visible = false
@@ -6601,7 +6619,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             needsKeyframe = true
             if audioEnabled { beginAudioGeneration() }
             lastCursorPNGHash = 0
-            lastCursorSent = (-1, -1, false)
+            lastCursorSent = Self.cursorEchoUnsent
             lastCursorPane = nil
             sendAllowInputState()
             if deferredRotationRebuild, let info = lastHello {
@@ -7960,7 +7978,7 @@ extension MacSender: MacSenderTransportDelegate {
         // changes it. Reset the dedup state to re-send sprite + position to
         // the fresh peer — the cursor analogue of forcing a keyframe.
         lastCursorPNGHash = 0
-        lastCursorSent = (-1, -1, false)
+        lastCursorSent = Self.cursorEchoUnsent
         lastCursorPane = nil
         lastReceived = Date()  // fresh grace period for the watchdog
         lastSendCompletionAt = Date()   // fresh grace period for the outbound-stall watchdog
@@ -8556,7 +8574,7 @@ extension MacSender {
 
     /// Whether the next poll sends the position and sprite again.
     func cursorEchoWillResendForTesting() async throws -> Bool {
-        try await onQueue { sender in !sender.lastCursorSent.visible && sender.lastCursorPNGHash == 0 }
+        try await onQueue { sender in sender.lastCursorSent.x < 0 && sender.lastCursorPNGHash == 0 }
     }
 }
 #endif

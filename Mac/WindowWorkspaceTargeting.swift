@@ -182,6 +182,9 @@ protocol InputTargetMapper: AnyObject, Sendable {
     /// Where canvas point `x`/`y` (normalized) lands on the Mac, without
     /// changing hover, focus or bindings. Nil outside every tile.
     func locate(x: Double, y: Double) -> CGPoint?
+    /// Held input was cancelled (revoke, View Only, pause, lock, disconnect): end any drag
+    /// binding, whose release will never arrive, so the next press goes where it lands.
+    func cancelBinding()
 }
 
 /// Where one input event goes. Hover, active tile and the Mac's own focus are
