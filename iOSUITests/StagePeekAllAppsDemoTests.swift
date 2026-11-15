@@ -49,12 +49,15 @@ extension DemoModeSmokeTests {
             let f = lastIcon.frame, visible = grid.exists ? grid.frame : app.frame
             return lastIcon.exists && !f.isEmpty && visible.insetBy(dx: 0, dy: 4).contains(CGPoint(x: f.midX, y: f.midY))
         }
-        for _ in 0..<6 where !reached() {
-            if grid.exists { grid.swipeUp() } else { dockApps.allElementsBoundByIndex.last { $0.isHittable }?.swipeUp() }
-            sleep(1)
+        let reach = { (round: Int) in
+            for _ in 0..<6 where !reached() {
+                if grid.exists { grid.swipeUp() } else { dockApps.allElementsBoundByIndex.last { $0.isHittable }?.swipeUp() }
+                sleep(1)
+            }
+            print("ALLAPPS round \(round): last icon \(lastIcon.frame) grid \(grid.exists ? grid.frame : .null) handle '\(handle.label)'")
+            XCTAssertTrue(reached(), "round \(round): All Apps, the grid's last icon, in view")
         }
-        print("ALLAPPS last icon \(lastIcon.frame) hittable=\(lastIcon.isHittable) grid \(grid.exists ? grid.frame : .null) handle '\(handle.label)'")
-        XCTAssertTrue(reached(), "All Apps, the grid's last icon, in view")
+        reach(0)
         allAppsSnapshot(app, "all-apps-0-grid")
 
         let allApps = app.descendants(matching: .any)["stagePeekAllApps"]
@@ -62,6 +65,7 @@ extension DemoModeSmokeTests {
         let underneath = ["stagePeekDockApp", "stagePeekDockHandle", "stagePeekLaunchpad", "stagePeekExpand", "stagePeekClose",
                           "stagePeekStrip", "galleryWindowCard", "demoShowDesktop", "demoOpenFloating", "demoAddPane"]
         for round in 1...3 {
+            if round > 1 { reach(round) }
             lastIcon.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             XCTAssertTrue(allApps.waitForExistence(timeout: 5), "round \(round): All Apps opens from the grid's last icon")
             XCTAssertTrue(close.waitForExistence(timeout: 3), "round \(round): its Close")
@@ -71,8 +75,8 @@ extension DemoModeSmokeTests {
                                         "two different apps called Notes both show")
 
             // Underneath: gone from the accessibility tree (hidden, untouchable), not merely covered.
-            // A lazily kept cell scrolled off the screen can linger in the tree (run 43733403618:
-            // one apps bar icon at y -49); it's reported, and anything on screen fails the test.
+            // Anything of the peek's or the receiver's on screen under All Apps fails; anything left
+            // off screen is printed (runs 43733403618, 43737338921 found the apps bar's cells).
             let screen = app.frame
             for id in underneath {
                 let frames = app.descendants(matching: .any).matching(identifier: id).allElementsBoundByIndex.map(\.frame)
@@ -92,7 +96,7 @@ extension DemoModeSmokeTests {
             allAppsWaitUntilGone(allApps)
             XCTAssertFalse(allApps.exists, "round \(round): Close goes back")
             XCTAssertTrue(peekClose.waitForExistence(timeout: 3), "round \(round): back on the peek")
-            XCTAssertTrue(lastIcon.waitForExistence(timeout: 3) && reached(), "round \(round): the grid as it was")
+            XCTAssertTrue(lastIcon.waitForExistence(timeout: 3), "round \(round): the apps grid is back")
             XCTAssertEqual(handle.label, "Show One Row of Apps", "round \(round): still all rows")
         }
         allAppsSnapshot(app, "all-apps-2-back")

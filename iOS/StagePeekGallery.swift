@@ -110,7 +110,6 @@ struct StagePeekDock: View {
     /// Shown when a search leaves no apps.
     var noMatch: String? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.coveredByAllApps) private var covered
     @State private var heldAt: CGPoint = .zero
     @State private var pullBase: Int?
     @State private var scrollStart: CGFloat?
@@ -238,7 +237,6 @@ struct StagePeekDock: View {
         .buttonStyle(.plain)
         .accessibilityLabel("All Apps")
         .accessibilityIdentifier("stagePeekLaunchpad")
-        .accessibilityHidden(covered)
     }
 
     private func appButton(_ app: MacAppItem, named: Bool = false, collapses: Bool = false) -> some View {
@@ -275,7 +273,6 @@ struct StagePeekDock: View {
                                         : String(localized: "Not running"))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("stagePeekDockApp")
-        .accessibilityHidden(covered)
     }
 }
 
@@ -292,7 +289,6 @@ struct StagePeekWindowCard: View {
     let inTile: Bool
     let current: Bool
     var closing = false
-    @Environment(\.coveredByAllApps) private var covered
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -333,7 +329,6 @@ struct StagePeekWindowCard: View {
                             : inTile ? String(localized: "Showing in a tile") : (window.pausedSpoken ?? ""))
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("galleryWindowCard")
-        .accessibilityHidden(covered)
     }
 
     @ViewBuilder private var preview: some View {
