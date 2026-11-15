@@ -99,9 +99,11 @@ final class AdaptiveLayoutTests: XCTestCase {
     @MainActor
     private func openSettings(_ app: XCUIApplication) {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        wakeControls(app)
         let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable after a touch")
+        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
+        if woke != .completed { reportReachableControls(app, "settings-not-reachable") }
+        XCTAssertEqual(woke, .completed, "Settings is reachable after a touch")
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
@@ -269,6 +271,39 @@ final class AdaptiveLayoutTests: XCTestCase {
         return band
     }
 
+    /// Touches the stream to bring the faded controls back, as a person would: on the picture,
+    /// never on the synthetic fold band (the layout leaves that strip to the fold, so a touch
+    /// there is not a touch on the stream). Without a band it is the usual spot below the middle.
+    @MainActor
+    private func wakeControls(_ app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        let frame = window.frame
+        var offset = CGVector(dx: 0.5, dy: 0.6)
+        let bandElement = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        if bandElement.exists, !frame.isEmpty {
+            let band = bandElement.frame
+            let wakeY = frame.minY + frame.height * 0.6
+            if band.height > band.width {   // book: the middle of the wider side
+                let leftWidth = band.minX - frame.minX, rightWidth = frame.maxX - band.maxX
+                let x = leftWidth >= rightWidth ? frame.minX + leftWidth / 2 : band.maxX + rightWidth / 2
+                offset.dx = (x - frame.minX) / frame.width
+            } else if band.minY <= wakeY, wakeY <= band.maxY {   // tabletop: below the band
+                offset.dy = (band.maxY + (frame.maxY - band.maxY) / 2 - frame.minY) / frame.height
+            }
+        }
+        window.coordinate(withNormalizedOffset: offset).tap()
+    }
+
+    /// On a failure to reach Settings: which controls can be reached, and a kept screenshot.
+    @MainActor
+    private func reportReachableControls(_ app: XCUIApplication, _ name: String) {
+        let hittable = app.buttons.allElementsBoundByIndex
+            .filter { $0.exists && $0.isHittable }
+            .map { "\($0.label)@\(Int($0.frame.midX)),\(Int($0.frame.midY))" }
+        print("AdaptiveLayout: \(name): reachable buttons \(hittable)")
+        keep(app, name)
+    }
+
     /// Polls `condition` (no fixed sleep) until it holds or `timeout` passes.
     @MainActor @discardableResult
     private func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
@@ -286,9 +321,11 @@ final class AdaptiveLayoutTests: XCTestCase {
     @MainActor
     private func assertControlsAvoidFold(_ app: XCUIApplication, band: CGRect, _ context: String) {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        wakeControls(app)
         let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable (\(context))")
+        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
+        if woke != .completed { reportReachableControls(app, "settings-not-reachable-\(context)") }
+        XCTAssertEqual(woke, .completed, "Settings is reachable (\(context))")
         let window = app.windows.firstMatch.frame
         // Half a point of rounding either way: frames come back in fractional points.
         let fold = band.insetBy(dx: 0.5, dy: 0.5)
