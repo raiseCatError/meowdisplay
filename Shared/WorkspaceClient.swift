@@ -178,6 +178,27 @@ struct WorkspaceHeldWindow: Hashable, Sendable {
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
 
+/// Where this device's last display arrangement request is (PROTOCOL.md 6.10).
+enum DisplayArrangeStatus: Equatable, Sendable {
+    /// Sent; the Mac hasn't answered yet.
+    case sending
+    /// The Mac's owner is being asked on the Mac.
+    case awaitingMacConfirm
+    /// Applied for now; the Mac puts the old one back at `revertAt` unless kept.
+    case applied(revertAt: Date)
+    /// Keep sent.
+    case keeping
+    /// Revert sent.
+    case reverting
+    /// Over: `kept`, `reverted`, `denied` or `failed`, with the Mac's reason.
+    case finished(DisplayArrangeState, reason: String?)
+
+    var isInProgress: Bool {
+        if case .finished = self { return false }
+        return true
+    }
+}
+
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
     /// The Mac locked or unlocked its screen (`macLockState`).
@@ -199,6 +220,8 @@ enum WorkspaceEvent: Sendable {
     case lockResult(LockMacResult)
     /// Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10).
     case frameResult(WindowFrameReply)
+    /// Display arrangement (PROTOCOL.md 6.10): where the Mac is with an arrangement request.
+    case displayArrange(DisplayArrangeStateMessage)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Unified Clipboard (PROTOCOL.md 6.15).
@@ -304,6 +327,8 @@ enum WorkspaceEvent: Sendable {
             return str(obj, "result", 32).flatMap(LockMacResult.init(rawValue:)).map { .lockResult($0) }
         case WindowFrameWire.result:
             return WindowFrameReply.parse(obj).map { .frameResult($0) }
+        case WireMessage.displayArrangeState:
+            return DisplayArrangeStateMessage.parse(obj).map { .displayArrange($0) }
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case ClipboardWire.type:
@@ -639,6 +664,13 @@ final class WorkspaceModel: ObservableObject {
     private var windowFrameRequest = 0
     private var windowFrameAsked: [Int: (tile: String, windowID: UInt32, op: WindowFrameOp)] = [:]
     private var windowFrameNoticeClear: DispatchWorkItem?
+    /// The Mac lets this device rearrange its displays (`displayArrange`); every request still
+    /// needs control and the Mac owner's answer on the Mac.
+    @Published private(set) var canArrangeDisplays = false
+    /// Where the last display arrangement request is (nil: none, or its outcome was dismissed).
+    @Published private(set) var displayArrangeStatus: DisplayArrangeStatus?
+    private var displayArrangeRequest = 0
+    private var displayArrangeWatchdog: DispatchWorkItem?
     /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
     @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
     /// Cards on screen now, most important first: their stills are asked for first.
@@ -833,6 +865,7 @@ final class WorkspaceModel: ObservableObject {
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
+            canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -937,6 +970,8 @@ final class WorkspaceModel: ObservableObject {
             lockMacStatus = .done(result)
         case .frameResult(let reply):
             finishWindowFrame(reply)
+        case .displayArrange(let message):
+            displayArrangeStateArrived(message)
         case .disconnected:
             sendTask?.cancel()
             leaveExtendRequest = nil
@@ -954,6 +989,7 @@ final class WorkspaceModel: ObservableObject {
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
             windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
+            displayArrangeDisconnected()
             lockFlowInputsChanged()
             files.setAvailable(false)
             menus.setAvailable(false)
@@ -1904,6 +1940,97 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func clearLockMacStatus() { if lockMacStatus != .locking { lockMacStatus = nil } }
+
+    // MARK: Display arrangement (PROTOCOL.md 6.10)
+
+    /// Sends the edit's changed origins (with the arrangement it was made from). False, and
+    /// nothing sent, unless the Mac offers it, control is held, the edit is valid and changed and
+    /// no other request is under way. The Mac checks all of it again and asks its owner.
+    @discardableResult
+    func requestDisplayArrangement(_ edit: DisplayArrangementEdit) -> Bool {
+        guard canArrangeDisplays, canControlMac, edit.isChanged, edit.validate() == nil,
+              !(displayArrangeStatus?.isInProgress ?? false) else { return false }
+        displayArrangeRequest += 1
+        let req = displayArrangeRequest
+        guard send(DisplayArrangeRequestMessage(req: req, edit: edit).wire) else {
+            displayArrangeStatus = .finished(.failed, reason: nil)
+            return false
+        }
+        displayArrangeStatus = .sending
+        armDisplayArrangeWatchdog(req: req, seconds: 10)
+        return true
+    }
+
+    /// Keep this arrangement: the Mac saves it (needs control there too).
+    func keepDisplayArrangement() {
+        guard case .applied = displayArrangeStatus else { return }
+        guard send(["type": WireMessage.displayArrangeKeep, "req": displayArrangeRequest]) else { return }
+        displayArrangeStatus = .keeping
+    }
+
+    /// Put the old arrangement back now (or withdraw a request the Mac's owner hasn't answered).
+    func revertDisplayArrangement() {
+        switch displayArrangeStatus {
+        case .sending, .awaitingMacConfirm, .applied, .keeping:
+            guard send(["type": WireMessage.displayArrangeRevert, "req": displayArrangeRequest]) else { return }
+            displayArrangeStatus = .reverting
+        default:
+            break
+        }
+    }
+
+    /// Forgets a finished request's outcome (the editor closed or started over).
+    func clearDisplayArrangeStatus() {
+        if !(displayArrangeStatus?.isInProgress ?? false) { displayArrangeStatus = nil }
+    }
+
+    private func displayArrangeStateArrived(_ message: DisplayArrangeStateMessage) {
+        guard message.req == displayArrangeRequest, displayArrangeStatus?.isInProgress == true else { return }
+        switch message.state {
+        case .awaitingMacConfirm:
+            displayArrangeStatus = .awaitingMacConfirm
+            // The Mac's owner has 60 s; past that (and a margin) the Mac has denied it.
+            armDisplayArrangeWatchdog(req: message.req, seconds: DisplayArrangeWire.confirmSeconds + 10)
+        case .applied:
+            let seconds = message.revertIn ?? DisplayArrangeWire.revertSeconds
+            displayArrangeStatus = .applied(revertAt: Date().addingTimeInterval(TimeInterval(seconds)))
+            armDisplayArrangeWatchdog(req: message.req, seconds: seconds + 10)
+        case .kept, .reverted, .denied, .failed:
+            displayArrangeWatchdog?.cancel(); displayArrangeWatchdog = nil
+            displayArrangeStatus = .finished(message.state, reason: message.reason)
+            // The arrangement may have changed (or the catalog was stale): list it again.
+            requestCatalog()
+        }
+    }
+
+    /// No word from the Mac for far longer than any step takes: shown as failed, so the editor
+    /// never waits forever. The Mac reverts an unkept arrangement on its own.
+    private func armDisplayArrangeWatchdog(req: Int, seconds: Int) {
+        displayArrangeWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.displayArrangeRequest == req, self.displayArrangeStatus?.isInProgress == true else { return }
+            self.displayArrangeStatus = .finished(.failed, reason: nil)
+        }
+        displayArrangeWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: work)
+    }
+
+    private func displayArrangeDisconnected() {
+        displayArrangeWatchdog?.cancel(); displayArrangeWatchdog = nil
+        canArrangeDisplays = false
+        switch displayArrangeStatus {
+        case .applied, .reverting:
+            // The Mac puts an unkept arrangement back when the session ends.
+            displayArrangeStatus = .finished(.reverted, reason: DisplayArrangeReason.sessionEnded)
+        case .keeping:
+            // Keep may or may not have reached the Mac: say so rather than guess.
+            displayArrangeStatus = .finished(.failed, reason: DisplayArrangeReason.sessionEnded)
+        case .sending, .awaitingMacConfirm:
+            displayArrangeStatus = .finished(.denied, reason: DisplayArrangeReason.sessionEnded)
+        default:
+            break
+        }
+    }
 
     // MARK: Lock Mac flow (Request Control first when needed; see LockMacFlow)
 

@@ -1492,6 +1492,50 @@ The Mac brings a tile's minimized or hidden window back only when the tile
 first shows it that way; a window minimized later stays minimized until
 `activate`.
 
+**Display arrangement.** Optional and additive (no `pv` bump): offered only
+when the Mac's `welcome.features` lists `displayArrange` (sent with the other
+browsing features, so only while Window mode is allowed on the Mac). A receiver
+edits the catalog's `displays` and asks the Mac to move them; the Mac changes
+its arrangement only with public Quartz Display Services, never through System
+Settings.
+
+- Receiver → Mac: `displayArrangeRequest {req, origins, base}`. `origins`
+  `[{id, x, y}]` are the new frame origins (global points, whole numbers) of
+  the displays that move, with the main display at 0,0 (a receiver that moved
+  the main display translates everything so it stays there). `base`
+  `[{id, x, y, w, h}]` is every drawn display (mirror members folded into
+  their primary) of the catalog the receiver edited. At most 16 entries each.
+- Mac → receiver: `displayArrangeState {req, state, reason?, revertIn?}` with
+  `state` one of `awaitingMacConfirm`, `applied` (`revertIn`: seconds, 15),
+  `kept`, `reverted`, `denied` or `failed`.
+- Receiver → Mac: `displayArrangeKeep {req}` (keep the applied arrangement) or
+  `displayArrangeRevert {req}` (put the old one back now; before the Mac's
+  owner answered it withdraws the request: `denied` `requested`).
+
+The Mac acts on a request only from an admitted session with control (the
+input grant; otherwise `denied` `control`) and one at a time across all
+sessions (`denied` `busy`). `base` must match the Mac's current displays
+exactly (`denied` `stale`), and the result must be valid against them:
+whole-point origins within ±32768, no overlap, every display sharing an edge
+with the rest, a mirror member never moved apart from its primary, and another
+session's MeowDisplay screen never moved (`denied` with `invalidOrigin`,
+`overlap`, `disconnected`, `mirrorMember`, `notMovable`, `unknownDisplay`,
+`noMain`, `empty` or `malformed`). Then the Mac sends `awaitingMacConfirm` and
+asks its owner in a prompt on the Mac (which device asks, what moves; Rearrange
+/ Don't Allow, only real input on the Mac answers Rearrange). Don't Allow,
+closing it or 60 s without an answer is `denied` (`declined`, `timeout`).
+After Rearrange the Mac checks control and the displays again, applies the
+origins for this login session only and reads the arrangement back: anything
+macOS placed differently is undone and reported `failed` `notApplied`
+(`configurationError` when macOS refused). Otherwise it sends `applied` with
+`revertIn` 15. `displayArrangeKeep` within that time, with control, saves the
+same arrangement permanently (`kept`). Revert, the timer, Keep without control
+or after the displays changed, and the session ending all restore the previous
+origins (`reverted` with `requested`, `timeout`, `control` or
+`displaysChanged`; nothing is sent once the session is gone). A `reason` is at
+most 32 characters; receivers show unknown ones as a generic failure. After
+`kept` or `reverted` the receiver asks for `windowCatalog` again.
+
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
 normalized `x y w h` in the canvas (non-overlapping, inside it, at least
@@ -2288,6 +2332,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-10-30 | Additive: Unified Clipboard (`clip`, `welcome.features` `"clipboard"`, section 6.15) |
 | 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
+| 2026-11-15 | Additive, no `pv` change: display arrangement editing (section 6.10), `welcome.features` `displayArrange`, `displayArrangeRequest`, `displayArrangeState`, `displayArrangeKeep`, `displayArrangeRevert` |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
