@@ -523,6 +523,8 @@ struct StagePeekGallery: View {
     @State private var menuWindow: CatalogWindowItem?
     @State private var confirmClose: CatalogWindowItem?
     @State private var cardGestureClock = CardGestureClock()
+    /// The arrangement the Arrange… editor opened with (nil: closed).
+    @State private var arrangeOverview: DisplayOverviewModel?
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
     @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
@@ -630,6 +632,27 @@ struct StagePeekGallery: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
+        }
+        .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangeOverview))
+    }
+
+    /// "Displays", with Arrange… beside it when the map is shown, the Mac offers display
+    /// arrangement and this device has control (the Mac also asks its owner every time).
+    @ViewBuilder private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
+        let overview = DisplayOverviewModel(catalog: displays)
+        if inputAllowed, model.canArrangeDisplays, overview.drawnDisplays.count >= 2, overview.hasArrangement {
+            HStack(alignment: .firstTextBaseline) {
+                sectionTitle(String(localized: "Displays"))
+                Spacer()
+                Button { arrangeOverview = overview } label: {
+                    Text("Arrange…").font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(meowAccent)
+                .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
+            }
+        } else {
+            sectionTitle(String(localized: "Displays"))
         }
     }
 
