@@ -11,6 +11,8 @@ extension DemoModeSmokeTests {
     /// Close goes back to the peek as it was. Three times over.
     @MainActor
     func testStagePeekAllAppsFromTheGridsLastIconCoversThePeekAndGoesBack() throws {
+        // Every leftover under All Apps in one run, not one per run.
+        continueAfterFailure = true
         let app = XCUIApplication()
         app.launchArguments += ["-demoStagePeek"]
         app.launch()
