@@ -151,7 +151,7 @@ final class ReceiverUISink: Sendable {
         target?.applyCursorPositionUpdate(x: x, y: y, visible: visible)
     }
 
-    func publishCursorOffDisplay(_ p: CGPoint?) {
+    func publishCursorOffDisplay(_ p: CursorLocatorTarget?) {
         target?.applyCursorOffDisplayUpdate(p)
     }
 
@@ -301,8 +301,17 @@ enum PaneCursorSizing {
     }
 }
 
-/// A hidden `cursor` report that says where the Mac cursor is on another display
-/// (PROTOCOL.md 6.2, `"why":"display"`). Pure, for tests.
+/// Where the Mac cursor is while it is not drawn: `point` in the stream's normalized
+/// coordinates (outside the picture, or outside `pane`). `pane` (Window mode) is the active
+/// pane's visible rectangle, normalized to the canvas: the locator points from that pane.
+struct CursorLocatorTarget: Equatable, Sendable {
+    var point: CGPoint
+    var pane: CGRect?
+}
+
+/// A hidden `cursor` report that says where the Mac cursor is (PROTOCOL.md 6.2): on another
+/// display (`"why":"display"`, Mirror/Extend) or over no pane (`"why":"pane"` with the
+/// active pane's `px`,`py`,`pw`,`ph`, Window mode). Pure, for tests.
 enum CursorOffDisplayReport {
     /// Positions this far outside the display are clamped: the locator only needs a direction
     /// and a rough distance, and a bogus value must not overflow view geometry.
@@ -311,7 +320,19 @@ enum CursorOffDisplayReport {
     /// The off-display position, or nil: visible reports, hidden ones without a reason or
     /// position, and non-finite values carry none.
     static func position(visible: Bool, why: String?, x: Double?, y: Double?) -> CGPoint? {
-        guard !visible, why == "display", let x, let y, x.isFinite, y.isFinite else { return nil }
+        guard !visible, why == "display" || why == "pane", let x, let y, x.isFinite, y.isFinite else { return nil }
         return CGPoint(x: min(max(x, -limit), limit), y: min(max(y, -limit), limit))
+    }
+
+    /// The locator target of a report, or nil. `"pane"` needs a pane rectangle inside the canvas
+    /// with a positive size; otherwise the report says nothing usable.
+    static func target(visible: Bool, why: String?, x: Double?, y: Double?,
+                       px: Double? = nil, py: Double? = nil, pw: Double? = nil, ph: Double? = nil) -> CursorLocatorTarget? {
+        guard let point = position(visible: visible, why: why, x: x, y: y) else { return nil }
+        guard why == "pane" else { return CursorLocatorTarget(point: point, pane: nil) }
+        guard let px, let py, let pw, let ph, [px, py, pw, ph].allSatisfy(\.isFinite) else { return nil }
+        let pane = CGRect(x: px, y: py, width: pw, height: ph).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !pane.isNull, pane.width > 0, pane.height > 0 else { return nil }
+        return CursorLocatorTarget(point: point, pane: pane)
     }
 }

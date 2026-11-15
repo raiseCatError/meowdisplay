@@ -986,6 +986,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private static let cursorEchoUnsent: (x: Double, y: Double, visible: Bool) = (-1, -1, true)
     /// Mirror/Extend: hidden reports with the cursor's position on another display.
     private var offDisplayCursor = OffDisplayCursorReports()
+    /// Window mode: the last hidden report carried an off-pane position (a plain hidden report
+    /// must follow when it no longer applies, so the receiver drops its locator).
+    private var offPaneReported = false
     private var lastCursorPNGHash = 0
     private var cursorSeq: UInt64 = 0
     // Caret-following Zoom While Typing (PROTOCOL.md 6.11): while this
@@ -5540,8 +5543,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     sendCursor(wire.fields + String(format: ",\"v\":1,\"kx\":%.6g,\"ky\":%.6g,\"r\":%d",
                                                     p.kx, p.ky, p.rotation))
                 }
-            } else if lastCursorSent.visible {
+                offDisplayCursor.reset()
+                offPaneReported = false
+            } else if let off = workspaceEngine?.offPaneCursor(forGlobal: loc,
+                                                                receiverMayMovePointer: receiverMayMovePointer()) {
+                // Over no pane: hidden, with where it is relative to the active pane (a locator).
+                let wire = CursorWirePosition(x: off.x, y: off.y)
+                let leaving = lastCursorSent.visible || !offPaneReported
+                if offDisplayCursor.shouldSend(wire, at: ProcessInfo.processInfo.systemUptime, leaving: leaving) {
+                    lastCursorSent.visible = false
+                    offPaneReported = true
+                    sendCursor("\"v\":0," + OffDisplayCursorReports.paneFields(wire, pane: off.pane))
+                }
+            } else if lastCursorSent.visible || offPaneReported {
                 lastCursorSent.visible = false
+                offPaneReported = false
+                offDisplayCursor.reset()
                 sendCursor("\"v\":0")
             }
             return

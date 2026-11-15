@@ -1872,6 +1872,16 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
     }
 
+    /// Where the real Mac cursor is relative to the active pane while it is over none, for the
+    /// receiver's off-pane locator. Nil while the report is the workspace pointer (the receiver
+    /// moves that one itself).
+    func offPaneCursor(forGlobal g: CGPoint, receiverMayMovePointer: Bool) -> (x: Double, y: Double, pane: WorkspaceRect)? {
+        inputLock.withLock {
+            Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
+                ? nil : targeting.offPaneCursor(forGlobal: g)
+        }
+    }
+
     /// Whether the cursor report is the workspace pointer (a receiver resume position)
     /// rather than the Mac's real cursor. Pure, for tests.
     static func reportsWorkspacePointer(pointerDriven: Bool, receiverMayMovePointer: Bool) -> Bool {

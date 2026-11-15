@@ -48,4 +48,12 @@ struct OffDisplayCursorReports {
 
     /// The fields after `"v":0` in such a report.
     static func fields(_ wire: CursorWirePosition) -> String { wire.fields + ",\"why\":\"display\"" }
+
+    /// Window mode: the fields after `"v":0` while the cursor is over no pane. `wire` is in
+    /// canvas coordinates (outside `pane`), `pane` the active pane's visible rectangle,
+    /// normalized to the canvas.
+    static func paneFields(_ wire: CursorWirePosition, pane: WorkspaceRect) -> String {
+        wire.fields + String(format: ",\"why\":\"pane\",\"px\":%.4f,\"py\":%.4f,\"pw\":%.4f,\"ph\":%.4f",
+                             pane.x, pane.y, pane.width, pane.height)
+    }
 }

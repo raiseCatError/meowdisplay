@@ -3468,7 +3468,7 @@ struct VideoLayerView: UIViewRepresentable {
             return layer
         }()
         static let locatorSize = CGSize(width: 24, height: 24)
-        private var cursorOffDisplay: CGPoint?
+        private var cursorOffDisplay: CursorLocatorTarget?
         private var cursorLocatorEnabled = true
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
@@ -4787,7 +4787,7 @@ struct VideoLayerView: UIViewRepresentable {
             updateCursorLocator()
         }
 
-        func setCursorOffDisplay(_ point: CGPoint?) {
+        func setCursorOffDisplay(_ point: CursorLocatorTarget?) {
             guard point != cursorOffDisplay else { return }
             cursorOffDisplay = point
             CATransaction.begin()
@@ -4809,12 +4809,20 @@ struct VideoLayerView: UIViewRepresentable {
         /// No animation, so it never pulses or slides (Reduce Motion needs nothing extra).
         private func updateCursorLocator() {
             // Where the pointer is: on another display, or the drawn one (maybe out of view).
-            let target = cursorOffDisplay ?? (cursorVisible && cursorLayer.contents != nil ? cursorNorm : nil)
+            let target = cursorOffDisplay?.point ?? (cursorVisible && cursorLayer.contents != nil ? cursorNorm : nil)
             guard cursorLocatorEnabled, currentTransform.isValid, let target else {
                 locatorLayer.isHidden = true
                 return
             }
-            let visible = currentTransform.displayedRect.intersection(bounds.inset(by: safeAreaInsets)).insetBy(dx: 4, dy: 4)
+            var visible = currentTransform.displayedRect.intersection(bounds.inset(by: safeAreaInsets))
+            if let pane = cursorOffDisplay?.pane {
+                // Window mode, over no pane: point from the active pane's picture.
+                let a = currentTransform.viewPoint(forRemote: pane.origin)
+                let b = currentTransform.viewPoint(forRemote: CGPoint(x: pane.maxX, y: pane.maxY))
+                visible = visible.intersection(CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
+                                                      width: abs(b.x - a.x), height: abs(b.y - a.y)))
+            }
+            visible = visible.insetBy(dx: 4, dy: 4)
             guard !visible.isNull, !visible.isEmpty,
                   let placement = OffscreenCursorLocator.placement(
                       cursor: currentTransform.viewPoint(forRemote: target), content: visible,

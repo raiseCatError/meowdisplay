@@ -207,4 +207,47 @@ private final class BindingMapper: InputTargetMapper, @unchecked Sendable {
     func keyboardTargetReady() -> Bool { true }
     func locate(x: Double, y: Double) -> CGPoint? { nil }
     func cancelBinding() { cancels += 1 }
+
+}
+
+/// Window mode: where the real Mac cursor is relative to the active pane while it is over none.
+final class WindowOffPaneCursorTests: XCTestCase {
+
+    private func onePane() -> WorkspaceInputTargeting {
+        var t = WorkspaceInputTargeting()
+        t.canvas = CGSize(width: 2000, height: 1000)
+        t.windowFrames = [10: CGRect(x: 0, y: 0, width: 1000, height: 1000)]
+        _ = t.update(assignments: [
+            WorkspaceTileAssignment(tileID: "a", rect: .unit, windowID: 10, windowGeneration: 1, pid: 100, bundleID: "a",
+                                    follow: .window, rotation: .none, fit: .fit, assignmentGeneration: 1),
+        ])
+        return t
+    }
+
+    func testOffPaneCursorExtendsTheActivePanesMapping() throws {
+        let t = onePane()
+        // Fit: the 1000x1000 window is drawn 500...1500 across the 2000x1000 canvas.
+        let off = try XCTUnwrap(t.offPaneCursor(forGlobal: CGPoint(x: 1500, y: 500)))
+        XCTAssertEqual(off.x, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(off.y, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(off.pane, WorkspaceRect(x: 0.25, y: 0, width: 0.5, height: 1))
+        let left = try XCTUnwrap(t.offPaneCursor(forGlobal: CGPoint(x: -1000, y: -500)))
+        XCTAssertLessThan(left.x, 0.25)
+        XCTAssertLessThan(left.y, 0)
+    }
+
+    func testNoOffPaneCursorInsideThePaneOrWithoutAnActivePane() {
+        XCTAssertNil(onePane().offPaneCursor(forGlobal: CGPoint(x: 750, y: 500)), "in the picture: the cursor itself")
+        var t = WorkspaceInputTargeting()
+        t.canvas = CGSize(width: 2000, height: 1000)
+        t.windowFrames = [10: CGRect(x: 0, y: 0, width: 1000, height: 1000), 11: CGRect(x: 3000, y: 0, width: 1000, height: 1000)]
+        _ = t.update(assignments: [
+            WorkspaceTileAssignment(tileID: "a", rect: .init(x: 0, y: 0, width: 0.5, height: 1), windowID: 10, windowGeneration: 1,
+                                    pid: 100, bundleID: "a", follow: .window, rotation: .none, fit: .fit, assignmentGeneration: 1),
+            WorkspaceTileAssignment(tileID: "b", rect: .init(x: 0.5, y: 0, width: 0.5, height: 1), windowID: 11, windowGeneration: 1,
+                                    pid: 200, bundleID: "b", follow: .window, rotation: .none, fit: .fit, assignmentGeneration: 2),
+        ])
+        XCTAssertNil(t.offPaneCursor(forGlobal: CGPoint(x: 2000, y: 500)), "two panes, none active: no locator")
+        XCTAssertNil(onePane().offPaneCursor(forGlobal: CGPoint(x: CGFloat.nan, y: 0)))
+    }
 }
