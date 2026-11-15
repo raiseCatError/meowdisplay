@@ -293,6 +293,8 @@ targets:
       - Mac/ConsentInputPolicy.swift
       - Mac/MacScreenLock.swift
       - Mac/WindowBrowserService.swift
+      - Mac/DisplayActionPolicy.swift
+      - Mac/DisplayIdentifyOverlay.swift
       - Mac/RemoteFileBrowser.swift
       - Mac/RemoteFileTransfers.swift
       - Mac/RemoteFilesAuthorization.swift
@@ -375,6 +377,12 @@ targets:
       - Shared/ScrollMomentum.swift
       - Shared/CursorPresentationPacer.swift
       - Shared/OffscreenCursorLocator.swift
+      - Shared/DisplayOverviewModel.swift
+      - Shared/OverviewCamera.swift
+      - Shared/DisplayArrangementLayout.swift
+      - Shared/OverviewInteraction.swift
+      - Shared/DisplayArrangementEdit.swift
+      - Mac/DisplayArrangementService.swift
       - Shared/KeyboardEditPlanner.swift
       - Shared/TypedTextEcho.swift
       - Shared/LockScreenKeyboard.swift

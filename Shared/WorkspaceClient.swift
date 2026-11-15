@@ -101,6 +101,27 @@ struct WindowFrameNotice: Equatable, Sendable {
 struct CatalogAppItem: Equatable, Sendable { var bundleID: String; var name: String; var hasWindows: Bool }
 struct InstalledAppItem: Equatable, Sendable { var bundleID: String; var name: String }
 
+/// Where the Mac cursor is (`overviewCursor`, PROTOCOL.md 6.10): global Mac points, y down, and
+/// the listed display it is on (nil when on none).
+struct OverviewCursor: Equatable, Sendable {
+    var point: CGPoint
+    var display: UInt32?
+
+    /// Coordinates beyond this are not a real Mac arrangement.
+    static let maxCoordinate = 1_000_000.0
+
+    /// nil unless `x` and `y` are finite numbers; a missing or invalid `d` is "no display".
+    static func parse(_ obj: [String: Any]) -> OverviewCursor? {
+        func number(_ key: String) -> Double? {
+            if let d = obj[key] as? Double { return d }
+            return (obj[key] as? Int).map(Double.init)
+        }
+        guard let x = number("x"), let y = number("y"), x.isFinite, y.isFinite,
+              abs(x) <= maxCoordinate, abs(y) <= maxCoordinate else { return nil }
+        return OverviewCursor(point: CGPoint(x: x, y: y), display: (obj["d"] as? Int).flatMap { UInt32(exactly: $0) })
+    }
+}
+
 struct WorkspaceCatalogMessage: Equatable, Sendable {
     var host: String?
     var windows: [CatalogWindowItem]
@@ -178,6 +199,27 @@ struct WorkspaceHeldWindow: Hashable, Sendable {
 
 struct StageAddReply: Equatable, Sendable { let window: UInt32; let result: String }
 
+/// Where this device's last display arrangement request is (PROTOCOL.md 6.10).
+enum DisplayArrangeStatus: Equatable, Sendable {
+    /// Sent; the Mac hasn't answered yet.
+    case sending
+    /// The Mac's owner is being asked on the Mac.
+    case awaitingMacConfirm
+    /// Applied for now; the Mac puts the old one back at `revertAt` unless kept.
+    case applied(revertAt: Date)
+    /// Keep sent.
+    case keeping
+    /// Revert sent.
+    case reverting
+    /// Over: `kept`, `reverted`, `denied` or `failed`, with the Mac's reason.
+    case finished(DisplayArrangeState, reason: String?)
+
+    var isInProgress: Bool {
+        if case .finished = self { return false }
+        return true
+    }
+}
+
 enum WorkspaceEvent: Sendable {
     case features(Set<String>)
     /// The Mac locked or unlocked its screen (`macLockState`).
@@ -199,6 +241,10 @@ enum WorkspaceEvent: Sendable {
     case lockResult(LockMacResult)
     /// Fill Window on Mac / Restore Previous Size on Mac (PROTOCOL.md 6.10).
     case frameResult(WindowFrameReply)
+    /// Display arrangement (PROTOCOL.md 6.10): where the Mac is with an arrangement request.
+    case displayArrange(DisplayArrangeStateMessage)
+    /// Where the Mac cursor is, while the overview watches it (PROTOCOL.md 6.10).
+    case overviewCursor(OverviewCursor)
     /// Remote Finder (PROTOCOL.md 6.12).
     case files(RemoteFilesReply)
     /// Unified Clipboard (PROTOCOL.md 6.15).
@@ -244,7 +290,7 @@ enum WorkspaceEvent: Sendable {
                 guard let id = u32(d, "id") else { return nil }
                 return CatalogDisplayItem(id: id, name: str(d, "name", 80) ?? "Display", width: d["w"] as? Int ?? 0,
                                           height: d["h"] as? Int ?? 0, isMain: d["main"] as? Bool ?? false,
-                                          isVirtual: d["virtual"] as? Bool ?? false)
+                                          isVirtual: d["virtual"] as? Bool ?? false, overview: OverviewDisplay(wire: d))
             }
             return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
                                                    installed: Array(installed),
@@ -304,6 +350,10 @@ enum WorkspaceEvent: Sendable {
             return str(obj, "result", 32).flatMap(LockMacResult.init(rawValue:)).map { .lockResult($0) }
         case WindowFrameWire.result:
             return WindowFrameReply.parse(obj).map { .frameResult($0) }
+        case WireMessage.displayArrangeState:
+            return DisplayArrangeStateMessage.parse(obj).map { .displayArrange($0) }
+        case DisplayActionsWire.overviewCursor:
+            return OverviewCursor.parse(obj).map { .overviewCursor($0) }
         case WireMessage.files:
             return RemoteFilesReply.parse(obj).map { .files($0) }
         case ClipboardWire.type:
@@ -464,6 +514,19 @@ enum WorkspaceRequests {
 
     static func launch(_ bundle: String) -> [String: Any] { ["type": WireMessage.windowAction, "action": "launch", "bundle": bundle] }
 
+    /// Identify Displays: a label on each Mac screen for a few seconds.
+    static func identifyDisplays() -> [String: Any] { ["type": DisplayActionsWire.identify] }
+
+    /// Move Cursor Here: the Mac cursor to the middle of a listed display (needs control).
+    static func moveCursor(toDisplay id: UInt32) -> [String: Any] {
+        ["type": DisplayActionsWire.moveCursor, "id": Int(id)]
+    }
+
+    /// The overview is open (`on`) or closed: the Mac cursor is reported only while it is open.
+    static func overviewCursorWatch(on: Bool) -> [String: Any] {
+        ["type": DisplayActionsWire.overviewCursorWatch, "on": on]
+    }
+
     /// Close Window from Stage Peek: presses that window's close button (any mode, needs control).
     static func windowClose(_ id: UInt32, generation: UInt64, req: Int) -> [String: Any] {
         ["type": WireMessage.windowClose, "window": Int(id), "gen": Int(generation), "req": req]
@@ -565,6 +628,17 @@ final class WorkspaceModel: ObservableObject {
     /// catalog and thumbnails fresh. Read-only requests; never a layout,
     /// capture or focus change.
     @Published var stagePeekOpen = false { didSet { if stagePeekOpen, !oldValue { startRefreshing() } } }
+    /// The full-screen display overview is open (over Stage Peek's gallery): keeps the catalog and
+    /// the display stills refreshing on its own, whatever Stage Peek does underneath it.
+    @Published var displayOverviewOpen = false {
+        didSet {
+            if displayOverviewOpen, !oldValue { startRefreshing() }
+            if displayOverviewOpen != oldValue { overviewCursorWatchChanged() }
+        }
+    }
+    /// Where the Mac cursor is while the overview is open and the Mac reports it.
+    @Published private(set) var overviewCursor: OverviewCursor?
+    private var overviewCursorRenewal: DispatchWorkItem?
     @Published var railEdge: WorkspaceRailEdge { didSet { defaults.set(railEdge.rawValue, forKey: Self.railKey) } }
     @Published var arranging = false
     @Published private(set) var hovered: String?
@@ -593,6 +667,8 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var launchFailed: String?
     /// The Mac can close a listed window from Stage Peek (`windowClose`).
     @Published private(set) var canCloseWindows = false
+    /// The Mac offers Identify Displays and Move Cursor Here (`DisplayActionsWire`).
+    @Published private(set) var canUseDisplayActions = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
     /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
@@ -639,6 +715,13 @@ final class WorkspaceModel: ObservableObject {
     private var windowFrameRequest = 0
     private var windowFrameAsked: [Int: (tile: String, windowID: UInt32, op: WindowFrameOp)] = [:]
     private var windowFrameNoticeClear: DispatchWorkItem?
+    /// The Mac lets this device rearrange its displays (`displayArrange`); every request still
+    /// needs control and the Mac owner's answer on the Mac.
+    @Published private(set) var canArrangeDisplays = false
+    /// Where the last display arrangement request is (nil: none, or its outcome was dismissed).
+    @Published private(set) var displayArrangeStatus: DisplayArrangeStatus?
+    private var displayArrangeRequest = 0
+    private var displayArrangeWatchdog: DispatchWorkItem?
     /// Launchpad (full app grid) is open: keeps catalogs fresh like Stage Peek.
     @Published var launchpadOpen = false { didSet { if launchpadOpen, !oldValue { startRefreshing() } } }
     /// Cards on screen now, most important first: their stills are asked for first.
@@ -828,11 +911,14 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canUseDisplayActions = f.contains(DisplayArrangeWire.welcomeFeature)
+            if displayOverviewOpen, overviewCursorRenewal == nil { overviewCursorWatchChanged() }
             canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
+            canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -937,10 +1023,18 @@ final class WorkspaceModel: ObservableObject {
             lockMacStatus = .done(result)
         case .frameResult(let reply):
             finishWindowFrame(reply)
+        case .displayArrange(let message):
+            displayArrangeStateArrived(message)
+        case .overviewCursor(let cursor):
+            // Only while the overview watches: a late message after it closed shows nothing.
+            if displayOverviewOpen, overviewCursor != cursor { overviewCursor = cursor }
         case .disconnected:
+            overviewCursor = nil
+            overviewCursorRenewal?.cancel(); overviewCursorRenewal = nil
             sendTask?.cancel()
             leaveExtendRequest = nil
             windowMode = false; remote = nil; available = false; arranging = false; stagePeekOpen = false
+            displayOverviewOpen = false
             launchpadOpen = false; launching = []; planner.reset(); inventory.reset()
             if var o = appOpening {
                 let step = o.disconnected()
@@ -954,6 +1048,7 @@ final class WorkspaceModel: ObservableObject {
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
             windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
+            displayArrangeDisconnected()
             lockFlowInputsChanged()
             files.setAvailable(false)
             menus.setAvailable(false)
@@ -992,7 +1087,8 @@ final class WorkspaceModel: ObservableObject {
             performAppOpening(step)
         }
         appDrop = nil
-        stagePeekOpen = false; launchpadOpen = false
+        stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false
+        overviewCursor = nil
         if overviewOpen { closeOverview() }
         catalog = nil
         thumbnails = [:]; thumbAge = [:]; displayThumbnails = [:]
@@ -1053,7 +1149,7 @@ final class WorkspaceModel: ObservableObject {
         advanceAppOpening()
     }
 
-    private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen }
+    private var browsing: Bool { overviewOpen || railExpanded || stagePeekOpen || launchpadOpen || displayOverviewOpen }
 
     /// Visible cards first; nothing asked twice within a few seconds; failures back off.
     private func requestThumbnails() {
@@ -1061,13 +1157,19 @@ final class WorkspaceModel: ObservableObject {
         let ids = planner.plan(priority: thumbnailPriority, all: c.windows.map(\.id), now: Date().timeIntervalSinceReferenceDate)
         let wantedIcons = iconPlanner.plan(c.windows.map(\.bundleID) + c.apps.map(\.bundleID), has: { icons[$0] != nil },
                                            now: Date().timeIntervalSinceReferenceDate)
-        let displays = (stagePeekOpen || overviewOpen) ? c.displays.map(\.id) : []
+        let displays = (stagePeekOpen || overviewOpen || displayOverviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
-        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
             iconPlanner.unsent(wantedIcons)
         }
         scheduleIconRetry()
+    }
+
+    /// The displays worth a live thumbnail: MeowDisplay virtual displays (this session's or another's)
+    /// are drawn as placeholders and never captured, or a preview would show itself.
+    nonisolated static func thumbnailDisplayIDs(_ displays: [CatalogDisplayItem]) -> [UInt32] {
+        displays.filter { !($0.overview?.isOwn ?? false) && !($0.overview?.isMeow ?? false) }.map(\.id)
     }
 
     /// Icons for the app carousel and Launchpad, a page at a time.
@@ -1882,6 +1984,40 @@ final class WorkspaceModel: ObservableObject {
 
     private var closeNames: [UInt32: String] = [:]
 
+    /// The overview opened or closed: ask the Mac to report its cursor, renewing the ask every
+    /// `overviewCursorRenewSeconds` (the Mac stops after twice that), and tell it when done.
+    private func overviewCursorWatchChanged() {
+        overviewCursorRenewal?.cancel(); overviewCursorRenewal = nil
+        if displayOverviewOpen {
+            renewOverviewCursorWatch()
+        } else {
+            overviewCursor = nil
+            if canUseDisplayActions { _ = send(WorkspaceRequests.overviewCursorWatch(on: false)) }
+        }
+    }
+
+    private func renewOverviewCursorWatch() {
+        guard displayOverviewOpen, canUseDisplayActions else { return }
+        _ = send(WorkspaceRequests.overviewCursorWatch(on: true))
+        let renewal = DispatchWorkItem { [weak self] in self?.renewOverviewCursorWatch() }
+        overviewCursorRenewal = renewal
+        DispatchQueue.main.asyncAfter(deadline: .now() + DisplayActionsWire.overviewCursorRenewSeconds, execute: renewal)
+    }
+
+    /// Identify Displays (overview): labels on the Mac's screens. Harmless, so no control needed.
+    func identifyDisplays() {
+        guard canUseDisplayActions else { return }
+        _ = send(WorkspaceRequests.identifyDisplays())
+    }
+
+    /// Move Cursor Here (overview): an explicit action, only with control. Never sent for this
+    /// device's own display or another MeowDisplay screen (placeholders).
+    func moveCursor(to display: CatalogDisplayItem) {
+        guard canUseDisplayActions, inputAllowed(),
+              display.overview?.isOwn != true, display.overview?.isMeow != true else { return }
+        _ = send(WorkspaceRequests.moveCursor(toDisplay: display.id))
+    }
+
     /// Lock This Mac: the Mac shows macOS's lock screen (needs control; the Mac says what happened).
     func lockMac() {
         guard canLockMac, lockMacStatus != .locking else { return }
@@ -1898,6 +2034,97 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func clearLockMacStatus() { if lockMacStatus != .locking { lockMacStatus = nil } }
+
+    // MARK: Display arrangement (PROTOCOL.md 6.10)
+
+    /// Sends the edit's changed origins (with the arrangement it was made from). False, and
+    /// nothing sent, unless the Mac offers it, control is held, the edit is valid and changed and
+    /// no other request is under way. The Mac checks all of it again and asks its owner.
+    @discardableResult
+    func requestDisplayArrangement(_ edit: DisplayArrangementEdit) -> Bool {
+        guard canArrangeDisplays, canControlMac, edit.isChanged, edit.validate() == nil,
+              !(displayArrangeStatus?.isInProgress ?? false) else { return false }
+        displayArrangeRequest += 1
+        let req = displayArrangeRequest
+        guard send(DisplayArrangeRequestMessage(req: req, edit: edit).wire) else {
+            displayArrangeStatus = .finished(.failed, reason: nil)
+            return false
+        }
+        displayArrangeStatus = .sending
+        armDisplayArrangeWatchdog(req: req, seconds: 10)
+        return true
+    }
+
+    /// Keep this arrangement: the Mac saves it (needs control there too).
+    func keepDisplayArrangement() {
+        guard case .applied = displayArrangeStatus else { return }
+        guard send(["type": WireMessage.displayArrangeKeep, "req": displayArrangeRequest]) else { return }
+        displayArrangeStatus = .keeping
+    }
+
+    /// Put the old arrangement back now (or withdraw a request the Mac's owner hasn't answered).
+    func revertDisplayArrangement() {
+        switch displayArrangeStatus {
+        case .sending, .awaitingMacConfirm, .applied, .keeping:
+            guard send(["type": WireMessage.displayArrangeRevert, "req": displayArrangeRequest]) else { return }
+            displayArrangeStatus = .reverting
+        default:
+            break
+        }
+    }
+
+    /// Forgets a finished request's outcome (the editor closed or started over).
+    func clearDisplayArrangeStatus() {
+        if !(displayArrangeStatus?.isInProgress ?? false) { displayArrangeStatus = nil }
+    }
+
+    private func displayArrangeStateArrived(_ message: DisplayArrangeStateMessage) {
+        guard message.req == displayArrangeRequest, displayArrangeStatus?.isInProgress == true else { return }
+        switch message.state {
+        case .awaitingMacConfirm:
+            displayArrangeStatus = .awaitingMacConfirm
+            // The Mac's owner has 60 s; past that (and a margin) the Mac has denied it.
+            armDisplayArrangeWatchdog(req: message.req, seconds: DisplayArrangeWire.confirmSeconds + 10)
+        case .applied:
+            let seconds = message.revertIn ?? DisplayArrangeWire.revertSeconds
+            displayArrangeStatus = .applied(revertAt: Date().addingTimeInterval(TimeInterval(seconds)))
+            armDisplayArrangeWatchdog(req: message.req, seconds: seconds + 10)
+        case .kept, .reverted, .denied, .failed:
+            displayArrangeWatchdog?.cancel(); displayArrangeWatchdog = nil
+            displayArrangeStatus = .finished(message.state, reason: message.reason)
+            // The arrangement may have changed (or the catalog was stale): list it again.
+            requestCatalog()
+        }
+    }
+
+    /// No word from the Mac for far longer than any step takes: shown as failed, so the editor
+    /// never waits forever. The Mac reverts an unkept arrangement on its own.
+    private func armDisplayArrangeWatchdog(req: Int, seconds: Int) {
+        displayArrangeWatchdog?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.displayArrangeRequest == req, self.displayArrangeStatus?.isInProgress == true else { return }
+            self.displayArrangeStatus = .finished(.failed, reason: nil)
+        }
+        displayArrangeWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds), execute: work)
+    }
+
+    private func displayArrangeDisconnected() {
+        displayArrangeWatchdog?.cancel(); displayArrangeWatchdog = nil
+        canArrangeDisplays = false
+        switch displayArrangeStatus {
+        case .applied, .reverting:
+            // The Mac puts an unkept arrangement back when the session ends.
+            displayArrangeStatus = .finished(.reverted, reason: DisplayArrangeReason.sessionEnded)
+        case .keeping:
+            // Keep may or may not have reached the Mac: say so rather than guess.
+            displayArrangeStatus = .finished(.failed, reason: DisplayArrangeReason.sessionEnded)
+        case .sending, .awaitingMacConfirm:
+            displayArrangeStatus = .finished(.denied, reason: DisplayArrangeReason.sessionEnded)
+        default:
+            break
+        }
+    }
 
     // MARK: Lock Mac flow (Request Control first when needed; see LockMacFlow)
 
@@ -2562,7 +2789,7 @@ final class WorkspaceModel: ObservableObject {
         askForApps(opening: true)
         refreshTask = Task { [weak self] in
             while let self, self.browsing {
-                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen ? 3_000_000_000 : 5_000_000_000)
+                try? await Task.sleep(nanoseconds: self.overviewOpen || self.stagePeekOpen || self.launchpadOpen || self.displayOverviewOpen ? 3_000_000_000 : 5_000_000_000)
                 guard !Task.isCancelled, self.browsing else { break }
                 self.requestCatalog()
                 self.askForApps(opening: false)

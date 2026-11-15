@@ -71,6 +71,11 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |
 | Picture in Picture | Yes | Yes | — | Android verified physically |
 | Performance overlay | Yes | Yes | Yes | Android shows fps, bitrate, decode, latency, rtt, drops. Mac Receiver: System → Performance Overlay |
+| Display arrangement map in Stage Peek | Yes | No | No | Uses the catalog's display positions (`x`, `y`, `scale`, `hz`, `mirrorOf`, `own`, `meow`); older Macs keep the grid. Unit-tested and built, no physical QA yet |
+| Full-screen display overview (pan, zoom, Fit All, select) | Yes | No | No | Unit-tested and built, no physical QA yet |
+| Edit display arrangement | Yes | No | No | Needs control and the `displayArrange` feature. The Mac's owner confirms on the Mac; without Keep the Mac reverts after `revertIn` seconds. Unit-tested and built, no physical QA yet |
+| Identify displays, Move Cursor Here | Yes | No | No | Part of the `displayArrange` feature; Move Cursor Here needs control. Unit-tested and built, no physical QA yet |
+| Mac cursor shown in the display overview | Yes | No | No | The Mac reports it only while the overview is open (renewed every 60 s, stops 120 s after the last renewal). Unit-tested and built, no physical QA yet |
 
 ## Audio
 

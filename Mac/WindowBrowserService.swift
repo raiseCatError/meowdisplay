@@ -128,10 +128,38 @@ struct DisplayCatalogEntry: Equatable, Sendable {
     var frame: CGRect
     var isMain: Bool
     var isVirtual: Bool
+    /// Pixels per point, nil when unknown.
+    var scale: Double?
+    var refreshHz: Int = 0
+    var mirrorOf: UInt32?
+    /// A MeowDisplay-managed virtual display of any session.
+    var isMeow = false
+    /// A virtual display owned by this session (implies `isMeow`).
+    var isOwn = false
 
     var wire: [String: Any] {
-        ["id": Int(displayID), "name": String(name.prefix(80)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
-         "main": isMain, "virtual": isVirtual]
+        var out: [String: Any] = [
+            "id": Int(displayID), "name": String(name.prefix(80)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
+            "main": isMain, "virtual": isVirtual,
+            "x": Int(frame.origin.x.rounded()), "y": Int(frame.origin.y.rounded()),
+            "meow": isMeow, "own": isOwn,
+        ]
+        if let scale { out["scale"] = scale }
+        if refreshHz > 0 { out["hz"] = refreshHz }
+        if let mirrorOf { out["mirrorOf"] = Int(mirrorOf) }
+        return out
+    }
+
+    /// Builds an entry from plain values; ownership comes from the registry sets, never names.
+    static func make(id: UInt32, name: String, frame: CGRect, isMain: Bool, isVirtual: Bool,
+                     pixelWidth: Int, refreshHz: Double, mirrorOf: UInt32?,
+                     meowIDs: Set<UInt32>, ownIDs: Set<UInt32>) -> DisplayCatalogEntry {
+        let own = ownIDs.contains(id)
+        return DisplayCatalogEntry(
+            displayID: id, name: name, frame: frame, isMain: isMain, isVirtual: isVirtual,
+            scale: pixelWidth > 0 && frame.width > 0 ? Double(pixelWidth) / Double(frame.width) : nil,
+            refreshHz: refreshHz.isFinite && refreshHz > 0 ? Int(refreshHz.rounded()) : 0,
+            mirrorOf: mirrorOf, isMeow: own || meowIDs.contains(id), isOwn: own)
     }
 }
 
@@ -166,6 +194,8 @@ final class WindowBrowserService: @unchecked Sendable {
     var sendMessage: (([String: Any]) -> Void)?
     /// Every new listing, for the Window-mode engine (on this service's queue).
     var onSnapshot: ((WindowCatalogSnapshot) -> Void)?
+    /// Virtual displays owned by this session (the sender's registry, never names).
+    var ownDisplayIDs: () -> Set<UInt32> = { [] }
     /// The latest WHOLE-window frame a tile streams, if any: a free, exact still.
     /// A pane's live frame of this window and where its content sits (pixels, top-left).
     var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
@@ -189,12 +219,14 @@ final class WindowBrowserService: @unchecked Sendable {
         queue.async { [self] in
             if value, !active { icons.reset() }
             active = value
+            if !value { stopCursorWatch() }
         }
     }
 
     func stop() {
         queue.async { [self] in
             stopped = true; active = false
+            stopCursorWatch()
             sendMessage = nil; onSnapshot = nil; liveFrame = nil
             stills.removeAll()
         }
@@ -264,8 +296,115 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
             case WireMessage.windowClose:
                 closeWindow(obj, inputGranted: inputGranted)
+            case DisplayActionsWire.identify:
+                identifyDisplays()
+            case DisplayActionsWire.moveCursor:
+                moveCursor(obj, inputGranted: inputGranted, controlStillAllowed: controlStillAllowed)
+            case DisplayActionsWire.overviewCursorWatch:
+                if let on = obj["on"] as? Bool { setCursorWatch(on) }
             default:
                 break
+            }
+        }
+    }
+
+    // MARK: Display actions (overview)
+
+    private var identifyLimit = DisplayActionRateLimit()
+    private var moveLimit = DisplayActionRateLimit()
+    private var displaysChangePending = false
+
+    /// Identify Displays: labels on the Mac screens this session was listed (main first, as the
+    /// receiver numbers them). Shows nothing of the receiver's own on the Mac beyond the label.
+    private func identifyDisplays() {
+        guard identifyLimit.admit(now: ProcessInfo.processInfo.systemUptime, interval: DisplayActionPolicy.identifyInterval),
+              !displays.isEmpty else { return }
+        var labels: [UInt32: String] = [:]
+        for (index, d) in displays.prefix(8).enumerated() {
+            labels[d.displayID] = DisplayActionPolicy.identifyLabel(index: index, name: d.name)
+        }
+        Log.info("workspace: identify displays (\(labels.count))")
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { DisplayIdentifyOverlay.show(labels, duration: DisplayActionPolicy.identifyDuration) }
+        }
+    }
+
+    /// Move Cursor Here: the centre of a listed display, with control (asked again right
+    /// before moving). The cursor echo then reports it like any other move.
+    private func moveCursor(_ obj: [String: Any], inputGranted: Bool, controlStillAllowed: @escaping @Sendable () -> Bool) {
+        guard moveLimit.admit(now: ProcessInfo.processInfo.systemUptime, interval: DisplayActionPolicy.moveInterval) else { return }
+        let listed = Dictionary(displays.prefix(8).map { ($0.displayID, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        switch DisplayActionPolicy.moveCursor(obj, inputGranted: inputGranted, listed: listed) {
+        case .refuse(let why):
+            Log.info("workspace: cursorToDisplay refused (\(why))")
+        case .move(let id, let point):
+            DispatchQueue.main.async {
+                guard controlStillAllowed() else {
+                    Log.info("workspace: cursorToDisplay refused (control, at move)")
+                    return
+                }
+                // Only if the display is still where it was listed; otherwise nothing moves.
+                guard CGDisplayBounds(id).contains(point) else {
+                    Log.info("workspace: cursorToDisplay refused (display moved)")
+                    return
+                }
+                CGWarpMouseCursorPosition(point)
+                CGAssociateMouseAndMouseCursorPosition(1)
+                Log.info("workspace: cursorToDisplay \(id)")
+            }
+        }
+    }
+
+    // MARK: Overview cursor
+
+    private var cursorThrottle = OverviewCursorThrottle()
+    private var cursorTimer: DispatchSourceTimer?
+    /// Sampling period: finer than the 10 Hz send limit, so a tick that runs a little early
+    /// never delays a send by a whole period.
+    private static let cursorSamplePeriod: Double = 0.05
+
+    /// `queue` only. The receiver's overview is open (on) or closed (off). Only an active,
+    /// admitted session gets here (the sender's browsing gates); it stops again when the session
+    /// stops being active, and 120 s after the last renewal.
+    private func setCursorWatch(_ on: Bool) {
+        cursorThrottle.watch(on: on, now: ProcessInfo.processInfo.systemUptime)
+        guard on else { return stopCursorWatch() }
+        if cursorTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: Self.cursorSamplePeriod, leeway: .milliseconds(10))
+            timer.setEventHandler { [weak self] in self?.sampleCursor() }
+            cursorTimer = timer
+            timer.resume()
+        }
+    }
+
+    /// `queue` only.
+    private func stopCursorWatch() {
+        cursorTimer?.cancel()
+        cursorTimer = nil
+        cursorThrottle.reset()
+    }
+
+    /// `queue` only.
+    private func sampleCursor() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard active, !stopped, cursorThrottle.isWatching(now: now) else { return stopCursorWatch() }
+        let listed = displays.map { (id: $0.displayID, frame: $0.frame) }
+        let sample = CGEvent(source: nil).flatMap { OverviewCursorSample.make(point: $0.location, listed: listed) }
+        if let message = cursorThrottle.admit(sample, now: now) { sendMessage?(message.wire) }
+    }
+
+    /// The Mac's displays changed (attached, removed, rearranged, resized): a receiver showing
+    /// the overview gets a fresh listing instead of an old arrangement. Coalesced; only while
+    /// this session is browsing.
+    func displaysChanged() {
+        queue.async { [self] in
+            guard active, !stopped, !displaysChangePending else { return }
+            displaysChangePending = true
+            queue.asyncAfter(deadline: .now() + 0.5) { [self] in
+                displaysChangePending = false
+                guard active, !stopped else { return }
+                refresh(sendCatalog: true)
             }
         }
     }
@@ -347,12 +486,19 @@ final class WindowBrowserService: @unchecked Sendable {
     private func updateDisplays(_ list: [SCDisplay]) {
         let main = CGMainDisplayID()
         scDisplays = Dictionary(list.map { ($0.displayID, $0) }, uniquingKeysWith: { a, _ in a })
+        let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+        let ownIDs = ownDisplayIDs()
         displays = list.map { d in
             let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == d.displayID }
             let isVirtual = CGDisplayIsBuiltin(d.displayID) == 0 && CGDisplayVendorNumber(d.displayID) == 0x1234   // CGVirtualDisplay default vendor
                 || (screen?.localizedName.contains("MeowDisplay") ?? false)
-            return DisplayCatalogEntry(displayID: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
-                                       frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual)
+            let mode = CGDisplayCopyDisplayMode(d.displayID)
+            let mirror = CGDisplayMirrorsDisplay(d.displayID)
+            return DisplayCatalogEntry.make(
+                id: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
+                frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual,
+                pixelWidth: mode?.pixelWidth ?? 0, refreshHz: mode?.refreshRate ?? 0,
+                mirrorOf: mirror == kCGNullDirectDisplay ? nil : mirror, meowIDs: meowIDs, ownIDs: ownIDs)
         }.sorted { ($0.isMain ? 0 : 1, $0.displayID) < ($1.isMain ? 0 : 1, $1.displayID) }
     }
 

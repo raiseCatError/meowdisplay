@@ -2936,6 +2936,14 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.handleFilesConsentRequest(session: session, generation: generation, capabilities: capabilities)
         }
+        sender.onDisplayArrangeConfirm = { [weak self, weak session] request, decide in
+            // Display arrangement: the Mac owner decides, in a panel owned by the coordinator.
+            guard let self, let session, self.owns(session) else { return decide(.unavailable) }
+            SecurityPresentationCoordinator.presentDisplayArrangement(request, deviceName: session.name, decide: decide)
+        }
+        sender.onDisplayArrangeDismiss = { token in
+            SecurityPresentationCoordinator.dismissDisplayArrangement(token: token)
+        }
         sender.onClipboardMessage = { [weak self, weak session] generation, message in
             guard let self, let session, self.owns(session) else { return }
             let sender = session.sender
