@@ -47,10 +47,13 @@ struct DisplayArrangementEditor: View {
         }
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .onAppear { model.clearDisplayArrangeStatus() }
+        .onAppear { model.displayArrangementEditorOpen = true; model.clearDisplayArrangeStatus() }
         // Closed some other way (the peek went away): never leave a request or an unkept
         // arrangement behind it.
-        .onDisappear { if busy { model.revertDisplayArrangement() } }
+        .onDisappear {
+            model.displayArrangementEditorOpen = false
+            if busy { model.revertDisplayArrangement() }
+        }
         .onChange(of: model.catalog?.displays ?? []) { displays in catalogChanged(displays) }
     }
 

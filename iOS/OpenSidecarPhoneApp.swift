@@ -19,6 +19,8 @@ struct OpenSidecarPhoneApp: App {
             // UI-test seams (iOS/UITestFoldSeam.swift, iOS/UITestOverviewFixture.swift): inert unless a test sets their environment.
             if UITestOverviewFixture.isEnabled {
                 UITestOverviewFixtureHost()
+            } else if UITestStagePeekFixture.isEnabled {
+                UITestStagePeekFixtureHost()
             } else {
                 ReceiverScreen().uiTestFoldBandMarker()
             }

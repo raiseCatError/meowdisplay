@@ -221,7 +221,13 @@ struct StagePeekOverlay: View {
             UIAccessibility.post(notification: .screenChanged, argument: nil)
         }
         // Rotation, fold, Split View, Stage Manager resize: a width change. A keyboard only changes the height.
-        .onChange(of: frame.size.width) { _ in if !searchFocused { cancelAll() } }
+        // A screen opened from the gallery (overview, arrangement editor) keeps the peek open under it.
+        .onChange(of: frame.size.width) { _ in
+            let galleryScreenOpen = model.displayOverviewOpen || model.displayArrangementEditorOpen
+            if StagePeekResize.closesOnWidthChange(searching: searchFocused, galleryScreenOpen: galleryScreenOpen) {
+                cancelAll()
+            }
+        }
         .onChange(of: edge) { _ in cancelAll() }
         .onChange(of: stripPressing) { pressing in if !pressing { detectCancel(strip: true) } }
         .onChange(of: openPressing) { pressing in if !pressing { detectCancel(strip: false) } }
