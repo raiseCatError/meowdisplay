@@ -202,6 +202,7 @@ targets:
     sources:
       - MacTests
       - Mac/DisplayArrangement.swift
+      - Mac/ExtendPhysicalSize.swift
       - Mac/CoalescingFetch.swift
       - Mac/MissionControlMonitor.swift
       - Shared/StagePeekDockLayout.swift

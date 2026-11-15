@@ -106,4 +106,30 @@ final class ExtendIntegrationBoundaryTests: XCTestCase {
         XCTAssertLessThanOrEqual(t.displayedRect.width, bounds.width + 0.5)
         XCTAssertLessThanOrEqual(t.displayedRect.height, bounds.height + 0.5)
     }
+
+    // MARK: - Declared physical size follows the fitted point mode
+
+    func testPortraitIPhoneHelloDeclaresASizeFromItsOwnPointModeNotTheReceiverAspect() {
+        // Portrait iPhone hello with the default Automatic shape (16:10):
+        // the shape, not the receiver's portrait panel, decides the virtual
+        // display's mode, so the declared size is landscape too.
+        let standard = ExtendDisplayShapePreference.standard
+        let aspect = standard.resolvedAspect(receiverPhysicalAspect: 1290.0 / 2796.0)
+        let points = ExtendDisplaySizing.pointSize(receiverPixelsWide: 1290, receiverPixelsHigh: 2796, aspect: aspect)
+        XCTAssertEqual(points.wide, 1398)
+        XCTAssertEqual(points.high, 874)
+        let mm = ExtendPhysicalSize.millimetres(pointsWide: points.wide, pointsHigh: points.high)
+        XCTAssertEqual(mm, CGSize(width: 311, height: 195))
+
+        // Automatic + Use Full Display keeps the portrait panel, and the
+        // declared width then rests on the horizontal minimum.
+        let full = ExtendDisplayShapePreference(shape: .automatic, useFullDisplay: true)
+        let fullAspect = full.resolvedAspect(receiverPhysicalAspect: 1290.0 / 2796.0)
+        let fullPoints = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: 1290, receiverPixelsHigh: 2796, aspect: fullAspect)
+        XCTAssertEqual(fullPoints.wide, 644)
+        XCTAssertEqual(fullPoints.high, 1398)
+        let fullMM = ExtendPhysicalSize.millimetres(pointsWide: fullPoints.wide, pointsHigh: fullPoints.high)
+        XCTAssertEqual(fullMM, CGSize(width: ExtendPhysicalSize.minimumWidth, height: 391))
+    }
 }
