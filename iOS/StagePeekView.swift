@@ -101,18 +101,17 @@ struct StagePeekOverlay: View {
     var body: some View {
         let cards = revealShifted(layout())
         ZStack(alignment: .topLeading) {
-            if machine.isVisible {
+            // All Apps replaces the whole peek while it's open (`StagePeekAllAppsLayering`): hidden in
+            // place, its apps bar cells and buttons stayed in the accessibility tree (hosted UI test,
+            // runs 43729529563-43742243552). Rows, search and filter live here, so Back keeps them.
+            if machine.isVisible, !launchpad {
                 backdrop
                     .contentShape(Rectangle())
                     .gesture(openGesture(cards: cards))
                     // Barely there (not 0) while dragging, so the finger's gesture keeps its view.
                     .opacity(model.drag != nil ? 0.001 : 1)
                     .transition(.opacity)
-                    .stepsAside(forAllApps: launchpad)
-                // All Apps replaces the card stack, the gallery and the apps bar (`StagePeekAllAppsLayering`):
-                // hidden in place, their cells stayed in the accessibility tree (hosted UI test,
-                // runs 43729529563-43737338921). Rows, search and filter live here, so Back keeps them.
-                if machine.expansion < 0.999, !launchpad {
+                if machine.expansion < 0.999 {
                     ZStack(alignment: .topLeading) {
                         ForEach(cards, id: \.index) { card in
                             cardView(card)
@@ -133,7 +132,7 @@ struct StagePeekOverlay: View {
                         compactCloseButton(w, card: card)
                     }
                 }
-                if machine.expansion > 0.001, !launchpad {
+                if machine.expansion > 0.001 {
                     gallery
                         // A card dragged from here (search results too) carries the finger's
                         // gesture: barely there, never 0 or removed, so the drag keeps its view.
@@ -143,15 +142,12 @@ struct StagePeekOverlay: View {
                 toolbar(cards: cards)
                     .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
-                    .stepsAside(forAllApps: launchpad)
                 if let notice = model.closeNotice {
-                    closeToast(notice).stepsAside(forAllApps: launchpad)
+                    closeToast(notice)
                 }
-                if !launchpad {
-                    topControls
-                        .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
-                        .transition(.opacity)
-                }
+                topControls
+                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
+                    .transition(.opacity)
             }
             if launchpad {
                 launchpadView.transition(.opacity)
