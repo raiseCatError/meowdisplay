@@ -462,6 +462,10 @@ private struct StagePeekArrangementPlaceholderTile: View {
         shape.fill(Color.white.opacity(0.04))
             .overlay(shape.strokeBorder(Color.white.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
             .overlay { content }
+            // Not tappable, but a tap here must not fall through to the gallery's empty-space
+            // tap (which closes the peek): the placeholder is part of the map, not empty space.
+            .contentShape(Rectangle())
+            .onTapGesture {}
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityText)
     }
