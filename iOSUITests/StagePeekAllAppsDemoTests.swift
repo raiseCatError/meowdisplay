@@ -64,8 +64,14 @@ extension DemoModeSmokeTests {
 
         let allApps = app.descendants(matching: .any)["stagePeekAllApps"]
         let close = app.buttons["stagePeekAllAppsClose"]
+        // The peek's own pieces: All Apps replaces them, so they're gone from the tree.
         let underneath = ["stagePeekDockApp", "stagePeekDockHandle", "stagePeekLaunchpad", "stagePeekExpand", "stagePeekClose",
-                          "stagePeekStrip", "galleryWindowCard", "demoShowDesktop", "demoOpenFloating", "demoAddPane"]
+                          "stagePeekStrip", "galleryWindowCard"]
+        // The receiver's controls and the demo's toolbar stay mounted (they hold input state) and
+        // step aside in place: not hittable. Whether VoiceOver skips them needs a device: runs
+        // 43742243552 and 43745599194 still listed them in the tree.
+        let steppedAside = ["demoShowDesktop", "demoOpenFloating", "demoAddPane"]
+        let steppedAsideLabels = ["Exit Demo", "Control (Demo)", "Settings"]
         for round in 1...3 {
             if round > 1 { reach(round) }
             lastIcon.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
@@ -86,9 +92,13 @@ extension DemoModeSmokeTests {
                 if frames.count > onScreen.count { print("ALLAPPS round \(round): \(id) off screen, still in the tree: \(frames.filter { !$0.intersects(screen) })") }
                 XCTAssertTrue(onScreen.isEmpty, "round \(round): \(id) on screen under All Apps: \(onScreen)")
             }
-            for label in ["Exit Demo", "Control (Demo)", "Settings"] {
+            for id in steppedAside {
+                let element = app.descendants(matching: .any).matching(identifier: id).firstMatch
+                XCTAssertFalse(element.exists && element.isHittable, "round \(round): \(id) is hittable under All Apps")
+            }
+            for label in steppedAsideLabels {
                 let control = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
-                XCTAssertFalse(control.exists, "round \(round): the receiver's \(label) is still there under All Apps")
+                XCTAssertFalse(control.exists && control.isHittable, "round \(round): the receiver's \(label) is hittable under All Apps")
             }
             XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "stagePeekSearch").count, 1,
                            "round \(round): one search field, All Apps' own")
