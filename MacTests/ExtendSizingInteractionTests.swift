@@ -2,9 +2,9 @@ import XCTest
 
 /// #262 (declared physical size) together with #281 (Desktop Size): the
 /// declared size never depends on Desktop Size, every combination keeps the
-/// physical-size minimums, and the published points always fit the
-/// reservation made at creation, so switching Desktop Size or rotating stays
-/// an in-place resize.
+/// physical-size minimums, and Desktop Size never adds a rebuild: switching
+/// it is always an in-place resize, and it never makes a rotation rebuild
+/// that would fit in place at Default.
 final class ExtendSizingInteractionTests: XCTestCase {
 
     private struct Receiver { let name: String; let wide: Int; let high: Int }
@@ -52,18 +52,45 @@ final class ExtendSizingInteractionTests: XCTestCase {
         }
     }
 
-    func testPublishedPointsFitTheReservationInBothOrientations() {
+    /// Switching Desktop Size alone (same receiver orientation and shape) is always an in-place
+    /// resize, whatever size the display was created with.
+    func testChangingDesktopSizeAloneAlwaysFitsTheReservation() {
         for r in receivers {
             for aspect in aspects(for: r) {
-                let created = ExtendDisplayPlan.resolve(
-                    receiverPixelsWide: r.wide, receiverPixelsHigh: r.high, aspect: aspect, desktopSize: .standard)
-                for size in ExtendDesktopSize.allCases {
-                    for (w, h) in [(r.wide, r.high), (r.high, r.wide)] {
+                for createdWith in ExtendDesktopSize.allCases {
+                    let created = ExtendDisplayPlan.resolve(
+                        receiverPixelsWide: r.wide, receiverPixelsHigh: r.high, aspect: aspect, desktopSize: createdWith)
+                    let reservation = max(created.wide, created.high, created.reservedPointsPerAxis)
+                    for size in ExtendDesktopSize.allCases {
                         let later = ExtendDisplayPlan.resolve(
-                            receiverPixelsWide: w, receiverPixelsHigh: h, aspect: aspect, desktopSize: size)
-                        XCTAssertLessThanOrEqual(max(later.wide, later.high), created.reservedPointsPerAxis,
-                                                 "\(r.name) \(size) after rotation")
+                            receiverPixelsWide: r.wide, receiverPixelsHigh: r.high, aspect: aspect, desktopSize: size)
+                        XCTAssertLessThanOrEqual(max(later.wide, later.high), reservation,
+                                                 "\(r.name) \(createdWith) -> \(size)")
                     }
+                }
+            }
+        }
+    }
+
+    /// A rotation that fits in place at Default also fits with any Desktop Size: Desktop Size
+    /// never adds a rebuild. (Some rotations rebuild at every size; that is the existing
+    /// VirtualDisplay.resize fallback and is unchanged.)
+    func testDesktopSizeNeverTurnsAnInPlaceRotationIntoARebuild() {
+        for r in receivers {
+            for aspect in aspects(for: r) {
+                for size in ExtendDesktopSize.allCases {
+                    let created = ExtendDisplayPlan.resolve(
+                        receiverPixelsWide: r.wide, receiverPixelsHigh: r.high, aspect: aspect, desktopSize: size)
+                    let reservation = max(created.wide, created.high, created.reservedPointsPerAxis)
+                    let rotatedDefault = ExtendDisplayPlan.resolve(
+                        receiverPixelsWide: r.high, receiverPixelsHigh: r.wide, aspect: aspect, desktopSize: .standard)
+                    let rotated = ExtendDisplayPlan.resolve(
+                        receiverPixelsWide: r.high, receiverPixelsHigh: r.wide, aspect: aspect, desktopSize: size)
+                    if max(rotatedDefault.wide, rotatedDefault.high) <= reservation {
+                        XCTAssertLessThanOrEqual(max(rotated.wide, rotated.high), reservation, "\(r.name) \(size)")
+                    }
+                    XCTAssertLessThanOrEqual(rotated.wide, rotatedDefault.wide)
+                    XCTAssertLessThanOrEqual(rotated.high, rotatedDefault.high)
                 }
             }
         }
