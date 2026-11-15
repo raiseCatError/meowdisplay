@@ -136,11 +136,17 @@ final class LiveDisplayOverviewQATests: XCTestCase {
             throw XCTSkip("no live Mac session in Window mode")
         }
         sleep(2)
+        // The strip's accessibility frame can cover the whole screen (it does on iPad), so hold
+        // just inside the screen edge it sits on and pull inward, as a person does. Stage Peek
+        // Edge is Left by default and can be Right: try the left edge first, then the right.
         let close = app.buttons["stagePeekClose"]
-        let start = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let inward = app.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
-        start.press(forDuration: 0.7, thenDragTo: inward, withVelocity: 250, thenHoldForDuration: 0.4)
-        XCTAssertTrue(close.waitForExistence(timeout: 3), "Stage Peek opens from its strip")
+        for (edge, inward) in [(0.01, 0.35), (0.99, 0.65)] where !close.exists {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: edge, dy: 0.5))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: inward, dy: 0.5))
+            start.press(forDuration: 0.7, thenDragTo: end, withVelocity: 250, thenHoldForDuration: 0.4)
+            _ = close.waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(close.exists, "Stage Peek opens from its strip")
         if app.buttons["stagePeekExpand"].exists { app.buttons["stagePeekExpand"].tap(); sleep(1) }
     }
 
