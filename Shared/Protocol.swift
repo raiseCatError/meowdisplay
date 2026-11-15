@@ -282,6 +282,15 @@ enum DisplayActionsWire {
     static let identify = "displayIdentify"
     /// receiver -> Mac: `{id}` (a display from the latest `windowCatalog`).
     static let moveCursor = "cursorToDisplay"
+    /// receiver -> Mac: `{on}`. While the overview is open: send `overviewCursor`. Renewed by
+    /// the receiver every `overviewCursorRenewSeconds`; the Mac stops after
+    /// `overviewCursorWatchSeconds` without a renewal.
+    static let overviewCursorWatch = "overviewCursorWatch"
+    /// Mac -> receiver: `{x, y, d?}` the Mac cursor in global points (0.1 precision) and the
+    /// listed display it is on (left out when on none).
+    static let overviewCursor = "overviewCursor"
+    static let overviewCursorWatchSeconds: Double = 120
+    static let overviewCursorRenewSeconds: Double = 60
 }
 
 /// Exact key modifiers (PROTOCOL.md `keyboard`): a `press`, `down` or `up` marked

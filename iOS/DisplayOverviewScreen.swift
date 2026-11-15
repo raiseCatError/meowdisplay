@@ -124,7 +124,9 @@ struct DisplayOverviewScreen: View {
 
     private var selectionTitle: String {
         guard let display = interaction.selectedDisplay else { return String(localized: "Displays") }
-        return title(for: display)
+        let name = title(for: display)
+        guard let cursor = model.overviewCursor, cursor.display == display.id else { return name }
+        return name + String(localized: ", cursor here")
     }
 
     private func title(for display: OverviewDisplay) -> String {
@@ -142,6 +144,7 @@ struct DisplayOverviewScreen: View {
         GeometryReader { geo in
             ZStack {
                 if interaction.viewport.width > 0 { tilesLayer }
+                if interaction.viewport.width > 0 { cursorLayer }
                 OverviewGestureSurface(
                     onPan: { delta in interaction.pan(byView: delta) },
                     onPinch: { factor, focal, translation in
@@ -183,6 +186,20 @@ struct DisplayOverviewScreen: View {
             ForEach(interaction.model.drawnDisplays) { display in tile(display) }
         }
         .allowsHitTesting(false)
+    }
+
+    /// The Mac cursor at its real position, at a fixed on-screen size whatever the zoom. Drawn
+    /// even over this device's own display (it is the real position). Off screen it is not drawn.
+    @ViewBuilder private var cursorLayer: some View {
+        if let cursor = model.overviewCursor,
+           let tip = OverviewCursorGlyph.viewPoint(world: cursor.point, camera: interaction.camera,
+                                                   viewport: interaction.viewport) {
+            let half = CGFloat(OverviewCursorGlyph.pointSize) / 2
+            OverviewCursorGlyphView()
+                .position(x: tip.x + half, y: tip.y + half)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     @ViewBuilder private func tile(_ display: OverviewDisplay) -> some View {
@@ -395,6 +412,35 @@ private struct OverviewDisplayTile: View {
 }
 
 /// The name caption (bottom-left) and Mirrored badge (top-right) over the visible part of a tile.
+/// The Mac cursor: a white arrow with a dark outline (four dark copies one point away), so it
+/// reads over both light and dark pictures. The frame's top-left is the arrow's tip.
+private struct OverviewCursorGlyphView: View {
+    private static let outline: [CGSize] = [
+        CGSize(width: 1, height: 0), CGSize(width: -1, height: 0),
+        CGSize(width: 0, height: 1), CGSize(width: 0, height: -1),
+    ]
+
+    var body: some View {
+        let side = CGFloat(OverviewCursorGlyph.pointSize)
+        ZStack {
+            ForEach(0..<Self.outline.count, id: \.self) { index in
+                arrow(.black).offset(Self.outline[index])
+            }
+            arrow(.white)
+        }
+        .frame(width: side, height: side)
+    }
+
+    private func arrow(_ color: Color) -> some View {
+        let side = CGFloat(OverviewCursorGlyph.pointSize)
+        return Image(systemName: "cursorarrow")
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(color)
+            .frame(width: side, height: side)
+    }
+}
+
 private struct OverviewTileLabels: View {
     let name: String
     let isMirrored: Bool

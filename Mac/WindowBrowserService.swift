@@ -219,12 +219,14 @@ final class WindowBrowserService: @unchecked Sendable {
         queue.async { [self] in
             if value, !active { icons.reset() }
             active = value
+            if !value { stopCursorWatch() }
         }
     }
 
     func stop() {
         queue.async { [self] in
             stopped = true; active = false
+            stopCursorWatch()
             sendMessage = nil; onSnapshot = nil; liveFrame = nil
             stills.removeAll()
         }
@@ -298,6 +300,8 @@ final class WindowBrowserService: @unchecked Sendable {
                 identifyDisplays()
             case DisplayActionsWire.moveCursor:
                 moveCursor(obj, inputGranted: inputGranted, controlStillAllowed: controlStillAllowed)
+            case DisplayActionsWire.overviewCursorWatch:
+                if let on = obj["on"] as? Bool { setCursorWatch(on) }
             default:
                 break
             }
@@ -349,6 +353,45 @@ final class WindowBrowserService: @unchecked Sendable {
                 Log.info("workspace: cursorToDisplay \(id)")
             }
         }
+    }
+
+    // MARK: Overview cursor
+
+    private var cursorThrottle = OverviewCursorThrottle()
+    private var cursorTimer: DispatchSourceTimer?
+    /// Sampling period: finer than the 10 Hz send limit, so a tick that runs a little early
+    /// never delays a send by a whole period.
+    private static let cursorSamplePeriod: Double = 0.05
+
+    /// `queue` only. The receiver's overview is open (on) or closed (off). Only an active,
+    /// admitted session gets here (the sender's browsing gates); it stops again when the session
+    /// stops being active, and 120 s after the last renewal.
+    private func setCursorWatch(_ on: Bool) {
+        cursorThrottle.watch(on: on, now: ProcessInfo.processInfo.systemUptime)
+        guard on else { return stopCursorWatch() }
+        if cursorTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now(), repeating: Self.cursorSamplePeriod, leeway: .milliseconds(10))
+            timer.setEventHandler { [weak self] in self?.sampleCursor() }
+            cursorTimer = timer
+            timer.resume()
+        }
+    }
+
+    /// `queue` only.
+    private func stopCursorWatch() {
+        cursorTimer?.cancel()
+        cursorTimer = nil
+        cursorThrottle.reset()
+    }
+
+    /// `queue` only.
+    private func sampleCursor() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard active, !stopped, cursorThrottle.isWatching(now: now) else { return stopCursorWatch() }
+        let listed = displays.map { (id: $0.displayID, frame: $0.frame) }
+        let sample = CGEvent(source: nil).flatMap { OverviewCursorSample.make(point: $0.location, listed: listed) }
+        if let message = cursorThrottle.admit(sample, now: now) { sendMessage?(message.wire) }
     }
 
     /// The Mac's displays changed (attached, removed, rearranged, resized): a receiver showing

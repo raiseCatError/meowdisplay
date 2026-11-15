@@ -1601,6 +1601,22 @@ cursor report shows the move. While a session is browsing, the Mac also
 sends a fresh `windowCatalog` when its displays change (attached, removed,
 rearranged or resized), so an overview never keeps an old arrangement.
 
+**Overview cursor** (same entry, `displayArrange`; sessions that pass the same
+gates as `windowThumbnailRequest`: `hello.ws`, Window mode allowed, video on,
+admitted, content not hidden, not paused). Receiver → Mac:
+`overviewCursorWatch {on}` while the overview is open; the receiver sends
+`on: true` when it opens, again every 60 s, and `on: false` when it closes.
+While a watch is on the Mac sends `overviewCursor {x, y, d?}`: the Mac cursor
+in global points (the coordinate space of `windowCatalog` `displays`, y down),
+rounded to 0.1, and `d`, the id of the listed display it is on (left out when
+on none). At most 10 per second and only when `x`, `y` or `d` changed since the
+last one; the first one follows the watch at once. The watch ends on `on: false`,
+on disconnect, when the session is paused, Video Off, or not admitted, when the
+Mac's content is hidden (lock, Privacy Shield), and 120 s after the last
+`on: true`. A receiver ignores a message with a missing or non-finite `x` or
+`y`, and reads a missing or invalid `d` as "no display". Neither message
+has a reply and neither needs control.
+
 **Fill Window on Mac / Restore Previous Size on Mac** (welcome feature
 `windowFrame`, listed only while Window mode is allowed; Window mode only).
 The only messages that change the size of a real Mac window. Receivers send
@@ -2346,6 +2362,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 | 2026-11-15 | Additive, no `pv` change: display arrangement editing (section 6.10), `welcome.features` `displayArrange`, `displayArrangeRequest`, `displayArrangeState`, `displayArrangeKeep`, `displayArrangeRevert` |
 | 2026-11-15 | Additive, no `pv` change: display actions under `welcome.features` `displayArrange`: `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
+| 2026-11-15 | Additive, no `pv` change: overview cursor under `welcome.features` `displayArrange`: `overviewCursorWatch`, `overviewCursor` (section 6.10) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.
