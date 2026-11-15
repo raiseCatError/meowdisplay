@@ -301,6 +301,11 @@ final class AdaptiveLayoutTests: XCTestCase {
             .filter { $0.exists && $0.isHittable }
             .map { "\($0.label)@\(Int($0.frame.midX)),\(Int($0.frame.midY))" }
         print("AdaptiveLayout: \(name): reachable buttons \(hittable)")
+        // Where Settings and Keyboard are, and why they can't be reached (frame, hittable, type).
+        for line in app.debugDescription.split(separator: "\n")
+        where line.contains("'Settings'") || line.contains("'Keyboard'") || line.contains("Gear") {
+            print("AdaptiveLayout: \(name): tree \(line.trimmingCharacters(in: .whitespaces))")
+        }
         keep(app, name)
     }
 
