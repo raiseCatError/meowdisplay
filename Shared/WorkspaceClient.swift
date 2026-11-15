@@ -489,6 +489,14 @@ enum WorkspaceRequests {
 
     static func launch(_ bundle: String) -> [String: Any] { ["type": WireMessage.windowAction, "action": "launch", "bundle": bundle] }
 
+    /// Identify Displays: a label on each Mac screen for a few seconds.
+    static func identifyDisplays() -> [String: Any] { ["type": DisplayActionsWire.identify] }
+
+    /// Move Cursor Here: the Mac cursor to the middle of a listed display (needs control).
+    static func moveCursor(toDisplay id: UInt32) -> [String: Any] {
+        ["type": DisplayActionsWire.moveCursor, "id": Int(id)]
+    }
+
     /// Close Window from Stage Peek: presses that window's close button (any mode, needs control).
     static func windowClose(_ id: UInt32, generation: UInt64, req: Int) -> [String: Any] {
         ["type": WireMessage.windowClose, "window": Int(id), "gen": Int(generation), "req": req]
@@ -621,6 +629,8 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var launchFailed: String?
     /// The Mac can close a listed window from Stage Peek (`windowClose`).
     @Published private(set) var canCloseWindows = false
+    /// The Mac offers Identify Displays and Move Cursor Here (`DisplayActionsWire`).
+    @Published private(set) var canUseDisplayActions = false
     /// The Mac draws floating panes (`windowFloat`). Without it floats are kept, tucked, unsent.
     @Published private(set) var canFloat = false
     /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
@@ -863,6 +873,7 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
+            canUseDisplayActions = f.contains(DisplayActionsWire.welcomeFeature)
             canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
@@ -1927,6 +1938,20 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private var closeNames: [UInt32: String] = [:]
+
+    /// Identify Displays (overview): labels on the Mac's screens. Harmless, so no control needed.
+    func identifyDisplays() {
+        guard canUseDisplayActions else { return }
+        _ = send(WorkspaceRequests.identifyDisplays())
+    }
+
+    /// Move Cursor Here (overview): an explicit action, only with control. Never sent for this
+    /// device's own display or another MeowDisplay screen (placeholders).
+    func moveCursor(to display: CatalogDisplayItem) {
+        guard canUseDisplayActions, inputAllowed(),
+              display.overview?.isOwn != true, display.overview?.isMeow != true else { return }
+        _ = send(WorkspaceRequests.moveCursor(toDisplay: display.id))
+    }
 
     /// Lock This Mac: the Mac shows macOS's lock screen (needs control; the Mac says what happened).
     func lockMac() {

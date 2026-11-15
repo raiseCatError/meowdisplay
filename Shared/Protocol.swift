@@ -273,6 +273,17 @@ enum WindowCloseWire {
     static let welcomeFeature = "windowClose"
 }
 
+/// The overview's display actions (PROTOCOL.md 6.10): Identify Displays shows a label on each
+/// Mac screen; Move Cursor Here puts the Mac cursor in the middle of a listed display (needs
+/// control). Sent only to a Mac that lists `welcomeFeature`.
+enum DisplayActionsWire {
+    static let welcomeFeature = "displayActions"
+    /// receiver -> Mac: `{}`.
+    static let identify = "displayIdentify"
+    /// receiver -> Mac: `{id}` (a display from the latest `windowCatalog`).
+    static let moveCursor = "cursorToDisplay"
+}
+
 /// Exact key modifiers (PROTOCOL.md `keyboard`): a `press`, `down` or `up` marked
 /// `exactModifiers: true` posts with exactly its own `modifiers`, never adding the ones this
 /// device holds down with `modifierDown`. The arrow keypad's own ⇧ ⌥ ⌘ use it, so they never
