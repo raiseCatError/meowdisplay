@@ -81,8 +81,9 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
-    private func launchIntoDemo() -> XCUIApplication {
+    private func launchIntoDemo(environment: [String: String] = [:]) -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchEnvironment.merge(environment) { _, new in new }
         app.launch()
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
         sleep(1)
@@ -232,6 +233,414 @@ final class AdaptiveLayoutTests: XCTestCase {
         }
         app.buttons["Exit Demo"].tap()
         XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
+    }
+
+    // MARK: - Synthetic fold (DEBUG seam `MEOW_UITEST_FOLD`, iOS/UITestSeams.swift)
+    //
+    // The simulator never reports a fold (no posture control), so these tests ask the app for a
+    // synthetic one: a 24 pt `.division` band at the window's centre, vertical (a book) or
+    // horizontal (tabletop), fed through the same `ControlReservedRegion.active(in:)` as a real
+    // hinge. The app exposes the band as the element `uitestFoldBand`.
+
+    /// The controls of the trays and rails, by label (Main Tray items, the rail's Settings, the
+    /// keyboard's own keys, Move View, Arrow Keys) and by identifier (the arrow keypad), plus
+    /// Exit Demo. The demo's own banner chips are reported, not asserted (`demoChrome`): they are
+    /// demo-only chrome centred over the picture, outside the fold-aware controls.
+    private static let controlLabels = ["Exit Demo", "Settings", "Command", "Option", "Control", "Shift",
+                                        "Escape", "Tab", "Toggle Dock", "Keyboard", "Hide Keyboard",
+                                        "Move View", "Arrow Keys"]
+    private static let demoChrome = ["Control (Demo)", "Demo Options", "demoWindowViewToggle"]
+
+    @MainActor
+    private func foldBand(_ app: XCUIApplication, vertical: Bool) -> CGRect {
+        let element = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        XCTAssertTrue(element.waitForExistence(timeout: 5), "the synthetic fold seam is on (a Debug build)")
+        let band = element.frame
+        let window = app.windows.firstMatch.frame
+        print("AdaptiveLayout: fold band \(band) in window \(window)")
+        XCTAssertTrue(window.intersects(band), "the fold band crosses the window")
+        if vertical {
+            XCTAssertGreaterThan(band.height, band.width, "a book fold is a vertical band")
+            XCTAssertEqual(band.midX, window.midX, accuracy: 1, "the fold is at the window's horizontal centre")
+        } else {
+            XCTAssertGreaterThan(band.width, band.height, "a tabletop fold is a horizontal band")
+            XCTAssertEqual(band.midY, window.midY, accuracy: 1, "the fold is at the window's vertical centre")
+        }
+        return band
+    }
+
+    /// Polls `condition` (no fixed sleep) until it holds or `timeout` passes.
+    @MainActor @discardableResult
+    private func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        return condition()
+    }
+
+    /// Wakes the controls with a touch on the stream, then checks every reachable control: inside
+    /// the window and off the fold band. Exit Demo and Settings must be among them, so a tray
+    /// that faded before the check can never pass by checking nothing.
+    @MainActor
+    private func assertControlsAvoidFold(_ app: XCUIApplication, band: CGRect, _ context: String) {
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
+        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable (\(context))")
+        let window = app.windows.firstMatch.frame
+        // Half a point of rounding either way: frames come back in fractional points.
+        let fold = band.insetBy(dx: 0.5, dy: 0.5)
+        let query = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label IN %@ OR identifier BEGINSWITH %@", Self.controlLabels, "arrowKey"))
+        var checked = Set<String>()
+        for control in query.allElementsBoundByIndex where control.exists && control.isHittable {
+            let frame = control.frame
+            guard !frame.isEmpty else { continue }
+            let name = control.identifier.isEmpty ? control.label : control.identifier
+            XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(frame),
+                          "\(name) \(frame) lies inside the window \(window) (\(context))")
+            XCTAssertFalse(frame.intersects(fold), "\(name) \(frame) keeps off the fold \(band) (\(context))")
+            checked.insert(control.label)
+        }
+        print("AdaptiveLayout: \(context): checked \(checked.sorted())")
+        XCTAssertTrue(checked.contains("Settings"), "Settings was reachable and checked (\(context))")
+        XCTAssertTrue(checked.contains("Exit Demo"), "Exit Demo was reachable and checked (\(context))")
+        for name in Self.demoChrome {
+            let chip = app.descendants(matching: .any)[name].firstMatch
+            if chip.exists, chip.frame.intersects(fold) {
+                print("AdaptiveLayout: NOTE demo chrome \(name) \(chip.frame) crosses the fold \(band) (\(context))")
+            }
+        }
+    }
+
+    /// Picks `option` in Settings ▸ Controls ▸ Control Layout and returns to the stream.
+    @MainActor
+    private func chooseControlLayout(_ app: XCUIApplication, _ option: String) {
+        openSettings(app)
+        openControlsPage(app)
+        XCTAssertTrue(controlsPageHas(app, "controlLayoutPicker"))
+        let segment = app.descendants(matching: .any)["controlLayoutPicker"].firstMatch.buttons[option]
+        XCTAssertTrue(segment.waitForExistence(timeout: 5), "Control Layout offers \(option)")
+        segment.tap()
+        XCTAssertTrue(waitUntil { segment.isSelected }, "\(option) is selected")
+        leaveSettings(app)
+    }
+
+    /// Every Control Layout this window offers (Strip, Overlay, Custom on a roomy window), each
+    /// checked against the fold; a compact window has no Control Layout, so its one layout (the
+    /// phone tray) is checked. The layout chosen before the test is restored.
+    @MainActor
+    private func checkControlsAvoidFold(vertical: Bool) throws {
+        let axis = vertical ? "vertical" : "horizontal"
+        let app = launchIntoDemo(environment: ["MEOW_UITEST_FOLD": axis])
+        let band = foldBand(app, vertical: vertical)
+        if try isRoomy(app) {
+            openSettings(app)
+            openControlsPage(app)
+            XCTAssertTrue(controlsPageHas(app, "controlLayoutPicker"), "a roomy window offers Control Layout")
+            let segments = app.descendants(matching: .any)["controlLayoutPicker"].firstMatch.buttons.allElementsBoundByIndex
+            let options = segments.map(\.label)
+            let original = segments.first { $0.isSelected }?.label
+            leaveSettings(app)
+            XCTAssertFalse(options.isEmpty, "Control Layout has options")
+            for option in options {
+                chooseControlLayout(app, option)
+                assertControlsAvoidFold(app, band: band, "\(axis) fold, \(option)")
+                keep(app, "fold-\(axis)-\(option)")
+            }
+            if let original, original != options.last { chooseControlLayout(app, original) }
+        } else {
+            print("AdaptiveLayout: compact window: no Control Layout here; checking the phone tray")
+            assertControlsAvoidFold(app, band: band, "\(axis) fold, phone tray")
+            keep(app, "fold-\(axis)-phone-tray")
+        }
+        app.buttons["Exit Demo"].tap()
+        XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
+    }
+
+    /// An iPhone Duo held like a book: no control sits on the fold, in every Control Layout.
+    @MainActor
+    func testControlsKeepOffAVerticalFoldInEveryLayout() throws {
+        try checkControlsAvoidFold(vertical: true)
+    }
+
+    /// An iPhone Duo on a table, half open: no control sits on the fold, in every Control Layout.
+    @MainActor
+    func testControlsKeepOffAHorizontalFoldInEveryLayout() throws {
+        try checkControlsAvoidFold(vertical: false)
+    }
+
+    /// Settings open while the window changes (a rotation where the window rotates; nothing where
+    /// it does not, like the Duo's cover screen): Settings stays up through it, and once it is
+    /// closed the controls are back, inside the window and off the fold, which follows the window.
+    @MainActor
+    func testSettingsThroughARotationWithAFoldThenControlsKeepOffIt() throws {
+        let app = launchIntoDemo(environment: ["MEOW_UITEST_FOLD": "vertical"])
+        _ = foldBand(app, vertical: true)
+        openSettings(app)
+        keep(app, "fold-settings-before-rotation")
+        let before = app.windows.firstMatch.frame
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let rotated = waitUntil(3) { app.windows.firstMatch.frame.size != before.size }
+        print("AdaptiveLayout: window \(before) -> \(app.windows.firstMatch.frame) (rotated: \(rotated))")
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
+                      || app.staticTexts["Settings"].waitForExistence(timeout: 5),
+                      "Settings stays open through the window change")
+        keep(app, "fold-settings-after-rotation-\(rotated)")
+        leaveSettings(app)
+        let band = foldBand(app, vertical: true)
+        assertControlsAvoidFold(app, band: band, "after Settings and rotation (rotated: \(rotated))")
+        keep(app, "fold-controls-after-settings-rotated-\(rotated)")
+        XCUIDevice.shared.orientation = .portrait
+        app.buttons["Exit Demo"].tap()
+        XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
+    }
+
+    // MARK: - Multi-Display Overview fixture (DEBUG seam `MEOW_UITEST_OVERVIEW`)
+    //
+    // The overview needs a Mac's display catalog, which the demo has not got, so the app opens it
+    // straight away with three sample displays: "Built-in Display" (main, 1512x982 at 0,0),
+    // "Wide Display" (1920x1080 to its right) and "Portrait Display" (1080x1920 above-left).
+
+    private static let leadingChrome = ["displayOverviewDone", "Previous Display", "Next Display",
+                                        "displayOverviewShowInPane"]
+    private static let trailingChrome = ["displayOverviewFitAll", "displayOverviewIdentify",
+                                         "displayOverviewAddPane", "displayOverviewMoveCursor"]
+
+    @MainActor
+    private func launchOverviewFixture(fold: String? = nil) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_OVERVIEW"] = "1"
+        if let fold { app.launchEnvironment["MEOW_UITEST_FOLD"] = fold }
+        app.launch()
+        XCTAssertTrue(app.buttons["displayOverviewDone"].waitForExistence(timeout: 10),
+                      "the overview fixture opens at launch (a Debug build)")
+        return app
+    }
+
+    @MainActor
+    private func overviewTile(_ app: XCUIApplication, _ name: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == 'displayOverviewTile' AND label BEGINSWITH %@", name)).firstMatch
+    }
+
+    @MainActor
+    private func overviewTileFrames(_ app: XCUIApplication) -> [String: CGRect] {
+        var frames: [String: CGRect] = [:]
+        for name in ["Built-in Display", "Wide Display", "Portrait Display"] {
+            frames[name] = overviewTile(app, name).frame
+        }
+        return frames
+    }
+
+    /// The canvas lies between the toolbar and the action bar: below Done, above Show in Pane.
+    @MainActor
+    private func overviewCanvas(_ app: XCUIApplication) -> CGRect {
+        let window = app.windows.firstMatch.frame
+        let top = app.buttons["displayOverviewDone"].frame.maxY
+        let bottom = app.buttons["displayOverviewShowInPane"].frame.minY
+        return CGRect(x: window.minX, y: top, width: window.width, height: max(0, bottom - top))
+    }
+
+    @MainActor
+    private func tap(_ app: XCUIApplication, at point: CGPoint) {
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - app.windows.firstMatch.frame.minX,
+                                 dy: point.y - app.windows.firstMatch.frame.minY))
+            .tap()
+    }
+
+    @MainActor
+    private func doubleTap(_ app: XCUIApplication, at point: CGPoint) {
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - app.windows.firstMatch.frame.minX,
+                                 dy: point.y - app.windows.firstMatch.frame.minY))
+            .doubleTap()
+    }
+
+    private func framesMatch(_ a: [String: CGRect], _ b: [String: CGRect], tolerance: CGFloat = 1.5) -> Bool {
+        a.keys.sorted() == b.keys.sorted() && a.allSatisfy { name, frame in
+            guard let other = b[name] else { return false }
+            return abs(frame.minX - other.minX) <= tolerance && abs(frame.minY - other.minY) <= tolerance
+                && abs(frame.width - other.width) <= tolerance && abs(frame.height - other.height) <= tolerance
+        }
+    }
+
+    /// With a book fold, the toolbar and the action bar split around it: navigation and Show in
+    /// Pane before it, the tools and the other actions after it (`OverviewChromeFold` and
+    /// `FoldAwareBar`), all inside the window and none on the fold.
+    @MainActor
+    func testOverviewChromeSplitsAroundAVerticalFold() throws {
+        let app = launchOverviewFixture(fold: "vertical")
+        let band = foldBand(app, vertical: true)
+        let window = app.windows.firstMatch.frame
+        let fold = band.insetBy(dx: 0.5, dy: 0.5)
+        for required in ["displayOverviewDone", "displayOverviewFitAll", "displayOverviewShowInPane"] {
+            XCTAssertTrue(app.buttons[required].waitForExistence(timeout: 5), "\(required) is shown")
+        }
+        for (names, leading) in [(Self.leadingChrome, true), (Self.trailingChrome, false)] {
+            for name in names {
+                let button = app.buttons[name].firstMatch
+                guard button.exists else {
+                    print("AdaptiveLayout: overview \(name) not shown in the fixture")
+                    continue
+                }
+                let frame = button.frame
+                XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(name) \(frame) is inside the window \(window)")
+                XCTAssertFalse(frame.intersects(fold), "\(name) \(frame) keeps off the fold \(band)")
+                if leading {
+                    XCTAssertLessThanOrEqual(frame.maxX, band.minX + 0.5, "\(name) is before the fold")
+                } else {
+                    XCTAssertGreaterThanOrEqual(frame.minX, band.maxX - 0.5, "\(name) is after the fold")
+                }
+            }
+        }
+        keep(app, "overview-vertical-fold")
+        app.buttons["displayOverviewDone"].tap()
+        XCTAssertTrue(waitUntil { !app.buttons["displayOverviewDone"].exists }, "Done closes the overview")
+    }
+
+    /// Without a fold the bars are as before: one line each, the toolbar's navigation ahead of its
+    /// tools, everything inside the window. The fold seam is off, so there is no band.
+    @MainActor
+    func testOverviewChromeKeepsOneLineWithoutAFold() throws {
+        let app = launchOverviewFixture()
+        XCTAssertFalse(app.descendants(matching: .any)["uitestFoldBand"].exists, "no synthetic fold without the seam")
+        let window = app.windows.firstMatch.frame
+        let done = app.buttons["displayOverviewDone"]
+        let fitAll = app.buttons["displayOverviewFitAll"]
+        let show = app.buttons["displayOverviewShowInPane"]
+        XCTAssertTrue(fitAll.waitForExistence(timeout: 5))
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        for name in Self.leadingChrome + Self.trailingChrome where app.buttons[name].exists {
+            XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(app.buttons[name].frame),
+                          "\(name) \(app.buttons[name].frame) is inside the window \(window)")
+        }
+        XCTAssertEqual(done.frame.midY, fitAll.frame.midY, accuracy: max(done.frame.height, fitAll.frame.height) / 2,
+                       "Done and Fit All share the toolbar's line")
+        XCTAssertLessThan(done.frame.maxX, fitAll.frame.minX, "the navigation comes before the tools")
+        let add = app.buttons["displayOverviewAddPane"]
+        if add.exists {
+            XCTAssertEqual(show.frame.midY, add.frame.midY, accuracy: max(show.frame.height, add.frame.height) / 2,
+                           "Show in Pane and Add as New Pane share the action bar's line")
+            XCTAssertLessThan(show.frame.maxX, add.frame.minX, "Show in Pane comes first")
+        }
+        XCTAssertLessThan(done.frame.maxY, show.frame.minY, "the toolbar is above the action bar")
+        keep(app, "overview-no-fold")
+    }
+
+    /// Selection, zoom, pan, Fit All and double-tap in the overview, and taps that land on the
+    /// display under the finger after the camera moved.
+    @MainActor
+    func testOverviewSelectionZoomPanFitAllAndTapTargeting() throws {
+        let app = launchOverviewFixture()
+        let window = app.windows.firstMatch
+        let tiles = app.descendants(matching: .any).matching(identifier: "displayOverviewTile")
+        XCTAssertTrue(waitUntil { tiles.count == 3 }, "the three sample displays are drawn (found \(tiles.count))")
+        let show = app.buttons["displayOverviewShowInPane"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5), "the main display is selected at open: Show in Pane is offered")
+        let canvas = overviewCanvas(app)
+        XCTAssertFalse(canvas.isEmpty, "the canvas lies between the bars")
+        // Fit-all frames settle after the first layout.
+        var fitAll = overviewTileFrames(app)
+        waitUntil {
+            let now = overviewTileFrames(app)
+            defer { fitAll = now }
+            return framesMatch(now, fitAll, tolerance: 0.5)
+        }
+        for (name, frame) in fitAll {
+            XCTAssertTrue(canvas.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(name) \(frame) is in the canvas \(canvas) at open")
+        }
+        let main = overviewTile(app, "Built-in Display")
+        let wide = overviewTile(app, "Wide Display")
+        let portrait = overviewTile(app, "Portrait Display")
+        XCTAssertTrue(main.isSelected, "the main display is selected at open")
+        keep(app, "overview-open")
+
+        // A single tap selects; the camera stays.
+        tap(app, at: CGPoint(x: wide.frame.midX, y: wide.frame.midY))
+        XCTAssertTrue(waitUntil { wide.isSelected && !main.isSelected }, "a tap selects Wide Display")
+        XCTAssertTrue(app.staticTexts["Wide Display"].exists, "the toolbar names the selection")
+        XCTAssertTrue(show.isEnabled, "Show in Pane is offered for the selection")
+        XCTAssertTrue(framesMatch(overviewTileFrames(app), fitAll), "a single tap does not move the camera")
+
+        // Pinch out about the middle: the displays grow.
+        let wideHeight = wide.frame.height
+        window.pinch(withScale: 1.6, velocity: 1.0)
+        XCTAssertTrue(waitUntil { wide.frame.height > wideHeight * 1.3 },
+                      "a pinch zooms in (Wide Display \(wideHeight) -> \(wide.frame.height) pt tall)")
+        keep(app, "overview-pinched")
+
+        // Drag: the arrangement follows the finger.
+        let beforePan = overviewTileFrames(app)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5)))
+        XCTAssertTrue(waitUntil {
+            let now = overviewTileFrames(app)
+            return beforePan.contains { name, frame in (now[name]?.maxX ?? frame.maxX) < frame.maxX - 20 }
+        }, "a drag pans the arrangement to the left")
+        keep(app, "overview-panned")
+
+        // After the camera moved, a tap lands on the display under it.
+        let target = CGRect(x: canvas.minX + 8, y: canvas.minY + 16, width: canvas.width - 16, height: canvas.height - 32)
+        let frames = overviewTileFrames(app)
+        let visible = frames.mapValues { $0.intersection(target) }.filter { !$0.value.isNull && $0.value.width > 30 && $0.value.height > 30 }
+        let selectedName = frames.keys.first { overviewTile(app, $0).isSelected }
+        if let pick = visible.first(where: { $0.key != selectedName }) ?? visible.first {
+            let name = pick.key, area = pick.value
+            tap(app, at: CGPoint(x: area.midX, y: area.midY))
+            XCTAssertTrue(waitUntil {
+                overviewTile(app, name).isSelected
+                    && frames.keys.filter { $0 != name }.allSatisfy { !overviewTile(app, $0).isSelected }
+            }, "after a pinch and a pan, a tap at \(area) selects \(name) and only it")
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch.exists,
+                          "the toolbar names \(name)")
+        } else {
+            XCTFail("no display is left in view after the pinch and the pan to tap: \(frames) in \(target)")
+        }
+
+        // Fit All brings every display back, as at open.
+        app.buttons["displayOverviewFitAll"].tap()
+        XCTAssertTrue(waitUntil { framesMatch(overviewTileFrames(app), fitAll) },
+                      "Fit All frames the whole arrangement again: \(overviewTileFrames(app)) vs \(fitAll)")
+        for (name, frame) in overviewTileFrames(app) {
+            XCTAssertTrue(canvas.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(name) \(frame) is back in the canvas")
+        }
+        keep(app, "overview-fit-all")
+
+        // A double-tap on a display selects it and zooms to it.
+        let portraitFit = portrait.frame
+        doubleTap(app, at: CGPoint(x: portraitFit.midX, y: portraitFit.midY))
+        XCTAssertTrue(waitUntil { portrait.isSelected && portrait.frame.height > portraitFit.height * 1.4 },
+                      "a double-tap selects Portrait Display and zooms to it (\(portraitFit) -> \(portrait.frame))")
+        keep(app, "overview-double-tap-display")
+
+        // A double-tap on empty space is Fit All. Empty space: a point of the canvas no display covers.
+        let covered = overviewTileFrames(app).values.map { $0.insetBy(dx: -8, dy: -8) }
+        var empty: CGPoint?
+        search: for row in 1..<12 {
+            for column in 1..<12 {
+                let point = CGPoint(x: target.minX + target.width * CGFloat(column) / 12,
+                                    y: target.minY + target.height * CGFloat(row) / 12)
+                if !covered.contains(where: { $0.contains(point) }) { empty = point; break search }
+            }
+        }
+        if let empty {
+            doubleTap(app, at: empty)
+            XCTAssertTrue(waitUntil { framesMatch(overviewTileFrames(app), fitAll) },
+                          "a double-tap on empty space at \(empty) fits all again")
+        } else {
+            print("AdaptiveLayout: the zoomed display covers the whole canvas; no empty space to double-tap")
+            app.buttons["displayOverviewFitAll"].tap()
+            XCTAssertTrue(waitUntil { framesMatch(overviewTileFrames(app), fitAll) })
+        }
+        XCTAssertTrue(portrait.isSelected, "fitting all keeps the selection")
+
+        app.buttons["displayOverviewDone"].tap()
+        XCTAssertTrue(waitUntil { !app.buttons["displayOverviewDone"].exists }, "Done closes the overview")
+        XCTAssertTrue(app.buttons["uitestOpenOverview"].waitForExistence(timeout: 5))
     }
 
     private func keep(_ app: XCUIApplication, _ name: String) {

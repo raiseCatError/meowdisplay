@@ -15,7 +15,16 @@ let macAppURL = ProjectLinks.gitHub
 struct OpenSidecarPhoneApp: App {
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            // UI-test seams (iOS/UITestSeams.swift): inert unless a test sets their environment.
+            if UITestOverviewFixture.isEnabled {
+                UITestOverviewFixtureHost()
+            } else {
+                ReceiverScreen().uiTestFoldBandMarker()
+            }
+            #else
             ReceiverScreen()
+            #endif
         }
     }
 }
@@ -1397,6 +1406,14 @@ extension ControlReservedRegion {
     /// positioned in). iOS 27.1 introduced them; earlier systems report none,
     /// which leaves the safe-area/notch fallback as the only input.
     static func active(in proxy: GeometryProxy) -> [ControlReservedRegion] {
+        #if DEBUG
+        // UI-test seam: a synthetic fold while `MEOW_UITEST_FOLD` is set (iOS/UITestSeams.swift).
+        if let fold = UITestFoldSeam.region(in: proxy) { return system(in: proxy) + [fold] }
+        #endif
+        return system(in: proxy)
+    }
+
+    private static func system(in proxy: GeometryProxy) -> [ControlReservedRegion] {
         // `#available` alone cannot keep older SDKs building: the compiler
         // must still resolve `reservedRegions`, which first ships in the
         // iOS 27.1 SDK. The compiler version cannot tell that SDK apart
