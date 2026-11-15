@@ -147,7 +147,13 @@ final class LiveDisplayOverviewQATests: XCTestCase {
             _ = close.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(close.exists, "Stage Peek opens from its strip")
-        if app.buttons["stagePeekExpand"].exists { app.buttons["stagePeekExpand"].tap(); sleep(1) }
+        // The Displays section (map, Overview) is part of the expanded gallery, not the compact
+        // stack: expand, and wait until the button offers Compact again.
+        let expand = app.buttons["stagePeekExpand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 3), "Stage Peek offers Expand")
+        if expand.label != "Compact" { expand.tap() }
+        XCTAssertTrue(waitUntil(5) { expand.label == "Compact" }, "the gallery expands")
+        snapshot(app, "overview-00-expanded")
     }
 
     /// Scrolls the gallery until `element` can be tapped. False when it never appears.
