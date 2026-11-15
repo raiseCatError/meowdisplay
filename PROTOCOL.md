@@ -1456,7 +1456,13 @@ mode alike (admitted session, `hello.ws`, Window mode allowed on the Mac), so a
 receiver's switcher and search open over the desktop without changing the
 mode. One identity ledger serves every mode: a window keeps its `gen` when the
 receiver later switches to Window mode with it. `windowCatalog` also carries
-`displays` `[{id, name, w, h, main, virtual}]`. Stills are queued in the order
+`displays` `[{id, name, w, h, main, virtual}]`, plus optional, additive keys
+(older receivers ignore them) describing the Mac's arrangement: `x`, `y` (frame
+origin in global points, may be negative), `scale` (pixels per point; omitted
+when unknown), `hz` (refresh rate, only when > 0), `mirrorOf` (display id this
+one mirrors; omitted otherwise), `meow` (a MeowDisplay virtual display of any
+session) and `own` (a virtual display of this session; implies `meow`). `meow`
+and `own` come from the sender's display registry, never from names. Stills are queued in the order
 asked (the latest request first; nothing is dropped while a batch runs) and a
 fresh still is answered from the Mac's cache; a still that can't be taken now
 is answered with the last real one and `stale: true`, or `unavailable: true`

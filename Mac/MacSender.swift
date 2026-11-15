@@ -8317,6 +8317,8 @@ extension MacSender {
     private func ensureWindowBrowser() -> WindowBrowserService {
         if let windowBrowser { return windowBrowser }
         let browser = WindowBrowserService(hostID: TrustStore.shared.installID() ?? "mac")
+        let ownerID = ObjectIdentifier(self)
+        browser.ownDisplayIDs = { VirtualDisplayRegistry.shared.displayIDs(ownedBy: ownerID) }
         let selfBox = self.selfBox
         let queue = self.queue
         browser.sendMessage = { [weak browser] message in

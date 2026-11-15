@@ -128,10 +128,38 @@ struct DisplayCatalogEntry: Equatable, Sendable {
     var frame: CGRect
     var isMain: Bool
     var isVirtual: Bool
+    /// Pixels per point, nil when unknown.
+    var scale: Double?
+    var refreshHz: Int = 0
+    var mirrorOf: UInt32?
+    /// A MeowDisplay-managed virtual display of any session.
+    var isMeow = false
+    /// A virtual display owned by this session (implies `isMeow`).
+    var isOwn = false
 
     var wire: [String: Any] {
-        ["id": Int(displayID), "name": String(name.prefix(80)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
-         "main": isMain, "virtual": isVirtual]
+        var out: [String: Any] = [
+            "id": Int(displayID), "name": String(name.prefix(80)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
+            "main": isMain, "virtual": isVirtual,
+            "x": Int(frame.origin.x.rounded()), "y": Int(frame.origin.y.rounded()),
+            "meow": isMeow, "own": isOwn,
+        ]
+        if let scale { out["scale"] = scale }
+        if refreshHz > 0 { out["hz"] = refreshHz }
+        if let mirrorOf { out["mirrorOf"] = Int(mirrorOf) }
+        return out
+    }
+
+    /// Builds an entry from plain values; ownership comes from the registry sets, never names.
+    static func make(id: UInt32, name: String, frame: CGRect, isMain: Bool, isVirtual: Bool,
+                     pixelWidth: Int, refreshHz: Double, mirrorOf: UInt32?,
+                     meowIDs: Set<UInt32>, ownIDs: Set<UInt32>) -> DisplayCatalogEntry {
+        let own = ownIDs.contains(id)
+        return DisplayCatalogEntry(
+            displayID: id, name: name, frame: frame, isMain: isMain, isVirtual: isVirtual,
+            scale: pixelWidth > 0 && frame.width > 0 ? Double(pixelWidth) / Double(frame.width) : nil,
+            refreshHz: refreshHz.isFinite && refreshHz > 0 ? Int(refreshHz.rounded()) : 0,
+            mirrorOf: mirrorOf, isMeow: own || meowIDs.contains(id), isOwn: own)
     }
 }
 
@@ -166,6 +194,8 @@ final class WindowBrowserService: @unchecked Sendable {
     var sendMessage: (([String: Any]) -> Void)?
     /// Every new listing, for the Window-mode engine (on this service's queue).
     var onSnapshot: ((WindowCatalogSnapshot) -> Void)?
+    /// Virtual displays owned by this session (the sender's registry, never names).
+    var ownDisplayIDs: () -> Set<UInt32> = { [] }
     /// The latest WHOLE-window frame a tile streams, if any: a free, exact still.
     /// A pane's live frame of this window and where its content sits (pixels, top-left).
     var liveFrame: ((UInt32) -> (CVPixelBuffer, CGRect)?)?
@@ -347,12 +377,19 @@ final class WindowBrowserService: @unchecked Sendable {
     private func updateDisplays(_ list: [SCDisplay]) {
         let main = CGMainDisplayID()
         scDisplays = Dictionary(list.map { ($0.displayID, $0) }, uniquingKeysWith: { a, _ in a })
+        let meowIDs = VirtualDisplayRegistry.shared.displayIDs
+        let ownIDs = ownDisplayIDs()
         displays = list.map { d in
             let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == d.displayID }
             let isVirtual = CGDisplayIsBuiltin(d.displayID) == 0 && CGDisplayVendorNumber(d.displayID) == 0x1234   // CGVirtualDisplay default vendor
                 || (screen?.localizedName.contains("MeowDisplay") ?? false)
-            return DisplayCatalogEntry(displayID: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
-                                       frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual)
+            let mode = CGDisplayCopyDisplayMode(d.displayID)
+            let mirror = CGDisplayMirrorsDisplay(d.displayID)
+            return DisplayCatalogEntry.make(
+                id: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
+                frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual,
+                pixelWidth: mode?.pixelWidth ?? 0, refreshHz: mode?.refreshRate ?? 0,
+                mirrorOf: mirror == kCGNullDirectDisplay ? nil : mirror, meowIDs: meowIDs, ownIDs: ownIDs)
         }.sorted { ($0.isMain ? 0 : 1, $0.displayID) < ($1.isMain ? 0 : 1, $1.displayID) }
     }
 
