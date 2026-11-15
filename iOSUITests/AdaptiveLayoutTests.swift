@@ -81,8 +81,9 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
-    private func launchIntoDemo() -> XCUIApplication {
+    private func launchIntoDemo(environment: [String: String] = [:]) -> XCUIApplication {
         let app = XCUIApplication()
+        app.launchEnvironment.merge(environment) { _, new in new }
         app.launch()
         if app.buttons["Close"].waitForExistence(timeout: 3) { app.buttons["Close"].tap() }
         sleep(1)
@@ -98,9 +99,11 @@ final class AdaptiveLayoutTests: XCTestCase {
     @MainActor
     private func openSettings(_ app: XCUIApplication) {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        wakeControls(app)
         let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable after a touch")
+        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
+        if woke != .completed { reportReachableControls(app, "settings-not-reachable") }
+        XCTAssertEqual(woke, .completed, "Settings is reachable after a touch")
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
@@ -230,6 +233,209 @@ final class AdaptiveLayoutTests: XCTestCase {
             }
             keep(app, "orientation-\(orientation.rawValue)")
         }
+        app.buttons["Exit Demo"].tap()
+        XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
+    }
+
+    // MARK: - Synthetic fold (DEBUG seam `MEOW_UITEST_FOLD`, iOS/UITestFoldSeam.swift)
+    //
+    // The simulator never reports a fold (no posture control), so these tests ask the app for a
+    // synthetic one: a 24 pt `.division` band at the window's centre, vertical (a book) or
+    // horizontal (tabletop), fed through the same `ControlReservedRegion.active(in:)` as a real
+    // hinge. The app exposes the band as the element `uitestFoldBand`.
+
+    /// The controls of the trays and rails, by label (Main Tray items, the rail's Settings, the
+    /// keyboard's own keys, Move View, Arrow Keys) and by identifier (the arrow keypad), plus
+    /// Exit Demo. The demo's own banner chips are reported, not asserted (`demoChrome`): they are
+    /// demo-only chrome centred over the picture, outside the fold-aware controls.
+    private static let controlLabels = ["Exit Demo", "Settings", "Command", "Option", "Control", "Shift",
+                                        "Escape", "Tab", "Toggle Dock", "Keyboard", "Hide Keyboard",
+                                        "Move View", "Arrow Keys"]
+    private static let demoChrome = ["Control (Demo)", "Demo Options", "demoWindowViewToggle"]
+
+    @MainActor
+    private func foldBand(_ app: XCUIApplication, vertical: Bool) -> CGRect {
+        let element = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        XCTAssertTrue(element.waitForExistence(timeout: 5), "the synthetic fold seam is on (a Debug build)")
+        let band = element.frame
+        let window = app.windows.firstMatch.frame
+        print("AdaptiveLayout: fold band \(band) in window \(window)")
+        XCTAssertTrue(window.intersects(band), "the fold band crosses the window")
+        if vertical {
+            XCTAssertGreaterThan(band.height, band.width, "a book fold is a vertical band")
+            XCTAssertEqual(band.midX, window.midX, accuracy: 1, "the fold is at the window's horizontal centre")
+        } else {
+            XCTAssertGreaterThan(band.width, band.height, "a tabletop fold is a horizontal band")
+            XCTAssertEqual(band.midY, window.midY, accuracy: 1, "the fold is at the window's vertical centre")
+        }
+        return band
+    }
+
+    /// Touches the stream to bring the faded controls back, as a person would: on the picture,
+    /// never on the synthetic fold band (the layout leaves that strip to the fold, so a touch
+    /// there is not a touch on the stream). Without a band it is the usual spot below the middle.
+    @MainActor
+    private func wakeControls(_ app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        let frame = window.frame
+        var offset = CGVector(dx: 0.5, dy: 0.6)
+        let bandElement = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        if bandElement.exists, !frame.isEmpty {
+            let band = bandElement.frame
+            let wakeY = frame.minY + frame.height * 0.6
+            if band.height > band.width {   // book: the middle of the wider side
+                let leftWidth = band.minX - frame.minX, rightWidth = frame.maxX - band.maxX
+                let x = leftWidth >= rightWidth ? frame.minX + leftWidth / 2 : band.maxX + rightWidth / 2
+                offset.dx = (x - frame.minX) / frame.width
+            } else if band.minY <= wakeY, wakeY <= band.maxY {   // tabletop: below the band
+                offset.dy = (band.maxY + (frame.maxY - band.maxY) / 2 - frame.minY) / frame.height
+            }
+        }
+        window.coordinate(withNormalizedOffset: offset).tap()
+    }
+
+    /// On a failure to reach Settings: which controls can be reached, and a kept screenshot.
+    @MainActor
+    private func reportReachableControls(_ app: XCUIApplication, _ name: String) {
+        let hittable = app.buttons.allElementsBoundByIndex
+            .filter { $0.exists && $0.isHittable }
+            .map { "\($0.label)@\(Int($0.frame.midX)),\(Int($0.frame.midY))" }
+        print("AdaptiveLayout: \(name): reachable buttons \(hittable)")
+        // Where Settings and Keyboard are, and why they can't be reached (frame, hittable, type).
+        for line in app.debugDescription.split(separator: "\n")
+        where line.contains("'Settings'") || line.contains("'Keyboard'") || line.contains("Gear") {
+            print("AdaptiveLayout: \(name): tree \(line.trimmingCharacters(in: .whitespaces))")
+        }
+        keep(app, name)
+    }
+
+    /// Polls `condition` (no fixed sleep) until it holds or `timeout` passes.
+    @MainActor @discardableResult
+    private func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        return condition()
+    }
+
+    /// Wakes the controls with a touch on the stream, then checks every reachable control: inside
+    /// the window and off the fold band. Exit Demo and Settings must be among them, so a tray
+    /// that faded before the check can never pass by checking nothing.
+    @MainActor
+    private func assertControlsAvoidFold(_ app: XCUIApplication, band: CGRect, _ context: String) {
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        wakeControls(app)
+        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
+        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
+        if woke != .completed { reportReachableControls(app, "settings-not-reachable-\(context)") }
+        XCTAssertEqual(woke, .completed, "Settings is reachable (\(context))")
+        let window = app.windows.firstMatch.frame
+        // Half a point of rounding either way: frames come back in fractional points.
+        let fold = band.insetBy(dx: 0.5, dy: 0.5)
+        let query = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label IN %@ OR identifier BEGINSWITH %@", Self.controlLabels, "arrowKey"))
+        var checked = Set<String>()
+        for control in query.allElementsBoundByIndex where control.exists && control.isHittable {
+            let frame = control.frame
+            guard !frame.isEmpty else { continue }
+            let name = control.identifier.isEmpty ? control.label : control.identifier
+            XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(frame),
+                          "\(name) \(frame) lies inside the window \(window) (\(context))")
+            XCTAssertFalse(frame.intersects(fold), "\(name) \(frame) keeps off the fold \(band) (\(context))")
+            checked.insert(control.label)
+        }
+        print("AdaptiveLayout: \(context): checked \(checked.sorted())")
+        XCTAssertTrue(checked.contains("Settings"), "Settings was reachable and checked (\(context))")
+        XCTAssertTrue(checked.contains("Exit Demo"), "Exit Demo was reachable and checked (\(context))")
+        for name in Self.demoChrome {
+            let chip = app.descendants(matching: .any)[name].firstMatch
+            if chip.exists, chip.frame.intersects(fold) {
+                print("AdaptiveLayout: NOTE demo chrome \(name) \(chip.frame) crosses the fold \(band) (\(context))")
+            }
+        }
+    }
+
+    /// Picks `option` in Settings ▸ Controls ▸ Control Layout and returns to the stream.
+    @MainActor
+    private func chooseControlLayout(_ app: XCUIApplication, _ option: String) {
+        openSettings(app)
+        openControlsPage(app)
+        XCTAssertTrue(controlsPageHas(app, "controlLayoutPicker"))
+        let segment = app.descendants(matching: .any)["controlLayoutPicker"].firstMatch.buttons[option]
+        XCTAssertTrue(segment.waitForExistence(timeout: 5), "Control Layout offers \(option)")
+        segment.tap()
+        XCTAssertTrue(waitUntil { segment.isSelected }, "\(option) is selected")
+        leaveSettings(app)
+    }
+
+    /// Every Control Layout this window offers (Strip, Overlay, Custom on a roomy window), each
+    /// checked against the fold; a compact window has no Control Layout, so its one layout (the
+    /// phone tray) is checked. The layout chosen before the test is restored.
+    @MainActor
+    private func checkControlsAvoidFold(vertical: Bool) throws {
+        let axis = vertical ? "vertical" : "horizontal"
+        let app = launchIntoDemo(environment: ["MEOW_UITEST_FOLD": axis])
+        let band = foldBand(app, vertical: vertical)
+        if try isRoomy(app) {
+            openSettings(app)
+            openControlsPage(app)
+            XCTAssertTrue(controlsPageHas(app, "controlLayoutPicker"), "a roomy window offers Control Layout")
+            let segments = app.descendants(matching: .any)["controlLayoutPicker"].firstMatch.buttons.allElementsBoundByIndex
+            let options = segments.map(\.label)
+            let original = segments.first { $0.isSelected }?.label
+            leaveSettings(app)
+            XCTAssertFalse(options.isEmpty, "Control Layout has options")
+            for option in options {
+                chooseControlLayout(app, option)
+                assertControlsAvoidFold(app, band: band, "\(axis) fold, \(option)")
+                keep(app, "fold-\(axis)-\(option)")
+            }
+            if let original, original != options.last { chooseControlLayout(app, original) }
+        } else {
+            print("AdaptiveLayout: compact window: no Control Layout here; checking the phone tray")
+            assertControlsAvoidFold(app, band: band, "\(axis) fold, phone tray")
+            keep(app, "fold-\(axis)-phone-tray")
+        }
+        app.buttons["Exit Demo"].tap()
+        XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
+    }
+
+    /// An iPhone Duo held like a book: no control sits on the fold, in every Control Layout.
+    @MainActor
+    func testControlsKeepOffAVerticalFoldInEveryLayout() throws {
+        try checkControlsAvoidFold(vertical: true)
+    }
+
+    /// An iPhone Duo on a table, half open: no control sits on the fold, in every Control Layout.
+    @MainActor
+    func testControlsKeepOffAHorizontalFoldInEveryLayout() throws {
+        try checkControlsAvoidFold(vertical: false)
+    }
+
+    /// Settings open while the window changes (a rotation where the window rotates; nothing where
+    /// it does not, like the Duo's cover screen): Settings stays up through it, and once it is
+    /// closed the controls are back, inside the window and off the fold, which follows the window.
+    @MainActor
+    func testSettingsThroughARotationWithAFoldThenControlsKeepOffIt() throws {
+        let app = launchIntoDemo(environment: ["MEOW_UITEST_FOLD": "vertical"])
+        _ = foldBand(app, vertical: true)
+        openSettings(app)
+        keep(app, "fold-settings-before-rotation")
+        let before = app.windows.firstMatch.frame
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let rotated = waitUntil(3) { app.windows.firstMatch.frame.size != before.size }
+        print("AdaptiveLayout: window \(before) -> \(app.windows.firstMatch.frame) (rotated: \(rotated))")
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
+                      || app.staticTexts["Settings"].waitForExistence(timeout: 5),
+                      "Settings stays open through the window change")
+        keep(app, "fold-settings-after-rotation-\(rotated)")
+        leaveSettings(app)
+        let band = foldBand(app, vertical: true)
+        assertControlsAvoidFold(app, band: band, "after Settings and rotation (rotated: \(rotated))")
+        keep(app, "fold-controls-after-settings-rotated-\(rotated)")
+        XCUIDevice.shared.orientation = .portrait
         app.buttons["Exit Demo"].tap()
         XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
     }
