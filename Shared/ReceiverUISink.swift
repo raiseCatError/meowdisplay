@@ -175,8 +175,8 @@ final class ReceiverUISink: Sendable {
         target?.applyMirrorDisplayStateUpdate(update)
     }
 
-    func publishConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
-        target?.applyConfirmedExtendShape(preference)
+    func publishConfirmedExtendShape(_ preference: ExtendDisplayShapePreference, reportsDesktopSize: Bool) {
+        target?.applyConfirmedExtendShape(preference, reportsDesktopSize: reportsDesktopSize)
     }
 
     func publishStreamingProfile(_ update: StreamingProfileStateUpdate) {

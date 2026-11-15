@@ -39,6 +39,7 @@ final class VirtualDisplay {
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
           refreshRate: Int = 60,
           restoreOrigin: CGPoint? = nil,
+          reservedPointsPerAxis: Int? = nil,
           owner: ObjectIdentifier? = nil,
           onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
         self.pointsWide = pointsWide
@@ -47,7 +48,10 @@ final class VirtualDisplay {
         // Reserve the longer orientation on both axes. That lets a phone or
         // tablet change orientation by applying a new mode to this *same*
         // virtual monitor instead of removing it and stranding its windows.
-        maxPointsPerAxis = max(pointsWide, pointsHigh)
+        // `reservedPointsPerAxis` lets a caller that publishes a deliberately
+        // smaller desktop (Desktop Size) reserve the UNSCALED long edge, so a
+        // later size change still fits in place. Never below the initial mode.
+        maxPointsPerAxis = max(pointsWide, pointsHigh, reservedPointsPerAxis ?? 0)
         self.originRestore = OriginRestore(target: restoreOrigin)
         self.onOriginChange = onOriginChange
 

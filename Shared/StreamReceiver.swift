@@ -853,6 +853,9 @@ final class StreamReceiver: ObservableObject {
     /// `pv` 14) — same request/confirm bookkeeping as `confirmedDisplayMode`.
     @MainActor @Published private(set) var confirmedExtendShape: ExtendDisplayShapePreference?
     @MainActor @Published private(set) var pendingExtendShape: ExtendDisplayShapePreference?
+    /// Whether the last `extendShapeState` carried `desktopSize` — i.e. this
+    /// Mac supports Desktop Size. Gates the Desktop Size picker.
+    @MainActor @Published private(set) var macReportsDesktopSize = false
     @MainActor private var extendShapeRequestState = ExtendShapeRequestState()
     // Receiver-enforced max FPS (PART 2/3/4) — same request/confirm shape as
     // Extend shape above. `maxFPSState` (`lastMaxFPSState`) additionally
@@ -2875,7 +2878,12 @@ final class StreamReceiver: ObservableObject {
             DispatchQueue.main.async { uiSink.publishMirrorDisplayState(update) }
         case WireMessage.extendShapeState:
             guard let preference = ExtendDisplayShapePreference(message: obj) else { return }
-            DispatchQueue.main.async { uiSink.publishConfirmedExtendShape(preference) }
+            // Presence of `desktopSize` is how a Mac advertises Desktop Size
+            // support (PROTOCOL.md 6.7); an older Mac omits it.
+            let reportsDesktopSize = ExtendDisplayShapePreference.desktopSize(inMessage: obj) != nil
+            DispatchQueue.main.async {
+                uiSink.publishConfirmedExtendShape(preference, reportsDesktopSize: reportsDesktopSize)
+            }
         case WireMessage.streamingProfileState:
             guard let update = StreamingProfileStateUpdate(message: obj) else { return }
             DispatchQueue.main.async { uiSink.publishStreamingProfile(update) }
@@ -3799,7 +3807,8 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor
-    func applyConfirmedExtendShape(_ preference: ExtendDisplayShapePreference) {
+    func applyConfirmedExtendShape(_ preference: ExtendDisplayShapePreference, reportsDesktopSize: Bool) {
+        macReportsDesktopSize = reportsDesktopSize
         _ = extendShapeRequestState.confirm(preference)
         confirmedExtendShape = extendShapeRequestState.confirmed
         pendingExtendShape = extendShapeRequestState.pending
@@ -6130,6 +6139,7 @@ final class StreamReceiver: ObservableObject {
             // known from a live Mac; a fresh extendShapeState arrives on
             // the next hello.
             self.confirmedExtendShape = nil
+            self.macReportsDesktopSize = false
             // Same reasoning again: only ever known from a live Mac.
             self.confirmedMaxFPS = nil
             self.lastMaxFPSState = nil
@@ -6301,6 +6311,7 @@ final class StreamReceiver: ObservableObject {
         extendShapeRequestState.reset()
         confirmedExtendShape = nil
         pendingExtendShape = nil
+        macReportsDesktopSize = false
     }
 
     @MainActor func applyMaxFPSStateReset() {

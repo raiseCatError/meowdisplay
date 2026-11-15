@@ -84,6 +84,13 @@ struct DisplaysSettingsView: View {
                         get: { controller.extendShapeDefault.useFullDisplay },
                         set: { controller.extendShapeDefault.useFullDisplay = $0 }))
                 }
+                Picker("Desktop Size", selection: Binding(
+                    get: { controller.extendShapeDefault.desktopSize },
+                    set: { controller.extendShapeDefault.desktopSize = $0 })) {
+                    ForEach(ExtendDesktopSize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
             } header: {
                 Text("Extend Shape")
             } footer: {
