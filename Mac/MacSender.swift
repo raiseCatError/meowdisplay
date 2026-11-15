@@ -497,6 +497,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// deciding whether a genuinely usable PHYSICAL display exists
     /// (Mirror's authoritative availability gate in `requestMode`).
     var virtualDisplayID: CGDirectDisplayID? { virtualDisplay?.displayID }
+    /// The saved-arrangement key of the current virtual display (`DisplayArrangement`), set with
+    /// it. Read on `queue` when an edited arrangement is put back.
+    private let ownArrangementKeyState = OSAllocatedUnfairLock<String?>(uncheckedState: nil)
     private let queue = DispatchQueue(label: "sender.video")
     /// See `MacSenderSelfBox`'s doc comment. Installed once `self` is fully
     /// constructed (end of `init`).
@@ -2649,6 +2652,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               }) else { return nil }
         guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
         virtualDisplay = vd
+        ownArrangementKeyState.withLockUnchecked { $0 = arrangementKey }
         return vd.displayID
     }
 
@@ -8495,6 +8499,16 @@ extension MacSender {
             confirmer: confirmer, scheduler: QueueDisplayArrangementScheduler(queue: queue),
             deviceName: endpointName,
             perform: { work in queue.async { work() } })
+        service.onArrangementRestored = { origins in
+            // On `queue`. An arrangement edit moved this session's own display and was reported
+            // to the saved arrangement by the origin poll; its revert may come during teardown,
+            // after the last poll. Record where it really is now, so the next connection does
+            // not restore an arrangement nobody kept.
+            guard let sender = selfBox.currentOnQueue(), let id = sender.virtualDisplay?.displayID,
+                  let origin = origins[id],
+                  let key = sender.ownArrangementKeyState.withLockUnchecked({ $0 }) else { return }
+            DisplayArrangement.save(origin: origin, size: CGDisplayBounds(id).size, device: key)
+        }
         service.sendMessage = { [weak service] message in
             // Called on `queue` (every service step runs there).
             guard let sender = selfBox.currentOnQueue(), let service, sender.displayArrangement === service,

@@ -124,6 +124,10 @@ final class DisplayArrangementService: @unchecked Sendable {
 
     /// Sends one message to this session's receiver (the owner drops it once not admitted).
     var sendMessage: ([String: Any]) -> Void = { _ in }
+    /// Every drawn display's origin right after an arrangement was put back (revert, timeout,
+    /// session end), on the owner's queue. The owner records its own display's restored spot
+    /// here: a revert during teardown happens after the last origin poll that saw the edit.
+    var onArrangementRestored: ([UInt32: CGPoint]) -> Void = { _ in }
 
     private let configurator: DisplayOriginConfigurator
     private let confirmer: DisplayArrangementConfirming
@@ -187,6 +191,7 @@ final class DisplayArrangementService: @unchecked Sendable {
             pending.timer?.cancel()
             let restored = restore(pending.previous, scope: .forSession)
             Log.info("display arrange: request \(pending.req) reverted (session ended), restored=\(restored)")
+            onArrangementRestored(currentOrigins())
         }
         phase = .idle
         exclusivity.release(ObjectIdentifier(self))
@@ -328,7 +333,9 @@ final class DisplayArrangementService: @unchecked Sendable {
 
     private func revert(_ pending: Pending, reason: String) {
         pending.timer?.cancel()
-        if restore(pending.previous, scope: .forSession) {
+        let restored = restore(pending.previous, scope: .forSession)
+        onArrangementRestored(currentOrigins())
+        if restored {
             Log.info("display arrange: request \(pending.req) reverted (\(reason))")
             finish(pending.req, .reverted, reason: reason)
         } else {

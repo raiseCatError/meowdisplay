@@ -367,6 +367,50 @@ final class DisplayArrangementServiceTests: XCTestCase {
         XCTAssertEqual(h.configurator.calls.count, 2)
     }
 
+    // MARK: Restored arrangement reported to the owner (saved Extend arrangement)
+
+    func testDisconnectingReportsTheRestoredOrigins() {
+        let h = applied()
+        var restored: [[UInt32: CGPoint]] = []
+        h.service.onArrangementRestored = { restored.append($0) }
+        h.service.sessionEnded()
+        XCTAssertEqual(restored, [[1: .zero, 2: right]])
+    }
+
+    func testTimeoutAndRevertReportTheRestoredOrigins() {
+        for undo in [{ (h: Harness) in h.scheduler.elapse(DisplayArrangeWire.revertSeconds) },
+                     { (h: Harness) in self.revert(h) }] {
+            let h = applied()
+            var restored: [[UInt32: CGPoint]] = []
+            h.service.onArrangementRestored = { restored.append($0) }
+            undo(h)
+            XCTAssertEqual(restored, [[1: .zero, 2: right]])
+        }
+    }
+
+    func testAFailedRevertReportsWhereTheDisplaysReallyAre() {
+        let h = applied()
+        var restored: [[UInt32: CGPoint]] = []
+        h.service.onArrangementRestored = { restored.append($0) }
+        h.configurator.failNext = true
+        revert(h)
+        XCTAssertEqual(restored, [[1: .zero, 2: left]])
+    }
+
+    func testKeepAndAnUnansweredPromptReportNothing() {
+        let kept = applied()
+        var restored: [[UInt32: CGPoint]] = []
+        kept.service.onArrangementRestored = { restored.append($0) }
+        keep(kept)
+        kept.service.sessionEnded()
+
+        let asking = makeHarness()
+        asking.service.onArrangementRestored = { restored.append($0) }
+        request(asking)
+        asking.service.sessionEnded()
+        XCTAssertTrue(restored.isEmpty)
+    }
+
     func testKeepWithoutControlReverts() {
         let h = applied()
         keep(h, granted: false)
