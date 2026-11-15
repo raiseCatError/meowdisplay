@@ -77,6 +77,77 @@ final class AdaptiveLayoutTests: XCTestCase {
         return condition()
     }
 
+    // MARK: - Stage Peek through a resize (DEBUG seam `MEOW_UITEST_STAGE_PEEK`)
+    //
+    // The real Stage Peek overlay over the three sample displays. The host narrows the canvas it
+    // gives the overlay (a Split View / Stage Manager resize) about a second after the Display
+    // Overview opens, and on the fixture's own Resize button. Its "Resizes: N" label counts them.
+
+    @MainActor
+    private func launchStagePeekFixture() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK"] = "1"
+        app.launch()
+        XCTAssertTrue(app.buttons["uitestStagePeekResize"].waitForExistence(timeout: 10),
+                      "the Stage Peek fixture opens at launch (a Debug build)")
+        return app
+    }
+
+    /// Holds just inside the left screen edge and pulls inward, as a person does.
+    @MainActor
+    private func openStagePeekFromTheEdge(_ app: XCUIApplication) {
+        let close = app.buttons["stagePeekClose"]
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5))
+        start.press(forDuration: 0.7, thenDragTo: end, withVelocity: 250, thenHoldForDuration: 0.4)
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "Stage Peek opens from its edge")
+    }
+
+    /// With the overview open and the canvas narrowed under it, Stage Peek stays open and the
+    /// overview stays up; Done returns to the same Stage Peek gallery.
+    @MainActor
+    func testDisplayOverviewStaysOpenThroughAResize() {
+        let app = launchStagePeekFixture()
+        openStagePeekFromTheEdge(app)
+        let expand = app.buttons["stagePeekExpand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 3), "Stage Peek offers Expand")
+        if expand.label != "Compact" { expand.tap() }
+        XCTAssertTrue(waitUntil(5) { expand.label == "Compact" }, "the gallery expands")
+
+        let open = app.buttons["displayOverviewButton"]
+        for _ in 0..<6 where !(open.exists && open.isHittable) { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(open.exists && open.isHittable, "the Displays section offers Overview")
+        open.tap()
+        let done = app.buttons["displayOverviewDone"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "the overview opens")
+        keep(app, "stage-peek-overview-open")
+
+        // The host narrows the canvas one second after the overview opened. Watch well past it: a
+        // Stage Peek that closed on the width change would take the overview with it.
+        let dismissed = waitUntil(4) { !done.exists }
+        XCTAssertFalse(dismissed, "the overview stays open through the resize")
+        done.tap()
+
+        let resizes = app.staticTexts["uitestStagePeekResizes"]
+        XCTAssertTrue(resizes.waitForExistence(timeout: 3))
+        XCTAssertEqual(resizes.label, "Resizes: 1", "the host did resize while the overview was open")
+        XCTAssertTrue(app.buttons["stagePeekClose"].waitForExistence(timeout: 3),
+                      "Done returns to the Stage Peek gallery, which stayed open")
+        XCTAssertEqual(app.buttons["stagePeekExpand"].label, "Compact", "it is still expanded")
+        keep(app, "stage-peek-after-overview")
+    }
+
+    /// Without a screen opened from the gallery a width change still closes Stage Peek, as before.
+    @MainActor
+    func testStagePeekStillClosesOnAResizeWithoutTheOverview() {
+        let app = launchStagePeekFixture()
+        openStagePeekFromTheEdge(app)
+        let close = app.buttons["stagePeekClose"]
+        app.buttons["uitestStagePeekResize"].tap()
+        XCTAssertTrue(waitUntil(5) { !close.exists }, "a width change closes Stage Peek")
+        XCTAssertEqual(app.staticTexts["uitestStagePeekResizes"].label, "Resizes: 1")
+    }
+
     // MARK: - Multi-Display Overview fixture (DEBUG seam `MEOW_UITEST_OVERVIEW`)
     //
     // The overview needs a Mac's display catalog, which the demo has not got, so the app opens it
