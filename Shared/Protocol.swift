@@ -275,9 +275,9 @@ enum WindowCloseWire {
 
 /// The overview's display actions (PROTOCOL.md 6.10): Identify Displays shows a label on each
 /// Mac screen; Move Cursor Here puts the Mac cursor in the middle of a listed display (needs
-/// control). Sent only to a Mac that lists `welcomeFeature`.
+/// control). Sent only to a Mac that lists `DisplayArrangeWire.welcomeFeature` (one feature
+/// entry for every display edit and action: a receiver reads at most 16 entries).
 enum DisplayActionsWire {
-    static let welcomeFeature = "displayActions"
     /// receiver -> Mac: `{}`.
     static let identify = "displayIdentify"
     /// receiver -> Mac: `{id}` (a display from the latest `windowCatalog`).

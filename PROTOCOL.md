@@ -1589,8 +1589,8 @@ more), `control` (no input grant: View Only cannot close), `accessibility`
 (the Mac lacks the permission), `noButton` or `ambiguous` (more than one
 window matched; nothing was pressed). A fresh `windowCatalog` follows.
 
-**Display actions** (welcome feature `displayActions`, Window mode
-allowed, admitted sessions): `displayIdentify {}` shows a label (the
+**Display actions** (welcome feature `displayArrange`, the same entry as
+display arrangement editing; Window mode allowed, admitted sessions): `displayIdentify {}` shows a label (the
 display's position in the latest `windowCatalog` `displays`, main first,
 and its name) on each listed Mac screen for about 3 s; at most one every
 2 s; no control needed. `cursorToDisplay {id}` moves the Mac cursor to the
@@ -2345,7 +2345,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 | 2026-11-15 | Additive, no `pv` change: display arrangement editing (section 6.10), `welcome.features` `displayArrange`, `displayArrangeRequest`, `displayArrangeState`, `displayArrangeKeep`, `displayArrangeRevert` |
-| 2026-11-15 | Additive, no `pv` change: `welcome.features` `displayActions`, `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
+| 2026-11-15 | Additive, no `pv` change: display actions under `welcome.features` `displayArrange`: `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.

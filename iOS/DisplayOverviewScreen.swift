@@ -77,6 +77,14 @@ struct DisplayOverviewScreen: View {
                 .accessibilityAddTraits(.isHeader)
             stepButton(.next, symbol: "chevron.right", label: String(localized: "Next Display"))
             Spacer(minLength: 4)
+            if model.canUseDisplayActions {
+                // Labels on the Mac's own screens, to match these tiles with the desk.
+                Button { model.identifyDisplays() } label: {
+                    Image(systemName: "number.square").padding(8)
+                }
+                .accessibilityLabel("Identify Displays")
+                .accessibilityIdentifier("displayOverviewIdentify")
+            }
             fitAllButton
         }
         .foregroundStyle(.white)
@@ -283,6 +291,12 @@ struct DisplayOverviewScreen: View {
                     Button("Add as New Pane") { dismiss(); onAddAsNewPane(item) }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("displayOverviewAddPane")
+                }
+                if model.canUseDisplayActions, model.canControlMac {
+                    // Explicit only: selecting a display never moves the Mac cursor.
+                    Button("Move Cursor Here") { model.moveCursor(to: item) }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("displayOverviewMoveCursor")
                 }
             } else {
                 Text("A MeowDisplay screen can't be shown in a pane.")

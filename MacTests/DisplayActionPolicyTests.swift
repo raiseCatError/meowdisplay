@@ -43,8 +43,8 @@ final class DisplayActionPolicyTests: XCTestCase {
     }
 
     func testTheMacAdvertisesDisplayActionsOnlyWithWindowMode() {
-        XCTAssertTrue(MacSender.welcomeFeatures(windowStreamingAllowed: true).contains(DisplayActionsWire.welcomeFeature))
-        XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(DisplayActionsWire.welcomeFeature))
+        XCTAssertTrue(MacSender.welcomeFeatures(windowStreamingAllowed: true).contains(DisplayArrangeWire.welcomeFeature))
+        XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(DisplayArrangeWire.welcomeFeature))
         XCTAssertLessThanOrEqual(MacSender.welcomeFeatures(windowStreamingAllowed: true).count, 16,
                                  "a receiver reads at most 16 features")
     }

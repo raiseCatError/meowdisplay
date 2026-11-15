@@ -7616,8 +7616,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(WindowWorkspaceWire.floatLiftFeature)
             features.append(WindowFrameWire.welcomeFeature)
             // Display arrangement edits the catalog's `displays`, so it comes with browsing.
+            // The overview's display actions (Identify, Move Cursor Here) come with it: one entry,
+            // since a receiver reads at most 16.
             features.append(DisplayArrangeWire.welcomeFeature)
-            features.append(DisplayActionsWire.welcomeFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         features.append(ExactKeyModifiersWire.welcomeFeature)

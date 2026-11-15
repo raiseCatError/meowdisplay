@@ -873,7 +873,7 @@ final class WorkspaceModel: ObservableObject {
             files.setAvailable(f.contains(RemoteFilesWire.welcomeFeature))
             menus.setAvailable(f.contains(AppMenuWire.welcomeFeature))
             canCloseWindows = f.contains(WindowCloseWire.welcomeFeature)
-            canUseDisplayActions = f.contains(DisplayActionsWire.welcomeFeature)
+            canUseDisplayActions = f.contains(DisplayArrangeWire.welcomeFeature)
             canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
