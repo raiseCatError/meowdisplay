@@ -16,8 +16,12 @@ struct OpenSidecarPhoneApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            // UI-test seam (iOS/UITestFoldSeam.swift): inert unless a test sets its environment.
-            ReceiverScreen().uiTestFoldBandMarker()
+            // UI-test seams (iOS/UITestFoldSeam.swift, iOS/UITestOverviewFixture.swift): inert unless a test sets their environment.
+            if UITestOverviewFixture.isEnabled {
+                UITestOverviewFixtureHost()
+            } else {
+                ReceiverScreen().uiTestFoldBandMarker()
+            }
             #else
             ReceiverScreen()
             #endif
