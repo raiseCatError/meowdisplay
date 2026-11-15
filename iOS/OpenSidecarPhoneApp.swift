@@ -15,7 +15,16 @@ let macAppURL = ProjectLinks.gitHub
 struct OpenSidecarPhoneApp: App {
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            // UI-test seam (iOS/UITestOverviewFixture.swift): inert unless a test sets its environment.
+            if UITestOverviewFixture.isEnabled {
+                UITestOverviewFixtureHost()
+            } else {
+                ReceiverScreen()
+            }
+            #else
             ReceiverScreen()
+            #endif
         }
     }
 }

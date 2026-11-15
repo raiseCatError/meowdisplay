@@ -249,6 +249,7 @@ struct DisplayOverviewScreen: View {
                 // Before `position`, which would make the element as big as the whole canvas.
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(accessibilityLabel(for: display))
+                .accessibilityIdentifier("displayOverviewTile")
                 .accessibilityAddTraits(traits)
                 .accessibilityAdjustableAction { direction in adjustSelection(direction) }
                 .accessibilityAction { interaction.select(id: display.id) }
