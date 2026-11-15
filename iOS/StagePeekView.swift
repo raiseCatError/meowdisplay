@@ -43,6 +43,8 @@ struct StagePeekOverlay: View {
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
     let onDisplay: (CatalogDisplayItem?) -> Void
+    /// UI tests (Demo's `-demoStagePeek`): open as VoiceOver's activate does, without the hold.
+    var opensOnAppearForTesting = false
 
     @State private var machine = StagePeekMachine()
     @State private var query = ""
@@ -191,7 +193,10 @@ struct StagePeekOverlay: View {
         .accessibilityAction(.escape) { if launchpad { closeLaunchpad() } else { finish(machine.dismiss()) } }
         .position(x: frame.midX, y: frame.midY)
         .ignoresSafeArea(.keyboard)   // the search keyboard never resizes (or closes) the peek
-        .onAppear { machine.naturalScrolling = naturalScrolling; syncItems(); playHint() }
+        .onAppear {
+            machine.naturalScrolling = naturalScrolling; syncItems(); playHint()
+            if opensOnAppearForTesting { finish(machine.openDirectly()) }
+        }
         .onChange(of: naturalScrolling) { machine.naturalScrolling = $0 }
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.

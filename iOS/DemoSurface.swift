@@ -146,7 +146,8 @@ struct DemoReceiverScreen: View {
                         hapticsEnabled: false,
                         dock: store.preferences.stagePeekDock,
                         inputAllowed: demo.inputAllowed,
-                        onDisplay: { _ in })
+                        onDisplay: { _ in },
+                        opensOnAppearForTesting: true)
                 }
             }
             .coordinateSpace(name: Self.screenSpace)
