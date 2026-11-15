@@ -204,6 +204,22 @@ private struct ReceiverDisplaysPage: View {
                     }))
                     .disabled(locked)
             }
+            // Only for a Mac that reported `desktopSize` (an older Mac would ignore it).
+            if receiver.macReportsDesktopSize {
+                Picker("Desktop Size", selection: Binding(
+                    get: { current.desktopSize },
+                    set: { size in
+                        var preference = current
+                        preference.desktopSize = size
+                        receiver.requestExtendShape(preference)
+                    })) {
+                    ForEach(ExtendDesktopSize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                .disabled(locked)
+                ReceiverCaption("Makes the Mac desktop on this display use larger text. macOS System Settings can't change this display's resolution; MeowDisplay manages it.")
+            }
             if receiver.pendingExtendShape != nil {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
