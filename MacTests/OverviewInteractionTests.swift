@@ -282,6 +282,21 @@ final class OverviewInteractionTests: XCTestCase {
         XCTAssertEqual(moved.camera, camera)
     }
 
+    /// A fold, unfold or rotation while the overview is open: a tap right after it lands on the tile
+    /// drawn under the finger in the NEW layout, whether the camera refits or was moved before.
+    func testATapAfterAViewportChangeHitsTheTileDrawnThere() {
+        for moveFirst in [false, true] {
+            var interaction = makeInteraction()
+            if moveFirst { interaction.pan(byView: CGVector(dx: 30, dy: -20)) }
+            interaction.updateLayout(viewport: CGSize(width: 820, height: 1180))
+            interaction.tap(atView: viewPoint(interaction, world: CGPoint(x: 2880, y: 540)))
+            XCTAssertEqual(interaction.model.selected, 2, "moved first: \(moveFirst)")
+            interaction.updateLayout(viewport: CGSize(width: 1180, height: 820))
+            interaction.tap(atView: viewPoint(interaction, world: CGPoint(x: 960, y: 540)))
+            XCTAssertEqual(interaction.model.selected, 1, "moved first: \(moveFirst)")
+        }
+    }
+
     func testCatalogRefreshKeepsSelectionAndCamera() {
         var interaction = makeInteraction()
         interaction.tap(atView: viewPoint(interaction, world: CGPoint(x: 2880, y: 540)))
