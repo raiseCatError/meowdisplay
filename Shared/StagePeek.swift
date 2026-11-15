@@ -667,6 +667,27 @@ enum StagePeekGalleryLayout {
 /// Legibility of Stage Peek's white controls over whatever the Mac shows
 /// behind them (issue #121, Workstream D). The controls are translucent, so
 /// their contrast depends on the streamed content: over a white window a
+/// What shows while Stage Peek's All Apps is open (tested). All Apps takes the peek's place
+/// instead of sitting on it: opened from the last icon of the apps bar's grid, it used to leave
+/// that grid, the peek's search and its buttons showing through a light dim, competing with its
+/// own search and names (owner report, 2026-11-15). Now the peek's pieces stay as they are, so
+/// going back finds them unchanged, but they aren't drawn, take no touches and VoiceOver skips
+/// them; the receiver's floating controls step aside too; and All Apps' own background is dense
+/// enough that the Mac picture behind it never competes with its white text.
+struct StagePeekAllAppsLayering: Equatable {
+    var open: Bool
+
+    /// The peek's search, apps bar, gallery, cards, buttons and edge strip.
+    var peekShown: Bool { !open }
+    /// The receiver's floating controls and prompts, under Stage Peek.
+    var receiverControlsShown: Bool { !open }
+
+    /// Black over the frosted Mac picture behind All Apps (white text stays above 7:1 on white).
+    static let scrimOpacity: Double = 0.72
+    /// Reduce Transparency or Increase Contrast: no frost, nearly opaque.
+    static let denseScrimOpacity: Double = 0.94
+}
+
 /// thin material with a light tint left white text below 2:1. A black scrim
 /// of at least `minimumScrimOpacity` keeps white text at WCAG AA (4.5:1)
 /// even if everything under the scrim were pure white, the worst case, and

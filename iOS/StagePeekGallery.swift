@@ -262,6 +262,7 @@ struct StagePeekDock: View {
                                            : String(localized: "Running, \(app.windowCount) windows"))
                                         : String(localized: "Not running"))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier("stagePeekDockApp")
     }
 }
 
@@ -879,6 +880,7 @@ struct StagePeekLaunchpad: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close All Apps")
+                .accessibilityIdentifier("stagePeekAllAppsClose")
             }
             .frame(maxWidth: 560)
             if !inputAllowed {
@@ -950,6 +952,7 @@ struct StagePeekLaunchpad: View {
                     .accessibilityLabel(app.name)
                     .accessibilityValue((app.running ? String(localized: "Running") : String(localized: "Not running"))
                                         + (favorites.contains(app.bundleID) ? ", " + String(localized: "Favorite") : ""))
+                    .accessibilityIdentifier("stagePeekAllAppsItem")
                 }
             }
         }
