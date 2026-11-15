@@ -57,10 +57,16 @@ struct DisplayOverviewScreen: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            canvas
-            actionBar
+        GeometryReader { root in
+            // An iPhone Duo held like a book: the chrome splits around the fold (canvas does not).
+            let fold = OverviewChromeFold.split(
+                containerWidth: root.size.width,
+                divisions: ControlReservedRegion.frames(of: .division, in: ControlReservedRegion.active(in: root)))
+            VStack(spacing: 0) {
+                toolbar(fold: fold)
+                canvas
+                actionBar(fold: fold)
+            }
         }
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
@@ -73,17 +79,29 @@ struct DisplayOverviewScreen: View {
 
     // MARK: Toolbar
 
-    private var toolbar: some View {
+    /// Two halves: navigation (leading) and tools (trailing); on one line, or split around a fold.
+    private func toolbar(fold: OverviewChromeFold.Split?) -> some View {
+        FoldAwareBar(fold: fold, horizontalPadding: 16) {
+            HStack(spacing: 8) {
+                Button("Done") { dismiss() }
+                    .accessibilityIdentifier("displayOverviewDone")
+                Spacer(minLength: 4)
+                stepButton(.previous, symbol: "chevron.left", label: String(localized: "Previous Display"))
+                Text(selectionTitle)
+                    .font(.headline).lineLimit(1).minimumScaleFactor(0.7)
+                    .accessibilityAddTraits(.isHeader)
+                stepButton(.next, symbol: "chevron.right", label: String(localized: "Next Display"))
+                Spacer(minLength: 4)
+            }
+        } trailing: {
+            toolbarTools
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 10)
+    }
+
+    private var toolbarTools: some View {
         HStack(spacing: 8) {
-            Button("Done") { dismiss() }
-                .accessibilityIdentifier("displayOverviewDone")
-            Spacer(minLength: 4)
-            stepButton(.previous, symbol: "chevron.left", label: String(localized: "Previous Display"))
-            Text(selectionTitle)
-                .font(.headline).lineLimit(1).minimumScaleFactor(0.7)
-                .accessibilityAddTraits(.isHeader)
-            stepButton(.next, symbol: "chevron.right", label: String(localized: "Next Display"))
-            Spacer(minLength: 4)
             if model.canUseDisplayActions {
                 // Labels on the Mac's own screens, to match these tiles with the desk.
                 Button { model.identifyDisplays() } label: {
@@ -94,8 +112,6 @@ struct DisplayOverviewScreen: View {
             }
             fitAllButton
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 16).padding(.vertical, 10)
     }
 
     private func stepButton(_ step: DisplayOverviewModel.SelectionStep, symbol: String, label: String) -> some View {
@@ -305,12 +321,30 @@ struct DisplayOverviewScreen: View {
     }
 
     /// A display source cannot float on iOS, so there is no float action here.
-    private var actionBar: some View {
+    private func actionBar(fold: OverviewChromeFold.Split?) -> some View {
+        FoldAwareBar(fold: fold, horizontalPadding: 16) {
+            actionPrimary
+        } trailing: {
+            actionSecondary
+        }
+        .frame(maxWidth: .infinity, minHeight: 60)
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder private var actionPrimary: some View {
+        if selectedItem != nil, interaction.selectionCanBeShown {
+            Button(showTitle) { showSelected() }
+                .buttonStyle(.borderedProminent).tint(meowAccent)
+                .accessibilityIdentifier("displayOverviewShowInPane")
+        } else {
+            Text("A MeowDisplay screen can't be shown in a pane.")
+                .font(.footnote).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
+        }
+    }
+
+    private var actionSecondary: some View {
         HStack(spacing: 12) {
             if let item = selectedItem, interaction.selectionCanBeShown {
-                Button(showTitle) { showSelected() }
-                    .buttonStyle(.borderedProminent).tint(meowAccent)
-                    .accessibilityIdentifier("displayOverviewShowInPane")
                 if canAddPane(item) {
                     Button("Add as New Pane") { dismiss(); onAddAsNewPane(item) }
                         .buttonStyle(.bordered)
@@ -322,13 +356,8 @@ struct DisplayOverviewScreen: View {
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("displayOverviewMoveCursor")
                 }
-            } else {
-                Text("A MeowDisplay screen can't be shown in a pane.")
-                    .font(.footnote).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 60)
-        .padding(.horizontal, 16).padding(.vertical, 8)
     }
 
     private func showSelected() {
@@ -541,6 +570,37 @@ private struct OverviewGestureSurface: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             true
+        }
+    }
+}
+
+/// A bar of two groups. Without a fold they sit on one centred line, as before. With a vertical
+/// fold the leading group fills the part before it and the trailing group the part after it, so
+/// nothing is drawn or tapped on the crease.
+private struct FoldAwareBar<Leading: View, Trailing: View>: View {
+    let fold: OverviewChromeFold.Split?
+    let horizontalPadding: CGFloat
+    @ViewBuilder let leading: Leading
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        if let fold {
+            HStack(spacing: 0) {
+                leading
+                    .frame(width: max(0, fold.leading - horizontalPadding))
+                Color.clear.frame(width: fold.gap)
+                    .accessibilityHidden(true)
+                trailing
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, horizontalPadding)
+        } else {
+            HStack(spacing: 12) {
+                leading
+                trailing
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, horizontalPadding)
         }
     }
 }

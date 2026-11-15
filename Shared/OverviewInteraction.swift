@@ -29,6 +29,33 @@ enum OverviewCursorGlyph {
     }
 }
 
+/// Where the overview's toolbar and action bar split around a vertical fold (an iPhone Duo held
+/// like a book), so no button sits on the crease. Pure, tested. The canvas itself is not split:
+/// the arrangement may cross the fold like a photo does.
+enum OverviewChromeFold {
+    struct Split: Equatable {
+        /// Width from the container's leading edge to where the gap starts.
+        var leading: CGFloat
+        /// Width kept clear around the fold.
+        var gap: CGFloat
+    }
+
+    /// A division taller than wide that crosses the chrome, or nil (no fold, a horizontal fold,
+    /// or one so close to an edge that a side would be narrower than `minimumSide`).
+    static func split(containerWidth: CGFloat, divisions: [CGRect], clearance: CGFloat = 8,
+                      minimumSide: CGFloat = 120) -> Split? {
+        guard containerWidth.isFinite, containerWidth > 0 else { return nil }
+        let folds = divisions.filter { !$0.isNull && !$0.isEmpty && $0.height > $0.width
+            && $0.maxX > 0 && $0.minX < containerWidth }
+        guard let fold = folds.min(by: { abs($0.midX - containerWidth / 2) < abs($1.midX - containerWidth / 2) })
+        else { return nil }
+        let start = max(0, fold.minX - clearance)
+        let end = min(containerWidth, fold.maxX + clearance)
+        guard start >= minimumSide, containerWidth - end >= minimumSide else { return nil }
+        return Split(leading: start, gap: end - start)
+    }
+}
+
 struct OverviewInteraction: Equatable {
     /// What a point of the view lands on.
     enum Target: Equatable {
