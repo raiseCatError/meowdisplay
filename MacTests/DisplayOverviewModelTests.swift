@@ -309,7 +309,7 @@ final class DisplayOverviewModelTests: XCTestCase {
             display(1, 0, 0, main: true),
             display(2, 100, 0, own: true),
             display(3, 200, 0, meow: true),
-            display(4, 300, 0, mirrorOf: 1, own: true),
+            display(4, 300, 0, own: true, mirrorOf: 1),
         ])
         XCTAssertFalse(model.isPlaceholder(1))
         XCTAssertTrue(model.isPlaceholder(2), "own")
