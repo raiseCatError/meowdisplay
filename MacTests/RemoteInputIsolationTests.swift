@@ -160,6 +160,50 @@ final class RemoteInputIsolationTests: XCTestCase {
                        "reopening starts nothing, and an earlier ticket stays stale")
     }
 
+    // MARK: - The app resigning active before SwiftUI closes the surface (#121 review C7)
+
+    /// UIKit marks the app inactive before SwiftUI's `scenePhase` reaches
+    /// `setLocalInputSurfaceOpen`. A step due in that gap reads the app's
+    /// state through the ticket and stops, while the surface is still open.
+    func testResignActiveClosesTheSurfaceBeforeTheNextStep() async {
+        let receiver = makeReceiver()
+        let active = Flag()
+        receiver.applicationIsActive = { active.value }
+        func ticket() -> RemoteInputTicket? {
+            RemoteInputTicket.current(surfaceOpen: receiver.inputSurfaceUsable, displayRunning: true, sessionLive: true,
+                                      controlGeneration: receiver.controlResetGeneration, connectionGeneration: 1)
+        }
+        let source = RecordingSource()
+        source.remoteInputTicket = ticket()
+        XCTAssertNotNil(source.remoteInputTicket)
+        source.afterSend = { [unowned source] event in
+            guard event == "press 4" else { return }
+            active.value = false
+            source.remoteInputTicket = ticket()
+        }
+        await run(threeKeySequence(), on: source)
+        XCTAssertEqual(source.sent, ["press 4"], "nothing after the app resigned active")
+        XCTAssertTrue(receiver.localInputSurfaceOpen, "SwiftUI hadn't closed the surface yet")
+    }
+
+    /// The surface is usable only while it's open and the app is active;
+    /// reading the app's state never releases or resets anything by itself.
+    func testTheSurfaceIsUsableOnlyWhileOpenAndTheAppIsActive() {
+        let receiver = makeReceiver()
+        let active = Flag()
+        receiver.applicationIsActive = { active.value }
+        let generation = receiver.controlResetGeneration
+        XCTAssertTrue(receiver.inputSurfaceUsable)
+        active.value = false
+        XCTAssertFalse(receiver.inputSurfaceUsable)
+        XCTAssertTrue(receiver.localInputSurfaceOpen)
+        XCTAssertEqual(receiver.controlResetGeneration, generation)
+        active.value = true
+        receiver.setLocalInputSurfaceOpen(false)
+        XCTAssertFalse(receiver.inputSurfaceUsable, "a closed surface stays closed whatever the app's state")
+        XCTAssertTrue(makeReceiver().inputSurfaceUsable, "the Mac Receiver's default: always active")
+    }
+
     func testNoTicketWithoutALiveConnection() {
         XCTAssertNil(makeReceiver().remoteInputTicket)
     }

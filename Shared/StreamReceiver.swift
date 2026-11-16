@@ -809,6 +809,13 @@ final class StreamReceiver: ObservableObject {
     /// isn't active. While it's false, only releases leave this device (see
     /// `RemoteInputTransmission`). The Mac Receiver never closes it.
     @MainActor private(set) var localInputSurfaceOpen = true
+    /// Whether the app is active right now, as the system itself reports it
+    /// (iOS: `UIApplication.applicationState`, which UIKit changes before it
+    /// tells SwiftUI). `localInputSurfaceOpen` follows `scenePhase` through
+    /// an `onChange` after a render, so a delayed step whose pause ended in
+    /// that gap still found the surface open. The ticket reads this at the
+    /// moment each later step would leave. The Mac Receiver keeps the default.
+    @MainActor var applicationIsActive: @MainActor () -> Bool = { true }
     @MainActor @Published private(set) var confirmedDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var pendingDisplayMode: ReceiverDisplayMode?
     @MainActor @Published private(set) var displayModeConfirmationGeneration = 0
@@ -3570,10 +3577,17 @@ final class StreamReceiver: ObservableObject {
         if !open { releaseLocalInput() }
     }
 
+    /// The surface as a delayed step sees it: open, and the app still active
+    /// (`applicationIsActive`), so a step due while the app is resigning
+    /// active stops even before SwiftUI closes the surface.
+    @MainActor var inputSurfaceUsable: Bool {
+        localInputSurfaceOpen && applicationIsActive()
+    }
+
     /// The ticket a delayed remote action must still hold before each later
     /// step goes out. It's nil while input can't leave this device.
     @MainActor var remoteInputTicket: RemoteInputTicket? {
-        RemoteInputTicket.current(surfaceOpen: localInputSurfaceOpen,
+        RemoteInputTicket.current(surfaceOpen: inputSurfaceUsable,
                                   displayRunning: displayState == .running,
                                   sessionLive: session.allowsLiveInput,
                                   controlGeneration: controlResetGeneration,
