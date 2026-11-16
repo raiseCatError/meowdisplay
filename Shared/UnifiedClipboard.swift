@@ -36,6 +36,11 @@ enum ClipboardWire {
     /// Size limits the person can choose for automatic transfers (bytes).
     static let sizeChoices = [1_000_000, 10_000_000, 50_000_000, 200_000_000]
     static let defaultMaxBytes = 10_000_000
+    /// The largest sequence number, Lamport counter or context entry an event may carry (2^53,
+    /// exact in every platform's number type). Counters grow by one per copy, so no real one
+    /// gets near it; a peer's `lc` near `Int.max` used to be adopted, and the next copy on
+    /// this device then trapped converting its counter back to `Int`.
+    static let maxCounter = 1 << 53
 }
 
 /// One clipboard representation, in a form every platform maps to its own types.
@@ -191,11 +196,13 @@ struct ClipEvent: Equatable, Sendable {
     /// (".", "..", "/", NUL) drop the whole event.
     static func parse(_ obj: [String: Any]) -> ClipEvent? {
         guard let origin = obj["o"] as? String, !origin.isEmpty, origin.count <= ClipboardWire.maxOriginLength,
-              let seqInt = obj["s"] as? Int, seqInt > 0, let lc = obj["lc"] as? Int, lc > 0,
+              let seqInt = obj["s"] as? Int, seqInt > 0, seqInt <= ClipboardWire.maxCounter,
+              let lc = obj["lc"] as? Int, lc > 0, lc <= ClipboardWire.maxCounter,
               let ch = obj["ch"] as? String, ch.count <= 64 else { return nil }
         var context: [String: UInt64] = [:]
         for (k, v) in (obj["vv"] as? [String: Any] ?? [:]).prefix(64) {
-            guard k.count <= ClipboardWire.maxOriginLength, let n = v as? Int, n >= 0 else { return nil }
+            guard k.count <= ClipboardWire.maxOriginLength, let n = v as? Int, n >= 0,
+                  n <= ClipboardWire.maxCounter else { return nil }
             context[k] = UInt64(n)
         }
         let seq = UInt64(seqInt)
@@ -268,7 +275,9 @@ struct ClipboardSync: Equatable, Sendable {
     init(origin: String, seq: UInt64 = 0, lamport: UInt64 = 0) {
         self.origin = origin
         self.seq = seq
-        self.lamport = lamport
+        // A counter stored before `ClipboardWire.maxCounter` existed may be one a peer pushed
+        // near `Int.max`: start from the bound instead, so the next copy can't trap.
+        self.lamport = min(lamport, UInt64(ClipboardWire.maxCounter))
         if seq > 0 { seen[origin] = seq }
     }
 
