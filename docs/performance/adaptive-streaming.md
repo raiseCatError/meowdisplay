@@ -314,7 +314,7 @@ Window view sets no source cadence, so it has no source cap.
 `NetworkCost.receiverDataPolicy`: saver when the setting is On; in Automatic, saver on clear Low
 Data Mode, or on a clearly metered path once the user accepted the one-time suggestion (until
 answered, a metered path stays normal and the receiver asks). A receiver that sends no setting
-(older builds, the Mac Receiver) is never data-saving. Mac-side evidence counts only for Low Data
+(older builds, Android) is never data-saving. Mac-side evidence counts only for Low Data
 Mode set on the Mac (`NetworkCost.macSidePolicyEvidence` drops a Mac `expensive` report); the Mac
 reads its own path on hello, before the first capture is configured. Off is full quality always,
 Low Data Mode included. The Full Quality / "No" answer only covers mobile data: in Automatic, clear
@@ -328,7 +328,9 @@ on, the controller's saver clamp applies instead (raster ≤ max(floor, 0.75), 6
 The iOS suggestion uses `NetworkCostSuggestionTracker`: high-confidence `expensive` evidence on
 live media only, once per episode, never on Low Data Mode or a tunnel, answer remembered and
 changeable in Settings ▸ Display ▸ Use Less Data (Ask / Save Data / Full Quality). The Mac Receiver
-has no setting: it sends no `saveData` and never asks. Android: not implemented (parity gap).
+has the setting (Streaming ▸ Data, Automatic / On / Off) and sends `saveData` but never an answer
+and never asks (`UseLessDataReporting.preferenceOnly`), so its Automatic saves only on clear Low
+Data Mode. Android: not implemented (parity gap).
 
 **Explainability.** Every controller decision with a new reason, and every change, goes to the
 diagnostics recorder (`StreamDiagnosticsSnapshot.adaptiveDecisions`, last 32, also in the export:

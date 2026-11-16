@@ -78,6 +78,8 @@ private struct ReceiverStreamingPage: View {
                 }
             }
 
+            ReceiverUseLessDataSection()
+
             ReceiverAudioSection(receiver: receiver, controller: controller)
 
             if receiver.connected, receiver.videoSize != .zero {
@@ -129,6 +131,35 @@ private struct ReceiverStreamingPage: View {
         } else {
             ReceiverValueRow("Maximum FPS", value: receiver.connected
                              ? String(localized: "Waiting for Mac") : String(localized: "Unavailable"))
+        }
+    }
+}
+
+/// "Use less data" (#123), the iPhone app's setting without its mobile-data
+/// prompt: Automatic (the default) saves data only in Low Data Mode, on this
+/// Mac or the other Mac; On always saves; Off is full quality always. Stored
+/// under the same key as on iOS and sent to the other Mac in hello
+/// (`saveData` only, never an answer: `UseLessDataReporting.preferenceOnly`).
+struct ReceiverUseLessDataSection: View {
+    @AppStorage(UseLessDataSettings.preferenceKey) private var useLessData = NetworkCost.DataPreference.auto.rawValue
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Use Less Data", selection: Binding(
+                    get: { NetworkCost.DataPreference(rawValue: useLessData) ?? .auto },
+                    set: {
+                        useLessData = $0.rawValue
+                        ReceiverController.publishUseLessData()
+                    })) {
+                    Text("Automatic").tag(NetworkCost.DataPreference.auto)
+                    Text("On").tag(NetworkCost.DataPreference.on)
+                    Text("Off").tag(NetworkCost.DataPreference.off)
+                }
+                ReceiverCaption("Automatic saves data in Low Data Mode, on this Mac or the other Mac. On always saves data. Off always streams at full quality, even in Low Data Mode. Saving data lowers resolution, bitrate and frame rate for this Mac's stream only; the stream never stops. Applies while the other Mac's Streaming Mode is Automatic.")
+            }
+        } header: {
+            Text("Data")
         }
     }
 }
