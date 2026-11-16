@@ -19,6 +19,14 @@ enum AudioMediaFrame {
     /// First byte of every audio media frame payload.
     static let marker: UInt8 = 0x01
 
+    /// Sample rates a receiver accepts in a config frame. Anything else is
+    /// malformed and dropped like a truncated frame: the receiver turns the
+    /// rate into an `Int32` CMTime timescale and divides by it, so 0 or a
+    /// value above `Int32.max` would trap. Covers every rate in the AAC
+    /// frequency table (`AACLCFraming.frequencyIndex`, 7350 Hz up) and every
+    /// real capture rate.
+    static let acceptedSampleRates: ClosedRange<UInt32> = 7_350...768_000
+
     private enum Subtype: UInt8 {
         case config = 0x01
         case packet = 0x02
@@ -110,7 +118,8 @@ struct AudioConfigFrame: Equatable {
         guard let sampleRate: UInt32 = reader.read(),
               let channelCount: UInt8 = reader.read(),
               let cookieLen: UInt16 = reader.read(),
-              let cookie = reader.readData(Int(cookieLen)) else { return nil }
+              let cookie = reader.readData(Int(cookieLen)),
+              AudioMediaFrame.acceptedSampleRates.contains(sampleRate) else { return nil }
         return AudioConfigFrame(sampleRate: sampleRate, channelCount: channelCount, cookie: cookie)
     }
 }
@@ -172,7 +181,8 @@ struct PCMConfigFrame: Equatable {
     static func decode(_ body: Data) -> PCMConfigFrame? {
         var reader = BinaryReader(body)
         guard let sampleRate: UInt32 = reader.read(),
-              let channelCount: UInt8 = reader.read() else { return nil }
+              let channelCount: UInt8 = reader.read(),
+              AudioMediaFrame.acceptedSampleRates.contains(sampleRate) else { return nil }
         return PCMConfigFrame(sampleRate: sampleRate, channelCount: channelCount)
     }
 }
