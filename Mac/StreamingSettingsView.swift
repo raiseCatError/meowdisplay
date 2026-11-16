@@ -132,7 +132,7 @@ struct StreamingSettingsView: View {
                                 LabeledContent("A/V Sync",
                                     value: "\(session.receiverAVSyncOffsetMs >= 0 ? "+" : "")\(session.receiverAVSyncOffsetMs) ms")
                             }
-                            LabeledContent("Route", value: entry.route?.rawValue ?? "—")
+                            LabeledContent("Route", value: entry.routeLabel ?? "—")
                             // Pause/Resume here means exactly what the label
                             // says: MacSender.pauseDisplay() stops capture
                             // (video + audio) while the connection stays up

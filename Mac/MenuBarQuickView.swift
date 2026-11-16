@@ -81,6 +81,6 @@ struct MenuBarQuickView: View {
     }
 
     private func headline(for entry: SenderController.ActiveDisplayEntry) -> String {
-        CanonicalRuntimeStatus.entryStatusText(mode: entry.mode, route: entry.route, phase: entry.phase)
+        CanonicalRuntimeStatus.entryStatusText(mode: entry.mode, routeLabel: entry.routeLabel, phase: entry.phase)
     }
 }
