@@ -305,14 +305,16 @@ final class AdaptiveLayoutTests: XCTestCase {
     // time (to line up with the host's own log), and a slow one is followed by a probe: a
     // screenshot and `app.state`, which the host answers without the app's main thread, and a
     // trivial query, which the app has to answer. Slow screenshot too: the host. Fast
-    // screenshot, slow query: the app (or its accessibility service). Nothing here relaxes an
-    // assertion.
+    // screenshot, slow query: the app (or its accessibility service). On a healthy run nothing
+    // here relaxes an assertion; only a stalled query earns Settings extra time.
 
     /// A first query longer than this is a stalled snapshot, not a missing control.
     private static let stalledFirstQuery: TimeInterval = 4
     /// A query longer than this gets a screenshot and the probe.
     private static let slowQuery: TimeInterval = 10
-    /// How long Settings may take to become hittable, re-waking the controls between polls.
+    /// How long one touch has to reveal Settings on a healthy run (unchanged from before).
+    private static let settingsPrompt: TimeInterval = 5
+    /// After a stalled query only: how long Settings may take, re-waking the controls.
     private static let settingsDeadline: TimeInterval = 30
 
     private static func clock() -> String { Date().ISO8601Format(.iso8601(timeZone: .gmt, includingFractionalSeconds: true)) }
@@ -364,30 +366,45 @@ final class AdaptiveLayoutTests: XCTestCase {
               + "app.windows.count \(windows) in \(String(format: "%.2f", querySeconds)) s at \(Self.clock())")
     }
 
-    /// Wakes the controls, then polls until Settings is hittable or the deadline passes,
-    /// waking the controls again between polls (they fade after a few idle seconds, and a
-    /// slow simulator can use that up). Settings must still be hittable, as before; only the
-    /// time allowed is longer, so a slow query is not mistaken for a missing control.
+    /// One touch must reveal Settings within `settingsPrompt` (5 s), as before: a healthy run gets
+    /// no extra time and no extra touches. Only when a query itself stalled (the first one took
+    /// longer than `stalledFirstQuery`) is the wait extended to `settingsDeadline`, re-waking the
+    /// controls between polls (they auto-hide after a few idle seconds, which a stall can use up);
+    /// the failure message and the log say when that happened. Settings must still be hittable.
     @MainActor
     private func waitForReachableSettings(_ app: XCUIApplication, _ context: String) {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        let deadline = Date().addingTimeInterval(Self.settingsDeadline)
+        let started = Date()
         var firstQuery: TimeInterval?
+        var slowestQuery: TimeInterval = 0
         var polls = 0
+        var wakes = 1
         var reachable = false
         timed("wake (\(context))") { wakeControls(app) }
         while true {
             polls += 1
             reachable = timed("Settings.isHittable (\(context), poll \(polls))") { settings.exists && settings.isHittable }
             if firstQuery == nil { firstQuery = lastQuerySeconds }
-            if reachable || Date() >= deadline { break }
-            RunLoop.current.run(until: Date().addingTimeInterval(1))
-            timed("wake (\(context), poll \(polls))") { wakeControls(app) }
+            slowestQuery = max(slowestQuery, lastQuerySeconds)
+            if reachable { break }
+            let stalled = slowestQuery > Self.stalledFirstQuery
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed >= (stalled ? Self.settingsDeadline : Self.settingsPrompt) { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+            if stalled, elapsed >= Double(wakes) * 3 {   // only after a stall: the tray may have auto-hidden
+                wakes += 1
+                timed("re-wake after a stalled query (\(context), wake \(wakes))") { wakeControls(app) }
+            }
         }
-        let stalled = Self.stallPrefix(firstQuery)
+        let extended = wakes > 1 || Date().timeIntervalSince(started) > Self.settingsPrompt + 1
+        if reachable, extended {
+            print("AdaptiveLayout: Settings reached only after the stall allowance (\(context); \(wakes) wakes, slowest query "
+                  + "\(String(format: "%.1f", slowestQuery)) s)")
+        }
+        let prefix = Self.stallPrefix(firstQuery)
         if !reachable { reportReachableControls(app, "settings-not-reachable-\(context)", firstQuery: firstQuery) }
-        XCTAssertTrue(reachable, "\(stalled)Settings is reachable after a touch (\(context); \(polls) polls in "
-                      + "\(Int(Self.settingsDeadline)) s)")
+        XCTAssertTrue(reachable, "\(prefix)Settings is reachable after a touch (\(context); \(polls) polls, \(wakes) wakes, "
+                      + "slowest query \(String(format: "%.1f", slowestQuery)) s)")
     }
 
     /// On a failure to reach Settings: the controls the tree lists and where Settings and
