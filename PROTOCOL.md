@@ -613,7 +613,7 @@ Coordinates use the conventions of section 7.
 
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
-| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, receiver UI fields? | Identify the panel; (re)sent on connect, rotation, or receiver UI preference change |
+| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, receiver UI fields?, `effHz`?, `adaptiveTelemetry`?, `cost`?, `saveData`?, `saveDataAnswer`? | Identify the panel; (re)sent on connect, rotation, receiver UI preference change, or a change of the adaptive keys (section 6.20) |
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
@@ -634,7 +634,7 @@ Coordinates use the conventions of section 7.
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
 | `keyboardState` | additive (welcome feature `textCaret`) | `open` (bool) | The on-screen keyboard opened or closed, so the sender can follow the text caret (section 6.11) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
-| `stats` | pv 1 | free-form, `diag`? | Receiver-side telemetry for the sender's log |
+| `stats` | pv 1 | free-form, `diag`?, adaptive telemetry keys? | Receiver-side telemetry for the sender's log and, while announced, the adaptive controller (section 6.20) |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
 | `closing` | pv 2 | none | App quit; session ends for good |
 
@@ -875,7 +875,8 @@ diagnosable from one log file. The official receiver sends it every ~5 s
 with fields like `transport`, `fps`, `mbps`, `e2e50`, `e2e95`, `enc50`,
 `rtt`, `stalls`, `dec50`, `ph50`, `ph95`, `offsetKnown`. No field is
 normative; senders MUST accept any object. While streaming diagnostics are
-on, the official receiver adds `diag` (section 6.2.1).
+on, the official receiver adds `diag` (section 6.2.1). While the Mac announces
+adaptive mode, it sends `stats` every ~2 s with the telemetry keys of section 6.20.
 
 **`sleeping`** and **`closing`** let the
 sender distinguish "device locked, it will come back" (keep listening for a
@@ -902,7 +903,7 @@ section 4.
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
 | `pong` | pv 1 | `t`, `mt` | Clock-sync reply |
-| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`?, `diag`? | Liveness + sender health |
+| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`?, `diag`?, `adaptive`? | Liveness + sender health; `adaptive` announces section 6.20 |
 | `cursor` | pv 1 | `x`?, `y`?, `v` | Cursor position/visibility |
 | `cursorImg` | pv 1 | `nw`, `nh`, `ax`, `ay`, `png` | Cursor sprite |
 | `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
@@ -2554,3 +2555,62 @@ Detection (macOS 27, no public API says so): a window owned by WindowManager or 
 a whole display (CGWindowList) gates an Accessibility check for WindowManager's `mc.display`
 group or the Dock's `mc` group. Polled twice a second only while a Window-mode session is live.
 Older Macs never send the field; older receivers ignore it and see paused panes as before.
+
+### 6.20 Adaptive Automatic and "Use less data" (#123)
+
+Optional and additive: no `pv` bump, no welcome feature, no new message type. Every key below
+rides on a message that already exists. A peer that does not know a key ignores it; absence means
+today's behaviour. Garbage or out-of-range values read as absent. Numbers are JSON numbers; a JSON
+bool is never accepted where a number is expected (and the reverse). Thresholds and the real-world
+effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md).
+
+**Receiver `hello`** (re-sent whenever any of these change; the official receivers check every
+~2 s on their ping tick):
+
+- `effHz` (int 1…240): the screen's current effective refresh. iOS: the screen's
+  `maximumFramesPerSecond`, at most 60 while Low Power Mode is on. Mac Receiver: the main
+  `NSScreen.maximumFramesPerSecond`. Absent: the Mac negotiates FPS exactly as before
+  (`maxFPS` only).
+- `adaptiveTelemetry` (int, `1`): the receiver adds the telemetry keys below to `stats` while the
+  Mac announces adaptive mode. Only honoured together with a valid `effHz`; the official receivers
+  always send both or neither. Absent: the Mac keeps its fixed Automatic policy for this receiver.
+- `cost` (object): a cost hint for the receiver's own media connection path,
+  `{"cost":C,"conf":F,"iface":I}`. C is `unmetered`, `expensive`, `constrained` (Low Data Mode) or
+  `unknown`; F is `low`, `medium` or `high` (high = the connection's own path); I is `wifi`,
+  `wired`, `cellular`, `tunnel` or `unknown`. A tunnel (Tailscale) is never reported as cellular;
+  through a tunnel "not expensive" is `unknown`. Class and flags only: never an SSID, address,
+  interface name or carrier. Missing or invalid `cost`/`conf`: the hint is ignored; an invalid
+  `iface` reads as `unknown`.
+- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting.
+- `saveDataAnswer` (`"saveData"` or `"keepQuality"`): the remembered answer to the one-time
+  suggestion, or the explicit full-quality choice in Settings. Absent: not answered.
+
+**Mac `ping`**: `"adaptive":1` while the Mac runs the adaptive controller for this session (the
+Mac's Adaptive Automatic (Beta) switch is on and its Streaming Mode is Automatic). Any other value
+or absence means not announced. A receiver that sees it sends `stats` every ~2 s instead of every
+~5 s and adds the keys below; a ping without it, or no ping for 6 s, returns to the old cadence and
+the old `stats` content.
+
+**Receiver `stats`** while announced (window = the time since the previous `stats`):
+
+| Key | Meaning |
+| --- | --- |
+| `win` | window length in seconds (0.5…30); required for the others to be read |
+| `deliveredFps` | frames that reached the presentation hand-off, per second |
+| `decodedFps`, `enqFps` | decoded / enqueued frames per second (defined; the official receivers do not send them yet) |
+| `dec95` | decode time p95 in ms (Metal path only) |
+| `presAge`, `late` | presenter queue age (ms) and late drops (defined; not sent yet) |
+| `jit` | mean change between consecutive control round trips in the window, ms (`rtt` is the existing key) |
+| `thermal` | 0 nominal, 1 fair, 2 serious, 3 critical |
+| `lowPower` | bool, Low Power Mode |
+
+**What the Mac does with them.** Old receivers (no keys) and Custom mode: exactly today's
+behaviour. With the Beta switch on, a receiver that sends `effHz` + `adaptiveTelemetry` gets a
+per-receiver controller: FPS changes take the live capture update, bitrate changes recreate the
+encoder session (with a keyframe), and raster changes restart that receiver's capture (rate
+limited). The bitrate never goes above the Best target (18 Mbps). With the switch on, the Mac also
+never captures above the source's own refresh. "Use less data" works with the switch off too: in
+Automatic, the Mac uses a conservative point (Balanced raster and bitrate, at most 60 FPS) for that
+receiver when `saveData` is `on`, or `auto` with clear Low Data Mode evidence, or `auto` with clear
+metered evidence and `saveDataAnswer:"saveData"`. `keepQuality` keeps full quality. Saving data
+never stops or refuses a stream. Android sends none of these keys yet (parity gap).
