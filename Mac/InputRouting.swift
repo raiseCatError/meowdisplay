@@ -526,8 +526,9 @@ struct ScrollRemainder {
     private(set) var y = 0.0
 
     mutating func take(dxPoints: Double, dyPoints: Double) -> (dx: Int32, dy: Int32) {
-        // The delta is a receiver's number: finite (JSON has no NaN or
-        // infinity) but possibly huge. Each total is clamped to what a scroll
+        // The delta is a receiver's number: possibly huge, and -infinity when
+        // the JSON says `-1e400` (`JSONSerialization` reads that as -inf), or
+        // NaN once a mapper scales an infinity. Each total is clamped to what a scroll
         // event can carry BEFORE it is converted, so the conversion can never
         // trap and the carried remainder stays finite. Real deltas are far
         // inside the bound and come out exactly as before.
