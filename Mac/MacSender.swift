@@ -522,6 +522,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// keeps them out of the message.
     private let reportedStreamingMode: StreamingMode?
     private let reportedCustomFrameRate: CustomFrameRateSelection?
+    /// Adaptive Automatic (#123, phase 2) and "Use less data" for this
+    /// receiver only. Its plan is nil (today's fixed policy) unless the Beta
+    /// switch is on or the receiver asks to save data, and never in Custom.
+    let adaptive: AdaptiveStreamingCoordinator
+    /// `queue` only: start of the adaptive sender window (ping cadence).
+    private var adaptiveWindowStart = ProcessInfo.processInfo.systemUptime
     /// Streaming Priority (bounded encoder-pipelining depth, see
     /// `StreamingPriorityPolicy`): like `streamingProfile`, applies per-
     /// pipeline at construction — a change rebuilds the session (see
@@ -597,6 +603,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// deciding the codec against IT, then applying only the CHOSEN codec's
     /// own ceiling closes that gap.
     private func effectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
+        adaptive.resolveFPS(todayEffectiveFPS(width: width, height: height))
+    }
+
+    /// Today's capability-aware FPS without the adaptive plan: what the
+    /// SOURCE runs at (the Extend virtual display's refresh, the Window view
+    /// composition budget), so the controller can later step back up.
+    private func todayEffectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
         let commonTarget = StreamingFPSPolicy.commonTargetFPS(
             profile: streamingProfile, requestedFPS: customFPS,
             receiverMaxFPS: lastHello?.maxFPS, userMaxFPS: receiverMaxFPSPreference.userCeilingFPS)
@@ -1163,7 +1176,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          streamingPriority: StreamingPriority = .auto,
          codecPreference: CodecPreference = .auto,
          streamingMode: StreamingMode? = nil,
-         customFrameRateSelection: CustomFrameRateSelection? = nil) {
+         customFrameRateSelection: CustomFrameRateSelection? = nil,
+         adaptiveAutomatic: Bool = false) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -1177,6 +1191,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.customFPS = customFPS
         self.reportedStreamingMode = streamingMode
         self.reportedCustomFrameRate = customFrameRateSelection
+        self.adaptive = AdaptiveStreamingCoordinator(
+            enabled: adaptiveAutomatic, streamingMode: streamingMode, displayMode: MacSender.adaptiveMode(mode),
+            log: { Log.info($0) })
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
@@ -1190,6 +1207,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.setSpecific(key: queueKey, value: ())
         transportController.delegate = self
         selfBox.install(self)
+        adaptive.applier = self
+        adaptive.recorder = diagnostics
     }
 
     // MARK: - Queue ownership
@@ -2639,7 +2658,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // encoder can't actually sustain at this size.
         let (virtualDisplayCaptureW, virtualDisplayCaptureH) = clampedCaptureSize(
             pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
-        let virtualDisplayFPS = effectiveFPS(width: virtualDisplayCaptureW, height: virtualDisplayCaptureH).fps
+        let virtualDisplayFPS = todayEffectiveFPS(width: virtualDisplayCaptureW, height: virtualDisplayCaptureH).fps
+        adaptive.setSourceRefresh(virtualDisplayFPS)
 
         // USB sessions can start before lockdown resolves the device name —
         // fall back to the kind from the hello rather than the generic label.
@@ -2953,7 +2973,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let size = CGSize(width: pointsWide, height: pointsHigh)
         let (resizeCaptureW, resizeCaptureH) = clampedCaptureSize(
             pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
-        let targetFPS = effectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
+        let targetFPS = todayEffectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
+        adaptive.setSourceRefresh(targetFPS)
         #if DEBUG
         Log.info("extendDebug: resizeExistingDisplay id=\(vd.displayID) "
             + "shape=\(extendShapePreference.shape.rawValue) resolvedAspect=\(resolvedAspect) "
@@ -3047,6 +3068,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// The capture scale: the quality's, times the adaptive plan's raster.
+    private var captureScale: Double { adaptive.captureScale(today: quality.scale) }
+
     /// hello.maxEncodeWide/High (PROTOCOL.md 6.5): a big panel does not imply
     /// a big decoder. Caps the stream at the receiver's advertised decode
     /// ceiling — SCK scales the capture — while the desktop keeps its full
@@ -3066,8 +3090,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `setupEncoder` goes on to pick — never a larger, unverified HEVC
     /// number invented ahead of hardware testing.
     private func clampedCaptureSize(pointsWide: Int, pointsHigh: Int, info: PhoneInfo) -> (Int, Int) {
-        let nativeW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
-        let nativeH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
+        let nativeW = (Int(Double(pointsWide * 2) * captureScale)) & ~1
+        let nativeH = (Int(Double(pointsHigh * 2) * captureScale)) & ~1
         let (maxWide, maxHigh) = CodecDecodeCeiling.applicable(
             codec: .h264, legacyMaxEncodeWide: info.maxEncodeWide, legacyMaxEncodeHigh: info.maxEncodeHigh)
         let (captureW, captureH) = DecodeCeiling.clamp(
@@ -3370,6 +3394,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         captureDisplayID = displayID
         capturePixelsWide = pixelsWide
         capturePixelsHigh = pixelsHigh
+        adaptive.noteCaptureStarted(width: pixelsWide, height: pixelsHigh,
+                                    scale: mode == .window ? quality.scale : captureScale)
         guard videoEnabled || desiredAudioEnabled else {
             // Nothing wants ScreenCaptureKit right now — stay a no-op
             // logical session exactly as before audio existed, rather than
@@ -3944,8 +3970,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if width <= 0 || height <= 0 {
                     (width, height) = lastHello.map {
                         clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-                    } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-                          (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+                    } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+                          (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
                 }
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
@@ -4000,8 +4026,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let display = try await findSCDisplay(id: vd.displayID, expectedSize: size)
                 let (width, height) = lastHello.map {
                     clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-                } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-                      (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+                } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+                      (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
         } catch is CancellationError {
@@ -4435,10 +4461,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
+        adaptive.setSourceRefresh(Self.physicalRefreshHz(display.displayID, mode: displayMode))
         let pixelsW = displayMode?.pixelWidth ?? display.width
         let pixelsH = displayMode?.pixelHeight ?? display.height
-        let nativeCaptureW = (Int(Double(pixelsW) * quality.scale)) & ~1
-        let nativeCaptureH = (Int(Double(pixelsH) * quality.scale)) & ~1
+        let nativeCaptureW = (Int(Double(pixelsW) * captureScale)) & ~1
+        let nativeCaptureH = (Int(Double(pixelsH) * captureScale)) & ~1
         // Clamp to the receiver's advertised decode ceiling (PROTOCOL.md
         // 6.5) exactly like Extend does via `clampedCaptureSize` — Mirror
         // used to skip this because capture started before any hello was
@@ -4508,8 +4535,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !isStale() else { throw CancellationError() }
         let (captureW, captureH) = lastHello.map {
             clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-        } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-              (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+        } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+              (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
     }
 
@@ -5340,6 +5367,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // Liveness + send-side health for the phone's overlay.
                 let elapsed = Date().timeIntervalSince(self.capWindowStart)
                 let capFps = elapsed > 0 ? Int(Double(self.capFrames) / elapsed) : 0
+                let adaptiveCapturedFrames = self.capFrames
                 self.capFrames = 0
                 self.capWindowStart = Date()
                 let sorted = self.inputLatencies.sorted()
@@ -5362,7 +5390,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
                 // Diagnostics (#123): optional `diag` summary, only while on.
                 let diagnosticsSuffix = self.diagnosticsPingSuffix()
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)}")
+                // Adaptive Automatic (#123): one controller window per ping.
+                self.adaptiveTick(capturedFrames: adaptiveCapturedFrames, drops: pingWindowDrops)
+                let adaptiveSuffix = AdaptiveStreamingWire.pingSuffix(announcing: self.adaptive.announcesAdaptive)
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)\(adaptiveSuffix)}")
             }
             self.schedulePing()
         }
@@ -5389,7 +5420,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let codec: DiagnosticsCodec = activeCodec == .hevc ? .hevc : .h264
         let width = capturePixelsWide, height = capturePixelsHigh, fps = captureTargetFPS
         let inFlight = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
+        let sourceHz = adaptive.sourceRefreshHz
         diagnostics.updateContext { context in
+            context.sourceRefreshHz = sourceHz.map(Double.init)
             context.displayMode = displayMode
             context.codec = codec
             context.rasterWidth = width
@@ -5852,6 +5885,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendJSONFrame("{\"type\":\"pong\",\"t\":\(t),\"mt\":\(mt)}")
             }
         case "stats":
+            // Adaptive Automatic (#123): the optional windowed telemetry keys.
+            adaptive.receiverStats(AdaptiveReceiverTelemetry.parse(obj))
             // Aggregated pipeline health measured on the phone — logged here
             // so one file holds both ends of the story.
             if let json = try? JSONSerialization.data(withJSONObject: obj),
@@ -5935,6 +5970,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { @MainActor in sink.publishStatus("Connected") }
                 let previous = lastHello
                 lastHello = info
+                // Optional adaptive keys (#123); absent = today's behaviour.
+                adaptive.helloAccepted(AdaptiveHelloFields.parse(obj), now: ProcessInfo.processInfo.systemUptime)
                 // Receiver-enforced max FPS (PART 3): load this peer's own
                 // stored preference the first time it's known, same
                 // convention as Extend shape — a live `maxFPSRequest` (or
@@ -6860,7 +6897,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           lowLatency: Bool, codec: StreamCodec) -> OSStatus {
         videoEncoder.create(MacSenderVideoEncoder.Configuration(
             width: width, height: height, fps: fps,
-            bitrate: quality.bitrate, codec: codec, lowLatency: lowLatency))
+            bitrate: adaptive.encoderBitrate(today: quality.bitrate), codec: codec, lowLatency: lowLatency))
     }
 
     /// Decides the codec for the NEXT `setupEncoder` call, per
@@ -6966,7 +7003,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         frameAdmission.reconfigure(fps: fps)
         Log.info("receiver codecs: \(lastHello?.codecs?.joined(separator: ", ") ?? "h264") "
             + "codec preference: \(codecPreference.rawValue) effective codec: \(codec.wireValue) reason: \(reason)")
-        Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(adaptive.encoderBitrate(today: quality.bitrate) / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
         sendStreamCodecState()
     }
 
@@ -7950,6 +7987,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.framesSent += 1
             self.bytesSent += frameByteCount
+            if channel == .video {
+                self.adaptive.noteVideoSent(bytes: frameByteCount, now: ProcessInfo.processInfo.systemUptime)
+            }
             #if DEBUG
             self.debugSendsCompletedWindow += 1
             if kind == "audio" {
@@ -8309,7 +8349,7 @@ extension MacSender {
         let (canvasW, canvasH) = windowCanvasSize(for: info)
         let hostID = TrustStore.shared.installID() ?? "mac"
         try await onQueue { sender in
-            let fps = sender.effectiveFPS(width: canvasW, height: canvasH).fps
+            let fps = sender.todayEffectiveFPS(width: canvasW, height: canvasH).fps
             sender.installWorkspaceEngine(hostID: hostID, canvas: CGSize(width: canvasW, height: canvasH), fps: fps)
         }
         try await startCapture(display: carrier, pixelsWide: canvasW, pixelsHigh: canvasH,
@@ -8527,6 +8567,7 @@ extension MacSender {
             sender.videoEncoder.invalidate()
             sender.capturePixelsWide = w
             sender.capturePixelsHigh = h
+            sender.adaptive.noteCaptureStarted(width: w, height: h, scale: sender.quality.scale)
             let fps = sender.effectiveFPS(width: w, height: h).fps
             do {
                 try sender.setupEncoder(width: w, height: h, fps: fps)
@@ -8706,3 +8747,130 @@ extension MacSender {
 #endif
 
 private struct WindowAudioStreamBox: @unchecked Sendable { let stream: SCStream }
+
+// MARK: - Adaptive Automatic (#123, phase 2)
+//
+// Every change goes through a path this sender already had, and only ever
+// touches this receiver's own pipeline (one `MacSender` per receiver).
+
+extension MacSender: AdaptiveStreamingApplying {
+    static func adaptiveMode(_ mode: CaptureMode) -> RefreshNegotiation.DisplayMode {
+        switch mode {
+        case .mirror: return .mirror
+        case .extend: return .extend
+        case .window: return .window
+        }
+    }
+
+    /// The physical display's active mode refresh; ProMotion and some
+    /// panels report 0 there, so the screen's maximum is the fallback.
+    static func physicalRefreshHz(_ displayID: CGDirectDisplayID, mode: CGDisplayMode?) -> Int? {
+        if let rate = mode?.refreshRate, rate >= 1 { return Int(rate.rounded()) }
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+        }
+        guard let fps = screen?.maximumFramesPerSecond, fps > 0 else { return nil }
+        return fps
+    }
+
+    /// What the receiver shows the stream on, for the readability floor.
+    static func adaptiveReceiverDisplay(_ info: PhoneInfo) -> AdaptiveReceiverDisplay? {
+        guard info.scale > 0, info.pixelsWide > 0, info.pixelsHigh > 0 else { return nil }
+        let sizeClass: AdaptiveReceiverDisplay.SizeClass
+        switch info.device {
+        case "iPhone": sizeClass = .phone
+        case "iPad": sizeClass = .tablet
+        case "Mac": sizeClass = .desktop
+        default: return nil
+        }
+        return AdaptiveReceiverDisplay(pointsWide: Int(Double(info.pixelsWide) / info.scale),
+                                       pointsHigh: Int(Double(info.pixelsHigh) / info.scale),
+                                       scale: info.scale, sizeClass: sizeClass)
+    }
+
+    /// `queue` only, once per ping window.
+    fileprivate func adaptiveTick(capturedFrames: Int, drops: (enc: Int, net: Int)) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let now = ProcessInfo.processInfo.systemUptime
+        if let report = transportController.pathCostReport {
+            adaptive.senderPathChanged(report, epoch: transportController.routeEpoch, now: now)
+        }
+        let inputs = lastHello.map { info in
+            AdaptiveStreamingCoordinator.Inputs(
+                mode: Self.adaptiveMode(mode), profile: streamingProfile, customFPS: customFPS,
+                receiverMaxFPS: info.maxFPS, userMaxFPS: receiverMaxFPSPreference.userCeilingFPS,
+                codec: activeCodec, receiver: Self.adaptiveReceiverDisplay(info))
+        }
+        let window = AdaptiveStreamingCoordinator.SenderWindow(
+            start: adaptiveWindowStart, end: now, capturedFrames: capturedFrames,
+            encoderDrops: drops.enc, networkDrops: drops.net,
+            thermal: AdaptiveThermalLevel(ProcessInfo.processInfo.thermalState),
+            lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+        adaptiveWindowStart = now
+        adaptive.tick(generation: activeConnectionGeneration, inputs: inputs, window: window, now: now)
+    }
+
+    /// `queue` only (the coordinator calls it from its queue-confined inputs).
+    func adaptiveApply(_ path: AdaptiveApplyPath) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // The lock screen view's frames are validated at the encoder; leave
+        // that pipeline alone. The plan applies at the next restart.
+        guard !lockScreenActive else {
+            Log.info("adaptive: \(path.rawValue) deferred while the lock screen is shown")
+            return
+        }
+        switch path {
+        case .none:
+            return
+        case .liveFPSUpdate:
+            applyEffectiveFPSChange()
+        case .encoderRebuild:
+            applyEffectiveFPSChange(rebuildEncoder: true)
+        case .captureRestart:
+            guard mode != .window, captureOwnership.liveStream != nil else {
+                // No raster in Window view, and no live stream to restart:
+                // the next capture start uses the new size. Bitrate/FPS now.
+                applyEffectiveFPSChange(rebuildEncoder: true)
+                return
+            }
+            let selfBox = self.selfBox
+            Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
+        }
+    }
+
+    /// Restart-class raster change (rate-limited by the controller): the
+    /// same release/stop/start sequence as a rotation, without touching the
+    /// virtual display, the mirrored display choice or the connection.
+    private func restartCaptureForAdaptiveRaster() async {
+        let began = (try? await onQueue { sender -> Bool in
+            guard !sender.reconfiguring, !sender.stopped, !sender.lockScreenActive,
+                  sender.captureOwnership.liveStream != nil,
+                  sender.captureStateSnapshot().phase == .running else { return false }
+            sender.reconfiguring = true
+            return true
+        }) ?? false
+        guard began else { return }
+        let selfBox = self.selfBox
+        defer { queue.async { selfBox.currentOnQueue()?.reconfiguring = false } }
+        // The cached frame is the old size: never replay it into the new encoder.
+        invalidateCapturePipeline(discardingLastFrame: true)
+        if let retired = try? await onQueue({ sender in sender.releaseCaptureStream() }) {
+            try? await retired.stopCapture()
+        }
+        videoEncoder.invalidate()
+        needsKeyframe = true
+        do {
+            switch mode {
+            case .mirror: try await rebuildMirrorCapturePipeline()
+            case .extend: try await reattachExtendCapture()
+            case .window: return
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard updateCaptureState({ $0.unexpectedStop() }) else { return }
+            Log.info("adaptive: raster restart failed: \(error) — entering capture recovery")
+            scheduleCaptureRecovery()
+        }
+    }
+}
