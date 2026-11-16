@@ -6614,15 +6614,18 @@ private struct VideoOffStatus: View {
     let onTurnOn: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Label(String(localized: "Video is off"), systemImage: "video.slash.fill")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-            Button(String(localized: "Turn Video On"), action: onTurnOn)
-                .font(.subheadline.weight(.semibold))
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .accessibilityIdentifier("videoOffTurnOn")
+        // One line when it fits; at large text sizes or on a narrow window the button goes under
+        // the words instead of either being cut off.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                status.lineLimit(1)
+                turnOn
+            }
+            VStack(spacing: 6) {
+                status.multilineTextAlignment(.center)
+                turnOn
+            }
+            .padding(.vertical, 4)
         }
         .foregroundStyle(.white)
         .padding(.leading, 14)
@@ -6633,6 +6636,19 @@ private struct VideoOffStatus: View {
         .padding(.horizontal, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("videoOffStatus")
+    }
+
+    private var status: some View {
+        Label(String(localized: "Video is off"), systemImage: "video.slash.fill")
+            .font(.subheadline.weight(.semibold))
+    }
+
+    private var turnOn: some View {
+        Button(String(localized: "Turn Video On"), action: onTurnOn)
+            .font(.subheadline.weight(.semibold))
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .accessibilityIdentifier("videoOffTurnOn")
     }
 }
 
