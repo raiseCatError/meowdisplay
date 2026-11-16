@@ -24,6 +24,19 @@ enum class StreamingProfile(val wire: String, val title: String, val explanation
     }
 }
 
+/**
+ * The Mac's outer Streaming Mode (Shared/StreamingMode.swift). In Automatic the Mac applies a fixed
+ * profile and priority and declines receiver requests for either, so this device shows them read-only
+ * (issue #142). Reported only by Macs with that change; null otherwise.
+ */
+enum class MacStreamingMode(val wire: String) {
+    Automatic("automatic"), Custom("custom");
+
+    companion object {
+        fun of(wire: String?) = entries.firstOrNull { it.wire == wire }
+    }
+}
+
 /** Custom profile's frame rate. Auto asks for the same ceiling as Performance. */
 enum class CustomFrameRate(val wire: String, val title: String) {
     Auto("auto", "Auto"), Fps30("fps30", "30"), Fps60("fps60", "60"), Fps90("fps90", "90"), Fps120("fps120", "120");
@@ -93,7 +106,12 @@ data class StreamSettings(
     /** The Mac's protocol version on this connection (0 before its welcome). */
     val macProtocolVersion: Int = 0,
     val profile: StreamingProfile? = null,
-    /** The Custom frame rate this device last asked for (the Mac's state carries only the profile). */
+    /** The Mac's Streaming Mode as it reported it; null when it didn't (older Macs). */
+    val macStreamingMode: MacStreamingMode? = null,
+    /**
+     * The Custom profile's frame rate: the Mac's own pick when it reports one (Custom mode, newer
+     * Macs), else what this device last asked for.
+     */
     val customFrameRate: CustomFrameRate = CustomFrameRate.Auto,
     val priority: StreamingPriority? = null,
     val extendShape: ExtendShapePreference? = null,
@@ -115,6 +133,17 @@ data class StreamSettings(
     val supportsMaxFPS get() = macProtocolVersion >= WireProtocol.MAX_FPS
     val supportsPriority get() = macProtocolVersion >= WireProtocol.STREAMING_PRIORITY
     val supportsProfileRequest get() = macProtocolVersion >= WireProtocol.STREAMING_PROFILE_REQUEST
+    /** The Mac is in Automatic: Streaming Profile, Frame Rate and Priority can't be changed from here. */
+    val streamingChoicesLocked get() = macStreamingMode == MacStreamingMode.Automatic
+
+    /** The note under the streaming choices, from the Mac's reported mode (iOS `ReceiverStreamingModeNote`). */
+    val streamingModeNote: String?
+        get() = when (macStreamingMode) {
+            MacStreamingMode.Automatic ->
+                "Streaming Mode is Automatic on the Mac. To choose a profile or priority here, switch it to Custom in MeowDisplay on the Mac."
+            MacStreamingMode.Custom -> "These settings belong to the Mac and apply to every device connected to it."
+            null -> null
+        }
     val shownExtendShape get() = pendingExtendShape ?: extendShape
     val shownMaxFPS get() = pendingMaxFPS ?: maxFPS
 
@@ -146,7 +175,12 @@ data class StreamSettings(
 
 /** Parsed Mac → receiver setting states. */
 sealed interface StreamSettingsUpdate {
-    data class Profile(val profile: StreamingProfile) : StreamSettingsUpdate
+    /** [mode] and [customFrameRate] are optional keys: null when the Mac didn't send them. */
+    data class Profile(
+        val profile: StreamingProfile,
+        val mode: MacStreamingMode? = null,
+        val customFrameRate: CustomFrameRate? = null,
+    ) : StreamSettingsUpdate
     data class Priority(val priority: StreamingPriority) : StreamSettingsUpdate
     data class ExtendShapeConfirmed(val preference: ExtendShapePreference) : StreamSettingsUpdate
     data class MaxFPS(val state: MaxFPSState) : StreamSettingsUpdate
@@ -162,7 +196,9 @@ object StreamSettingsWire {
 
     /** Null for any other type, or a known one with a missing/mistyped required field. */
     fun parse(type: String, body: JsonObject): StreamSettingsUpdate? = when (type) {
-        "streamingProfileState" -> StreamingProfile.of(body.string("profile"))?.let(StreamSettingsUpdate::Profile)
+        "streamingProfileState" -> StreamingProfile.of(body.string("profile"))?.let {
+            StreamSettingsUpdate.Profile(it, MacStreamingMode.of(body.string("mode")), CustomFrameRate.of(body.string("customFrameRate")))
+        }
         "streamingPriorityState" -> StreamingPriority.of(body.string("priority"))?.let(StreamSettingsUpdate::Priority)
         "extendShapeState" -> ExtendShape.of(body.string("shape"))?.let {
             StreamSettingsUpdate.ExtendShapeConfirmed(ExtendShapePreference(it, body.bool("useFullDisplay") ?: false))
@@ -266,7 +302,12 @@ class StreamSettingsModel {
 
     fun apply(update: StreamSettingsUpdate) {
         state = when (update) {
-            is StreamSettingsUpdate.Profile -> state.copy(profile = update.profile)
+            // Every state carries the mode afresh: a Mac without it reports none, and its controls stay as they were.
+            is StreamSettingsUpdate.Profile -> state.copy(
+                profile = update.profile,
+                macStreamingMode = update.mode,
+                customFrameRate = update.customFrameRate ?: state.customFrameRate,
+            )
             is StreamSettingsUpdate.Priority -> state.copy(priority = update.priority)
             is StreamSettingsUpdate.ExtendShapeConfirmed -> state.copy(extendShape = update.preference, pendingExtendShape = null)
             is StreamSettingsUpdate.MaxFPS -> state.copy(maxFPS = update.state.preference, pendingMaxFPS = null, maxFPSState = update.state)
@@ -277,14 +318,15 @@ class StreamSettingsModel {
         }
     }
 
+    /** Null while the Mac is in Automatic: it would decline, and the local Custom rate must not change. */
     fun requestProfile(profile: StreamingProfile, customFrameRate: CustomFrameRate): JsonObject? {
-        if (!state.supportsProfileRequest) return null
+        if (!state.supportsProfileRequest || state.streamingChoicesLocked) return null
         state = state.copy(customFrameRate = customFrameRate)
         return StreamSettingsWire.streamingProfileRequest(profile, customFrameRate)
     }
 
     fun requestPriority(priority: StreamingPriority): JsonObject? =
-        if (state.supportsPriority) StreamSettingsWire.streamingPriorityRequest(priority) else null
+        if (state.supportsPriority && !state.streamingChoicesLocked) StreamSettingsWire.streamingPriorityRequest(priority) else null
 
     /** Only a display the Mac listed (or Auto) can be asked for. */
     fun requestMirrorDisplay(uuid: String?): JsonObject? {
