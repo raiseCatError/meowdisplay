@@ -27,7 +27,7 @@ struct StagePeekCardGestures: UIViewRepresentable {
     /// (owner report 2026-10-31).
     var globalOrigin: CGPoint? = nil
 
-    static let holdDuration: TimeInterval = 0.35
+    static let holdDuration: TimeInterval = ReceiverHoldGestures.stagePeekCardDrag
     static let holdSlop: CGFloat = 10
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
