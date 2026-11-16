@@ -304,6 +304,13 @@ struct PerformanceLabFrameIDTracker: Sendable {
     private var lastCounter: UInt32?
     private var lastUniqueMs: Double?
 
+    /// A new stream (session or generation): forget the last ID so the next
+    /// read is a baseline, never a skip or discontinuity. The tally stays.
+    mutating func rebaseline() {
+        lastCounter = nil
+        lastUniqueMs = nil
+    }
+
     mutating func observe(_ reading: PerformanceLabFrameIDReading?, atMs nowMs: Double) -> Event {
         guard let reading else {
             tally.unreadable += 1

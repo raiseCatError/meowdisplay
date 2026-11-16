@@ -31,6 +31,15 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
     private var framesUntilProbe = 0
     private var misses = 0
     private var buffer: [UInt8] = []
+    /// The receiver session (its recorder) and stream generation the last
+    /// frame belonged to. A new one re-baselines the counter, so a
+    /// reconnect or new session mid-trial is never counted as skipped IDs.
+    private var stream: StreamKey?
+
+    struct StreamKey: Equatable, Sendable {
+        let recorder: ObjectIdentifier
+        let generation: UInt64?
+    }
 
     init() {}
 
@@ -52,11 +61,14 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
         rowHint = nil
         framesUntilProbe = 0
         misses = 0
+        stream = nil
     }
 
-    /// A decoded frame. Call only when `recorder.isEnabled`.
-    func observe(_ pixelBuffer: CVPixelBuffer, recorder: StreamDiagnosticsRecorder,
+    /// A decoded frame. Call only when `recorder.isEnabled`. `generation`:
+    /// the presentation generation the frame belongs to.
+    func observe(_ pixelBuffer: CVPixelBuffer, recorder: StreamDiagnosticsRecorder, generation: UInt64? = nil,
                  nowMs: Double = StreamDiagnosticsClock.nowMs()) {
+        noteStream(recorder: recorder, generation: generation)
         guard shouldRead() else { return }
         guard let plane = PerformanceLabPixelBufferLuma(pixelBuffer) else { return }
         plane.withLockedRows { source in
@@ -65,9 +77,22 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
     }
 
     /// Pure entry point over any luma source (tests).
-    func observe(_ source: PerformanceLabLumaSource, recorder: StreamDiagnosticsRecorder, nowMs: Double) {
+    func observe(_ source: PerformanceLabLumaSource, recorder: StreamDiagnosticsRecorder, generation: UInt64? = nil,
+                 nowMs: Double) {
+        noteStream(recorder: recorder, generation: generation)
         guard shouldRead() else { return }
         read(source, recorder: recorder, nowMs: nowMs)
+    }
+
+    /// A different receiver session (recorder) or stream generation than
+    /// the last frame: the next read is a new baseline, not a skip. The
+    /// tally (tests, lab view) keeps counting.
+    private func noteStream(recorder: StreamDiagnosticsRecorder, generation: UInt64?) {
+        let key = StreamKey(recorder: ObjectIdentifier(recorder), generation: generation)
+        lock.lock(); defer { lock.unlock() }
+        guard key != stream else { return }
+        if stream != nil { tracker.rebaseline() }
+        stream = key
     }
 
     /// Locked: every frame. Unlocked: one frame in `probeEveryNthFrame`.

@@ -340,7 +340,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         if let diagnostics, diagnostics.isEnabled {
             diagnostics.recordPresentationEnqueue(at: StreamDiagnosticsClock.nowMs())
             // Performance Lab frame-ID reader: read-only, mostly a no-op (#123).
-            PerformanceLabFrameIDProbe.shared.observe(box.value, recorder: diagnostics)
+            PerformanceLabFrameIDProbe.shared.observe(box.value, recorder: diagnostics, generation: generation)
         }
         outputEffects.decodedFrameReady(box, captureMs)
     }
