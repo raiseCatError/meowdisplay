@@ -386,6 +386,20 @@ jobs:
           echo "Duo UI test classes: $classes" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Select Xcode (.xcode-version)
         run: scripts/ci/select-xcode.sh
+      # Diagnostics for a stalled UI query (the runner image and macOS differed between a slow
+      # and a normal run): kept in the artifact with the watchdog's log.
+      - name: Log the runner
+        run: |
+          mkdir -p "$RUNNER_TEMP/host-watchdog"
+          {
+            echo "ImageOS=${ImageOS:-unset} ImageVersion=${ImageVersion:-unset}"
+            sw_vers
+            uname -a
+            sysctl hw.model hw.ncpu hw.memsize
+            xcodebuild -version
+            uptime
+            df -h /
+          } 2>&1 | tee "$RUNNER_TEMP/host-watchdog/runner.txt"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate project
@@ -417,12 +431,18 @@ jobs:
         run: |
           set -uo pipefail
           log="$RUNNER_TEMP/ui-tests.log"
+          # Logs the host every 10 s and samples the app when the output stalls (see the script).
+          : > "$log"
+          scripts/ci/host-watchdog.sh "$RUNNER_TEMP/host-watchdog" "${{ steps.duo.outputs.udid }}" "$log" &
+          watchdog=$!
+          trap 'kill "$watchdog" 2>/dev/null' EXIT
           # shellcheck disable=SC2086 # ONLY is one -only-testing argument per class
           xcodebuild test-without-building \
             -project MeowDisplay.xcodeproj \
             -scheme OpenSidecariOS \
             -destination "id=${{ steps.duo.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/ios-duo" \
+            -resultBundlePath "$RUNNER_TEMP/ios-duo.xcresult" \
             $ONLY \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300 2>&1 | tee "$log"
@@ -436,6 +456,19 @@ jobs:
             fi
           done
           exit "$status"
+      # The result bundle (the tests' screenshots and timings), the test log and the host
+      # watchdog's log and samples: what a stalled run is diagnosed from.
+      - name: Keep the Duo diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-duo-diagnostics
+          path: |
+            ${{ runner.temp }}/ios-duo.xcresult
+            ${{ runner.temp }}/ui-tests.log
+            ${{ runner.temp }}/host-watchdog
+          if-no-files-found: warn
+          retention-days: 14
 
   # The integration gate's verdict, where people see it: a push to dev whose jobs failed
   # opens (or adds to) one issue, and the first push on which they all pass again closes it.
