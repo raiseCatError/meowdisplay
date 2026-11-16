@@ -305,6 +305,9 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
         "sourceAgeP95Ms", "sendP95Ms", "encoderBusyShare", "sendBackpressureShare", "composeP95Ms", "composeFPS",
         "arrivalFPS", "arrivalP50Ms", "arrivalP95Ms", "arrivalGapsOver250ms", "enqueueFPS", "presenterQueueAgeP95Ms",
         "presenterQueueDepthMax", "decodeP95Ms", "decodeSamples", "rttMs",
+        // peer summary, Performance Lab frame-ID reader (numbers only)
+        "frameIDReadCount", "frameIDUniqueFPS", "frameIDDuplicates", "frameIDMissing", "frameIDUnreadable",
+        "frameIDIntervalP95Ms",
     ]
 
     /// Kinds of field that must never appear, even if someone adds them to

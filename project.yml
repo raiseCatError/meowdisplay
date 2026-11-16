@@ -431,6 +431,15 @@ targets:
       # Adaptive Automatic phase 2 wiring (#123): MacSender and StreamReceiver use these.
       - Shared/AdaptiveStreamingWiring.swift
       - Mac/AdaptiveStreamingSession.swift
+      # Performance Lab (#123): model, fixture schedule, frame-ID reader,
+      # run controller and the synthetic self-test.
+      - Shared/PerformanceLabFrameID.swift
+      - Shared/PerformanceLabFrameIDProbe.swift
+      - Shared/PerformanceLabWorkload.swift
+      - Shared/PerformanceLabScenario.swift
+      - Shared/PerformanceLabRun.swift
+      - Mac/PerformanceLabRunController.swift
+      - Mac/PerformanceLabSynthetic.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same

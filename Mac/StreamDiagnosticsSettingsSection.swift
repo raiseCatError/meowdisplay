@@ -31,6 +31,8 @@ struct StreamDiagnosticsSettingsSection: View {
                 Button("Export Diagnostics…") { export() }
                     .controlSize(.small)
                     .disabled(controller.sessions.allSatisfy(\.failed))
+                Button("Performance Lab…") { PerformanceLabPanelWindow.show() }
+                    .controlSize(.small)
             }
         } header: {
             Text("Streaming Diagnostics")

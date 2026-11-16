@@ -1,0 +1,15 @@
+#!/bin/sh
+# Performance Lab software-only self-test (#123). SYNTHETIC: it validates the
+# harness (bundle schema, statistics, report), not performance. No device,
+# capture or network involved. Python 3 standard library only.
+#
+#   tools/perf-lab/selftest
+#
+# The Swift half (scripted events through the real recorder and run
+# controller, checked against tests/golden/synthetic-run) runs with the Mac
+# unit tests: see docs/performance/performance-lab.md, "Self-test".
+set -eu
+export PYTHONDONTWRITEBYTECODE=1  # no __pycache__ in the tree
+here=$(cd "$(dirname "$0")" && pwd)
+python3 -m unittest discover -s "$here" -p 'test_*.py'
+python3 "$here/perf_lab.py" selftest
