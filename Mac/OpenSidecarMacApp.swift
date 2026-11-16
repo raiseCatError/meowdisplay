@@ -1013,6 +1013,8 @@ final class SenderController: ObservableObject {
     /// `_meowdisp-q._udp` — QUIC reachability/capability HINTS only (see
     /// `QUICDiscoveryHintStore`); never trust, never a connect request.
     private var quicHintBrowser: NWBrowser?
+    /// Dedupes the Bonjour browsers' state lines. Touched only on the main queue.
+    private var browserStateLog = DiscoveryBrowserStateLog()
     // Last receiver-originated Connect token handled per peer id, so a
     // browse re-fire with the same still-published token (mDNS is noisy)
     // doesn't redial a session that's already coming up.
@@ -1205,6 +1207,7 @@ final class SenderController: ObservableObject {
                 self.scheduleAutoConnect()
             }
         }
+        logStateChanges(of: browser, role: .receivers)
         browser.start(queue: .main)
         self.browser = browser
         startQUICHintBrowsing()
@@ -1225,8 +1228,21 @@ final class SenderController: ObservableObject {
             }
             QUICDiscoveryHintStore.shared.replaceAll(entries)
         }
+        logStateChanges(of: browser, role: .quicHints)
         browser.start(queue: .main)
         quicHintBrowser = browser
+    }
+
+    /// Diagnostic only (#263): records `.waiting`/`.failed` so a browser that silently
+    /// found nothing leaves a trace. Never restarts or otherwise reacts to the state.
+    private func logStateChanges(of browser: NWBrowser, role: DiscoveryBrowserRole) {
+        browser.stateUpdateHandler = { [weak self] state in
+            let summary = DiscoveryBrowserStateSummary(state)
+            DispatchQueue.main.async {
+                guard let self, let line = self.browserStateLog.line(for: summary, role: role) else { return }
+                Log.info(line)
+            }
+        }
     }
 
     /// The name this Mac pairs and advertises under: the Mac's own name, or
