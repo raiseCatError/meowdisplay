@@ -203,9 +203,15 @@ python3 tools/perf-lab/perf_lab.py compare <bundle-A> <bundle-B> [--allow-partia
   ships with the tool in `scenarios.json`, generated from the app; the app
   version, variant, commit and date have strict formats). A listed trial
   whose file is missing, and a planned trial that is not listed, stay in the
-  report as `failed` (`missingTrialData`). A malformed bundle, a file over
-  64 MB or a trial file outside the bundle folder is refused with exit 2 and
-  one line, never a traceback.
+  report as `failed` (`missingTrialData`). A trial labelled `complete` must
+  list no issues, at least `requestedWindows` windows and a measured time
+  above 0, or the bundle is refused (the minimum-trials gate counts complete
+  trials). A malformed bundle, a file over 64 MB, a bundle over 128 MB in
+  total (a trial of the longest scenario is about 1.8 MB), anything that is
+  not a regular file (a FIFO, a folder, a device), a trial file outside the
+  bundle folder, any other file-system error, and an `--out` path that cannot
+  be written (for example in a missing folder) are refused with exit 2 and
+  one line, never a traceback or a hang.
 - Per trial: source-unique, capture, submit, encode, send rates; frame time
   at submission p50/p95/p99; capture interval, source age, encode and send
   p50/p95/p99 exact to the bucket; gaps over 100/250/500 ms per interval stage;

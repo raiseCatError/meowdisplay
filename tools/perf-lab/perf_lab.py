@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import stat
 import statistics
 import subprocess
 import sys
@@ -71,6 +72,10 @@ MINIMUM_TRIALS = 3
 # Bounds on what a bundle may contain.
 MAX_TRIALS = 999
 MAX_FILE_BYTES = 64 * 1024 * 1024
+# All files of one bundle together. A trial of the longest scenario (120
+# windows) is about 1.8 MB, so this is about 70 such trials; parsed JSON
+# takes several times its file size in memory.
+MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 APP_VERSION_RE = re.compile(r"[0-9][0-9a-z.]*( \([0-9a-z.-]+\))?|synthetic|dev|unknown")
 COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
 VARIANT_RE = re.compile(r"[a-z0-9-]{1,24}")
@@ -87,23 +92,52 @@ class RefusedError(Exception):
 
 # ---------------------------------------------------------------- loading
 
-def _read_json(path, root=None):
-    """One bundle file: inside the bundle folder, at most MAX_FILE_BYTES."""
+class _ByteBudget:
+    """What is left of MAX_BUNDLE_BYTES while one bundle loads."""
+
+    def __init__(self, limit):
+        self.left = limit
+
+
+def _read_json(path, root=None, budget=None):
+    """One bundle file: a regular file inside the bundle folder, at most
+    MAX_FILE_BYTES, and within the bundle's total `budget` if given."""
     name = os.path.basename(path)
-    if root is not None:
-        real_root = os.path.realpath(root)
-        if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
-            raise BundleError("%s points outside the bundle folder" % name)
     try:
-        if os.path.getsize(path) > MAX_FILE_BYTES:
+        if root is not None:
+            real_root = os.path.realpath(root)
+            if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
+                raise BundleError("%s points outside the bundle folder" % name)
+        # O_NONBLOCK: opening a FIFO never waits for a writer; the type
+        # check below then refuses it (and devices, sockets, folders).
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise BundleError("%s is not a regular file" % name)
+            if st.st_size > MAX_FILE_BYTES:
+                raise BundleError("%s is larger than %d MB" % (name, MAX_FILE_BYTES // (1024 * 1024)))
+        except BaseException:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "rb") as f:
+            # Read one byte more than allowed: a file that grew after the
+            # check is still refused.
+            data = f.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
             raise BundleError("%s is larger than %d MB" % (name, MAX_FILE_BYTES // (1024 * 1024)))
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        if budget is not None:
+            budget.left -= len(data)
+            if budget.left < 0:
+                raise BundleError("the bundle is larger than %d MB in total" % (MAX_BUNDLE_BYTES // (1024 * 1024)))
+        return json.loads(data.decode("utf-8"))
     except FileNotFoundError:
         raise BundleError("missing %s" % name)
     except json.JSONDecodeError as e:
         raise BundleError("%s is not valid JSON (%s)" % (name, e))
-    except (UnicodeDecodeError, RecursionError, IsADirectoryError, PermissionError) as e:
+    except (UnicodeDecodeError, RecursionError, OSError, ValueError) as e:
+        # OSError covers a symlink loop, a name too long, I/O errors and
+        # permissions; never a traceback.
         raise BundleError("%s cannot be read (%s)" % (name, type(e).__name__))
 
 
@@ -212,7 +246,8 @@ def load_bundle(path):
 def _load_bundle(path):
     if not os.path.isdir(path):
         raise BundleError("%s is not a bundle folder" % os.path.basename(os.path.normpath(path)))
-    manifest = _read_json(os.path.join(path, "manifest.json"), path)
+    budget = _ByteBudget(MAX_BUNDLE_BYTES)
+    manifest = _read_json(os.path.join(path, "manifest.json"), path, budget)
     if not isinstance(manifest, dict):
         raise BundleError("manifest.json is not an object")
     if manifest.get("format") != RUN_FORMAT:
@@ -248,7 +283,7 @@ def _load_bundle(path):
             continue
         name = trial_file_name(index)
         try:
-            trial = _read_json(os.path.join(path, name), path)
+            trial = _read_json(os.path.join(path, name), path, budget)
         except BundleError as e:
             if not str(e).startswith("missing "):
                 raise
@@ -265,8 +300,26 @@ def _load_bundle(path):
             raise BundleError("%s status %r differs from the manifest (%r)" % (name, trial.get("status"), entry.get("status")))
         _privacy_lint(trial, name)
         _check_histograms(trial, manifest["histogramUpperEdgesMs"], name)
+        if trial.get("status") == "complete":
+            _check_complete(trial, name)
         trials.append(trial)
     return Bundle(path, manifest, trials)
+
+
+def _check_complete(trial, name):
+    """The app labels a trial complete only with no issues, every requested
+    window and a measured time. The minimum-trials gate counts complete
+    trials, so a label that its contents contradict makes the bundle unusable."""
+    issues, windows = trial["issues"], trial["windows"]
+    requested, seconds = trial["requestedWindows"], trial["measuredSeconds"]
+    if not isinstance(issues, list) or issues:
+        raise BundleError("%s is labelled complete but lists issues" % name)
+    if not isinstance(requested, int) or isinstance(requested, bool) or requested < 1:
+        raise BundleError("%s: requestedWindows %r is not a positive whole number" % (name, requested))
+    if not isinstance(windows, list) or len(windows) < requested:
+        raise BundleError("%s is labelled complete but has fewer windows than the %d requested" % (name, requested))
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds <= 0:
+        raise BundleError("%s is labelled complete but measured no time" % name)
 
 
 def hist_percentile(p, buckets, count, lo, hi, edges):
@@ -857,8 +910,12 @@ def cmd_start(args):
 
 def _write(text, out):
     if out:
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(text)
+        try:
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            # A missing folder, a folder in the way, no permission: exit 2.
+            raise ValueError("cannot write --out %s (%s)" % (os.path.basename(out) or out, type(e).__name__))
     else:
         sys.stdout.write(text)
 
@@ -919,6 +976,10 @@ def main(argv=None):
     except (KeyError, TypeError, AttributeError, IndexError, OverflowError, RecursionError) as e:
         # A bundle that passed loading but is still malformed somewhere.
         print("perf_lab: malformed bundle (%s: %s)" % (type(e).__name__, _one_line(e)), file=sys.stderr)
+        return 2
+    except OSError as e:
+        # Anything the file system raised that the loader did not name.
+        print("perf_lab: cannot read or write a file (%s)" % type(e).__name__, file=sys.stderr)
         return 2
     return 1
 
