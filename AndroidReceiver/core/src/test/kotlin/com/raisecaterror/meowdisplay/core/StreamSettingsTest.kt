@@ -6,6 +6,7 @@ import com.raisecaterror.meowdisplay.core.session.ExtendShape
 import com.raisecaterror.meowdisplay.core.session.ExtendShapePreference
 import com.raisecaterror.meowdisplay.core.session.HelloFields
 import com.raisecaterror.meowdisplay.core.session.InMemorySessionPolicyStore
+import com.raisecaterror.meowdisplay.core.session.MacStreamingMode
 import com.raisecaterror.meowdisplay.core.session.MaxFPSPreference
 import com.raisecaterror.meowdisplay.core.session.MediaLink
 import com.raisecaterror.meowdisplay.core.session.ReceiverSession
@@ -100,6 +101,54 @@ class StreamSettingsTest {
         assertNull("absent selection is Auto", mirror.state.selectedUUID)
         val tiers = StreamSettingsWire.parse("maxFPSState", obj("{\"enabled\":false,\"maxFPS\":60,\"availableTiers\":[60,\"30\",-1,99999,30,60]}")) as StreamSettingsUpdate.MaxFPS
         assertEquals(listOf(30, 60), tiers.state.availableTiers)
+    }
+
+    @Test
+    fun profileStateCarriesTheMacsModeAndCustomRate() {
+        assertEquals(StreamSettingsUpdate.Profile(StreamingProfile.Custom, MacStreamingMode.Custom, CustomFrameRate.Fps60),
+            StreamSettingsWire.parse("streamingProfileState", obj("{\"profile\":\"custom\",\"mode\":\"custom\",\"customFrameRate\":\"fps60\"}")))
+        assertEquals(StreamSettingsUpdate.Profile(StreamingProfile.Performance, MacStreamingMode.Automatic),
+            StreamSettingsWire.parse("streamingProfileState", obj("{\"profile\":\"performance\",\"mode\":\"automatic\"}")))
+        assertEquals("unknown optional keys read as absent", StreamSettingsUpdate.Profile(StreamingProfile.Efficiency),
+            StreamSettingsWire.parse("streamingProfileState", obj("{\"profile\":\"efficiency\",\"mode\":\"turbo\",\"customFrameRate\":\"fps999\"}")))
+    }
+
+    @Test
+    fun automaticOnTheMacLocksTheStreamingChoices() {
+        val link = connect()
+        session.say(link, "{\"type\":\"streamingProfileState\",\"profile\":\"performance\",\"mode\":\"automatic\"}")
+        assertTrue(settings.streamingChoicesLocked)
+        assertTrue(settings.streamingModeNote!!.startsWith("Streaming Mode is Automatic on the Mac."))
+        assertFalse("the Mac would decline it", session.requestStreamingProfile(StreamingProfile.Custom, CustomFrameRate.Fps30))
+        assertFalse(session.requestStreamingPriority(StreamingPriority.PreferFps))
+        assertEquals(0, link.count("streamingProfileRequest") + link.count("streamingPriorityRequest"))
+        assertEquals("a declined pick leaves the Custom rate alone", CustomFrameRate.Auto, settings.customFrameRate)
+        assertEquals(StreamingProfile.Performance, settings.profile)
+    }
+
+    @Test
+    fun customOnTheMacSyncsItsFrameRateBeforeAnyRequest() {
+        val link = connect()
+        session.say(link, "{\"type\":\"streamingProfileState\",\"profile\":\"efficiency\",\"mode\":\"custom\",\"customFrameRate\":\"fps90\"}")
+        assertFalse(settings.streamingChoicesLocked)
+        assertEquals("These settings belong to the Mac and apply to every device connected to it.", settings.streamingModeNote)
+        assertEquals(CustomFrameRate.Fps90, settings.customFrameRate)
+        assertTrue(session.requestStreamingProfile(StreamingProfile.Custom))
+        assertEquals("picking Custom keeps the Mac's own rate", "fps90", link.last("streamingProfileRequest")["customFrameRate"]!!.jsonPrimitive.content)
+        assertTrue(session.requestStreamingPriority(StreamingPriority.PreferLatency))
+    }
+
+    @Test
+    fun aMacThatDoesNotReportItsModeKeepsTheChoicesOpen() {
+        val link = connect()
+        session.say(link, "{\"type\":\"streamingProfileState\",\"profile\":\"performance\",\"mode\":\"automatic\"}")
+        session.say(link, "{\"type\":\"streamingProfileState\",\"profile\":\"efficiency\"}")
+        assertNull("each state carries the mode afresh", settings.macStreamingMode)
+        assertFalse(settings.streamingChoicesLocked)
+        assertNull(settings.streamingModeNote)
+        assertTrue(session.requestStreamingProfile(StreamingProfile.Performance))
+        session.onClosed(link)
+        assertNull("a new connection forgets the old Mac's mode", settings.macStreamingMode)
     }
 
     @Test

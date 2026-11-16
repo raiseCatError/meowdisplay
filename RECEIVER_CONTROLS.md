@@ -212,11 +212,14 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
 
 Streaming Profile and Priority are the Mac's settings and apply to every
-connected device. While the Mac's Streaming Mode is **Automatic**, iPhone,
-iPad and Mac Receiver show them read-only with a note to switch the Mac to
-Custom; Android still shows the pickers, and the Mac leaves a request it
-can't apply alone (no restart). No receiver can change the Mac's Streaming
-Mode (Automatic/Custom); that is set on the Mac only.
+connected device. While the Mac's Streaming Mode is **Automatic**, every
+receiver shows them read-only with a note to switch the Mac to Custom. In
+Custom, each receiver shows the Mac's own Custom frame rate, so picking the
+Custom profile doesn't overwrite it. With a Mac too old to report its mode,
+the pickers stay editable as before. The Mac declines a request it can't
+apply, without restarting any stream. No
+receiver can change the Mac's Streaming Mode (Automatic/Custom); that is set
+on the Mac only.
 
 ## Audio and connection
 
