@@ -101,6 +101,9 @@ class RemoteAccess(
             }
         }
         routes.onDefaultNetworkChanged = { coordinator.onNetworkChanged() }
+        // "Use less data" (PROTOCOL.md 6.20): the hello's cost hint follows the network this session runs over.
+        media.costOf = routes::costHint
+        routes.onPathCostMayHaveChanged = { media.session.resendHello() }
         media.remoteEndpointsHost = object : RemoteEndpointsHost {
             override fun ownReport() = if (automaticEnabled) {
                 RemoteEndpointsWire.Report(ips = TailnetInterfaces.fromNetworks(routes.snapshot()))

@@ -2726,7 +2726,7 @@ effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md)
   interface name or carrier. Missing or invalid `cost`/`conf`: the hint is ignored; an invalid
   `iface` reads as `unknown`.
 - `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting. Only a receiver
-  that has the setting sends it (iOS). The Mac Receiver has none and sends neither this key nor
+  that has the setting sends it (iOS and Android). The Mac Receiver has none and sends neither this key nor
   `saveDataAnswer`: absent = today's behaviour (never data-saving).
 - `saveDataAnswer` (`"saveData"` or `"keepQuality"`): the remembered answer to the one-time
   suggestion, or the explicit full-quality choice in Settings. Absent: not answered.
@@ -2772,5 +2772,27 @@ answer, or Full Quality under On Mobile Data) only means "don't save on mobile d
 change (not by the controller) happens at most once per 20 s per receiver; a policy that changes
 again inside that time waits, and the latest one applies when the 20 s have passed, so a flapping
 path or hint cannot restart capture repeatedly. A change that needs no restart (FPS, bitrate)
-applies at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
-(parity gap).
+applies at once. Saving data never stops or refuses a stream.
+
+**Android** sends only `saveData` and `cost`, no `effHz`, `adaptiveTelemetry`, `saveDataAnswer`,
+`diag` or telemetry `stats` (those wait for hardware validation), so it never gets the per-receiver
+controller and never sees the one-time mobile-data suggestion. `saveData` is always sent, like iOS
+(`auto` until the person picks On or Off). With `auto` and no `saveDataAnswer`, the Mac therefore
+saves data for an Android receiver only on clear `constrained` evidence (Android's Data Saver, on a
+metered or tunnelled connection); `expensive` alone stays full quality because it is never answered.
+`cost` describes the network that carries the connection (the one that owns the receiver's address on
+the socket, else the system's default network, capped at `medium`) and is omitted whenever the
+class would be `unknown`:
+
+| Android path | `iface` | `cost` | `conf` |
+| --- | --- | --- | --- |
+| Cellular / Wi-Fi / Ethernet, `NOT_METERED` | `cellular` / `wifi` / `wired` | `unmetered` | `high` |
+| Same, metered (cellular, a phone hotspot) | same | `expensive` | `high` |
+| Same, metered, Data Saver on | same | `constrained` | `high` |
+| VPN (also when it reports the transport it rides on) | `tunnel`, never `cellular` | `constrained` if Data Saver is on, `expensive` if the VPN network is metered, else omitted (not metered through a tunnel is unknown) | `medium` |
+| No known transport | `unknown` | `constrained` if Data Saver is on, else omitted | `medium` |
+
+Data Saver is `RESTRICT_BACKGROUND_STATUS_ENABLED` (not `WHITELISTED`). It only restricts metered
+networks, so on a known unmetered network it does not make the path `constrained`. The hello is
+re-sent on the live connection when the setting, the network's capabilities or Data Saver change
+(an unchanged hello is never re-sent).

@@ -15,6 +15,7 @@ import com.raisecaterror.meowdisplay.android.trust.PinStore
 import com.raisecaterror.meowdisplay.core.session.ConnectRequestState
 import com.raisecaterror.meowdisplay.core.session.DisplayMode
 import com.raisecaterror.meowdisplay.core.session.HelloFields
+import com.raisecaterror.meowdisplay.core.session.NetworkCostHint
 import com.raisecaterror.meowdisplay.core.session.InputWireState
 import com.raisecaterror.meowdisplay.core.session.MediaListener
 import com.raisecaterror.meowdisplay.core.session.PeerSessionPolicy
@@ -137,6 +138,9 @@ class MediaController(
     /** Names the path of a new connection: (peer address, our address, peer ID) to a route. Set by Remote Access. */
     @Volatile var routeOf: ((java.net.InetAddress, java.net.InetAddress?, String) -> RouteInfo?)? = null
 
+    /** The cost hint of the network carrying a connection, from our address on it (PROTOCOL.md 6.20). Set by Remote Access; until then none is sent. */
+    @Volatile var costOf: ((java.net.InetAddress?) -> NetworkCostHint?)? = null
+
     /** A paired Mac's name for the UI ("your Mac" when unknown). */
     override fun macName(peerID: String?): String = pins.paired.value.firstOrNull { it.peerID == peerID }?.name ?: "your Mac"
 
@@ -151,6 +155,7 @@ class MediaController(
                 remoteEndpointsHost?.received(peerID, report)
             }
         },
+        pathCost = { local -> costOf?.invoke(local) },
     )
     private var listener: MediaListener? = null
     private val connectRequests = ConnectRequestState()

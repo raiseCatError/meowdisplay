@@ -1,10 +1,14 @@
 package com.raisecaterror.meowdisplay.android.remote
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -13,6 +17,9 @@ import com.raisecaterror.meowdisplay.core.remote.NetworkFacts
 import com.raisecaterror.meowdisplay.core.remote.RouteClassifier
 import com.raisecaterror.meowdisplay.core.remote.RouteInfo
 import com.raisecaterror.meowdisplay.core.remote.Transport
+import com.raisecaterror.meowdisplay.core.session.NetworkCostHint
+import com.raisecaterror.meowdisplay.core.session.NetworkCostMapper
+import com.raisecaterror.meowdisplay.core.session.PathCostFlags
 import java.net.InetAddress
 
 /**
@@ -22,6 +29,7 @@ import java.net.InetAddress
  * no VPN service is created and no Tailscale token is needed. Runs only while the app is in front.
  */
 class RouteMonitor(context: Context) {
+    private val appContext = context.applicationContext
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private val lock = Any()
@@ -30,12 +38,29 @@ class RouteMonitor(context: Context) {
     private var started = false
     private var quietUntil = 0L
 
-    private class Known(val transport: Transport, val addresses: List<ByteArray>, val routes: List<IpPrefix>?)
+    private class Known(val transport: Transport, val addresses: List<ByteArray>, val routes: List<IpPrefix>?, val cost: PathCostFlags)
 
     /** The default network appeared or its link properties changed (debounced: one call per change). */
     @Volatile var onDefaultNetworkChanged: (() -> Unit)? = null
 
+    /**
+     * Something that may change the cost hint changed: a network's capabilities, a network came or went,
+     * or Data Saver was switched (debounced). The caller re-announces its hello; an unchanged one is not sent.
+     */
+    @Volatile var onPathCostMayHaveChanged: (() -> Unit)? = null
+
+    /** Data Saver (`RESTRICT_BACKGROUND_STATUS_ENABLED`) as last read: when the person turned it on for this app. */
+    @Volatile private var dataSaver = false
+
     private val announce = Runnable { onDefaultNetworkChanged?.invoke() }
+    private val announceCost = Runnable { onPathCostMayHaveChanged?.invoke() }
+
+    private val dataSaverChanged = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            readDataSaver()
+            costChanged()
+        }
+    }
 
     private inner class Watcher : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = refresh(network)
@@ -46,6 +71,7 @@ class RouteMonitor(context: Context) {
         }
         override fun onLost(network: Network) {
             synchronized(lock) { known.remove(network) }
+            costChanged()
         }
     }
 
@@ -56,9 +82,11 @@ class RouteMonitor(context: Context) {
             synchronized(lock) { defaultNetwork = network }
             refresh(network)
             changed()
+            costChanged()
         }
         override fun onLost(network: Network) {
             synchronized(lock) { if (defaultNetwork == network) defaultNetwork = null }
+            costChanged()
         }
     }
 
@@ -78,6 +106,18 @@ class RouteMonitor(context: Context) {
             )
             connectivity.registerDefaultNetworkCallback(defaults)
         }.onFailure { started = false }
+        if (!started) return
+        // Data Saver is switched in system settings; the system tells apps with this protected broadcast.
+        readDataSaver()
+        runCatching {
+            val filter = IntentFilter(ConnectivityManager.ACTION_RESTRICT_BACKGROUND_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(dataSaverChanged, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                appContext.registerReceiver(dataSaverChanged, filter)
+            }
+        }
     }
 
     @Synchronized
@@ -85,6 +125,8 @@ class RouteMonitor(context: Context) {
         if (!started) return
         started = false
         main.removeCallbacks(announce)
+        main.removeCallbacks(announceCost)
+        runCatching { appContext.unregisterReceiver(dataSaverChanged) }
         for (callback in listOf(others, vpns, defaults)) runCatching { connectivity.unregisterNetworkCallback(callback) }
         synchronized(lock) {
             known.clear()
@@ -112,7 +154,44 @@ class RouteMonitor(context: Context) {
         val addresses = properties?.linkAddresses?.map { it.address.address }.orEmpty()
         // If the routes can't be read the VPN is only ever called "VPN".
         val routes = runCatching { properties?.routes?.map { IpPrefix(it.destination.address.address, it.destination.prefixLength) } }.getOrNull()
-        synchronized(lock) { known[network] = Known(transport, addresses, routes) }
+        val cost = PathCostFlags(
+            cellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+            wifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+            ethernet = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+            vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+            notMetered = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+        )
+        synchronized(lock) { known[network] = Known(transport, addresses, routes, cost) }
+        costChanged()
+    }
+
+    private fun readDataSaver() {
+        dataSaver = runCatching {
+            connectivity.restrictBackgroundStatus == ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED
+        }.getOrDefault(false)
+    }
+
+    private fun costChanged() {
+        main.removeCallbacks(announceCost)
+        main.postDelayed(announceCost, DEBOUNCE_MS)
+    }
+
+    /**
+     * The cost hint (PROTOCOL.md 6.20) for a connection whose socket has [local] as this device's address:
+     * the network that owns that address (high confidence for a plain network), else the system's default
+     * network (capped at medium), else null: nothing known, nothing sent. Only capability flags are read;
+     * no SSID, address, interface name or carrier ever leaves here.
+     */
+    fun costHint(local: InetAddress?): NetworkCostHint? {
+        val mine = local?.address
+        val (facts, own) = synchronized(lock) {
+            val byAddress = mine?.let { address -> known.values.firstOrNull { k -> k.addresses.any { it.contentEquals(address) } } }
+            when {
+                byAddress != null -> byAddress to true
+                else -> defaultNetwork?.let { known[it] }?.let { it to false }
+            }
+        } ?: return null
+        return NetworkCostMapper.hint(facts.cost, dataSaver, ownPath = own)
     }
 
     /** The system's networks right now, the default one marked. */
