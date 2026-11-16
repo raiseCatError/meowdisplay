@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 
 // Pure, hardware-independent coverage of `PCMJitterBufferPolicy` — the only
 // piece of `PCMPlaybackEngine` that's meaningfully unit-testable without a
@@ -8,6 +9,23 @@ import XCTest
 // report) — forcing those into brittle AVFoundation-internals tests would
 // not add real coverage.
 final class PCMPlaybackEngineTests: XCTestCase {
+    /// A decoded buffer in another rate or channel count than the running
+    /// engine's connection needs a rebuild; the same format, or no engine
+    /// yet, never does (valid audio is never interrupted).
+    func testEngineRebuildOnlyWhenTheBufferFormatDiffers() throws {
+        let stereo48 = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let stereo44 = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2))
+        let mono48 = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        XCTAssertFalse(PCMEngineFormatPolicy.requiresRebuild(
+            currentSampleRate: nil, currentChannelCount: nil, buffer: stereo48))
+        XCTAssertFalse(PCMEngineFormatPolicy.requiresRebuild(
+            currentSampleRate: 48_000, currentChannelCount: 2, buffer: stereo48))
+        XCTAssertTrue(PCMEngineFormatPolicy.requiresRebuild(
+            currentSampleRate: 48_000, currentChannelCount: 2, buffer: stereo44))
+        XCTAssertTrue(PCMEngineFormatPolicy.requiresRebuild(
+            currentSampleRate: 48_000, currentChannelCount: 2, buffer: mono48))
+    }
+
     func testNotOverflowingBelowTheBound() {
         XCTAssertFalse(PCMJitterBufferPolicy.isOverflowing(pendingCount: 0))
         XCTAssertFalse(PCMJitterBufferPolicy.isOverflowing(pendingCount: PCMJitterBufferPolicy.maxPendingPacketCount - 1))

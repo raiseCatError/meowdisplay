@@ -27,6 +27,13 @@ enum AudioMediaFrame {
     /// real capture rate.
     static let acceptedSampleRates: ClosedRange<UInt32> = 7_350...768_000
 
+    /// Channel counts a receiver accepts in a config frame. 0 would build a
+    /// zero-channel format description; the range matches what
+    /// `AACLCFraming.audioSpecificConfig` can describe (the Mac only sends
+    /// an AAC config when it can build a cookie) and covers the real
+    /// 2-channel capture.
+    static let acceptedChannelCounts: ClosedRange<UInt8> = 1...7
+
     private enum Subtype: UInt8 {
         case config = 0x01
         case packet = 0x02
@@ -119,7 +126,8 @@ struct AudioConfigFrame: Equatable {
               let channelCount: UInt8 = reader.read(),
               let cookieLen: UInt16 = reader.read(),
               let cookie = reader.readData(Int(cookieLen)),
-              AudioMediaFrame.acceptedSampleRates.contains(sampleRate) else { return nil }
+              AudioMediaFrame.acceptedSampleRates.contains(sampleRate),
+              AudioMediaFrame.acceptedChannelCounts.contains(channelCount) else { return nil }
         return AudioConfigFrame(sampleRate: sampleRate, channelCount: channelCount, cookie: cookie)
     }
 }
@@ -182,7 +190,8 @@ struct PCMConfigFrame: Equatable {
         var reader = BinaryReader(body)
         guard let sampleRate: UInt32 = reader.read(),
               let channelCount: UInt8 = reader.read(),
-              AudioMediaFrame.acceptedSampleRates.contains(sampleRate) else { return nil }
+              AudioMediaFrame.acceptedSampleRates.contains(sampleRate),
+              AudioMediaFrame.acceptedChannelCounts.contains(channelCount) else { return nil }
         return PCMConfigFrame(sampleRate: sampleRate, channelCount: channelCount)
     }
 }

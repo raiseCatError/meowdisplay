@@ -226,6 +226,9 @@ final class ReceiverAudioPresenter: @unchecked Sendable {
         timing: AudioTimingSnapshot,
         activateSession: () -> Void
     ) {
+        // A zero-length payload is decodable on the wire but has nothing to
+        // play, and an empty `Data` has no base address to copy from.
+        guard !payload.isEmpty else { return }
         ensurePlaybackChain(activateSession: activateSession)   // lazily recreates the renderer after resync/reset
         guard let audioRenderer else { return }
         // Mac wall-clock ms -> this receiver's equivalent wall-clock ms
