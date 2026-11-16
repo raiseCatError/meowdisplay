@@ -35,6 +35,14 @@ struct StreamingSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if controller.streamingMode == .automatic {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Adaptive Automatic (Beta)", isOn: $controller.adaptiveAutomaticBeta)
+                        Text("Adjusts frame rate, bitrate and resolution for each device from what its stream measures, never above Automatic's usual quality. Off: Automatic uses its fixed settings. Changing it restarts the streams. Not yet tuned on real hardware.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if controller.streamingMode == .custom {
                     VStack(alignment: .leading, spacing: 4) {
                         Picker("Streaming Profile", selection: $controller.streamingProfile) {
@@ -133,6 +141,9 @@ struct StreamingSettingsView: View {
                                     value: "\(session.receiverAVSyncOffsetMs >= 0 ? "+" : "")\(session.receiverAVSyncOffsetMs) ms")
                             }
                             LabeledContent("Route", value: entry.route?.rawValue ?? "—")
+                            if let session = controller.session(for: entry.id) {
+                                AdaptiveStreamUsageRows(monitor: session.sender.adaptive.monitor)
+                            }
                             // Pause/Resume here means exactly what the label
                             // says: MacSender.pauseDisplay() stops capture
                             // (video + audio) while the connection stays up
@@ -156,5 +167,26 @@ struct StreamingSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Per-device video data sent and, when active, the adaptive or data-saving
+/// operating point (#123). Refreshes every 2 s.
+private struct AdaptiveStreamUsageRows: View {
+    let monitor: AdaptiveStreamingMonitor
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { _ in
+            let snapshot = monitor.snapshot()
+            VStack(alignment: .leading, spacing: 2) {
+                LabeledContent("Video Data Sent", value: AdaptiveUsageText.payload(snapshot))
+                Text("App video payload only, not what a carrier bills.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let plan = AdaptiveUsageText.plan(snapshot) {
+                    LabeledContent("Operating Point", value: plan)
+                }
+            }
+        }
     }
 }

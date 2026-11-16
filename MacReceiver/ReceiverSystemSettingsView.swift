@@ -65,6 +65,8 @@ private struct ReceiverSystemPage: View {
                     .controlSize(.small)
             }
 
+            ReceiverStreamDiagnosticsSection(receiver: receiver)
+
             Section {
                 ReceiverValueRow("Version", value: appVersion)
                 Link(destination: ProjectLinks.gitHub) {

@@ -172,7 +172,7 @@ struct SettingsView: View {
         case .permissions:
             PermissionsSettingsPage()
         case .diagnostics:
-            DiagnosticsSettingsPage()
+            DiagnosticsSettingsPage(receiver: receiver)
         case .about:
             AboutSettingsPage(defaults: DemoSession.preferenceDefaults(demoActive: demo != nil))
         case .developer:
@@ -352,6 +352,8 @@ private struct DisplaySettingsPage: View {
     @ObservedObject var controlStore: ReceiverControlStore
     @ObservedObject var pictureInPicture: ReceiverPictureInPictureController
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(UseLessDataSettings.preferenceKey) private var useLessData = NetworkCost.DataPreference.auto.rawValue
+    @AppStorage(UseLessDataSettings.answerKey) private var useLessDataAnswer = NetworkCost.MeteredAnswer.unanswered.rawValue
 
     var body: some View {
         SettingsForm {
@@ -397,6 +399,7 @@ private struct DisplaySettingsPage: View {
             }
             streamingProfileSection
             maxFPSSection
+            useLessDataSection
         }
         .navigationTitle(MobileSettingsCategory.display.title)
     }
@@ -659,6 +662,36 @@ private struct DisplaySettingsPage: View {
             } footer: {
                 Text("Caps how fast this Mac streams to this device, on top of its normal profile/display limits.")
             }
+        }
+    }
+
+    /// "Use less data" (#123): Automatic / On / Off, and in Automatic the
+    /// remembered answer for mobile data, which stays reversible here. Sent
+    /// to the Mac in hello; it never stops a stream, only lowers quality on
+    /// this device's stream while the Mac's Streaming Mode is Automatic.
+    @ViewBuilder
+    private var useLessDataSection: some View {
+        let preference = NetworkCost.DataPreference(rawValue: useLessData) ?? .auto
+        Section {
+            Picker("Use Less Data", selection: Binding(
+                get: { preference },
+                set: { useLessData = $0.rawValue; ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load()) })) {
+                Text("Automatic").tag(NetworkCost.DataPreference.auto)
+                Text("On").tag(NetworkCost.DataPreference.on)
+                Text("Off").tag(NetworkCost.DataPreference.off)
+            }
+            .settingsAnchor("useLessData")
+            if preference == .auto {
+                Picker("On Mobile Data", selection: Binding(
+                    get: { NetworkCost.MeteredAnswer(rawValue: useLessDataAnswer) ?? .unanswered },
+                    set: { useLessDataAnswer = $0.rawValue; ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load()) })) {
+                    Text("Ask").tag(NetworkCost.MeteredAnswer.unanswered)
+                    Text("Save Data").tag(NetworkCost.MeteredAnswer.saveData)
+                    Text("Full Quality").tag(NetworkCost.MeteredAnswer.keepQuality)
+                }
+            }
+        } footer: {
+            Text("Automatic saves data in Low Data Mode, and on mobile data once you agree. Saving data lowers resolution, bitrate and frame rate for this device only. The stream never stops. Applies while the Mac's Streaming Mode is Automatic.")
         }
     }
 
@@ -1494,8 +1527,10 @@ private struct PermissionsSettingsPage: View {
 // MARK: - Diagnostics
 
 private struct DiagnosticsSettingsPage: View {
+    let receiver: StreamReceiver
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
+    @AppStorage(StreamDiagnosticsSwitch.defaultsKey) private var streamDiagnostics = false
 
     var body: some View {
         SettingsForm {
@@ -1528,7 +1563,21 @@ private struct DiagnosticsSettingsPage: View {
             } footer: {
                 Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging.")
             }
+            Section {
+                Toggle("Streaming Diagnostics", isOn: $streamDiagnostics)
+                    .onChange(of: streamDiagnostics) { on in StreamDiagnosticsSwitch.shared.set(on) }
+                if streamDiagnostics {
+                    NavigationLink {
+                        StreamDiagnosticsDetailView(receiver: receiver)
+                    } label: {
+                        Label("Stages and Verdict", systemImage: "gauge.with.dots.needle.33percent")
+                    }
+                }
+            } footer: {
+                Text("Measures each stage of the stream on this \(deviceKind) and names the stage that limits it when the evidence is clear. Off by default. Exports hold aggregate numbers only and are shared only when you choose to.")
+            }
         }
+        .onAppear { StreamDiagnosticsSwitch.shared.set(streamDiagnostics) }
         .navigationTitle(MobileSettingsCategory.diagnostics.title)
     }
 }

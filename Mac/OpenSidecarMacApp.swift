@@ -95,6 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Use This Mac as a Display comes back only if the user left it on.
         controller.applyLaunchRole()
         EncoderWarmUp.start()
+        // Performance Lab (#123): listens for tools/perf-lab `start`; inert unless diagnostics are on.
+        PerformanceLabRemoteStart.install()
     }
 
     // Quitting while this Mac is a display: tell the sending Mac we're
@@ -856,6 +858,16 @@ final class SenderController: ObservableObject {
             guard streamingMode != oldValue else { return }
             UserDefaults.standard.set(streamingMode.rawValue, forKey: "streamingMode")
             restartAll()
+        }
+    }
+    /// Settings ▸ Streaming ▸ Adaptive Automatic (Beta), #123. Off by
+    /// default: Automatic stays today's fixed policy. Only Automatic reads
+    /// it, so a change rebuilds the streams only there.
+    @Published var adaptiveAutomaticBeta = UserDefaults.standard.bool(forKey: AdaptiveStreamingSettings.defaultsKey) {
+        didSet {
+            guard adaptiveAutomaticBeta != oldValue else { return }
+            UserDefaults.standard.set(adaptiveAutomaticBeta, forKey: AdaptiveStreamingSettings.defaultsKey)
+            if streamingMode == .automatic { restartAll() }
         }
     }
     // What a session actually gets built with — `StreamingModePolicy`/
@@ -3016,7 +3028,8 @@ final class SenderController: ObservableObject {
                                streamingPriority: effectiveStreamingPriority,
                                codecPreference: effectiveCodecPreference,
                                streamingMode: streamingMode,
-                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil)
+                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil,
+                               adaptiveAutomatic: streamingMode == .automatic && adaptiveAutomaticBeta)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let remoteRoute: Bool
         switch target {

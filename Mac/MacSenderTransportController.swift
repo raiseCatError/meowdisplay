@@ -51,6 +51,11 @@ final class MacSenderTransportController: @unchecked Sendable {
     private var currentPathDirectLink = false
     private var currentPathUsesWiFi = false
     private var currentRoute: ConnectionRoute?
+    private var currentPathCost: (expensive: Bool, constrained: Bool)?
+    /// Adaptive streaming (#123): the live media path as cost evidence, and
+    /// an epoch bumped whenever that evidence or the route changes.
+    private var currentCostReport: NetworkCost.EndpointReport?
+    private var routeEpochValue: UInt64 = 0
     private var upgradeTimer: DispatchSourceTimer?
     private var upgradeProbes: [NWConnection] = []
     private var probeRoundGeneration = 0
@@ -97,6 +102,28 @@ final class MacSenderTransportController: @unchecked Sendable {
     var route: ConnectionRoute? {
         dispatchPrecondition(condition: .onQueue(queue))
         return currentRoute
+    }
+
+    /// The live path's cost flags (`NWPath.isExpensive` / `isConstrained`),
+    /// as last reported for the current connection; nil before a path.
+    /// Read by diagnostics only (#123): no media policy uses them.
+    var pathCostFlags: (expensive: Bool, constrained: Bool)? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return currentPathCost
+    }
+
+    /// The live media connection's cost evidence (high confidence: its own
+    /// path), nil before a path. Class and flags only.
+    var pathCostReport: NetworkCost.EndpointReport? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return currentCostReport
+    }
+
+    /// Bumped on every route or cost change of the live connection; an
+    /// adaptive controller ignores anything older.
+    var routeEpoch: UInt64 {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return routeEpochValue
     }
 
     var currentDialGeneration: Int {
@@ -304,7 +331,14 @@ final class MacSenderTransportController: @unchecked Sendable {
             + " gateways=\(path.gateways.map { "\($0)" }.joined(separator: ","))"
             + " expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
             + (gatewayHost ? " receiverHostsNetwork=true" : ""))
+        let costReport = NetworkCost.endpointReport(NetworkCost.PathFlags(path: path),
+                                                    reachability: route == .remote ? .remote : .local)
+        if costReport != currentCostReport || route != currentRoute {
+            routeEpochValue &+= 1
+        }
+        currentCostReport = costReport
         currentRoute = route
+        currentPathCost = (path.isExpensive, path.isConstrained)
         let sink = statusSink
         Task { @MainActor in sink.publishTransportPath(route) }
     }

@@ -20,6 +20,14 @@ import SwiftUI
 final class ReceiverController: ObservableObject {
     static let shared = ReceiverController()
 
+    /// The main screen's current refresh and Low Power Mode, for hello's
+    /// `effHz` (#123). Re-sent by the receiver when it changes.
+    static func publishEffectiveRefresh() {
+        ReceiverAdaptiveState.shared.setEffectiveRefresh(ReceiverEffectiveRefresh.resolve(
+            maximumFramesPerSecond: NSScreen.screens.first?.maximumFramesPerSecond ?? 0,
+            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled))
+    }
+
     /// Window mode: this Mac's arrangement of the sending Mac's windows.
     let workspace = WorkspaceModel()
 
@@ -154,6 +162,9 @@ final class ReceiverController: ObservableObject {
                                       fallbackServiceName: fallbackName,
                                       maxEncodeWide: 4096, maxEncodeHigh: 2304,
                                       maxFPS: NSScreen.screens.first?.maximumFramesPerSecond)
+        // Adaptive streaming (#123): this screen's effective refresh rides on
+        // hello (no "Use less data" prompt here: Automatic, no suggestion).
+        Self.publishEffectiveRefresh()
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)
@@ -288,6 +299,7 @@ final class ReceiverController: ObservableObject {
             Task { @MainActor in
                 guard let self, let receiver = self.receiver else { return }
                 self.announcePanel(to: receiver)
+                Self.publishEffectiveRefresh()
             }
         }
         Log.info("receiver mode started (advertising \"\(receiver.serviceName)\")")
