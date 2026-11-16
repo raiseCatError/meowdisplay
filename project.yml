@@ -417,6 +417,8 @@ targets:
       - Shared/FrameRateLimiter.swift
       - Shared/RefreshNegotiation.swift
       - Shared/NetworkCost.swift
+      - Shared/AdaptiveStreamingModel.swift
+      - Shared/AdaptiveStreamingController.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same
