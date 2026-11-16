@@ -344,9 +344,7 @@ private struct PairingPanelView: View {
     @ObservedObject var prompt: PairingPromptModel
     let onResolved: () -> Void
     @State private var armed = false
-    private static var refusedGrantMessage: String {
-        String(localized: "Approval was blocked because the click came from software, such as Screen Sharing. Use a physical mouse or trackpad connected to this Mac, or a hardware KVM, then try again.")
-    }
+    private static var refusedGrantMessage: String { PairingCopy.refusedGrant }
 
     var body: some View {
         Group {
@@ -397,10 +395,12 @@ private struct PairingPanelView: View {
                             .keyboardShortcut(.cancelAction)
                         Button(pending.classification == .newPeer ? "Codes Match" : "Re-pair") {
                             guard ConsentGrant.allowed() else {
-                                prompt.noteRefusedGrant()
-                                NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
-                                    userInfo: [.announcement: Self.refusedGrantMessage,
-                                               .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+                                // Spoken once per prompt (`noteRefusedGrant`).
+                                if prompt.noteRefusedGrant() {
+                                    NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
+                                        userInfo: [.announcement: Self.refusedGrantMessage,
+                                                   .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+                                }
                                 return
                             }
                             // Only now, after a hardware press on the grant
