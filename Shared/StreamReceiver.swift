@@ -77,6 +77,18 @@ enum PeerUpdateSignal: Equatable {
 final class ReceiverTransportState: @unchecked Sendable {
     private let lock = NSLock()
     private var value = "—"
+    /// The live path's `isExpensive`/`isConstrained` (diagnostics only, #123).
+    private var cost: (expensive: Bool, constrained: Bool)?
+
+    func setPathCost(expensive: Bool, constrained: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        cost = (expensive, constrained)
+    }
+
+    func pathCost() -> (expensive: Bool, constrained: Bool)? {
+        lock.lock(); defer { lock.unlock() }
+        return cost
+    }
 
     func set(_ newValue: String) {
         lock.lock(); defer { lock.unlock() }
@@ -1348,6 +1360,10 @@ final class StreamReceiver: ObservableObject {
     /// storage here does not add or remove that race. `photonWindow` is
     /// exclusively `queue`-confined on every side (append/snapshot/reset).
     private let presentationTiming = ReceiverPresentationTimingState()
+    /// Opt-in streaming diagnostics for this session (#123,
+    /// `StreamDiagnosticsRecorder`). Measurement only; thread-safe; every
+    /// hook does nothing but a flag read while diagnostics are off.
+    let diagnostics = StreamDiagnosticsRecorder(side: .receiver)
     private var lastRttMs = 0.0
     private var e2eWindow: [Double] = []        // capture→display, ms
     private var encodeWindow: [Double] = []     // capture→socket on the Mac, ms
@@ -1453,11 +1469,17 @@ final class StreamReceiver: ObservableObject {
         // `StreamReceiver`). `clockOffsetMs` is still read only when this
         // block actually executes on `queue`, not here at call time.
         let presentationTiming = self.presentationTiming
+        let diagnostics = self.diagnostics
         queue.async {
+            let diagnosticsOn = diagnostics.isEnabled
+            let diagnosticsNow = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
+            // Observed presentation: the experimental Metal path's presented handler only.
+            if diagnosticsOn { diagnostics.increment(.observedPresentations, at: diagnosticsNow) }
             guard let offset = presentationTiming.clockOffsetMs else { return }
             let photon = (presentedWallMs + offset) - captureMs
             if photon > -50, photon < 5000 {
                 presentationTiming.appendPhoton(max(photon, 0))
+                if diagnosticsOn { diagnostics.recordDuration(.observedSubmitToGlass, ms: photon, at: diagnosticsNow) }
             }
         }
     }
@@ -2728,6 +2750,7 @@ final class StreamReceiver: ObservableObject {
             interfaceNames: path.availableInterfaces.map(\.name),
             remoteEndpointDescription: peer)
         transportState.set(route.rawValue)
+        transportState.setPathCost(expensive: path.isExpensive, constrained: path.isConstrained)
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
         Log.info("connection path from \(peer): \(names) route=\(route.rawValue)")
     }
@@ -2805,6 +2828,7 @@ final class StreamReceiver: ObservableObject {
                 presentationTiming.clockOffsetMs = best.offset
             }
             lastRttMs = rtt
+            if diagnostics.isEnabled { diagnostics.recordRTT(rtt, at: StreamDiagnosticsClock.nowMs()) }
         case "ping":
             // The Mac piggybacks its send-side health on liveness pings.
             if let enc = obj["encDrops"] as? Int {
@@ -2820,6 +2844,9 @@ final class StreamReceiver: ObservableObject {
             macInputP50 = obj["inp50"] as? Double ?? macInputP50
             macInputP95 = obj["inp95"] as? Double ?? macInputP95
             macCapFps = obj["capFps"] as? Int ?? macCapFps
+            if let peer = StreamDiagnosticsPeerSummary.fromWire(obj[StreamDiagnosticsPeerSummary.wireKey], side: .sender) {
+                diagnostics.updatePeer(peer)
+            }
         case "cursor":
             applyCursor(obj)
         case WireMessage.textCaret:
@@ -3123,6 +3150,8 @@ final class StreamReceiver: ObservableObject {
         presenter.enqueueFlushAndRemoveImage()
         videoDecoder.enqueueReset()
         presentationTiming.resetPhotonWindow()
+        // A new session: diagnostics start over too.
+        diagnostics.reset()
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
         // negative offset from the superseded connection). Shadow bump
@@ -4153,6 +4182,7 @@ final class StreamReceiver: ObservableObject {
             guard let receiver = selfBox.currentOnQueue() else { return }
             receiver.presentationGeneration &+= 1
             presenter.enqueueAdvanceGeneration()
+            receiver.diagnostics.noteGeneration(receiver.presentationGeneration, at: StreamDiagnosticsClock.nowMs())
             receiver.resetAudioPlayback(keepingFormat: true)
             #if DEBUG
             Log.info("audioTrace: resync — anchor cleared, video generation advanced to \(receiver.presentationGeneration)")
@@ -4643,6 +4673,18 @@ final class StreamReceiver: ObservableObject {
             }
         }
 
+        if diagnostics.isEnabled {
+            var mapped: Double?
+            if let captureMs, let offset = presentationTiming.clockOffsetMs {
+                let e2e = (nowMs + offset) - captureMs
+                if e2e > -50, e2e < 5000 { mapped = e2e }
+            }
+            var wireSpan: Double?
+            if let captureMs, let sendMs { wireSpan = sendMs - captureMs }
+            diagnostics.recordArrival(bytes: CMSampleBufferGetTotalSampleSize(sample), wireSubmitToSendMs: wireSpan,
+                                      mappedSubmitToReceiveMs: mapped, at: StreamDiagnosticsClock.nowMs())
+        }
+
         framesThisWindow += 1
         let elapsed = now.timeIntervalSince(fpsWindowStart)
         if elapsed >= 1.0 {
@@ -4708,7 +4750,7 @@ final class StreamReceiver: ObservableObject {
             statsReportCounter += 1
             if statsReportCounter >= 5 {
                 statsReportCounter = 0
-                sendControl([
+                var statsMessage: [String: Any] = [
                     "type": "stats",
                     "transport": transport,
                     "fps": fps,
@@ -4726,7 +4768,23 @@ final class StreamReceiver: ObservableObject {
                     "ph50": stats.photonP50.rounded(),
                     "ph95": stats.photonP95.rounded(),
                     "offsetKnown": presentationTiming.clockOffsetMs != nil,
-                ])
+                ]
+                // Diagnostics (#123): optional `diag` summary, only while on.
+                if diagnostics.isEnabled {
+                    let route = DiagnosticsRouteClass(label: transport)
+                    let cost = transportState.pathCost()
+                    let metal = useMetalPath && onDecodedFrame != nil
+                    let offsetKnown = presentationTiming.clockOffsetMs != nil
+                    diagnostics.updateContext { context in
+                        context.route = route
+                        context.pathExpensive = cost?.expensive
+                        context.pathConstrained = cost?.constrained
+                        context.presentationPath = metal ? .metal : .displayLayer
+                        context.clockOffsetKnown = offsetKnown
+                    }
+                    statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
+                }
+                sendControl(statsMessage)
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
                 videoTelemetry.clearDecodeDurationWindow()
@@ -5619,8 +5677,9 @@ final class StreamReceiver: ObservableObject {
             // Receiver Swift6-B1: `telemetry` (`ReceiverVideoTelemetry`) is a
             // Sendable value captured on its own — no `self`, no queue hop,
             // just the lock-protected append. Per-frame hot path.
-            decodeDurationMs: { ms in
+            decodeDurationMs: { [diagnostics = self.diagnostics] ms in
                 telemetry.recordDecodeDuration(ms)
+                if diagnostics.isEnabled { diagnostics.recordDuration(.decode, ms: ms, at: StreamDiagnosticsClock.nowMs()) }
             },
             requestKeyframe: {
                 queue.async {
@@ -5684,8 +5743,9 @@ final class StreamReceiver: ObservableObject {
                 // `telemetry` — a Sendable value, no `self`, no queue hop.
                 // Per-frame (flush) / per-window (debug presented) hot
                 // path.
-                decodeFlushIncurred: {
+                decodeFlushIncurred: { [diagnostics = self.diagnostics] in
                     telemetry.incrementFlushCount()
+                    if diagnostics.isEnabled { diagnostics.increment(.displayLayerFlushes, at: StreamDiagnosticsClock.nowMs()) }
                     // The layer failed and was flushed: it shows nothing until the next
                     // keyframe, and the Mac sends one on its own only every 60 s. Ask now,
                     // through the same 1 s throttle as the decoder's requests.
@@ -5699,7 +5759,8 @@ final class StreamReceiver: ObservableObject {
                     #if DEBUG
                     telemetry.incrementDebugPresentedCount()
                     #endif
-                }))
+                }),
+            diagnostics: diagnostics)
     }
 
     /// C1: the sole authoritative owner of `connection`/`pendingConnections`/

@@ -151,6 +151,12 @@ final class MacSenderPipelineState: @unchecked Sendable {
         lock.lock(); pendingEncodes = 0; lock.unlock()
     }
 
+    /// Frames in flight in the encoder right now (diagnostics only).
+    var pendingEncodesNow: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingEncodes
+    }
+
     var pendingSendsNow: Int {
         lock.lock(); defer { lock.unlock() }
         return pendingSends
