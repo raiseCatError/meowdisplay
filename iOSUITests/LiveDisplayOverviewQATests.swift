@@ -170,15 +170,15 @@ final class LiveDisplayOverviewQATests: XCTestCase {
             if let request = candidates.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
                 request.tap()
                 snapshot(app, "editor-00-control-requested")
-                print("LiveOverview: control requested; waiting up to 120 s for the owner to approve on the Mac")
-                // Pending: "Awaiting approval on the Mac…". Approved: the gallery's control note goes away.
-                // Refused or timed out: Ask Again.
-                let note = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Request Control for more actions'")).firstMatch
-                let awaiting = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Awaiting approval'")).firstMatch
-                let askAgain = app.buttons["Ask Again"]
-                let settled = waitUntil(120) { askAgain.exists || (!note.exists && !awaiting.exists) }
-                print("LiveOverview: control request settled=\(settled) refused=\(askAgain.exists)")
-                snapshot(app, "editor-00-after-approval-wait")
+                // The Mac answers by its policy for this device: a prompt for the owner, or a silent grant when the
+                // device is always allowed. Tapping it closes Stage Peek here, so reopen Stage Peek and look again.
+                print("LiveOverview: control requested; waiting up to 120 s for control (owner approval or the Mac's policy)")
+                let granted = waitUntil(120) {
+                    if !app.buttons["stagePeekClose"].exists { try? openStagePeekInWindowMode(app) }
+                    return scrollTo(arrange, in: app)
+                }
+                print("LiveOverview: Stage Peek open after the request: \(app.buttons["stagePeekClose"].exists); Arrange… offered: \(granted)")
+                snapshot(app, "editor-00-after-control-request")
             } else {
                 snapshot(app, "editor-00-no-request-button")
             }
