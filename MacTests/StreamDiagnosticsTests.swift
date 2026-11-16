@@ -123,6 +123,27 @@ final class StreamDiagnosticsTests: XCTestCase {
         XCTAssertEqual(r.snapshot(at: 2_060).count(.generationResets), 1)
     }
 
+    /// A generation change after a silence longer than a window (no hook,
+    /// no read) completes that window with its data first; it used to be
+    /// cleared, losing a whole window.
+    func testGenerationChangeAfterASilenceKeepsTheFullWindow() throws {
+        let (r, _) = makeRecorder()
+        r.noteGeneration(1, at: 0)
+        for t in stride(from: 100.0, through: 2_000, by: 100) { r.recordCapture(.complete, at: t) }
+        r.noteGeneration(2, at: 7_000)
+        r.recordCapture(.complete, at: 7_100)
+        let w = try XCTUnwrap(r.completedWindowForLab(at: 7_200), "the window that began at 0 completed")
+        XCTAssertEqual(w.sequence, 1)
+        XCTAssertEqual(w.startMs, 0)
+        XCTAssertEqual(w.durationMs, 7_000)
+        XCTAssertEqual(w.snapshot.count(.captureComplete), 20)
+        XCTAssertEqual(w.snapshot.count(.generationResets), 0, "the restart belongs to the new window")
+        let current = r.snapshot(at: 12_100)
+        XCTAssertEqual(current.windowSequence, 2)
+        XCTAssertEqual(current.count(.generationResets), 1)
+        XCTAssertEqual(current.count(.captureComplete), 1)
+    }
+
     func testResetClearsSessionState() {
         let (r, _) = makeRecorder()
         r.recordSubmit(origin: .live, sourceKey: 1, sourceAgeMs: 3, pendingEncodes: 1, at: 0)
