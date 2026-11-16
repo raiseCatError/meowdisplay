@@ -82,8 +82,11 @@ final class MacSenderHostileHelloTests: XCTestCase {
         let huge = try JSONDecoder().decode(PhoneInfo.self, from: Self.helloText("pixelsWide", "9223372036854775807"))
         XCTAssertEqual(PeerDisplayBounds.violation(pixelsWide: huge.pixelsWide, pixelsHigh: huge.pixelsHigh, scale: huge.scale),
                        .pixelsWide)
-        // JSON has no NaN or infinity: an overflowing literal doesn't even parse as a control message.
+        // An overflowing positive literal doesn't parse as a control message at all; an overflowing
+        // negative one does, as -infinity (see `testNegativeInfinityFromAnOverflowingLiteralNeverTraps`),
+        // but `PhoneInfo` refuses it.
         XCTAssertNil(try? JSONSerialization.jsonObject(with: Self.helloText("scale", "1e400")))
+        XCTAssertThrowsError(try JSONDecoder().decode(PhoneInfo.self, from: Self.helloText("scale", "-1e400")))
     }
 
     /// The same hellos through the live handler: nothing changes, the session stays admitted.
@@ -189,6 +192,43 @@ final class MacSenderHostileHelloTests: XCTestCase {
         XCTAssertTrue(posted.contains(.scrollWheel), "a huge scroll still scrolls, bounded")
         XCTAssertTrue(posted.contains(.leftMouseDown))
         XCTAssertTrue(posted.contains(.leftMouseUp))
+    }
+
+    /// `JSONSerialization` reads an overflowing negative literal (`-1e400`) as -infinity, so a
+    /// control message CAN carry a non-finite number (`JSONSerialization.data` never writes one,
+    /// hence raw text here). Every input sink takes it without trapping, and nothing ends the session.
+    func testNegativeInfinityFromAnOverflowingLiteralNeverTraps() async throws {
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(#"{"dx":-1e400}"#.utf8)) as? [String: Any])
+        XCTAssertEqual(parsed["dx"] as? Double, -.infinity, "the platform behaviour this test is about")
+        let sender = try makeSender()
+        let generation = try await admit(sender)
+        sender.grantSessionInput(generation: generation)
+        try await sender.settleForTesting()
+        XCTAssertTrue(sender.hasInputGrantForTesting)
+        _ = events.take()
+        let messages = [
+            #"{"type":"hello","pixelsWide":2532,"pixelsHigh":1170,"scale":-1e400,"device":"iPhone","id":"\#(Self.peerID)"}"#,
+            #"{"type":"scroll","dx":-1e400,"dy":-1e400}"#,
+            #"{"type":"scroll","dx":3,"dy":-1e400}"#,
+            #"{"type":"pointer","action":"moveRelative","dx":-1e400,"dy":-1e400}"#,
+            #"{"type":"pointer","action":"move","x":-1e400,"y":-1e400}"#,
+            #"{"type":"pencil","phase":"down","x":-1e400,"y":0.3,"pressure":-1e400,"azimuth":-1e400,"altitude":-1e400,"t":-1e400}"#,
+            #"{"type":"pencil","phase":"move","x":0.3,"y":-1e400,"pressure":-1e400,"altitude":-1e400}"#,
+            #"{"type":"pencil","phase":"up","x":0.3,"y":0.3}"#,
+            #"{"type":"touch","phase":"began","x":-1e400,"y":-1e400,"t":-1e400}"#,
+            #"{"type":"touch","phase":"ended","x":-1e400,"y":-1e400}"#,
+            #"{"type":"proximity","entering":true,"x":-1e400,"y":-1e400}"#,
+            #"{"type":"proximity","entering":false,"x":0.5,"y":0.5}"#,
+            #"{"type":"ping","t":-1e400}"#,
+        ]
+        for text in messages {
+            try await sender.receiveControlForTesting(Data(text.utf8))
+        }
+        try await sender.settleForTesting()
+        let state = try await sender.helloStateForTesting
+        XCTAssertEqual(state?.pixelsWide, 2532, "the -infinity hello does not decode and changes nothing")
+        XCTAssertEqual(state?.admitted, true, "nothing above ends the session")
+        XCTAssertTrue(events.take().map(\.type).contains(.scrollWheel), "an infinite scroll is bounded, not dropped")
     }
 
     // MARK: - Helpers
