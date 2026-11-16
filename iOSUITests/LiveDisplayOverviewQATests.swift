@@ -88,26 +88,145 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         snapshot(app, "overview-07-shown-in-pane")
     }
 
-    /// Rotating the iPad with the overview open keeps it open; Fit All then frames every display
-    /// in the new orientation.
+    /// F2 on hardware. With a display selected and the camera zoomed and panned, rotate portrait,
+    /// landscape, portrait. The overview stays presented and keeps its selection the whole way;
+    /// back in portrait every tile is where it was (the same camera: zoom and pan kept). Fit All
+    /// then frames every display, and Done returns to the Stage Peek gallery, which stayed open.
     @MainActor
     func testOverviewStaysOpenThroughARotation() throws {
         let app = try launchIntoOverview()
         let done = app.buttons["displayOverviewDone"]
+        let target = try selectSecondDisplay(app)
+        let fit = tileFrames(app)
         zoomAndPan(app)
-        XCUIDevice.shared.orientation = .landscapeLeft
-        sleep(2)
-        snapshot(app, "overview-04-landscape")
-        XCTAssertTrue(done.waitForExistence(timeout: 3), "the overview is still open after rotating")
-        tapFitAll(app)
-        let rotated = mainWindow(app).frame
-        for tile in overviewTiles(app) {
-            XCTAssertTrue(rotated.intersects(tile.frame), "\(tile.label) is in view after Fit All in landscape")
+        sleep(1)
+        let zoomed = tileFrames(app)
+        XCTAssertTrue(framesDiffer(fit, zoomed), "the pinch and drag moved the camera off the fit view")
+        snapshot(app, "rotation-01-portrait-zoomed")
+
+        try rotate(app, to: .landscapeLeft, keeping: target, "landscape")
+        snapshot(app, "rotation-02-landscape")
+        try rotate(app, to: .portrait, keeping: target, "back in portrait")
+        snapshot(app, "rotation-03-portrait-again")
+        let after = tileFrames(app)
+        print("LiveOverview: zoomed \(zoomed) after round trip \(after)")
+        XCTAssertEqual(Set(after.keys), Set(zoomed.keys), "the same displays are drawn")
+        for (label, frame) in zoomed {
+            guard let now = after[label] else { continue }
+            XCTAssertTrue(nearlyEqual(frame, now, 3), "\(label) is where it was before rotating (zoom and pan kept): \(frame) -> \(now)")
         }
-        XCUIDevice.shared.orientation = .portrait
-        sleep(2)
-        XCTAssertTrue(done.waitForExistence(timeout: 3), "the overview is still open after rotating back")
+
+        tapFitAll(app)
+        let window = mainWindow(app).frame
+        for tile in overviewTiles(app) { XCTAssertTrue(window.intersects(tile.frame), "\(tile.label) is in view after Fit All") }
         done.tap()
+        XCTAssertTrue(waitUntil(5) { !done.exists }, "Done closes the overview")
+        XCTAssertTrue(app.buttons["stagePeekClose"].waitForExistence(timeout: 3),
+                      "Done returns to the Stage Peek gallery, which stayed open through the rotation")
+        snapshot(app, "rotation-04-done-gallery")
+        app.buttons["stagePeekClose"].tap()
+    }
+
+    /// After a rotation round trip with a display selected, Show in Pane still closes the
+    /// overview and streams that display in a pane.
+    @MainActor
+    func testShowInPaneAfterARotation() throws {
+        let app = try launchIntoOverview()
+        let done = app.buttons["displayOverviewDone"]
+        let target = try selectSecondDisplay(app)
+        zoomAndPan(app)
+        try rotate(app, to: .landscapeLeft, keeping: target, "landscape")
+        try rotate(app, to: .portrait, keeping: target, "back in portrait")
+        let showInPane = app.buttons["displayOverviewShowInPane"]
+        XCTAssertTrue(showInPane.waitForExistence(timeout: 3), "the kept selection still offers Show in Pane")
+        showInPane.tap()
+        XCTAssertTrue(waitUntil(8) { !done.exists }, "Show in Pane closes the overview after the rotation")
+        snapshot(app, "rotation-05-shown-in-pane")
+    }
+
+    /// The arrangement editor stays presented through a rotation, with nothing changed. It never
+    /// drags a display or taps Apply (Apply stays disabled the whole time), and it leaves with
+    /// Cancel, so the Mac's arrangement is not touched. Skips when the Mac does not offer Arrange….
+    @MainActor
+    func testArrangementEditorStaysOpenThroughARotationWithoutChanges() throws {
+        guard on("MEOW_LIVE_SESSION_TESTS") else {
+            throw XCTSkip("live session test: set MEOW_LIVE_SESSION_TESTS=1 with a paired Mac nearby")
+        }
+        guard on("MEOW_LIVE_OVERVIEW_MULTI") else {
+            throw XCTSkip("needs two or more Mac displays: set MEOW_LIVE_OVERVIEW_MULTI=1 once they exist")
+        }
+        let app = XCUIApplication()
+        app.launch()
+        try openStagePeekInWindowMode(app)
+        let arrange = app.buttons["displayArrangeButton"]
+        guard scrollTo(arrange, in: app) else {
+            snapshot(app, "editor-00-no-arrange")
+            throw XCTSkip("Arrange… is not offered (the Mac does not allow arranging from this device, or no control)")
+        }
+        arrange.tap()
+        let title = app.staticTexts["Arrange Displays"]
+        let apply = app.buttons["Apply"]
+        let cancel = app.buttons["Cancel"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "the arrangement editor opens")
+        XCTAssertFalse(apply.isEnabled, "nothing to apply: no display was moved")
+        snapshot(app, "editor-01-portrait")
+        for (orientation, name) in [(UIDeviceOrientation.landscapeLeft, "landscape"), (.portrait, "back in portrait")] {
+            XCUIDevice.shared.orientation = orientation
+            sleep(2)
+            XCTAssertTrue(title.exists && cancel.exists, "the arrangement editor is still presented (\(name))")
+            XCTAssertFalse(apply.isEnabled, "still nothing to apply (\(name))")
+            snapshot(app, "editor-02-\(name.replacingOccurrences(of: " ", with: "-"))")
+        }
+        cancel.tap()
+        XCTAssertTrue(waitUntil(5) { !title.exists }, "Cancel closes the editor")
+        XCTAssertTrue(app.buttons["stagePeekClose"].waitForExistence(timeout: 3),
+                      "Cancel returns to the Stage Peek gallery, which stayed open through the rotation")
+        snapshot(app, "editor-03-cancelled")
+        app.buttons["stagePeekClose"].tap()
+    }
+
+    // MARK: - Rotation helpers
+
+    /// Selects the second display from the left; returns its label.
+    @MainActor
+    private func selectSecondDisplay(_ app: XCUIApplication) throws -> String {
+        let tiles = overviewTiles(app)
+        guard tiles.count >= 2 else { throw XCTSkip("fewer than two displays drawn") }
+        let label = tiles[1].label
+        tiles[1].tap()
+        XCTAssertTrue(app.buttons["displayOverviewShowInPane"].waitForExistence(timeout: 3), "a selected display offers Show in Pane")
+        XCTAssertEqual(selectedTileLabel(app), label, "\(label) is selected")
+        return label
+    }
+
+    /// Rotates, then checks the overview is still presented and `selected` is still selected.
+    @MainActor
+    private func rotate(_ app: XCUIApplication, to orientation: UIDeviceOrientation, keeping selected: String, _ name: String) throws {
+        XCUIDevice.shared.orientation = orientation
+        sleep(2)
+        XCTAssertTrue(app.buttons["displayOverviewDone"].waitForExistence(timeout: 3), "the overview is still presented (\(name))")
+        XCTAssertEqual(selectedTileLabel(app), selected, "the selection is kept (\(name))")
+        XCTAssertTrue(app.buttons["displayOverviewShowInPane"].exists, "the selection still offers Show in Pane (\(name))")
+    }
+
+    @MainActor
+    private func selectedTileLabel(_ app: XCUIApplication) -> String? {
+        overviewTiles(app).first { $0.isSelected }?.label
+    }
+
+    /// Each drawn display's on-screen frame, by label.
+    @MainActor
+    private func tileFrames(_ app: XCUIApplication) -> [String: CGRect] {
+        Dictionary(overviewTiles(app).map { ($0.label, $0.frame) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    private func nearlyEqual(_ a: CGRect, _ b: CGRect, _ tolerance: CGFloat) -> Bool {
+        abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance
+            && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+
+    private func framesDiffer(_ a: [String: CGRect], _ b: [String: CGRect]) -> Bool {
+        a.contains { label, frame in b[label].map { !nearlyEqual(frame, $0, 20) } ?? true }
     }
 
     // MARK: - Helpers
