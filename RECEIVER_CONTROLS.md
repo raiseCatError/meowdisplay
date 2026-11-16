@@ -188,7 +188,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Extend Shape, Use Full Display | Yes | Yes | Yes | Yes |
 | Video on / off | Yes | Yes | Yes | Yes |
 | Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | Yes (Display) | Yes (Streaming) |
-| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | No setting: always Automatic |
+| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | No setting: not sent, never data-saving |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
@@ -207,14 +207,16 @@ on the Mac only.
 "Low Data Mode") lowers resolution, bitrate and frame rate on this device's
 stream only, while the Mac's Streaming Mode is Automatic. It never stops a
 stream, and Custom on the Mac is never overridden.
-- **Automatic** (default): saves data when the connection is in Low Data Mode,
-  or on mobile data once you agree. The first time the connection reliably
+- **Automatic** (default): saves data when this device or the Mac is in Low
+  Data Mode, or on mobile data once you agree. The first time the connection reliably
   looks like mobile data while video plays, the app asks once: "This
   connection may use mobile data. Save data automatically?" The answer is
   remembered and can be changed under **On Mobile Data** (Ask / Save Data /
-  Full Quality). A VPN such as Tailscale is not treated as mobile data.
-- **On**: always saves data. **Off**: never does.
-The Mac Receiver sends Automatic with no prompt (Low Data Mode is honoured).
+  Full Quality). Full Quality covers mobile data only: Low Data Mode still
+  saves data. A VPN such as Tailscale is not treated as mobile data.
+- **On**: always saves data. **Off**: never does, not even in Low Data Mode.
+The Mac Receiver has no setting and sends none: the Mac streams to it as
+before (no data saving).
 What the Mac does is in PROTOCOL.md 6.20. Thresholds and the real data saved
 are not measured yet (PENDING HARDWARE).
 
