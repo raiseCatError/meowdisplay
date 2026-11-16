@@ -121,7 +121,10 @@ actor USBTLSBridge {
     private var listener: NWListener?
     private var splice: ByteSplice?
     private var cancelled = false
-    private var resumedStart = false
+    /// `start()`'s pending continuation while it waits for the listener.
+    /// Taken (set to nil) before it is resumed, so it is resumed exactly
+    /// once: by `.ready`, by `.failed`, or by `cancel()`, whichever is first.
+    private var startContinuation: CheckedContinuation<NWEndpoint.Port, Error>?
 
     /// `dialTunnel` is `Usbmux.dial` in production (always targeting
     /// `WireCrypto.tlsPort` — see `start()`) and an injected fake opaque
@@ -158,6 +161,7 @@ actor USBTLSBridge {
         }
         self.listener = listener
         return try await withCheckedThrowingContinuation { cont in
+            startContinuation = cont
             // `listener.cancel()` is idempotent and thread-safe on its own,
             // so it's called unconditionally and synchronously right here,
             // on the raw Network.framework callback, rather than after
@@ -173,7 +177,7 @@ actor USBTLSBridge {
             }
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
-                Task { await self.handleListenerState(state, listener: listener, continuation: cont) }
+                Task { await self.handleListenerState(state, listener: listener) }
             }
             listener.start(queue: queue)
         }
@@ -200,25 +204,25 @@ actor USBTLSBridge {
         splice.start()
     }
 
-    private func handleListenerState(
-        _ state: NWListener.State, listener: NWListener,
-        continuation: CheckedContinuation<NWEndpoint.Port, Error>
-    ) {
+    private func handleListenerState(_ state: NWListener.State, listener: NWListener) {
         guard self.listener === listener else { return }
         switch state {
         case .ready:
-            guard !resumedStart, let port = listener.port else { return }
-            resumedStart = true
-            continuation.resume(returning: port)
+            guard let port = listener.port else { return }
+            finishStart(.success(port))
         case .failed(let error):
-            if !resumedStart {
-                resumedStart = true
-                continuation.resume(throwing: Failure.listenerFailed(error))
-            }
+            finishStart(.failure(Failure.listenerFailed(error)))
             performCancel()
         default:
             break
         }
+    }
+
+    /// Resumes `start()` if it is still waiting; a no-op otherwise.
+    private func finishStart(_ result: Result<NWEndpoint.Port, Error>) {
+        guard let continuation = startContinuation else { return }
+        startContinuation = nil
+        continuation.resume(with: result)
     }
 
     /// Tears down whatever part of the bridge is currently alive. Idempotent
@@ -231,6 +235,10 @@ actor USBTLSBridge {
     private func performCancel() {
         guard !cancelled else { return }
         cancelled = true
+        // A `start()` still waiting for the listener ends now: its listener
+        // is about to go, and no later state of it is acted on (`listener`
+        // is cleared below), so nothing else would ever resume it.
+        finishStart(.failure(Failure.cancelled))
         listener?.cancel()
         listener = nil
         splice?.teardown()
