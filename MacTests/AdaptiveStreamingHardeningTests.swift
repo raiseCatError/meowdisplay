@@ -301,8 +301,10 @@ final class AdaptiveStreamingHardeningTests: XCTestCase {
         XCTAssertNil(mac.helloFields.saveData)
 
         let ios = ReceiverAdaptiveState()
+        ios.noteHelloSent(ios.helloFields, now: 0)   // the connect hello, before the setting was read
         ios.setSettings(UseLessDataSettings(), suggestionsEnabled: true)
-        XCTAssertTrue(ios.consumeHelloResend(), "the first report re-sends hello")
+        XCTAssertTrue(ios.consumeHelloResend(now: AdaptiveHelloResendGate.minimumIntervalSeconds),
+                      "the first report re-sends hello")
         XCTAssertEqual(ios.helloFields.wireFields["saveData"] as? String, "auto")
     }
 

@@ -5,7 +5,9 @@ Automatic (Beta)", which is off by default.** Off means today's fixed Automatic 
 byte. "Use less data" works with the switch off too. Nothing here has been measured on hardware:
 every threshold, and any real-world benefit, is **PENDING HARDWARE**. The simulation in
 `MacTests/AdaptiveStreamingSimulation.swift` is a model for exercising the controller, not
-evidence of real-world gains. Section 9 describes the wiring.
+evidence of real-world gains; its comparison table is in
+[`adaptive-streaming-simulation.md`](adaptive-streaming-simulation.md). Section 9 describes the
+wiring; section 10 the fixes from the QA 94fdc717 review.
 
 Today, Automatic is a fixed policy (`StreamingModePolicy`): Performance profile, Balanced priority,
 Auto codec, Best quality (native raster, 18 Mbps), and the frame rate from `StreamingFPSPolicy`. Phase 1
@@ -103,7 +105,7 @@ The codec is never changed: it stays as negotiated.
 
 | Dimension | Steps | Start (= today's Best) | Saver top | Change cost in the real pipeline |
 |---|---|---|---|---|
-| Raster scale (of native, post-`DecodeCeiling`) | 0.5, 0.625, 0.75, 0.875, 1.0 | 1.0 | max(floor, 0.75) | **capture restart** (rate-limited) |
+| Raster scale (of native, **before** `DecodeCeiling`; a step that would capture the same size as the next higher one is dropped) | 0.5, 0.625, 0.75, 0.875, 1.0 | 1.0 | max(floor, 0.75) | **capture restart** (rate-limited) |
 | Bitrate | 2, 3, 4, 6, 8, 10, 12, 15, 18 Mbps (capped at `AdaptiveStreamingLadder.bitrateCeiling` = today's Best) | 18 Mbps | 6 Mbps | encoder reconfigure (VT session recreate + keyframe) |
 | FPS | negotiation `allowedTargets` (20, 30, 60, [90], [120]) | `initialTargetFPS` (≤ 60) | 60 | live capture update (`applyEffectiveFPSChange`) |
 
@@ -124,7 +126,8 @@ an iPad → 0.5.
 - mode and window start/end (required)
 - unique source FPS
 - capture, encoded, delivered, decoded and enqueued FPS
-- encode queue depth and age
+- encode queue depth and age (the age is the sender's measured mean submit → output encode
+  latency)
 - drops (encoder / network / receiver-late)
 - RTT, jitter
 - send backpressure (the fraction of the window at the pending-send cap)
@@ -168,22 +171,32 @@ The receiver's size, scale and size class are in the configuration.
 | Encoder or decoder overload, confirmed | FPS above 60 down → raster down to the floor → FPS down → raster below the floor. The bitrate never changes. |
 | Thermal (serious), confirmed | FPS above 60 down → raster down to the floor → FPS down. Critical also clamps FPS ≤ 30 and raster ≤ max(floor, 0.75). |
 | Source limited | hold. No downshift and no upshift credit (the healthy streak is frozen). |
-| Healthy for 5 windows, 10 s after the last change, no oscillation back-off | one upshift, as a probe: raster up to the floor → FPS up to 60 → raster up → bitrate up → 90/120. Strict order: only the first dimension below its top (and not backed off) is tried. Without headroom, hold. |
-| A bad window during a probe | revert at once. That dimension is backed off for 30 s, doubling up to 600 s. |
+| Healthy for 5 windows, 10 s after the last change, no oscillation back-off | one upshift, as a probe: raster up to the floor → FPS up to 60 → raster up → bitrate up → 90/120. The first step in that order with headroom is taken: a raster step that can't rise (no headroom, or the restart limit) falls through to the cheaper bitrate step. 90/120 is tried only when nothing below it is waiting. Without headroom anywhere, hold. |
+| A bad window during a probe (any problem cause, or short delivery with no attributable cause) | revert at once. That dimension is backed off for 30 s, doubling up to 600 s. |
 | 3 healthy windows during a probe | `probeConfirmed`; that dimension's back-off is reset |
 
 **Headroom** needed before an upshift:
 
 - Network: backpressure ≤ 0.02, RTT ≤ 1.25 × baseline + 10 ms, and jitter ≤ 0.5 × the new frame
   interval.
-- Pipeline: encode queue age and decode p95, each scaled by the new pixel count, ≤ 60 % of the new
-  frame interval.
-- Rates above 60: the source must produce at least 90 % of the tier.
+- Pipeline: decode p95 ≤ 60 % of the new frame interval, and the encode latency ≤ 60 % of its
+  overload limit (2 new frame intervals: the sender keeps two encodes in flight), each scaled by
+  the new pixel count.
+- **Missing pipeline evidence is "unknown", not "no".** The default display-layer receiver path
+  sends no decode time. Then an FPS or raster upshift also needs the network headroom above and
+  waits `minDwellSecondsWithoutPipelineEvidence` (20 s) after the last change instead of 10 s; a
+  probe that then leaves delivery short is reverted.
+- FPS: the capture must be saturated (source frames ≥ 90 % of the current target). The capture
+  runs at the current target, so it can't show more source frames than that; whether the source
+  can reach a tier at all is in the negotiation (90/120 only from a source whose refresh allows it).
 
-**Stability.** Raster changes restart capture, so they are spaced at least 20 s apart (6 s for a
-severe downshift). A raster step that is rate-limited holds (`restartRateLimited`). It does not skip
-ahead to a cut from 60 to 30 FPS. Three direction flips within 120 s block upshifts for 60 s. This
-back-off doubles each time, up to 600 s.
+**Stability.** Raster changes restart capture, so the controller spaces them at least 20 s apart
+(6 s for a severe downshift). A raster step that is rate-limited holds (`restartRateLimited`). It
+does not skip ahead to a cut from 60 to 30 FPS. Three direction flips within 120 s block upshifts
+for 60 s (a policy clamp counts as a downward move). This back-off doubles each time, up to 600 s.
+In the app, the coordinator also enforces one limit per receiver over everything that can restart
+capture (section 10), so in practice a severe raster step waits for the 20 s too; its bitrate/FPS
+part applies at once.
 
 ## 5. Safety and fallback
 
@@ -202,7 +215,7 @@ back-off doubles each time, up to 600 s.
 |---|---|
 | Negotiation matches today's FPS for legacy peers | unit-tested (pure) |
 | Controller rules (causes, floor, hysteresis, clamps, isolation, determinism) | unit-tested (pure) |
-| Comparison with today's fixed policy | **SIMULATION only** (`$C/reports/123-adaptive-simulation.md`), using an assumed plant |
+| Comparison with today's fixed policy | **SIMULATION only** ([`adaptive-streaming-simulation.md`](adaptive-streaming-simulation.md)), using an assumed plant, with samples built by the production builder |
 | The thresholds suit real Macs, receivers and networks | **PENDING HARDWARE**: none of them is tuned |
 | Real cost of a bitrate change (VT session recreate) vs a raster change (capture restart) | known from the code (`MacSenderVideoEncoder` recreates the session for any change). The latency cost is **unmeasured**. |
 | Effective-refresh, cost and telemetry inputs exist on the wire | phase 2: optional keys, no welcome feature (PROTOCOL.md 6.20); encode/decode unit-tested, never run against a real device |
@@ -256,6 +269,7 @@ means today's values. A decision can only reach the pipeline that owns the coord
 | Effective refresh, telemetry flag, cost hint, "Use less data", answer | receiver `hello` (re-sent on change) |
 | Delivered FPS, decode p95, RTT, RTT jitter, thermal, Low Power | receiver `stats`, every ~2 s while the Mac announces (`ping` key `adaptive`) |
 | Captured frames (≈ source unique frames: ScreenCaptureKit only delivers changed frames), encoder/network drops | the sender's ~2 s ping window |
+| Encode latency (mean submit → compressed output) | VideoToolbox output callbacks, timed only while the controller runs (`MacSenderPipelineState`, under the lock the encode path already takes) |
 | Sent video frames and bytes | video send completions |
 | Send backpressure | network drops ÷ (network drops + sent frames) in the window (an approximation of "share of the window at the pending cap") |
 | Sender thermal, Low Power | `ProcessInfo` |
@@ -271,11 +285,11 @@ The controller does not depend on the diagnostics switch.
 |---|---|
 | FPS only | live capture update: `applyEffectiveFPSChange()` (`SCStream.updateConfiguration`, then an encoder recreate at the new rate) |
 | Bitrate (with or without FPS) | encoder recreate with a keyframe: `applyEffectiveFPSChange(rebuildEncoder: true)` |
-| Raster | capture restart for this receiver only (release, stop, start at the new size; the cached frame is discarded). Rate-limited by the controller; a data-policy raster change is rate-limited by the coordinator (below). Not used in Window view, whose canvas is fixed: its ladder has no raster steps. A user-driven rebuild (Extend rotation or shape change, recovery) always wins: one that arrives during an adaptive restart is queued and runs right after it; an adaptive restart that arrives during a rebuild waits and runs afterwards only if the capture still has the old raster (`CaptureRebuildArbiter`) |
+| Raster | capture restart for this receiver only (release, stop, start at the new size; the cached frame is discarded). Rate-limited by the coordinator for every origin (section 10). Not used in Window view, whose canvas is fixed: its ladder has no raster steps. A user-driven rebuild (Extend rotation or shape change, recovery) always wins: one that arrives during an adaptive restart is queued and runs right after it; an adaptive restart that arrives during a rebuild waits and runs afterwards only if the capture still has the old raster (`CaptureRebuildArbiter`). Every committed capture start checks its size against the plan and restarts once if a raster change arrived while it was starting |
 
 There is no live `VTSessionSetProperty` bitrate path: that needs hardware validation first
-(follow-up). While the lock screen view is shown nothing is applied; the plan applies at the next
-restart. Frame generations, lock-screen frame validation, ordered control/media, the
+(follow-up). While the lock screen view is shown nothing is applied; the costliest held change is
+applied when the view ends (`AdaptiveApplyDeferral`). Frame generations, lock-screen frame validation, ordered control/media, the
 `StreamingRestartLedger` (#142) and the H.264 macroblock guard are unchanged: the plan can only
 lower today's FPS (`min`), and the H.264 guard is still applied first.
 
@@ -331,9 +345,44 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
   rarely fires on the default display-layer path.
 - Window view pane counts are not fed (the pane clamp never fires), and Window view has no source
   cap (no source cadence is set there).
-- The native raster is the started capture size divided by the applied scale, so a stream clamped
-  by the receiver's decode ceiling looks larger to the readability floor than it is.
 - The first ~2 s of a session run today's FPS until the controller's first tick (60-first then
   applies as a live FPS update).
+- Without `dec95` the decoder cause can't be told from other short delivery, so a decoder-limited
+  receiver on the display-layer path is held, not stepped down (the simulation shows this).
 - Everything in "PENDING HARDWARE" in section 6, plus: the cost of a live FPS update and of a
   per-receiver capture restart on real Macs, and whether 2 s `stats` change anything measurable.
+
+## 10. Review fixes (QA 94fdc717, review A)
+
+- **Recovery (A1).** The sender's encode latency now reaches the controller, missing decode time is
+  handled as unknown (see Headroom), a raster step that can't rise falls through to bitrate, and a
+  probe with unexplained short delivery reverts. The production sample builder
+  (`AdaptiveStreamingCoordinator.makeSample`) is the only one: the simulation and the tests use it,
+  and `AdaptiveStreamingSample.controllerFieldUse` lists, for every sample field, whether production
+  sets it or what the fallback is (a test checks the list against the builder).
+- **One limiter per receiver (A3, A8).** The coordinator gates every plan change before it reaches
+  the pipeline: at most one capture restart per 20 s and one bitrate change per 4 s, whatever the
+  origin (controller step, policy clamp, data policy, reset on reconnect, a receiver flipping its
+  telemetry keys). Held parts are re-evaluated every tick against the latest wanted plan; FPS
+  passes at once. A raster change that keeps the captured size is not a restart.
+- **Native size (A4).** The controller's raster 1.0 is the size before the decode ceiling; the
+  H.264 FPS guard uses the size actually encoded at the top raster. Steps that would capture the
+  same size are dropped, so a 5K display mirrored to an iPad with a 4096×2304 ceiling has the
+  ladder 0.5, 0.625, 0.75, 1.0, and its configuration no longer changes with each restart.
+- **Started size (A5).** The coordinator records the size a capture really started at and checks
+  it against the plan's size, instead of trusting the scale read at preparation time.
+- **Legacy peers (A6).** With the switch on, the Mirror/Extend source cap applies to every receiver,
+  old ones included (documented in PROTOCOL.md 6.20). With it off, a matrix test runs the
+  production resolver (`MacSender.effectiveFPS(today:adaptive:)`) and gets today's FPS everywhere.
+- **Lock screen and other rebuilders (A7).** A change held by the lock screen view is applied when
+  the view ends. Capture recovery, the lock screen capture move, Video On and Mirror display changes
+  still start capture outside `CaptureRebuildArbiter`; an adaptive restart that finds capture
+  already restarted by one of them (the "already active" error) leaves it running instead of
+  entering recovery, and that start's commit re-checks the raster.
+- **Re-hellos (A9).** Receivers re-send hello only for a change the Mac uses, at most once per 5 s,
+  latest values (PROTOCOL.md 6.20).
+- **Off costs nothing.** With the switch off and no data saving: no input building, no replanning,
+  no `stats` telemetry parsing, no encode timing, and video sends are counted without a lock (the
+  Settings payload figure is published once per ping). A test counts the coordinator's work.
+- **Not changed (A10).** `restartCaptureForAdaptiveRaster` still writes a few capture fields off
+  `queue`, copying the existing `reconfigure` pattern; left for a separate fix.

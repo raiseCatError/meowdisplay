@@ -2703,8 +2703,11 @@ the readability floor only inside 0.5…8. Numbers are JSON numbers; a JSON bool
 where a number is expected (and the reverse). Thresholds and the real-world
 effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md).
 
-**Receiver `hello`** (re-sent whenever any of these change; the official receivers check every
-~2 s on their ping tick):
+**Receiver `hello`** (re-sent when a value the Mac uses changes: `effHz`, `adaptiveTelemetry`, the
+`cost` class or confidence, `saveData` or `saveDataAnswer`. A change of the `iface` kind alone does
+not re-send. The official receivers check on their ~2 s ping tick and re-send at most once per 5 s
+since the last hello, carrying the latest values, so a flapping value cannot cause a hello storm.
+A hello sent for another reason carries the current values and resets that interval):
 
 - `effHz` (int 1…240): the screen's current effective refresh. iOS: the screen's
   `maximumFramesPerSecond`, at most 60 while Low Power Mode is on. Mac Receiver: the main
@@ -2745,14 +2748,21 @@ the old `stats` content.
 | `thermal` | 0 nominal, 1 fair, 2 serious, 3 critical |
 | `lowPower` | bool, Low Power Mode |
 
-**What the Mac does with them.** Old receivers (no keys) and Custom mode: exactly today's
-behaviour. With the Beta switch on, a receiver that sends `effHz` + `adaptiveTelemetry` gets a
-per-receiver controller: FPS changes take the live capture update, bitrate changes recreate the
-encoder session (with a keyframe), and raster changes restart that receiver's capture (the
-controller allows one raster change per 20 s, except a severe protective step). The bitrate never
-goes above the Best target (18 Mbps). With the switch on, the Mac also never captures above the
-source's own refresh in Mirror (the mirrored display's refresh) and Extend (the virtual display's);
-a reading below 24 Hz counts as unknown (no cap). Window view has no source cap.
+**What the Mac does with them.** Custom mode: exactly today's behaviour. With the Beta switch off,
+old receivers (no keys) get exactly today's behaviour. With the Beta switch on, a receiver that
+sends `effHz` + `adaptiveTelemetry` gets a per-receiver controller: FPS changes take the live
+capture update (which also recreates the encoder at the new rate), bitrate changes recreate the
+encoder session (with a keyframe), and raster changes restart that receiver's capture. Rate limits,
+per receiver and whatever caused the change (the controller, a data-policy change, a thermal or
+policy clamp, a reset on reconnect, or a receiver switching between sending the telemetry keys and
+not): at most one capture restart per 20 s, and at most one bitrate change per 4 s. A change inside
+its limit waits and the latest wanted point applies when the limit has passed; the parts of a change
+that are not limited (FPS) apply at once. A raster step whose captured size equals the current one
+(the receiver's decode ceiling, `maxEncodeWide/High`) is not a restart. The bitrate never goes above
+the Best target (18 Mbps). **Source cap (switch on only):** the Mac never captures above the
+source's own refresh in Mirror (the mirrored display's refresh) and Extend (the virtual display's),
+for every receiver, old receivers without the keys included (they otherwise keep today's fixed
+point). A reading below 24 Hz counts as unknown (no cap). Window view has no source cap.
 
 "Use less data" works with the switch off too: in Automatic, the Mac uses a conservative point
 (Balanced raster and bitrate, at most 60 FPS) for that receiver when `saveData` is `on`, or `auto`
