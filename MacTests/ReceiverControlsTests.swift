@@ -100,7 +100,7 @@ final class ReceiverControlsTests: XCTestCase {
         var profile = ControlProfile.canonical()
         XCTAssertEqual(profile.visibleTrayItems, ControlTrayItem.allCases)
         XCTAssertEqual(profile.actions(for: ModifierChord([.command])).map(\.displayKey),
-                       ["C", "V", "X", "Z", "A", "W", "Space"])
+                       ["C", "V", "X", "Z", "A", "W", "T", "Space"])
         XCTAssertEqual(profile.actions(for: ModifierChord([.command, .option])).count, 5)
         XCTAssertEqual(profile.actions(for: ModifierChord([.command, .shift])).count, 6)
 
@@ -2129,5 +2129,215 @@ final class ReservedRegionLayoutTests: XCTestCase {
         XCTAssertEqual(pieces, [CGRect(x: 0, y: 0, width: 20, height: 50),
                                 CGRect(x: 30, y: 0, width: 30, height: 50),
                                 CGRect(x: 70, y: 0, width: 30, height: 50)])
+    }
+}
+
+/// The default modifier-chord palettes, and how saved profiles meet a changed default.
+final class ShortcutPaletteAuditTests: XCTestCase {
+    private let command = ModifierChord([.command])
+    private let commandOption = ModifierChord([.command, .option])
+    private let commandShift = ModifierChord([.command, .shift])
+
+    /// The Command palette as shipped at schema 21, written out independently of `canonical`.
+    private func schema21CommandPalette() -> [ShortcutItem] {
+        let chord = command
+        func item(_ id: String, _ title: String, _ key: String, _ usage: Int) -> ShortcutItem {
+            ShortcutItem(id: id, title: title, displayKey: key, usage: usage, modifiers: chord)
+        }
+        return [item("copy", "Copy", "C", 6), item("paste", "Paste", "V", 25), item("cut", "Cut", "X", 27),
+                item("undo", "Undo", "Z", 29), item("select-all", "Select All", "A", 4),
+                item("close", "Close", "W", 26), item("spotlight", "Spotlight", "Space", 44)]
+    }
+
+    private func makeRepository() throws -> (ReceiverControlPreferencesRepository, UserDefaults, String) {
+        let suite = "ShortcutPaletteAuditTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        return (ReceiverControlPreferencesRepository(defaults: defaults), defaults, suite)
+    }
+
+    /// Preferences as a schema-21 build would have saved them: every slot carries `commandPalette`.
+    private func savedAtSchema21(commandPalette: [ShortcutItem]?, version: Int = 21) -> ReceiverControlPreferences {
+        var preferences = ReceiverControlPreferences()
+        for slot in ControlProfileSlot.allCases {
+            var profile = ControlProfile.canonical(slot: slot)
+            if let commandPalette {
+                profile.setActions(commandPalette, for: command)
+            } else {
+                profile.palettes.removeAll { $0.chord == command }
+            }
+            preferences.updateProfile(profile)
+        }
+        preferences.version = version
+        return preferences
+    }
+
+    private func load(_ preferences: ReceiverControlPreferences) throws -> ReceiverControlPreferences {
+        let (repository, defaults, suite) = try makeRepository()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(try JSONEncoder().encode(preferences), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        return repository.load()
+    }
+
+    // MARK: - Canonical contents
+
+    func testNewTabIsCommandTWithAStableIDRightAfterClose() throws {
+        let actions = ControlProfile.canonical().actions(for: command)
+        let ids = actions.map(\.id)
+        let newTab = try XCTUnwrap(actions.first { $0.id == "new-tab" })
+        XCTAssertEqual(newTab.title, "New Tab")
+        XCTAssertEqual(newTab.displayKey, "T")
+        XCTAssertEqual(newTab.action, .keyboardShortcut(KeyboardShortcut(usage: 23, modifiers: command)))
+        XCTAssertEqual(newTab.keysDescription, "⌘T")
+        let closeIndex = try XCTUnwrap(ids.firstIndex(of: "close"))
+        XCTAssertEqual(ids.firstIndex(of: "new-tab"), closeIndex + 1)
+    }
+
+    func testReopenClosedTabStaysOnlyInCommandShiftAndIsNotDuplicated() throws {
+        let profile = ControlProfile.canonical()
+        XCTAssertFalse(profile.actions(for: command).contains { $0.id == "reopen-tab" })
+        let reopen = profile.palettes.flatMap(\.actions).filter { $0.id == "reopen-tab" }
+        XCTAssertEqual(reopen.count, 1)
+        XCTAssertEqual(reopen.first?.action, .keyboardShortcut(KeyboardShortcut(usage: 23, modifiers: commandShift)))
+        XCTAssertTrue(profile.actions(for: commandShift).contains { $0.id == "reopen-tab" })
+    }
+
+    func testCanonicalPalettesHaveNoDuplicateIDsOrDuplicateKeyAndModifierCombinations() {
+        for slot in ControlProfileSlot.allCases {
+            let actions = ControlProfile.canonical(slot: slot).palettes.flatMap(\.actions)
+            XCTAssertEqual(Set(actions.map(\.id)).count, actions.count, "duplicate id in \(slot)")
+            var combos: [String] = []
+            for item in actions {
+                guard case .keyboardShortcut(let shortcut) = item.action else {
+                    XCTFail("\(item.id) is not a keyboard shortcut")
+                    continue
+                }
+                combos.append("\(shortcut.modifiers.id):\(shortcut.usages.map(String.init).joined(separator: ","))")
+            }
+            XCTAssertEqual(Set(combos).count, combos.count, "duplicate key+modifier in \(slot): \(combos)")
+        }
+    }
+
+    func testEveryCanonicalActionCarriesItsPalettesModifiersAndOtherChordsStayEmpty() {
+        let profile = ControlProfile.canonical()
+        XCTAssertEqual(Set(profile.palettes.map(\.chord)), [command, commandOption, commandShift])
+        for palette in profile.palettes {
+            for item in palette.actions {
+                guard case .keyboardShortcut(let shortcut) = item.action else { return XCTFail(item.id) }
+                XCTAssertEqual(shortcut.modifiers, palette.chord, item.id)
+            }
+        }
+        for chord in [ModifierChord([.control]), ModifierChord([.option]), ModifierChord([.shift]),
+                      ModifierChord([.command, .control]), ModifierChord([.control, .shift])] {
+            XCTAssertTrue(profile.actions(for: chord).isEmpty, "\(chord.displayName) stays empty by design")
+        }
+    }
+
+    func testCanonicalPaletteContents() {
+        let profile = ControlProfile.canonical()
+        XCTAssertEqual(profile.actions(for: command).map(\.id),
+                       ["copy", "paste", "cut", "undo", "select-all", "close", "new-tab", "spotlight"])
+        XCTAssertEqual(profile.actions(for: commandOption).map(\.id),
+                       ["move-here", "force-quit", "dock", "hide-others", "close-all"])
+        XCTAssertEqual(profile.actions(for: commandShift).map(\.id),
+                       ["redo", "new-folder", "reopen-tab", "screenshot", "screenshot-selection", "screenshot-controls"])
+    }
+
+    func testNoCanonicalPaletteExceedsEightKeys() {
+        // Eight is the most a phone palette shows on one line (portrait wraps to two rows above eight;
+        // landscape never wraps), so a default palette must not grow past it.
+        for palette in ControlProfile.canonical().palettes {
+            XCTAssertLessThanOrEqual(palette.actions.count, 8, palette.chord.displayName)
+        }
+    }
+
+    // MARK: - Saved profiles
+
+    func testSchema21ProfileWithUntouchedCommandPaletteGainsNewTabAfterClose() throws {
+        let loaded = try load(savedAtSchema21(commandPalette: schema21CommandPalette()))
+        XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
+        for slot in ControlProfileSlot.allCases {
+            let profile = loaded.profile(for: slot)
+            XCTAssertEqual(profile.actions(for: command).map(\.id),
+                           ["copy", "paste", "cut", "undo", "select-all", "close", "new-tab", "spotlight"], "\(slot)")
+            XCTAssertEqual(profile, .canonical(slot: slot), "\(slot)")
+        }
+    }
+
+    func testOlderSchemaWithUntouchedCommandPaletteAlsoGainsNewTab() throws {
+        let loaded = try load(savedAtSchema21(commandPalette: schema21CommandPalette(), version: 8))
+        XCTAssertEqual(loaded.profile(for: .default).actions(for: command).filter { $0.id == "new-tab" }.count, 1)
+    }
+
+    func testMigrationLeavesOtherPalettesAndTrayUntouched() throws {
+        var saved = savedAtSchema21(commandPalette: schema21CommandPalette())
+        var profile = saved.profile(for: .default)
+        profile.setActions(Array(profile.actions(for: commandShift).dropFirst()), for: commandShift)
+        profile.trayItems[0].isVisible = false
+        saved.updateProfile(profile)
+        let loaded = try load(saved).profile(for: .default)
+        XCTAssertEqual(loaded.actions(for: commandShift), profile.actions(for: commandShift))
+        XCTAssertEqual(loaded.actions(for: commandOption), profile.actions(for: commandOption))
+        XCTAssertEqual(loaded.trayItems, profile.trayItems)
+    }
+
+    func testCustomisedCommandPalettesAreNeverOverwritten() throws {
+        let original = schema21CommandPalette()
+        var reordered = original
+        reordered.swapAt(0, 1)
+        var trimmed = original
+        trimmed.removeAll { $0.id == "spotlight" }
+        var extended = original
+        extended.append(ShortcutItem(id: "mine", title: "Mine", displayKey: "K", usage: 14, modifiers: command))
+        var restyled = original
+        restyled[0].display = .emoji("📋")
+        var renamed = original
+        renamed[5].title = "Close Window"
+        let replaced = [ShortcutItem(id: "mine", title: "Mine", displayKey: "K", usage: 14, modifiers: command)]
+
+        for (name, palette) in [("reordered", reordered), ("trimmed", trimmed), ("extended", extended),
+                                ("restyled", restyled), ("renamed", renamed), ("replaced", replaced),
+                                ("emptied", [])] {
+            let loaded = try load(savedAtSchema21(commandPalette: palette))
+            XCTAssertEqual(loaded.profile(for: .default).actions(for: command), palette, name)
+        }
+    }
+
+    func testMissingCommandPaletteIsNotRecreatedByMigration() throws {
+        let loaded = try load(savedAtSchema21(commandPalette: nil))
+        XCTAssertTrue(loaded.profile(for: .default).actions(for: command).isEmpty)
+    }
+
+    func testPaletteThatAlreadyHasNewTabIsNotDuplicated() throws {
+        let loaded = try load(savedAtSchema21(commandPalette: ControlProfile.canonical().actions(for: command)))
+        XCTAssertEqual(loaded.profile(for: .default).actions(for: command).filter { $0.id == "new-tab" }.count, 1)
+    }
+
+    func testNewTabTheUserDeletesAfterMigrationStaysDeleted() throws {
+        let (repository, defaults, suite) = try makeRepository()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(try JSONEncoder().encode(savedAtSchema21(commandPalette: schema21CommandPalette())),
+                     forKey: ReceiverControlPreferencesRepository.defaultsKey)
+        var preferences = repository.load()
+        var profile = preferences.profile(for: .default)
+        profile.setActions(profile.actions(for: command).filter { $0.id != "new-tab" }, for: command)
+        preferences.updateProfile(profile)
+        repository.save(preferences)
+        for _ in 0..<2 {
+            XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), schema21CommandPalette())
+            repository.save(repository.load())
+        }
+    }
+
+    func testFreshInstallGetsNewTabAndCurrentSchemaProfileIsNeverRewritten() throws {
+        let (repository, defaults, suite) = try makeRepository()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(repository.load().profile(for: .default).actions(for: command).contains { $0.id == "new-tab" })
+        var preferences = ReceiverControlPreferences()
+        var profile = preferences.profile(for: .profile1)
+        profile.setActions(schema21CommandPalette(), for: command)
+        preferences.updateProfile(profile)
+        repository.save(preferences)
+        XCTAssertEqual(repository.load().profile(for: .profile1).actions(for: command), schema21CommandPalette(),
+                       "a palette saved at the current schema is the user's, even if it looks like an old default")
     }
 }

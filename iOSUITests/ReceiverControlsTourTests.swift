@@ -190,6 +190,18 @@ final class ReceiverControlsTourTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS '⇧→'")).firstMatch
             .waitForExistence(timeout: 3), "⇧→ was not sent")
         XCTAssertEqual(shift.value as? String, "On", "a latch lasts while the keypad is open")
+        // The preview names what was sent.
+        let preview = app.descendants(matching: .any)["arrowKeyPreview"].firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 2), "no key preview")
+        // "Shift Right Arrow" just after the press, then "Shift" (armed) once it has lingered.
+        XCTAssertTrue(preview.label.hasPrefix("Shift"), preview.label)
+        // Toggles combine, and a second touch turns one off.
+        let command = app.buttons["arrowKeypadModifier.command"].firstMatch
+        command.tap()
+        XCTAssertEqual(command.value as? String, "On")
+        XCTAssertEqual(shift.value as? String, "On", "turning on ⌘ leaves ⇧ on")
+        command.tap()
+        XCTAssertEqual(command.value as? String, "Off")
         snapshot("arrows-keypad-modifiers")
 
         button.tap()
