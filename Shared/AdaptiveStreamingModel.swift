@@ -107,6 +107,12 @@ struct AdaptiveStreamingThresholds: Equatable, Sendable {
     var probeConfirmWindows = 3
     /// Minimum time after any change before an upshift.
     var minDwellSeconds: Double = 10.0
+    /// The dwell instead of `minDwellSeconds` when part of the pipeline
+    /// evidence is missing (no receiver decode time, which the default
+    /// display-layer path never reports, or no sender encode latency): the
+    /// upshift then rests on delivery, drops, backpressure and RTT/jitter
+    /// alone, so it waits longer (#123 A1).
+    var minDwellSecondsWithoutPipelineEvidence: Double = 20.0
     /// Raster changes restart capture: at most one per interval…
     var minRestartIntervalSeconds: Double = 20.0
     /// …or this one for a protective (severe) downshift.
@@ -156,10 +162,14 @@ struct AdaptiveStreamingThresholds: Equatable, Sendable {
     var headroomRttFactor = 1.25
     var headroomRttSlackMs = 10.0
     var headroomJitterFrameIntervals = 0.5
-    /// Encode queue age and decode p95 must fit in this fraction of the
-    /// NEW frame interval (scaled for the new pixel count).
+    /// Decode p95 must fit in this fraction of the NEW frame interval, and
+    /// the encode latency in this fraction of its overload limit
+    /// (`encodeQueueAgeFrameIntervals` new intervals: the sender keeps up to
+    /// two encodes in flight), each scaled for the new pixel count.
     var headroomPipelineFraction = 0.6
-    /// 90/120 needs the source to actually produce this fraction of the tier.
+    /// An FPS upshift needs the capture saturated: source frames at least
+    /// this fraction of the CURRENT target (the capture runs at the current
+    /// target, so it can't show more than that).
     var highRefreshSourceRatio = 0.9
 
     // Network step order
@@ -218,6 +228,9 @@ struct AdaptiveStreamingSample: Equatable, Sendable {
     var enqueuedFPS: Double?
 
     var encodeQueueDepth: Int?
+    /// The sender's measured encode latency for the window: the mean time
+    /// from submitting a frame to VideoToolbox to its compressed output
+    /// (which includes any wait behind the other in-flight encode).
     var encodeQueueAgeMs: Double?
     var drops = Drops()
     var rttMs: Double?
@@ -240,6 +253,54 @@ struct AdaptiveStreamingSample: Equatable, Sendable {
     var floatingPaneCount = 0
 
     var duration: Double { windowEnd - windowStart }
+
+    /// How the controller depends on each field (#123 A1). A field the
+    /// controller needs must be set by the production sample builder
+    /// (`AdaptiveStreamingCoordinator.makeSample`); anything else must have
+    /// an explicit fallback when absent. A test checks every stored property
+    /// is listed here and every `.setByProduction` field is set by the real
+    /// builder from the keys real receivers send, so the controller can't
+    /// again wait for a field production never fills.
+    enum FieldUse: Equatable, Sendable {
+        /// Always set by the production builder; the controller relies on it.
+        case setByProduction
+        /// Read when present; absent has a stated fallback.
+        case optionalWithFallback(String)
+        /// Not read by the controller (diagnostics or future use).
+        case unused
+    }
+
+    static let controllerFieldUse: [String: FieldUse] = [
+        "generation": .setByProduction,
+        "routeEpoch": .setByProduction,
+        "mode": .setByProduction,
+        "windowStart": .setByProduction,
+        "windowEnd": .setByProduction,
+        "sourceUniqueFPS": .setByProduction,
+        "captureFPS": .unused,
+        "encodedFPS": .setByProduction,
+        "deliveredFPS": .setByProduction,
+        "decodedFPS": .optionalWithFallback("delivered FPS stands in; no decoded-ratio check"),
+        "enqueuedFPS": .optionalWithFallback("decoded, then delivered FPS stands in"),
+        "encodeQueueDepth": .unused,
+        "encodeQueueAgeMs": .optionalWithFallback(
+            "no encode-latency overload check; upshift pipeline evidence is unknown (longer dwell)"),
+        "drops": .setByProduction,
+        "rttMs": .optionalWithFallback("no RTT baseline: no RTT-based downshift and no network headroom (hold)"),
+        "jitterMs": .optionalWithFallback("no jitter check"),
+        "sendBackpressure": .setByProduction,
+        "decodeTimeP95Ms": .optionalWithFallback(
+            "no decode overload check; upshift pipeline evidence is unknown (longer dwell)"),
+        "presentationQueueAgeMs": .optionalWithFallback("no presentation-queue check"),
+        "stallCount": .optionalWithFallback("counts as 0 stalls"),
+        "payloadBytesPerSecond": .unused,
+        "senderThermal": .setByProduction,
+        "receiverThermal": .optionalWithFallback("nominal"),
+        "power": .setByProduction,
+        "dataPolicy": .setByProduction,
+        "activePaneCount": .optionalWithFallback("1 pane: the Window view pane clamp never fires"),
+        "floatingPaneCount": .optionalWithFallback("0 floats"),
+    ]
 }
 
 /// The numbers a decision used, for the diagnostics view and export.

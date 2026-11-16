@@ -177,6 +177,50 @@ struct AdaptiveHelloFields: Equatable, Sendable {
     }
 }
 
+/// When a receiver re-sends `hello` for an adaptive change (#123 A9): only
+/// when something the Mac uses changed since the last hello that went out
+/// (effective refresh, telemetry flag, cost class and confidence, "Use less
+/// data" and its answer; the interface kind alone is informational), and at
+/// most once per `minimumIntervalSeconds`. Checked on every ping tick, so
+/// the latest state always goes out once the interval has passed. Pure.
+struct AdaptiveHelloResendGate: Equatable, Sendable {
+    static let minimumIntervalSeconds: TimeInterval = 5
+
+    /// The part of the hello fields the Mac acts on.
+    struct MacView: Equatable, Sendable {
+        var effectiveRefreshHz: Int?
+        var telemetry: Bool
+        var cost: NetworkCost.CostEvidence?
+        var saveData: NetworkCost.DataPreference?
+        var saveDataAnswer: NetworkCost.MeteredAnswer?
+
+        init(_ fields: AdaptiveHelloFields) {
+            effectiveRefreshHz = fields.effectiveRefreshHz
+            telemetry = fields.effectiveRefreshHz != nil && fields.telemetry
+            cost = fields.cost?.cost
+            saveData = fields.saveData
+            saveDataAnswer = fields.saveDataAnswer == .unanswered ? nil : fields.saveDataAnswer
+        }
+    }
+
+    private(set) var lastSent: MacView?
+    private(set) var lastSentAt: TimeInterval?
+
+    /// A hello went out (for any reason) carrying `fields`.
+    mutating func noteSent(_ fields: AdaptiveHelloFields, now: TimeInterval) {
+        lastSent = MacView(fields)
+        lastSentAt = now
+    }
+
+    /// Whether to re-send now. Before the first hello of a session there is
+    /// nothing to re-send: that hello carries the current values.
+    func shouldResend(_ fields: AdaptiveHelloFields, now: TimeInterval) -> Bool {
+        guard let lastSent, MacView(fields) != lastSent else { return false }
+        guard let lastSentAt else { return true }
+        return now - lastSentAt >= Self.minimumIntervalSeconds || now < lastSentAt
+    }
+}
+
 /// The optional windowed keys of a receiver `stats` message.
 struct AdaptiveReceiverTelemetry: Equatable, Sendable {
     var windowSeconds: Double
@@ -492,7 +536,7 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
     private var effectiveRefreshHz: Int?
     private var pathReport: NetworkCost.EndpointReport?
     private var settings = UseLessDataSettings()
-    private var helloResendNeeded = false
+    private var resendGate = AdaptiveHelloResendGate()
     private var announce = AdaptiveAnnounceTracker()
     private var window = AdaptiveReceiverTelemetryWindow()
     private var tracker = NetworkCostSuggestionTracker()
@@ -510,16 +554,12 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
 
     func setEffectiveRefresh(_ hz: Int?) {
         lock.lock(); defer { lock.unlock() }
-        guard hz != effectiveRefreshHz else { return }
         effectiveRefreshHz = hz
-        helloResendNeeded = true
     }
 
     func setPath(_ report: NetworkCost.EndpointReport) {
         lock.lock(); defer { lock.unlock() }
-        guard report != pathReport else { return }
         pathReport = report
-        helloResendNeeded = true
     }
 
     func setSettings(_ newSettings: UseLessDataSettings, suggestionsEnabled: Bool? = nil) {
@@ -527,14 +567,8 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         if let suggestionsEnabled { self.suggestionsEnabled = suggestionsEnabled }
         if newSettings.answer != tracker.answer { tracker.record(answer: newSettings.answer) }
         while tracker.dismissals < newSettings.dismissals { tracker.recordDismissal() }
-        let firstReport = !preferenceReported
         preferenceReported = true
-        guard firstReport || newSettings.preference != settings.preference || newSettings.answer != settings.answer else {
-            settings = newSettings
-            return
-        }
         settings = newSettings
-        helloResendNeeded = true
     }
 
     var currentSettings: UseLessDataSettings {
@@ -544,24 +578,28 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
 
     var helloFields: AdaptiveHelloFields {
         lock.lock(); defer { lock.unlock() }
-        return AdaptiveHelloFields(
+        return currentFieldsLocked()
+    }
+
+    private func currentFieldsLocked() -> AdaptiveHelloFields {
+        AdaptiveHelloFields(
             effectiveRefreshHz: effectiveRefreshHz, telemetry: effectiveRefreshHz != nil,
             cost: pathReport, saveData: preferenceReported ? settings.preference : nil,
             saveDataAnswer: preferenceReported && settings.answer != .unanswered ? settings.answer : nil)
     }
 
-    /// True once per change since the last hello: the caller re-sends hello.
-    func consumeHelloResend() -> Bool {
+    /// True when the caller should re-send hello now
+    /// (`AdaptiveHelloResendGate`): something the Mac uses changed since the
+    /// last hello, and the last one is at least the minimum interval old.
+    func consumeHelloResend(now: TimeInterval) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        let needed = helloResendNeeded
-        helloResendNeeded = false
-        return needed
+        return resendGate.shouldResend(currentFieldsLocked(), now: now)
     }
 
-    /// Called when a hello goes out for any reason: it carries the current values.
-    func noteHelloSent() {
+    /// Called when a hello goes out for any reason, with the fields it carries.
+    func noteHelloSent(_ fields: AdaptiveHelloFields, now: TimeInterval) {
         lock.lock(); defer { lock.unlock() }
-        helloResendNeeded = false
+        resendGate.noteSent(fields, now: now)
     }
 
     // Mac announce and stats cadence
@@ -628,7 +666,6 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         if let answer {
             tracker.record(answer: answer)
             settings.answer = answer
-            helloResendNeeded = true
         } else {
             tracker.recordDismissal()
             settings.dismissals = tracker.dismissals

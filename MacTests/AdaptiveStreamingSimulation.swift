@@ -25,6 +25,15 @@ import Foundation
 // - Noise: a fixed-seed linear congruential generator adds ±3 % to capacity
 //   and RTT, so runs are repeatable bit for bit.
 //
+// Samples: the plant's truth is turned into exactly what production has (the
+// sender's ping window, its send and encode-latency counters, and the
+// receiver's `stats` keys as the official receivers send them, through the
+// wire encoding), and the controller's sample is built by the production
+// builder `AdaptiveStreamingCoordinator.makeSample`. So the simulation can't
+// feed the controller a field production never sets (#123 A1). Receivers on
+// the default display-layer path send no `dec95`; a scenario can opt into it
+// (the Metal path).
+//
 // Metrics: delivered unique FPS = presented frames that were distinct source
 // frames; stall time = window × the fraction of expected unique frames that
 // were not presented; bytes = delivered payload bytes (not billed bytes).
@@ -65,6 +74,8 @@ struct AdaptiveSimulationScenario {
     var activePanes = 1
     var floatingPanes = 0
     var noiseSeed: UInt64 = 1
+    /// The receiver reports decode p95 (`dec95`): the Metal path only.
+    var receiverSendsDecodeP95 = false
 
     static let iPad11 = AdaptiveReceiverDisplay(pointsWide: 1194, pointsHigh: 834, scale: 2, sizeClass: .tablet)
     static let iPhone = AdaptiveReceiverDisplay(pointsWide: 852, pointsHigh: 393, scale: 3, sizeClass: .phone)
@@ -191,30 +202,42 @@ struct AdaptiveSimulationPlant {
         let decoded = decoderUtilisation > 1 ? delivered / decoderUtilisation : delivered
         let decodeMs = pixels / decoderCapacity * 1000
         let decodeP95 = decodeMs * 1.3 * (decoderUtilisation > 0.9 ? 1.5 : 1)
-        let presentationAge = decoderUtilisation > 1 ? 120.0 : 6.0
         let presented = decoded * (1 - lateFraction)
-        let missing = wanted > 0 ? max(0, 1 - presented / wanted) : 0
 
         // Thermal
         if let thermal = s.thermal {
             heat = min(1, max(0, heat + thermal.rate * (min(encoderUtilisation, 1) - thermal.equilibriumUtilisation) * window))
         }
 
-        let sample = AdaptiveStreamingSample(
-            generation: generation, routeEpoch: s.routeEpoch(start), mode: s.mode,
-            windowStart: start, windowEnd: start + window,
-            sourceUniqueFPS: sourceFPS, captureFPS: wanted, encodedFPS: encoded, deliveredFPS: delivered,
-            decodedFPS: decoded, enqueuedFPS: presented,
-            encodeQueueDepth: encoderUtilisation > 1 ? 3 : 1, encodeQueueAgeMs: encodeQueueAge,
-            drops: .init(encoder: Int(encoderDrops.rounded()), network: Int((encoded * loss * window).rounded()),
-                         receiverLate: Int((decoded * lateFraction * window).rounded())),
-            rttMs: rtt, jitterMs: jitter, sendBackpressure: min(1, loss * 1.5),
-            decodeTimeP95Ms: decodeP95, presentationQueueAgeMs: presentationAge,
-            stallCount: Int((missing * 10).rounded(.down)),
-            payloadBytesPerSecond: min(demand, capacity) / 8,
-            senderThermal: thermalLevel, receiverThermal: s.thermal == nil ? nil : .nominal,
-            power: .normal, dataPolicy: dataPolicy,
-            activePaneCount: s.activePanes, floatingPaneCount: s.floatingPanes)
+        // What production sees. Sender: its ping window and send counters
+        // (frames that found the send gate full are network drops, the rest
+        // are sent) and the mean encode latency. Receiver: `stats` keys as
+        // the official receivers send them, through the wire encoding;
+        // `deliveredFps` counts frames reaching the presentation hand-off
+        // (decoded), and there is no `late`, `decodedFps`, `enqFps` or
+        // `presAge` yet.
+        let networkDrops = Int((encoded * loss * window).rounded())
+        let sentFrames = Int((encoded * (1 - loss) * window).rounded())
+        let senderWindow = AdaptiveStreamingCoordinator.SenderWindow(
+            start: start, end: start + window, capturedFrames: Int((wanted * window).rounded()),
+            encoderDrops: Int(encoderDrops.rounded()), networkDrops: networkDrops,
+            thermal: thermalLevel ?? .nominal, lowPower: false,
+            encodeLatencyMs: encoded > 0 ? encodeQueueAge : nil)
+        var receiverTelemetry = AdaptiveReceiverTelemetry(windowSeconds: window)
+        receiverTelemetry.deliveredFPS = decoded
+        receiverTelemetry.decodeP95Ms = s.receiverSendsDecodeP95 ? decodeP95 : nil
+        receiverTelemetry.jitterMs = jitter
+        receiverTelemetry.thermal = .nominal
+        receiverTelemetry.lowPower = false
+        var statsKeys = receiverTelemetry.wireFields
+        statsKeys[AdaptiveStreamingWire.rttKey] = rtt.rounded()
+        let parsed = AdaptiveReceiverTelemetry.parse(statsKeys) ?? receiverTelemetry
+        let sample = AdaptiveStreamingCoordinator.makeSample(
+            generation: generation, routeEpoch: s.routeEpoch(start), mode: s.mode, window: senderWindow,
+            sentFrames: sentFrames, sentBytes: Int((min(demand, capacity) / 8 * window).rounded()),
+            telemetry: parsed, dataPolicy: dataPolicy, now: start + window)
+        // Window view pane counts are not fed in production, so the
+        // scenario's panes never reach the controller here either.
         return Outcome(sample: sample, presentedUniqueFPS: presented, expectedUniqueFPS: wanted,
                        bytes: min(demand, capacity) / 8 * window)
     }
@@ -353,7 +376,7 @@ enum AdaptiveSimulation {
 extension AdaptiveSimulationScenario {
     static var all: [AdaptiveSimulationScenario] {
         [healthyLAN60, proMotion120WithHeadroom, advertised120Source60, bandwidthCollapse, jitteryRemote,
-         meteredPath, encoderLimitedMac, decoderLimitedReceiver, thermalRamp, idleToMotion,
+         meteredPath, encoderLimitedMac, decoderLimitedReceiver, decoderLimitedMetalReceiver, thermalRamp, idleToMotion,
          windowViewMultiPane, routeFlap, telemetryDropout]
     }
 
@@ -432,6 +455,15 @@ extension AdaptiveSimulationScenario {
     static var decoderLimitedReceiver: Self {
         var s = Self(name: "Decoder-limited old receiver", summary: "Decoder ceiling 150 Mpx/s (native 60 needs 240)")
         s.decoderMegapixelsPerSecond = 150
+        return s
+    }
+
+    /// The same receiver on the Metal path, which reports `dec95`.
+    static var decoderLimitedMetalReceiver: Self {
+        var s = decoderLimitedReceiver
+        s.name = "Decoder-limited old receiver (Metal path)"
+        s.summary = "As above, but the receiver reports decode p95 (dec95)"
+        s.receiverSendsDecodeP95 = true
         return s
     }
 
