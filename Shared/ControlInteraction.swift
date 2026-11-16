@@ -76,6 +76,48 @@ enum ModifierHoldResponse: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Every touch-and-hold the receiver owns, with its delay, in one place (#131). The point is the
+/// rules, not a shared number: each hold means something different, so only the one a user can
+/// find too slow without risk is adjustable. A shorter hold never reaches a gesture that sends
+/// something to the Mac or ends something; those keep their fixed delays. System gestures (the
+/// edge swipes, Control Center) and the OS's own Touch Accommodations are not here, and are
+/// never changed.
+enum ReceiverHoldGestures {
+    struct Entry: Equatable {
+        let id: String
+        /// Seconds. For an adjustable hold, the default (Standard).
+        let seconds: TimeInterval
+        /// Whether Settings → Controls → Hold Response changes it.
+        let adjustable: Bool
+    }
+
+    /// Settings: touch and hold to open Session Actions (Back to Home, Disconnect).
+    static let sessionActions: TimeInterval = 0.5
+    /// Window view: hold a pane's label to lift it (move) or release it for its menu.
+    static let paneLabel: TimeInterval = 0.4
+    /// Window view: hold a pane divider to drag it.
+    static let paneDivider: TimeInterval = 0.35
+    /// Stage Peek: hold an app or window card to drag it onto a pane.
+    static let stagePeekCardDrag: TimeInterval = 0.35
+
+    /// The registry, in the order of RECEIVER_CONTROLS.md → Hold gestures.
+    static var all: [Entry] {
+        [
+            Entry(id: "modifierShortcuts", seconds: ModifierHoldResponse.standard.delay, adjustable: true),
+            Entry(id: "stagePeekEdge", seconds: StagePeekConfig.holdDelay, adjustable: false),
+            Entry(id: "stagePeekCardDrag", seconds: stagePeekCardDrag, adjustable: false),
+            Entry(id: "sessionActions", seconds: sessionActions, adjustable: false),
+            Entry(id: "paneLabel", seconds: paneLabel, adjustable: false),
+            Entry(id: "paneDivider", seconds: paneDivider, adjustable: false),
+            Entry(id: "touchHoldCommit", seconds: PointerGestureConfig.holdCommitDelay, adjustable: false),
+            Entry(id: "naturalPress", seconds: PointerGestureConfig.naturalPressDelay, adjustable: false),
+            Entry(id: "naturalRightClick", seconds: PointerGestureConfig.naturalLongPressDelay, adjustable: false),
+            Entry(id: "smartTouchLongPress", seconds: PointerGestureConfig.smartTouchLongPressDelay, adjustable: false),
+            Entry(id: "smartTouchTitleBar", seconds: PointerGestureConfig.smartTouchTitleBarHoldDelay, adjustable: false),
+        ]
+    }
+}
+
 /// When a press on a modifier stops waiting for the hold.
 enum ModifierPressPolicy {
     /// A finger that slides this far from where it touched down is reaching

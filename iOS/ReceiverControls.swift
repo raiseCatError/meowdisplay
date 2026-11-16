@@ -1664,7 +1664,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .contentShape(Rectangle())
                 // The hold wins once it reaches its duration (while the finger is
                 // still down); lifting earlier is an ordinary tap on Settings.
-                .gesture(LongPressGesture(minimumDuration: 0.5)
+                .gesture(LongPressGesture(minimumDuration: ReceiverHoldGestures.sessionActions)
                     .onEnded { _ in openSessionActions() }
                     .exclusively(before: TapGesture().onEnded {
                         store.beginAutoHideActivity()
