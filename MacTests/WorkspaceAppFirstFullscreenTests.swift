@@ -230,17 +230,30 @@ final class WorkspaceAppFirstModelTests: XCTestCase {
     }
 
     /// Connected and listed; `windowMode`: Window view with Safari and Terminal in two panes.
-    private func model(windowMode: Bool = true) -> WorkspaceModel {
-        let m = WorkspaceModel(defaults: UserDefaults(suiteName: "WorkspaceAppFirstModelTests-\(UUID().uuidString)")!)
+    private var defaults = UserDefaults.standard
+
+    private func wire(_ m: WorkspaceModel) {
         m.send = { [unowned self] in self.sent.append($0); return true }
         m.inputAllowed = { true }
         m.controlState = { [unowned self] in self.control }
         m.requestControl = { [unowned self] in self.controlRequests += 1 }
         m.requestWindowMode = { [unowned self] in self.windowModeRequests += 1 }
-        m.requestDisplayMode = { [unowned self] in self.modeRequests.append($0) }
+        m.requestDisplayMode = { [unowned self] in self.modeRequests.append($0); return true }
         m.mirroring = { [unowned self] in self.mirroring }
         m.extending = { [unowned self] in self.extending }
         m.clock = { [unowned self] in self.now }
+    }
+
+    /// The layout this device saved for `host`, by window.
+    private func persisted(_ host: String = "mac-a") -> [String: UInt32] {
+        let l = defaults.data(forKey: "workspace.layout.\(host)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()
+        return l.tiles.compactMapValues { $0.source?.windowID }
+    }
+
+    private func model(windowMode: Bool = true) -> WorkspaceModel {
+        defaults = UserDefaults(suiteName: "WorkspaceAppFirstModelTests-\(UUID().uuidString)")!
+        let m = WorkspaceModel(defaults: defaults)
+        wire(m)
         m.apply(.connected(peerID: "mac-a"))
         m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
         m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
@@ -491,5 +504,134 @@ final class WorkspaceAppFirstModelTests: XCTestCase {
         XCTAssertFalse(m.appFirstInputNote)
         m.openAppFullscreen(zedApp)
         XCTAssertFalse(m.appFirstInputNote)
+    }
+
+    // MARK: Saved layout, session end, Window view ending
+
+    /// While the app is fullscreen, what's saved on this device is the layout from before, so a
+    /// relaunch (a new model on the same defaults) gets the person's panes back.
+    func testWhileFullscreenThePreviousLayoutIsWhatIsSaved() {
+        let m = model()
+        let before = shown(m)
+        XCTAssertEqual(persisted(), before)
+        m.openAppFullscreen(zedApp)
+        assertAlone(m, 10)
+        XCTAssertEqual(persisted(), before, "never the single app pane")
+
+        let relaunched = WorkspaceModel(defaults: defaults)
+        wire(relaunched)
+        relaunched.apply(.connected(peerID: "mac-a"))
+        XCTAssertEqual(shown(relaunched), before)
+        XCTAssertNil(relaunched.appFirst)
+        XCTAssertNil(relaunched.localFullscreen)
+    }
+
+    /// Switching to another Mac ends it there; coming back finds the earlier panes.
+    func testAnotherMacEndsItAndTheEarlierPanesAreKept() {
+        let m = model()
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(.connected(peerID: "mac-b"))
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(persisted("mac-a"), before)
+        m.apply(.connected(peerID: "mac-a"))
+        XCTAssertEqual(shown(m), before)
+        XCTAssertNil(m.appFirst)
+    }
+
+    /// The session ends: Open Fullscreen ends with it (its pane, fullscreen and question), the
+    /// earlier panes are back, and nothing later can ask for an old mode.
+    func testDisconnectEndsItAndRestoresTheEarlierPanes() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(.mode(window: true))
+        m.apply(.disconnected)
+        XCTAssertNil(m.appFirst)
+        XCTAssertNil(m.localFullscreen)
+        XCTAssertEqual(shown(m), before)
+        XCTAssertEqual(modeRequests, [])
+        m.exitLocalFullscreen()
+        m.exitAppFirst()
+        XCTAssertEqual(modeRequests, [], "no old Mirror asked for later")
+        m.apply(.connected(peerID: "mac-a"))
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(shown(m), before)
+    }
+
+    /// Its window closed and the question shows; the session ends: the question goes too, and
+    /// Reopen can't act on the old listing.
+    func testDisconnectClearsTheWindowClosedQuestion() {
+        let m = model()
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(gone([10]))
+        XCTAssertEqual(m.appFirst?.ended, .windowClosed)
+        m.apply(.disconnected)
+        XCTAssertNil(m.appFirst)
+        m.reopenAppFirst()
+        XCTAssertNil(m.appOpening)
+        XCTAssertEqual(shown(m), before)
+    }
+
+    /// The reconnect its own switch into Window view causes (the Mac rebuilds this device's
+    /// session) doesn't end it: the app pane stays fullscreen, and Exit still goes back to Mirror.
+    func testItsOwnSwitchIntoWindowViewSurvivesTheReconnect() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        assertAlone(m, 10)
+        XCTAssertEqual(persisted(), before)
+        m.exitLocalFullscreen()
+        XCTAssertEqual(modeRequests, [.mirror])
+        XCTAssertEqual(persisted(), before)
+    }
+
+    /// Window view ends another way (Settings, the Mac, a refused switch): it ends quietly with
+    /// the earlier panes back and asks for no mode.
+    func testWindowViewEndingAnotherWayEndsIt() {
+        let m = model()
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(.mode(window: false))
+        XCTAssertNil(m.appFirst)
+        XCTAssertNil(m.localFullscreen)
+        XCTAssertEqual(shown(m), before)
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// Exit before the Mac confirmed Window view: the earlier panes come back, but no mode is
+    /// asked for (it would be a new switch, not a return).
+    func testExitBeforeWindowViewStartedAsksForNoMode() {
+        mirroring = true
+        let m = model(windowMode: false)
+        m.openAppFullscreen(zedApp)
+        m.exitLocalFullscreen()
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(modeRequests, [])
+    }
+}
+
+/// What's saved during Open Fullscreen (Shared/WorkspaceAppOpening.swift), pure.
+final class WorkspaceAppFirstPersistenceTests: XCTestCase {
+    private func layout(_ ids: [String], window: UInt32) -> WorkspaceLayout {
+        WorkspaceLayout(preset: ids.count == 1 ? .single : .natural(for: ids.count, landscape: false),
+                        tiles: ids.map { WorkspaceTile(id: $0, source: WorkspaceSource(host: "mac-a", windowID: window)) })
+    }
+
+    func testThePreviousLayoutIsSavedOnlyForItsOwnMac() {
+        let before = layout(["w1", "w2"], window: 1)
+        let app = layout(["w9"], window: 9)
+        let s = WorkspaceAppFirst.begin(host: "mac-a", bundleID: "a", name: "A", tile: "w9", continuing: nil, fullscreen: nil,
+                                        previous: WorkspaceAppFirst.Previous(layout: before, fullscreen: nil, mode: nil))
+        XCTAssertEqual(WorkspaceAppFirst.layoutToPersist(app, session: s, host: "mac-a"), before)
+        XCTAssertEqual(WorkspaceAppFirst.layoutToPersist(app, session: s, host: "mac-b"), app)
+        XCTAssertEqual(WorkspaceAppFirst.layoutToPersist(app, session: nil, host: "mac-a"), app)
     }
 }

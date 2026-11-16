@@ -777,8 +777,8 @@ final class WorkspaceModel: ObservableObject {
     /// Asks the Mac for Window mode (displayModeRequest "window").
     var requestWindowMode: () -> Void = {}
     /// Asks the Mac for Mirror or Extend (the existing `displayModeRequest`): Exit Fullscreen
-    /// after Open Fullscreen started Window view from there.
-    var requestDisplayMode: (ReceiverDisplayMode) -> Void = { _ in }
+    /// after Open Fullscreen started Window view from there. False: nothing was sent.
+    var requestDisplayMode: (ReceiverDisplayMode) -> Bool = { _ in false }
     /// Whether this session may change the Mac (launch apps, close windows).
     var inputAllowed: () -> Bool = { false }
     /// Whether this device shows the Mac in Mirror now (outside Window view), as the Mac confirmed.
@@ -957,6 +957,9 @@ final class WorkspaceModel: ObservableObject {
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
             if !window { remote = nil }
             if window { awaitingCatalogToSend = true; requestCatalog() }
+            // Open Fullscreen's Window view started; or Window view ended another way (Settings,
+            // the Mac, a refused switch): its pane is gone and Exit must never ask for an old mode.
+            if window { appFirstAwaitingWindowMode = false } else { endAppFirstQuietly(reason: "window view ended") }
         case .catalog(let c):
             onCatalog(c)
         case .state(let s):
@@ -1047,6 +1050,9 @@ final class WorkspaceModel: ObservableObject {
                 appOpening = o
                 performAppOpening(step)
             }
+            // Open Fullscreen ends with the session, except across the reconnect its own switch
+            // into Window view causes (the Mac rebuilds this device's session for it).
+            if !appFirstAwaitingWindowMode { endAppFirstQuietly(reason: "disconnected") }
             iconsConnected = false; iconPlanner.reset(); iconRetry?.cancel(); iconRetry = nil
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
@@ -1106,7 +1112,12 @@ final class WorkspaceModel: ObservableObject {
 
     private func load(for peer: String) {
         host = peer
-        saved = (defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()).compacted()
+        // Open Fullscreen still showing on this Mac (the reconnect its switch into Window view
+        // causes): its app pane stays; what's saved on this device is the layout from before it.
+        if appFirst?.host != peer || saved.tiles[appFirst?.tile ?? ""] == nil {
+            appFirst = nil; appFirstLeftExtend = false; appFirstAwaitingWindowMode = false
+            saved = (defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()).compacted()
+        }
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
         history = WorkspaceHistory()
         savedLayouts = defaults.data(forKey: "workspace.saved.\(peer)").map(WorkspaceSavedLayout.decodeList) ?? []
@@ -1114,8 +1125,6 @@ final class WorkspaceModel: ObservableObject {
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []; inventory.reset()
         dismissAppOpening()
-        // Open Fullscreen's "before" belongs to that Mac's layout only.
-        if appFirst?.host != peer { appFirst = nil; appFirstLeftExtend = false }
         generations = [:]; closedOnMac = [:]; listedThisConnection = []
         publish()
     }
@@ -2471,6 +2480,9 @@ final class WorkspaceModel: ObservableObject {
     /// The person already confirmed leaving Extend for this Open Fullscreen: its window, placed
     /// once the app has opened, doesn't ask again.
     private var appFirstLeftExtend = false
+    /// Open Fullscreen asked for Window view and the Mac hasn't confirmed it: the reconnect that
+    /// switch causes doesn't end it.
+    private var appFirstAwaitingWindowMode = false
 
     /// The session's control as the opening needs it (live session and the Mac's grant).
     private var appOpeningControl: WorkspaceAppOpening.Control {
@@ -2545,9 +2557,14 @@ final class WorkspaceModel: ObservableObject {
         history.record(saved)
         saved = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: id, source: source)]).compacted()
         localFullscreen = nil
-        refreshMissing(); persist(); publish()
-        if !windowMode { requestWindowMode() }
+        // Set first: what's saved on this device stays the layout from before (`persist`).
         appFirst = session
+        refreshMissing(); persist(); publish()
+        if !windowMode {
+            // Its own switch reconnects this device; Open Fullscreen survives that one.
+            appFirstAwaitingWindowMode = true
+            requestWindowMode()
+        }
         Log.info("appFirst: fullscreen bundle=\(bundleID) window=\(w.id) tile=\(id) previousMode=\(session.previous.mode?.rawValue ?? "window")")
         enterLocalFullscreen(id)
         stagePeekCloseRequest += 1
@@ -2563,6 +2580,7 @@ final class WorkspaceModel: ObservableObject {
     func exitAppFirst() {
         guard let s = appFirst else { return }
         appFirst = nil
+        appFirstAwaitingWindowMode = false
         appFirstInputNote = false
         if appOpening?.fullscreenOnPlace == true { dismissAppOpening() }
         let p = s.previous
@@ -2571,7 +2589,30 @@ final class WorkspaceModel: ObservableObject {
         saved = removingClosed(from: p.layout).compacted()
         localFullscreen = p.fullscreen
         refreshMissing(); persist(); publish()
-        if let mode = p.mode { requestDisplayMode(mode) } else { scheduleSend(immediately: true) }
+        scheduleSend(immediately: true)
+        guard let mode = p.mode else { return }
+        // Only out of Window view: asking for Mirror/Extend otherwise would be a new switch.
+        guard windowMode else {
+            Log.info("appFirst: exit outside Window view; \(mode.rawValue) not requested")
+            return
+        }
+        if !requestDisplayMode(mode) { Log.info("appFirst: exit could not ask for \(mode.rawValue); staying in Window view") }
+    }
+
+    /// Open Fullscreen ends without Exit (the session ended, or Window view ended another way):
+    /// the layout from before comes back here, as saved, and no mode is asked for. Its question
+    /// (window closed) and its note go with it.
+    private func endAppFirstQuietly(reason: String) {
+        guard let s = appFirst else { return }
+        Log.info("appFirst: ended (\(reason)) bundle=\(s.bundleID)")
+        appFirst = nil
+        appFirstAwaitingWindowMode = false
+        appFirstLeftExtend = false
+        appFirstInputNote = false
+        if localFullscreen == s.tile { localFullscreen = nil }
+        guard s.host == host else { publish(); return }
+        saved = removingClosed(from: s.previous.layout).compacted()
+        refreshMissing(); persist(); publish()
     }
 
     /// Its window closed: open the app fullscreen again (Exit still goes back to the same view).
@@ -2585,6 +2626,7 @@ final class WorkspaceModel: ObservableObject {
     func chooseAnotherAfterAppFirst() {
         guard let s = appFirst, s.ended != nil else { return }
         appFirst = nil
+        persist()   // staying in Window view as it is now: that's what's saved from here
         openOverview(replacing: arranged.tiles[s.tile] != nil ? s.tile : nil)
     }
 
@@ -3043,7 +3085,11 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func persist() {
-        guard let host, let data = WorkspaceLayoutRecord(saved).encoded() else { return }
+        guard let host else { return }
+        // During Open Fullscreen the layout from before it is what's kept on this device, so a
+        // relaunch or another Mac never loses the panes the person had (`WorkspaceAppFirst`).
+        let kept = WorkspaceAppFirst.layoutToPersist(saved, session: appFirst, host: host)
+        guard let data = WorkspaceLayoutRecord(kept).encoded() else { return }
         defaults.set(data, forKey: "workspace.layout.\(host)")
     }
 }
