@@ -661,6 +661,15 @@ struct StagePeekOverlay: View {
     /// The buttons' text size relative to the default, for `StagePeekToolbarLayout`.
     @ScaledMetric(relativeTo: .footnote) private var toolbarTextScale: CGFloat = 1
 
+    /// The toolbar's labels: icon and title, or the icon alone (its title still names it to VoiceOver).
+    private struct ToolbarLabels: ViewModifier {
+        let showsTitles: Bool
+
+        @ViewBuilder func body(content: Content) -> some View {
+            if showsTitles { content.labelStyle(.titleAndIcon) } else { content.labelStyle(.iconOnly) }
+        }
+    }
+
     /// Expand/Compact, Add as Tile (expanded, room for another tile), Close.
     /// Fixed at the bottom centre: it used to follow the highlighted card, so it slid and jumped
     /// while the compact peek scrolled (owner report 2026-10-31).
@@ -702,7 +711,7 @@ struct StagePeekOverlay: View {
                 .accessibilityIdentifier("stagePeekClose")
         }
         .font(.footnote.weight(.semibold))
-        .modifier(StagePeekToolbarLabels(showsTitles: titles))
+        .modifier(ToolbarLabels(showsTitles: titles))
         // A filled dark capsule, not `.bordered` with a white tint: that
         // drew white labels on a translucent white fill, unreadable over a
         // bright window (see `StagePeekLegibility`).
@@ -1017,14 +1026,5 @@ private struct RemoteFinderHost: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: files.isOpen)
-    }
-}
-
-/// The toolbar's labels: icon and title, or the icon alone (its title still names it to VoiceOver).
-private struct StagePeekToolbarLabels: ViewModifier {
-    let showsTitles: Bool
-
-    @ViewBuilder func body(content: Content) -> some View {
-        if showsTitles { content.labelStyle(.titleAndIcon) } else { content.labelStyle(.iconOnly) }
     }
 }

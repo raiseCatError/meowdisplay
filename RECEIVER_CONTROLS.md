@@ -107,18 +107,6 @@ ignore Touch Style.
 | Custom layout share code | n/a | Yes | Yes. Copy and paste a code | n/a |
 | Show Surface Grid while Video is off | Yes | Yes | Yes | No |
 
-### Text size and narrow windows (#121)
-
-The receiver adapts to the window and the text size, never to a device model.
-
-- **Main Tray chips** shrink from 40 pt only as far as the screen edge needs (9 chips are 33 pt on a 360 pt phone, 30 pt at the smallest, 320 pt). Hiding a chip you don't use gives the rest more room.
-- **Stage Peek's buttons** (Expand / Compact, Add as Tile, Close) show their titles while the row fits the window, and drop to icons when it would not (accessibility text sizes, a 320 pt Slide Over, a long translation). Each button keeps its name for VoiceOver and Voice Control.
-- **Video is off** puts **Turn Video On** under the words when they don't fit side by side.
-- **Settings** pickers that are segmented become menus at the accessibility text sizes, so no choice is cut off.
-- **Session Actions**, the Mac lock banner and Home's rows already wrap or scroll at large text.
-
-Not yet adapted, because it needs a device to judge: the Main Tray's chip size (it is a fixed 30 to 40 pt, not Dynamic Type), pane labels' reserved height at accessibility sizes, and Android.
-
 ## Keyboard and haptics
 
 | Control | iPhone | iPad | Android | Mac Receiver |
@@ -148,6 +136,18 @@ The keypad stays open while you use Return, modifiers, the Function Tray and sho
 **Where it sits.** On iPhone in landscape it sits on the bottom edge on the chosen side (Right by default), stepping inward past whatever already holds that corner. With the default trays the Main Tray is on the right and Return is bottom-left, so on the right the button sits just inside the Main Tray, and on the left it sits beside Return. Return is never on the right by default, so "right side, next to Return" can't both hold. In portrait it sits at the chosen end of the row above the Main Tray. The keypad opens above the button and moves inward or up to clear the other controls and system-reserved areas. Its modifiers sit in a compact column beside the T, as tall as it, on the side with room (toward the middle of the screen), in portrait and landscape alike; where no column fits, they become a row under the T. The T and the modifiers move as one, so the modifiers clear everything the T clears: the trays, the calculator, the palette, the notch and reserved areas. The button never moves when the keypad opens. A shortcut palette can push both aside while it is open. They are not tray items, so tray chips keep their size, and saved profiles, Function Tray layouts and share codes are unchanged. Older builds ignore the two new preferences.
 
 **Accessibility.** The button is **Arrow Keys** (Shown/Hidden), with **Up Arrow**, **Down Arrow**, **Left Arrow** and **Right Arrow** as named actions, so VoiceOver, Voice Control and Switch Control can send arrows without a swipe. Each keypad key is a button of the same name; its value names the keypad modifiers it adds, and activating it sends the arrow with those. The keypad's modifiers are **Shift for Arrows**, **Option for Arrows** and **Command for Arrows** (Voice Control also answers to **Arrow Shift** and so on), On or Off, with the hint "Only the arrow keys use it."; activating one latches or unlatches it. With an older Mac and a tray modifier on, they read Unavailable and say why. Reduce Motion turns the keypad's scale into a fade.
+
+### Text size and narrow windows (#121)
+
+The receiver adapts to the window and the text size, never to a device model.
+
+- **Main Tray chips** shrink from 40 pt only as far as the screen edge needs (9 chips are 33 pt on a 360 pt phone, 30 pt at the smallest, 320 pt). Hiding a chip you don't use gives the rest more room.
+- **Stage Peek's buttons** (Expand / Compact, Add as Tile, Close) show their titles while the row fits the window, and drop to icons when it would not (accessibility text sizes, a 320 pt Slide Over, a long translation). Each button keeps its name for VoiceOver and Voice Control.
+- **Video is off** puts **Turn Video On** under the words when they don't fit side by side.
+- **Settings** pickers that are segmented become menus at the accessibility text sizes, so no choice is cut off.
+- **Session Actions**, the Mac lock banner and Home's rows already wrap or scroll at large text.
+
+Not yet adapted, because it needs a device to judge: the Main Tray's chip size (it is a fixed 30 to 40 pt, not Dynamic Type), pane labels' reserved height at accessibility sizes, and Android.
 
 ## Typing
 
