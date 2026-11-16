@@ -2808,6 +2808,6 @@ answer, or Full Quality under On Mobile Data) only means "don't save on mobile d
 `saveData:"auto"`, Low Data Mode at either end still saves. A capture restart caused by a data-policy
 change (not by the controller) happens at most once per 20 s per receiver; a raster that changes
 again inside that time waits, and the latest one applies when the 20 s have passed, so a flapping
-path or hint cannot restart capture repeatedly. The policy itself and the parts of its change that
-need no restart (FPS, bitrate) apply at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
+path or hint cannot restart capture repeatedly. A change that needs no restart (FPS, bitrate)
+applies at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
 (parity gap).
