@@ -74,6 +74,36 @@ final class OwnerAuthTests: XCTestCase {
 
     private func settle() async { for _ in 0..<30 { await Task.yield() } }
 
+    /// Stands in for the prompt's timeout sleep: `wait` returns when the test
+    /// calls `fire` (before or after the wait began).
+    private final class TimeoutGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        private var _requested: [UInt64] = []
+
+        var requested: [UInt64] { lock.lock(); defer { lock.unlock() }; return _requested }
+
+        func wait(for nanoseconds: UInt64) async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                _requested.append(nanoseconds)
+                if fired { lock.unlock(); continuation.resume(); return }
+                waiter = continuation
+                lock.unlock()
+            }
+        }
+
+        func fire() {
+            lock.lock()
+            fired = true
+            let pending = waiter
+            waiter = nil
+            lock.unlock()
+            pending?.resume()
+        }
+    }
+
     // 1. new peer + auth success → pairing may continue (waiting only after auth).
     func testNewPeerAuthSuccessAllowsLocalAcceptance() async {
         let prompt = PairingPromptModel(timeoutNanoseconds: 5_000_000_000)
@@ -131,12 +161,39 @@ final class OwnerAuthTests: XCTestCase {
 
     // An owner-auth prompt nobody answers still ends at the prompt timeout,
     // closed and not approved.
+    //
+    // The prompt's timeout is held by the test, not by a wall clock: a 50 ms
+    // sleep raced the main-actor hops between showing the SAS and the phase
+    // check, and on a loaded machine the timeout won (the check then saw
+    // `.closed`). The timeout now fires only once owner authentication is
+    // known to be in progress.
     func testUnansweredOwnerAuthTimesOutClosed() async {
-        let prompt = PairingPromptModel(timeoutNanoseconds: 50_000_000)
+        let gate = TimeoutGate()
+        let prompt = PairingPromptModel(timeoutNanoseconds: 50_000_000) { await gate.wait(for: $0) }
         let auth = FakeAuthenticator(); prompt.ownerAuthenticator = auth
         let request = await showSAS(prompt, token: UUID(), pending(.newPeer))
         prompt.decide(accept: true); await settle()
         XCTAssertEqual(prompt.panelPhase, .authenticatingOwner)
+        XCTAssertEqual(auth.requests, 1)
+        XCTAssertEqual(auth.invalidated, 0)
+        gate.fire()
+        let accepted = await request.value
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(prompt.panelPhase, .closed)
+        XCTAssertNil(prompt.confirmedLocally)
+        XCTAssertEqual(gate.requested, [50_000_000], "the prompt waits for its own timeout, once")
+        XCTAssertEqual(auth.invalidated, 1, "the timeout ends the authentication in progress")
+        auth.finish(.success)   // a late success must not revive it
+        await settle()
+        XCTAssertEqual(prompt.panelPhase, .closed)
+        XCTAssertNil(prompt.confirmedLocally)
+    }
+
+    // The default wait is still a real one: with no test gate the prompt
+    // times out by itself, closed and not approved.
+    func testPromptTimesOutOnTheRealClock() async {
+        let prompt = PairingPromptModel(timeoutNanoseconds: 20_000_000)
+        let request = await showSAS(prompt, token: UUID(), pending(.newPeer))
         let accepted = await request.value
         XCTAssertFalse(accepted)
         XCTAssertEqual(prompt.panelPhase, .closed)
