@@ -5699,6 +5699,16 @@ final class StreamReceiver: ObservableObject {
                     #if DEBUG
                     telemetry.incrementDebugPresentedCount()
                     #endif
+                },
+                // A delayed (A/V Sync) frame was dropped still compressed after
+                // Resync/reset: later P-frames have no reference until an IDR.
+                // Same 1 s throttle as the other keyframe requests.
+                compressedFrameDiscardedBeforeDecode: {
+                    queue.async {
+                        guard keyframeThrottle.shouldSend(now: Date(), minimumInterval: 1.0) else { return }
+                        Log.info("requesting keyframe (stale compressed frame dropped before decode)")
+                        Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                    }
                 }))
     }
 
