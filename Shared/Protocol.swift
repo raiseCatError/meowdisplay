@@ -228,6 +228,10 @@ enum WindowWorkspaceWire {
     /// kept running) while the receiver draws it under the finger during a move or resize, so
     /// the float is never on screen twice. Without it the receiver never sends `lift`.
     static let floatLiftFeature = "floatLift"
+    /// The Mac shows an Overview pane: a tile sent with `"overview": true` (no `window` or
+    /// `display`) shows every Mac display in its arrangement, live, and moves the real cursor
+    /// across them. Without it the receiver never sends one (an older Mac refuses it as `unavailable`).
+    static let overviewPaneFeature = "overviewPane"
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }

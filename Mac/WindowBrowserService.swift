@@ -244,6 +244,18 @@ final class WindowBrowserService: @unchecked Sendable {
         queue.sync { Dictionary(displays.map { ($0.displayID, $0.frame) }, uniquingKeysWith: { a, _ in a }) }
     }
 
+    /// The displays an Overview pane shows, by id order: the listed ones except MeowDisplay's own
+    /// virtual displays (any session's, as live thumbnails leave out, or the pane would show itself)
+    /// and mirrors (they repeat the display they mirror).
+    func overviewDisplays() -> [OverviewPaneLayout.Display] {
+        queue.sync {
+            displays.filter { !$0.isOwn && !$0.isMeow && $0.mirrorOf == nil }.sorted { $0.displayID < $1.displayID }.map {
+                OverviewPaneLayout.Display(id: $0.displayID, bounds: WorkspaceRect(x: $0.frame.minX, y: $0.frame.minY,
+                                                                                  width: $0.frame.width, height: $0.frame.height))
+            }
+        }
+    }
+
     // MARK: Messages (admitted session only; MacSender gates)
 
     /// `controlStillAllowed`: the session's control asked again (side-effect free) right before an

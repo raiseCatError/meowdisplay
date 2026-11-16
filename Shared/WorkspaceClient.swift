@@ -454,7 +454,10 @@ enum WorkspaceRequests {
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
                                     "follow": source.follow.rawValue,
                                     "rotation": tile.rotation.rawValue, "fit": tile.fit.rawValue]
-            if source.isDisplay {
+            if source.isOverview {
+                // Every Mac display in its arrangement (`overviewPane`); an older Mac refuses it.
+                t["overview"] = true
+            } else if source.isDisplay {
                 // A whole Mac display (Full Desktop in a pane), by its real display id.
                 guard let d = displayID(source) else { continue }
                 t["display"] = Int(d)
@@ -1148,6 +1151,10 @@ final class WorkspaceModel: ObservableObject {
         var rebased = saved
         for (id, tile) in saved.tiles {
             guard let source = tile.source else { continue }
+            if source.isOverview {
+                if c.displays.isEmpty { missing.insert(id) }
+                continue
+            }
             if source.isDisplay {
                 if !c.displays.contains(where: { WorkspaceSource.displayKey($0.id) == source.windowID }) { missing.insert(id) }
                 continue
@@ -1881,6 +1888,7 @@ final class WorkspaceModel: ObservableObject {
         guard let c = catalog else { return }
         missing = Set(saved.tiles.compactMap { id, tile in
             guard let source = tile.source else { return nil }
+            if source.isOverview { return c.displays.isEmpty ? id : nil }
             if source.isDisplay { return c.displays.contains { WorkspaceSource.displayKey($0.id) == source.windowID } ? nil : id }
             let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
             return listed ? nil : id

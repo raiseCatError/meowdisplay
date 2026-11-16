@@ -8055,6 +8055,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // The overview's display actions (Identify, Move Cursor Here) come with it: one entry,
             // since a receiver reads at most 16.
             features.append(DisplayArrangeWire.welcomeFeature)
+            features.append(WindowWorkspaceWire.overviewPaneFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         features.append(ExactKeyModifiersWire.welcomeFeature)
