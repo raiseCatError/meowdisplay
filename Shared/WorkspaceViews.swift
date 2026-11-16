@@ -848,7 +848,7 @@ struct WorkspaceChromeView: View {
         // release without moving = the label's menu. The strip keeps its form until the finger
         // lifts, so the view carrying this gesture stays (see `labelStrip`).
         .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.4)
+            LongPressGesture(minimumDuration: ReceiverHoldGestures.paneLabel)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
                 .updating($labelPress) { value, state, _ in
                     if case .second(true, _) = value { state = target }
@@ -1212,7 +1212,7 @@ struct WorkspaceChromeView: View {
             .frame(width: size.width, height: size.height)
             .contentShape(held ? WorkspaceRectsShape(rects: [CGRect(origin: .zero, size: size)]) : WorkspaceRectsShape(rects: parts))
             .position(x: r.midX, y: r.midY)
-            .gesture(LongPressGesture(minimumDuration: 0.35, maximumDistance: 10)
+            .gesture(LongPressGesture(minimumDuration: ReceiverHoldGestures.paneDivider, maximumDistance: 10)
                 .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("workspace")))
                 .onChanged { value in
                     guard case .second(true, let drag) = value else { return }
