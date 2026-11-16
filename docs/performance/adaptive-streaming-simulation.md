@@ -26,7 +26,11 @@ Regenerate: run this test with `TEST_RUNNER_ADAPTIVE_SIM_REPORT=<path>` passed t
   policy clamps count as downward moves for the oscillation guard.
 - New scenario: the decoder-limited receiver on the Metal path (with `dec95`), next to the default path.
 - Still controller-only: the coordinator's per-receiver restart (20 s) and bitrate (4 s) limiters are
-  not modelled here; the wiring tests cover them.
+  not modelled here; the wiring tests cover them. The fixes from the review of ddcef384 therefore
+  leave this table unchanged: the limiter changes (a controller step down is never held, restarts
+  count from when they really run) and the return to the fixed point after 30 s without telemetry
+  are coordinator behaviour, and the 0 ms round-trip baseline never applies because the model's
+  round trip is never below about 6 ms. The "Telemetry dropout" row is the controller alone.
 
 ## Model assumptions
 
@@ -115,7 +119,9 @@ s > 60 FPS; final raster/Mbps/FPS; changes; restart-class (raster) changes; dire
 ## Differences from the first table, row by row (simulation only)
 
 - Healthy rows (healthy LAN, 60 Hz source, idle to motion, Window view, receiver A): the adaptive
-  row now equals the fixed one (675 MB, 18 Mbps). The first table's extra data was the 24 Mbps probe.
+  row now has the fixed row's data and bitrate (675 MB, 18 Mbps). The first table's extra data was
+  the 24 Mbps probe. In Window view the frame rate still differs: the adaptive row stays at 60 FPS
+  (0 s above 60), the fixed row runs 120 (300 s above 60).
 - 120 Hz ProMotion: still reaches 120 (290 s above 60), now on the evidence production has (no
   `dec95`, capture capped at the current target, saturation as the source signal).
 - Decoder-limited receiver: on the default display-layer path the controller can't tell a decoder

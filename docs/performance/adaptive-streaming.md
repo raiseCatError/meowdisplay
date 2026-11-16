@@ -194,9 +194,12 @@ The receiver's size, scale and size class are in the configuration.
 (6 s for a severe downshift). A raster step that is rate-limited holds (`restartRateLimited`). It
 does not skip ahead to a cut from 60 to 30 FPS. Three direction flips within 120 s block upshifts
 for 60 s (a policy clamp counts as a downward move). This back-off doubles each time, up to 600 s.
-In the app, the coordinator also enforces one limit per receiver over everything that can restart
-capture (section 10), so in practice a severe raster step waits for the 20 s too; its bitrate/FPS
-part applies at once.
+In the app, the coordinator also enforces one limit per receiver over the capture restarts it asks
+for (section 10): a raise of the raster waits until 20 s after the previous one of those restarts.
+The controller's own lower raster (a severe step down or a probe revert) is not held there, so it
+applies when the controller decides it. Restarts from outside the coordinator (rotation, capture
+recovery, Video On, the lock screen capture move, user setting or mode changes) are neither limited
+nor counted.
 
 ## 5. Safety and fallback
 
@@ -305,7 +308,7 @@ Window view sets no source cadence, so it has no source cap.
 | Switch off | today's fixed policy (tested over modes × hellos × source rates × FPS results) |
 | Custom | bypass: never managed, never data-saving |
 | Receiver without `effHz` + `adaptiveTelemetry` (old iOS/Mac builds, Android) | today's fixed policy, capped at the source cadence while the switch is on |
-| Telemetry stops | the controller holds (stale telemetry), then discards its streaks |
+| Telemetry stops | the controller holds (stale telemetry), then discards its streaks; after 30 s without a sample the receiver gets today's fixed point again (through the usual limits) until telemetry resumes, and then the controller starts again from its initial point |
 | Older or equal route epoch | ignored |
 | Newer connection generation | controller reset to the initial point |
 
@@ -319,10 +322,11 @@ Mode set on the Mac (`NetworkCost.macSidePolicyEvidence` drops a Mac `expensive`
 reads its own path on hello, before the first capture is configured. Off is full quality always,
 Low Data Mode included. The Full Quality / "No" answer only covers mobile data: in Automatic, clear
 Low Data Mode still saves. A policy change keeps the controller and its history
-(`AdaptiveStreamingController.setDataPolicy`, never a new controller). A policy change that would
-restart capture is applied at most once per `minRestartIntervalSeconds` (20 s) per receiver; a
-later change inside that time is pending (latest wins) and applies on the first tick after the
-interval. A change before the first capture, or one that needs no restart, applies at once. Saver with the switch off is a static point that reuses an
+(`AdaptiveStreamingController.setDataPolicy`, never a new controller). A policy change applies at
+once. Only the raster part of the plan it leads to can wait: a raster raise comes at most once per
+`minRestartIntervalSeconds` (20 s) per receiver, re-evaluated every tick (latest wins), while the
+FPS and bitrate parts apply at once (bitrate still within its own 4 s limit). A change before the
+first capture applies at once in full. Saver with the switch off is a static point that reuses an
 existing quality level: Balanced raster and bitrate (75 %, 10 Mbps), at most 60 FPS. With the switch
 on, the controller's saver clamp applies instead (raster ≤ max(floor, 0.75), 6 Mbps, 60 FPS).
 The iOS suggestion uses `NetworkCostSuggestionTracker`: high-confidence `expensive` evidence on
@@ -366,7 +370,11 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
   the pipeline: at most one capture restart per 20 s and one bitrate change per 4 s, whatever the
   origin (controller step, policy clamp, data policy, reset on reconnect, a receiver flipping its
   telemetry keys). Held parts are re-evaluated every tick against the latest wanted plan; FPS
-  passes at once. A raster change that keeps the captured size is not a restart.
+  passes at once. A raster change that keeps the captured size is not a restart. Changed by the
+  review of ddcef384 (section 11): the controller's own lower raster is never held, and the limit
+  counts from when an adaptive restart really ran. Capture restarts that do not come from the
+  coordinator (rotation, recovery, Video On, the lock screen capture move) are not limited or
+  counted.
 - **Native size (A4).** The controller's raster 1.0 is the size before the decode ceiling; the
   H.264 FPS guard uses the size actually encoded at the top raster. Steps that would capture the
   same size are dropped, so a 5K display mirrored to an iPad with a 4096×2304 ceiling has the
@@ -386,5 +394,41 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
 - **Off costs nothing.** With the switch off and no data saving: no input building, no replanning,
   no `stats` telemetry parsing, no encode timing, and video sends are counted without a lock (the
   Settings payload figure is published once per ping). A test counts the coordinator's work.
-- **Not changed (A10).** `restartCaptureForAdaptiveRaster` still writes a few capture fields off
-  `queue`, copying the existing `reconfigure` pattern; left for a separate fix.
+- **A10.** Fixed by the review of ddcef384 (section 11) in `restartCaptureForAdaptiveRaster` only;
+  `reconfigure` still writes the same capture fields off `queue` (left for a separate fix).
+
+## 11. Review fixes (ddcef384, review of the recovery fix)
+
+- **Switch off stays today's behaviour (F1).** A capture start notes the size it started at and
+  re-reads the source size and ceiling to compare. With the switch off and no data saving, that
+  re-read could disagree with how the capture was sized (a display-mode change or a missing mode in
+  between) and restart capture once. `captureNeedsRasterRestart` is now false until some plan has
+  asked for a raster other than today's (`hasManagedRaster`), so the post-start re-check, the
+  deferred restart after a rebuild and the restart itself can't run, log or defer anything then. A
+  test drives the real re-check in a `MacSender`, and the switch-off matrix test now also starts a
+  capture whose noted size disagrees.
+- **Protective steps are never held (F2).** The 20 s limit holds raster raises only; the
+  controller's own lower raster (a severe step down or a probe revert) applies at once, so the
+  controller never judges windows of a point the pipeline isn't running and never over-corrects.
+  As a consequence a receiver flipping its telemetry keys can cause a raise and the step back down
+  in one interval (still at most one raise per 20 s).
+- **One-dimension decode ceiling (F3).** `AdaptiveCaptureSizing.isClampedByCeiling` uses the same
+  rule as `DecodeCeiling.clamp`: both dimensions present and above 0.
+- **Telemetry loss (F4).** After 30 s (`telemetryLossSeconds`, five stale periods) without a sample,
+  the coordinator stops using the controller's point and today's fixed point returns through the
+  usual limits. When samples resume, the controller restarts from its initial point.
+- **0 ms round trip (F5).** Receivers send `rtt` in whole milliseconds, so a link under 0.5 ms
+  (Thunderbolt, the same Mac) always reports 0, and no baseline was ever set, which blocked every
+  step up on the display-layer path. Three 0 samples in a row now make 0 the baseline; one early 0
+  (before the first pong) is still ignored. Mac side only, so older receivers benefit; the wire is
+  unchanged.
+- **Limiter gaps (F6).** Every adaptive raster restart (from a plan change, the post-start re-check,
+  the end of the lock screen view or a finished rebuild) records when it really began, for the
+  coordinator's limits and the controller's own restart spacing. A data-policy change applies at
+  once and only its raster part waits for the limit.
+- **Lock screen deferral (F7).** A post-start re-check during the lock screen view is held like any
+  other adaptive change. Held changes are dropped, not applied, when the sender stops or the
+  connection ends; the next capture start re-checks the raster. Frame generations and lock-screen
+  frame acceptance are untouched.
+- **A10.** `restartCaptureForAdaptiveRaster` now discards the cached frame, releases the stream,
+  invalidates the encoder and asks for a keyframe on `queue`.
