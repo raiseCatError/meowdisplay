@@ -708,7 +708,8 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
 struct StreamDiagnosticsAdaptiveDecision: Codable, Equatable, Sendable {
     static let maxRecorded = 32
 
-    /// Seconds since the recorder's clock origin (`StreamDiagnosticsClock`).
+    /// Built from device uptime (`StreamDiagnosticsClock`), then re-based by the recorder
+    /// when it stores the decision: as recorded, seconds since the recorder's last reset.
     var atSeconds: Double
     var action: AdaptiveStreamingDecision.Action
     var reason: AdaptiveStreamingDecision.Reason
