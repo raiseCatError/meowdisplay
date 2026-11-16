@@ -3057,13 +3057,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `setupEncoder` goes on to pick — never a larger, unverified HEVC
     /// number invented ahead of hardware testing.
     private func clampedCaptureSize(pointsWide: Int, pointsHigh: Int, info: PhoneInfo) -> (Int, Int) {
-        let nativeW = (Int(Double(pointsWide * 2) * quality.scale)) & ~1
-        let nativeH = (Int(Double(pointsHigh * 2) * quality.scale)) & ~1
         let (maxWide, maxHigh) = CodecDecodeCeiling.applicable(
             codec: .h264, legacyMaxEncodeWide: info.maxEncodeWide, legacyMaxEncodeHigh: info.maxEncodeHigh)
-        let (captureW, captureH) = DecodeCeiling.clamp(
-            width: nativeW, height: nativeH, maxWide: maxWide, maxHigh: maxHigh)
-        if captureW != nativeW || captureH != nativeH {
+        // Total sizing math (`PeerDisplayBounds`): the same sizes as before for
+        // every real display, and no trap for any other.
+        let size = PeerDisplayBounds.extendCapture(
+            pointsWide: pointsWide, pointsHigh: pointsHigh, scale: quality.scale, maxWide: maxWide, maxHigh: maxHigh)
+        let (captureW, captureH) = size.capture
+        if captureW != size.native.width || captureH != size.native.height {
             Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling "
                 + "\(maxWide ?? 0)x\(maxHigh ?? 0)")
         }
@@ -5141,6 +5142,47 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return false
     }
 
+    /// `queue` only: whether the hello handler may act on this hello.
+    ///
+    /// A hello that doesn't decode as `PhoneInfo` (a field of the wrong JSON
+    /// type, a fractional or out-of-range integer) changes nothing, exactly as
+    /// before; it is only reported like any other unparseable message (a byte
+    /// count, never its content). A hello that decodes but describes a display
+    /// no device has (`PeerDisplayBounds`) is a malformed peer: the session
+    /// ends before identity, readiness or any size is touched.
+    private func helloIsUsable(_ info: PhoneInfo?, payloadBytes: Int) -> Bool {
+        guard let info else {
+            handleUnparseableControlLogAction(
+                unparseableControlLogPolicy.record(payloadBytes, at: ProcessInfo.processInfo.systemUptime))
+            return false
+        }
+        if let field = PeerDisplayBounds.violation(
+            pixelsWide: info.pixelsWide, pixelsHigh: info.pixelsHigh, scale: info.scale) {
+            reportMalformedHello(field)
+            return false
+        }
+        return true
+    }
+
+    /// A paired receiver sent a hello whose display no device has: like a
+    /// QUIC protocol violation, the session stops (no redial for a peer that
+    /// authenticated and then misbehaved). The log names the field only
+    /// (this file's constant), never the value.
+    private func reportMalformedHello(_ field: PeerDisplayBounds.Field) {
+        guard !stopped else { return }
+        Log.info("SECURITY: hello refused — \(field.rawValue) out of range; ending session")
+        invalidateApplicationSession(reason: "malformedHello")
+        haltCaptureLifecycle()?.stopCapture { _ in }
+        transportController.cancelConnectionWithoutClearing()
+        helloContinuation?.resume(throwing: CancellationError())
+        helloContinuation = nil
+        let selfBox = self.selfBox
+        Task { @MainActor in
+            guard let self = selfBox.resolve() else { return }
+            self.onTrustFailure?("MeowDisplay stopped the session: the device described a display size it can't have. Update MeowDisplay on the device, then connect again.")
+        }
+    }
+
     private func reportTrustFailure() {
         guard !stopped else { return }
         invalidateApplicationSession(reason: "certificateRejected")
@@ -5810,7 +5852,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Log.info("PHONE-STATS \(line) | mac enc↓=\(thisWindowDrops.enc) net↓=\(thisWindowDrops.net) pending=\(pipelineState.pendingSendsNow)")
             }
         case "hello":
-            if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
+            // The hello's numbers are checked here, once, before anything below
+            // (identity, readiness, sizing) sees them (`helloIsUsable`).
+            let decodedHello = try? JSONDecoder().decode(PhoneInfo.self, from: payload)
+            guard helloIsUsable(decodedHello, payloadBytes: payload.count) else { return }
+            if let info = decodedHello {
                 // The pinned peer key this connection authenticated with —
                 // TLS metadata over TCP, QUIC metadata over a QUIC Control
                 // stream; the same SPKI encoding either way.
@@ -8077,12 +8123,12 @@ extension MacSender {
     /// The canvas Window mode composites into: the receiver's panel at this
     /// Mac's quality setting, inside its decode ceiling, even dimensions.
     private func windowCanvasSize(for info: PhoneInfo) -> (Int, Int) {
-        let wide = Int(Double(info.pixelsWide) * quality.scale) & ~1
-        let high = Int(Double(info.pixelsHigh) * quality.scale) & ~1
         let (maxWide, maxHigh) = CodecDecodeCeiling.applicable(
             codec: .h264, legacyMaxEncodeWide: info.maxEncodeWide, legacyMaxEncodeHigh: info.maxEncodeHigh)
-        let (w, h) = DecodeCeiling.clamp(width: wide, height: high, maxWide: maxWide, maxHigh: maxHigh)
-        return (max(w & ~1, 64), max(h & ~1, 64))
+        let canvas = PeerDisplayBounds.windowCanvas(
+            pixelsWide: info.pixelsWide, pixelsHigh: info.pixelsHigh, scale: quality.scale,
+            maxWide: maxWide, maxHigh: maxHigh)
+        return (canvas.width, canvas.height)
     }
 
     /// Window mode start: the workspace engine plus a tiny display stream
@@ -8498,6 +8544,22 @@ extension MacSender {
     }
 
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
+
+    /// The hello the sender acts on (its panel size) and whether the live connection is still
+    /// admitted: what a refused hello must leave alone, or end.
+    var helloStateForTesting: (pixelsWide: Int, pixelsHigh: Int, admitted: Bool)? {
+        get async throws {
+            try await onQueue { sender in
+                sender.lastHello.map { ($0.pixelsWide, $0.pixelsHigh, sender.sessionAuthorization.isAdmitted) }
+            }
+        }
+    }
+
+    /// Records what the session's stop-with-message path (`onTrustFailure`) is told.
+    func observeTrustFailuresForTesting(_ handler: @escaping @Sendable (String) -> Void) async {
+        let selfBox = self.selfBox
+        await MainActor.run { selfBox.resolve()?.onTrustFailure = handler }
+    }
 
     /// Changes the device's permit without the review a real change runs (F5: the per-event check
     /// alone must refuse).

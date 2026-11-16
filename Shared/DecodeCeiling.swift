@@ -21,8 +21,19 @@ enum DecodeCeiling {
             return (width, height)
         }
         let scale = min(Double(maxWide) / Double(width), Double(maxHigh) / Double(height))
-        let clampedWidth = max((Int(Double(width) * scale)) & ~1, 2)
-        let clampedHeight = max((Int(Double(height) * scale)) & ~1, 2)
+        let clampedWidth = max(even(Double(width) * scale, atMost: maxWide), 2)
+        let clampedHeight = max(even(Double(height) * scale, atMost: maxHigh), 2)
         return (clampedWidth, clampedHeight)
+    }
+
+    /// `Int(value) & ~1` for a non-negative `value` that is at most about
+    /// `limit`. The product can round up to the Double nearest an
+    /// `Int`-sized limit (a receiver's `maxEncodeWide` near `Int.max` is
+    /// 2^63 as a Double, which `Int(_:)` traps on), so anything at or above
+    /// the limit is the limit itself. Unchanged for every real size: such a
+    /// value is below `limit + 1`, and `Int` truncates it to `limit` anyway.
+    private static func even(_ value: Double, atMost limit: Int) -> Int {
+        guard value < Double(limit) else { return limit & ~1 }
+        return Int(value) & ~1
     }
 }
