@@ -9,6 +9,8 @@ import XCTest
 ///                                   checks the single-display fallback instead.
 ///   MEOW_LIVE_ALLOW_IDENTIFY=1      Identify Displays (numbers drawn on the Mac's displays).
 ///   MEOW_LIVE_ALLOW_CURSOR_MOVE=1   Move Cursor Here (moves the Mac pointer once).
+///   MEOW_LIVE_REQUEST_CONTROL=1     the editor test taps Request Control and waits up to 120 s for the
+///                                   owner to approve on the Mac (it never approves anything itself).
 /// The Mac arrangement is never edited here.
 final class LiveDisplayOverviewQATests: XCTestCase {
     override func setUp() { continueAfterFailure = false }
@@ -159,6 +161,17 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         app.launch()
         try openStagePeekInWindowMode(app)
         let arrange = app.buttons["displayArrangeButton"]
+        if !scrollTo(arrange, in: app), on("MEOW_LIVE_REQUEST_CONTROL") {
+            // Arrange… needs control. Ask the Mac once; the owner approves on the Mac (never from here).
+            let request = app.buttons.matching(NSPredicate(format: "label == 'Request Control' OR label == 'Ask Again'")).firstMatch
+            app.swipeDown(velocity: .slow); app.swipeDown(velocity: .slow)
+            if request.waitForExistence(timeout: 5), request.isHittable {
+                request.tap()
+                snapshot(app, "editor-00-control-requested")
+                print("LiveOverview: control requested; waiting up to 120 s for the owner to approve on the Mac")
+                _ = waitUntil(120) { app.buttons["displayArrangeButton"].exists }
+            }
+        }
         guard scrollTo(arrange, in: app) else {
             snapshot(app, "editor-00-no-arrange")
             throw XCTSkip("Arrange… is not offered (the Mac does not allow arranging from this device, or no control)")
