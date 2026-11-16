@@ -963,7 +963,12 @@ dropped.
   interval ms), `gap250` (arrival gaps over 250 ms), `enqFps` (frames
   enqueued for presentation/s), `qAge95` (presenter queue age ms), `qMax`
   (presenter queue depth), `dec95`/`decN` (decode ms and samples, Metal path
-  only), `rtt`, `jit` (control round trip and its jitter, ms).
+  only), `rtt`, `jit` (control round trip and its jitter, ms); and, only
+  while the receiver reads the Performance Lab fixture's frame-ID strip
+  (docs/performance/performance-lab.md), `fidN` (frames read), `fidU`
+  (source-unique fixture frames/s), `fidDup`, `fidSkip`, `fidBad`
+  (duplicate, skipped and unreadable counts in the window) and `fid95`
+  (interval between unique fixture frames, p95 ms).
 
 The frame header fields `cap`/`snd` are unchanged.
 

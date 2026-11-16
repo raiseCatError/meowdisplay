@@ -70,12 +70,15 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
     case presentationEnqueueInterval
     case observedSubmitToGlass
     case rtt
+    // Performance Lab frame-ID reader (receiver, Metal path only)
+    case frameIDUniqueInterval
 
     /// Stages that are intervals between successive events: they also count
     /// gaps over 100/250/500 ms.
     var isInterval: Bool {
         switch self {
-        case .captureInterval, .submitInterval, .composeInterval, .arrivalInterval, .presentationEnqueueInterval:
+        case .captureInterval, .submitInterval, .composeInterval, .arrivalInterval, .presentationEnqueueInterval,
+             .frameIDUniqueInterval:
             return true
         default:
             return false
@@ -159,6 +162,11 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
                          source: "Receiver ping to sender pong on the control channel",
                          timebase: .localMonotonic,
                          caveat: "Control-message round trip; it rides behind any queued video on the same connection.")
+        case .frameIDUniqueInterval:
+            return .init(id: "receiver.frame_id.unique_interval_ms", unit: "ms", side: .receiver,
+                         source: "PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID (ReceiverVideoPresenter.presentDecoded)",
+                         timebase: .localMonotonic,
+                         caveat: "Only while the Performance Lab fixture is on screen and only on the experimental Metal path, which itself changes timing. Measured at the decoded-frame handoff, not on glass.")
         }
     }
 }
@@ -209,6 +217,13 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
     case presenterStaleDiscarded
     case observedPresentations
     case displayLayerFlushes
+    // Performance Lab frame-ID reader (receiver, Metal path only)
+    case frameIDRead
+    case frameIDUnique
+    case frameIDDuplicate
+    case frameIDSkipped
+    case frameIDUnreadable
+    case frameIDDiscontinuity
 
     var definition: StreamDiagnosticsMetricDefinition {
         let s = StreamDiagnosticsSide.sender, r = StreamDiagnosticsSide.receiver
@@ -303,6 +318,24 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
                          caveat: "Experimental Metal path only. The only presentation this app can observe.")
         case .displayLayerFlushes:
             return .init(id: "receiver.presentation.layer_flushes", unit: "events", side: r, source: "Display layer failed and was flushed", timebase: .none, caveat: "")
+        case .frameIDRead:
+            return .init(id: "receiver.frame_id.read", unit: "frames", side: r, source: "Decoded frames whose Performance Lab frame-ID strip was read", timebase: .none,
+                         caveat: "Experimental Metal path only; only while the lab fixture is visible.")
+        case .frameIDUnique:
+            return .init(id: "receiver.frame_id.unique", unit: "frames", side: r, source: "Read frame IDs that differ from the previous read ID", timebase: .none,
+                         caveat: "Source-unique fixture frames that reached the decoded-frame handoff.")
+        case .frameIDDuplicate:
+            return .init(id: "receiver.frame_id.duplicate", unit: "frames", side: r, source: "Read frame IDs equal to the previous read ID", timebase: .none,
+                         caveat: "The same source frame handed over again (replay, static resend or re-encode).")
+        case .frameIDSkipped:
+            return .init(id: "receiver.frame_id.skipped", unit: "frames", side: r, source: "IDs missing between two successive read IDs", timebase: .none,
+                         caveat: "Fixture frames drawn on the Mac that never reached this point: rate limiting at a lower target FPS skips frames by design.")
+        case .frameIDUnreadable:
+            return .init(id: "receiver.frame_id.unreadable", unit: "frames", side: r, source: "Decoded frames where a located strip failed its guard or checksum", timebase: .none,
+                         caveat: "Blended, partially updated or heavily compressed frames; also the fixture leaving the screen.")
+        case .frameIDDiscontinuity:
+            return .init(id: "receiver.frame_id.discontinuity", unit: "events", side: r, source: "Read ID went backwards or jumped by more than half the counter range", timebase: .none,
+                         caveat: "Fixture restarted; counting starts again from the new ID.")
         }
     }
 }

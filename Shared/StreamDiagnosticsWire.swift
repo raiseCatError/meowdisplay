@@ -42,6 +42,13 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     var decodeSamples: Double?
     var rttMs: Double?
     var rttJitterMs: Double?
+    // Receiver-reported, Performance Lab frame-ID reader (only while it read a strip)
+    var frameIDReadCount: Double?
+    var frameIDUniqueFPS: Double?
+    var frameIDDuplicates: Double?
+    var frameIDMissing: Double?
+    var frameIDUnreadable: Double?
+    var frameIDIntervalP95Ms: Double?
 
     init(side: StreamDiagnosticsSide) {
         self.side = side
@@ -61,6 +68,8 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
         ("gap250", \.arrivalGapsOver250ms), ("enqFps", \.enqueueFPS), ("qAge95", \.presenterQueueAgeP95Ms),
         ("qMax", \.presenterQueueDepthMax), ("dec95", \.decodeP95Ms), ("decN", \.decodeSamples),
         ("rtt", \.rttMs), ("jit", \.rttJitterMs),
+        ("fidN", \.frameIDReadCount), ("fidU", \.frameIDUniqueFPS), ("fidDup", \.frameIDDuplicates),
+        ("fidSkip", \.frameIDMissing), ("fidBad", \.frameIDUnreadable), ("fid95", \.frameIDIntervalP95Ms),
     ] }
 
     /// Largest value accepted from the wire for any field.
@@ -138,6 +147,16 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
             s.decodeSamples = snapshot.stage(.decode).map { Double($0.count) }
             s.rttMs = p(.rtt, \.p50)
             s.rttJitterMs = snapshot.rttJitterMs
+            // Performance Lab: only when the frame-ID reader saw the fixture.
+            let read = snapshot.count(.frameIDRead)
+            if read > 0 || snapshot.count(.frameIDUnreadable) > 0 {
+                s.frameIDReadCount = Double(read)
+                s.frameIDUniqueFPS = snapshot.rate(.frameIDUnique)
+                s.frameIDDuplicates = Double(snapshot.count(.frameIDDuplicate))
+                s.frameIDMissing = Double(snapshot.count(.frameIDSkipped))
+                s.frameIDUnreadable = Double(snapshot.count(.frameIDUnreadable))
+                s.frameIDIntervalP95Ms = p(.frameIDUniqueInterval, \.p95)
+            }
         }
         return s
     }

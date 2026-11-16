@@ -38,6 +38,7 @@ enum StreamDiagnosticsPresentation {
         case .presentationEnqueueInterval: return "Enqueued for presentation (interval)"
         case .observedSubmitToGlass: return "Submit to glass, observed (Metal path only)"
         case .rtt: return "Control round trip"
+        case .frameIDUniqueInterval: return "Lab fixture, new frame IDs (interval, Metal path only)"
         }
     }
 
