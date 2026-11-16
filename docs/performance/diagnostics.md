@@ -127,6 +127,7 @@ receiver clock mapped onto the sender's with the ping/pong offset;
 | `sender.window.static_resends` | frames | sender | none | Composites made by the ~1 s static resend, not by a change | Duplicates by design (heal a lost frame). |
 | `session.route_changes` | events | either | none | Route class changed between samples | Sampled about every 2 s. |
 | `session.generation_resets` | events | either | none | Capture or presentation generation changed; interval baselines restart |  |
+| `session.colour_samples` | events | either | none | A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change | Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found. |
 | `receiver.arrival.frames` | frames | receiver | none | Complete video frames at presentDecodedSample |  |
 | `receiver.arrival.bytes` | bytes | receiver | none | Sample buffer size of each arrived frame | Video payload only. |
 | `receiver.presentation.enqueued` | frames | receiver | none | AVSampleBufferDisplayLayer.enqueue or Metal handoff | Enqueued for presentation, never confirmed on glass. |
@@ -255,7 +256,7 @@ Schema (`schemaVersion` 1, `StreamDiagnosticsExport`):
 - `build`: `appVersion` (marketing version and build, sanitized),
   `osMajor`/`osMinor`/`osPatch`, `platform`, `deviceClass` (mac/iPhone/iPad)
 - `sessions[]`: `snapshot` (window, stages, counters, session counters,
-  gauges, RTT jitter, `context`, `peer`, `resources`) and `verdict`
+  gauges, RTT jitter, `context`, `peer`, `resources`, `colour`) and `verdict`
   (cause, confidence, reason, evidence, alternatives, frame budget)
 - `classifierThresholds`, `limitations` (fixed sentences)
 
@@ -275,6 +276,127 @@ ID). `testExportContainsOnlyAllowedKeysAndValues` walks the encoded JSON and
 fails on any key outside a reviewed allowlist, on any allowlisted key that
 looks like a forbidden kind of field, and on any string value outside that
 set.
+
+## Colour metadata
+
+Issue #241 (SDR / Display P3 colour accuracy) is research only. The code sets
+no colour metadata anywhere except the pixel format (`420v` or `BGRA`) and one
+`CIRenderDestination` colour space in the Window View compositor, so what the
+operating system attaches and what the stream's SPS declares can only be
+learned by looking. This group looks. **It reads and reports; it does not
+convert, tag or correct anything, changes no capture, encoder, decoder or
+render setting, and makes no claim of colour accuracy.**
+
+Implementation: `Shared/StreamDiagnosticsColour.swift`. Sampling is read-only,
+only while diagnostics are on, and once per stream generation or format change,
+never per frame (the per-frame cost of a hook is the on/off flag, one lock and a
+key comparison; `session.colour_samples` counts the extractions).
+
+### What is sampled, and where
+
+| Stage | Hook | What is read |
+| --- | --- | --- |
+| `capture` | `MacSender.encode`, the Mirror / Extend buffer handed to the encoder; once per capture generation or pixel format | Pixel format FourCC and bit depth, `kCVImageBufferColorPrimariesKey`, `TransferFunctionKey`, `YCbCrMatrixKey`, the attached `CGColorSpace` model and name, whether an ICC profile is attached (a bool, never its bytes). Range is read from the pixel format (`420v` limited, `420f` full, `BGRA` not applicable). |
+| `composited` | the same hook while the mode is Window View | The same fields for the composited `BGRA` buffer before encode. Replaces a `capture` sample and the other way round. |
+| `encoderFormat` | VideoToolbox output callback, keyframes only; once per generation or format description | The output format description's colour extensions (primaries, transfer, matrix, `FullRangeVideo`, bits per component, ICC presence). |
+| `encoderVUI` | the same callback | The SPS in that format description (the parameter set that goes on the wire), parsed for its VUI. |
+| `receiverFormat` | `codecConfigurationChanged`, when the receiver builds a format description from the received parameter sets | The same extensions as `encoderFormat`. |
+| `receiverVUI` | the same event | The SPS parsed for its VUI. |
+
+On the receiver, the format description only changes when the SPS or PPS
+changes, so turn diagnostics on before connecting (or reconnect) to get receiver
+samples. The sender samples at the next frame / keyframe after the switch is on.
+
+### SPS VUI parser
+
+A pure parser over `Data` for H.264 and HEVC SPS NAL units (with or without an
+Annex B start code). It removes emulation prevention bytes, reads Exp-Golomb
+codes, and walks the SPS to `vui_parameters`: H.264 high-profile fields
+(`chroma_format_idc`, bit depths, scaling lists, picture order count syntax,
+cropping) and the HEVC `profile_tier_level` with sub-layers, scaling list data,
+PCM, short-term reference picture sets (including inter-predicted sets) and
+long-term references. It then reads `video_signal_type_present_flag`,
+`video_full_range_flag`, `colour_description_present_flag`,
+`colour_primaries`, `transfer_characteristics` and `matrix_coeffs`.
+
+It is defensive: input over 4096 bytes, a wrong NAL type, a non-base layer, a
+truncated stream, an oversized loop count or an impossible Exp-Golomb code gives
+`unparsed(reason)` (`empty`, `tooLarge`, `notAnSPS`, `truncated`,
+`invalidValue`, `exceedsBound`, `unsupportedLayer`, `unsupportedCodec`,
+`noParameterSet`), never a crash and never a guess.
+
+### Values
+
+Every value is a closed enum with `absent`, `unspecified` and `other(code)`:
+primaries, transfer, YCbCr matrix, pixel format, plus range (`unknown`,
+`limited`, `full`, `notApplicable`), bit depth, colour space model and name, and
+the ICC bool. `absent` means the syntax element or attachment was not there (no
+VUI, no colour description, no attachment); `unspecified` means the stream said
+"unspecified" (code 2). `other(code)` carries an H.273 code point the table
+does not name; `other(-1)` is an attachment string this tool does not list.
+
+### Consistency summary
+
+The summary compares stage pairs where both ends were sampled and parsed: the
+source buffer against the encoder format description, that against the encoder
+SPS VUI, the source buffer against the VUI, and (receiver) its format description
+against its VUI. A field is compared only when at least one side states a value;
+range is reported only when both stages state one and they differ (an absent
+`FullRangeVideo` flag has a documented default, video range).
+Each mismatch is a typed code: `differ` (both state values and they differ),
+`firstUnlabelled` or `secondUnlabelled` (only one side states it). There is no
+verdict on which stage is right. Not counted as differences: BT.709 / SMPTE 170M /
+BT.2020 transfer (the same curve), BT.470 BG against SMPTE 170M matrix (both
+"601"), `unspecified` against `absent`, and range when either side is not stated or is RGB. An
+untagged `BGRA` composite against an SPS that labels a matrix therefore shows
+`firstUnlabelled` for `matrix`: informational, and the very thing candidate B
+asks about.
+
+### Export
+
+`snapshot.colour` (absent until sampled) holds `stages[]` (`stage`, `metadata`,
+`vui`, `unparsed`), `consistency` (`agreement`, `comparisons`, `mismatches[]`) and
+`sampleCount`. Enums encode as `{"kind": "...", "code": N}` (`code` only for
+`other`). There is no free-form string field; `StreamDiagnosticsColourTests`
+runs the same key and value allowlist as the rest of the export over a
+populated colour section.
+
+### What to capture on hardware (#241)
+
+PENDING HARDWARE: no value in this section has been observed on a real stream. The unit tests
+use synthetic buffers and hand-built parameter sets only.
+
+Per capture: turn Streaming Diagnostics on on the Mac and on the receiver
+before connecting, run the stream for about 10 s, open Settings, read the
+"Colour metadata" group (Mac and receiver), then Export on both. Repeat for each
+combination below, same display, same receiver, same colour profile.
+
+| Capture | Mode | Codec |
+| --- | --- | --- |
+| 1 | Mirror (or Extend) | H.264 |
+| 2 | Mirror (or Extend) | HEVC |
+| 3 | Window View | H.264 |
+| 4 | Window View | HEVC |
+
+Record the Mac display's colour profile (System Settings > Displays) and the receiver model with each capture.
+
+Which audit candidate each observation confirms or rules out (candidates from the #241 pipeline audit):
+
+| Candidate | What it is | Observation that confirms it | Observation that rules it out |
+| --- | --- | --- | --- |
+| A | Mirror / Extend: SCK default (display, maybe P3) colour space against what the VUI / receiver assumes | `capture` primaries `displayP3` (or colour space `displayP3`) while `encoderVUI` primaries are `bt709`, `absent` or `unspecified` (a `primaries` mismatch on the capture to VUI pair) | `capture` and `encoderVUI` primaries agree |
+| B | Window View: composited buffer untagged, so VideoToolbox picks the RGB to YCbCr matrix | `composited` matrix `absent` (untagged) and `encoderVUI` matrix a value (`firstUnlabelled`), or `encoderVUI` matrix `absent` / `unspecified` while the receiver decodes with a default | `composited` carries a matrix that equals the VUI matrix |
+| C | Window View only: the compositor renders into sRGB while SCK captures in the display's space | `composited` space `srgb` and primaries `absent` or `bt709` in Window View while the Mirror capture's `capture` primaries are `displayP3`. The metadata shows the tag; whether wide-gamut content was clipped needs a swatch comparison, so this stays unconfirmed from metadata alone | `composited` carries P3 primaries or a P3 colour space, or Mirror is not P3 either |
+| D | Transfer function: sRGB-encoded pixels against a BT.709 transfer tag | `encoderVUI` or `receiverFormat` transfer `bt709` (or `smpte170m`) while `capture` / `composited` transfer or colour space is `srgb` (a `transfer` mismatch is not raised for 709 against 170M, so read the values) | VUI transfer `srgb`, or `unspecified` / `absent` on every stage (then the receiver's default decides; metadata cannot say what it is) |
+| E | Range mismatch (video against full) | `encoderVUI` range `full` while `capture` is `420v` (`limited`), or `limited` VUI over a full-range source (`range` `differ`) | `range` agrees across stages, or the VUI does not state a range (`unknown`) |
+| F | Metal path ignores tags and does no colour management | Needs a second capture with `metalRenderer` on: identical stage values but a visibly different picture. Metadata cannot confirm it; it can show the stream is tagged identically for both paths | Not applicable to the metadata |
+| G | Android relies entirely on the VUI | `encoderVUI` primaries / matrix `absent` or `unspecified` (nothing for Android to read) | VUI fully stated and consistent with the format description. Android itself has no diagnostics here |
+
+Also settle the audit's open questions from the same exports: what the system
+attaches to a delivered SCK buffer (`capture`), whether the compositor or
+VideoToolbox tags a composited buffer (`composited`), what VUI VideoToolbox
+writes (`encoderVUI`), and whether CoreMedia lifts the VUI into the format
+description on the receiver (`receiverFormat` against `receiverVUI`).
 
 ## Overhead method
 
@@ -304,6 +426,7 @@ Not measured:
 - GPU, hardware encoder or decoder utilisation (no public per-process API used).
 - Network bytes billed (TLS, QUIC/TCP, IP, VPN/tunnel overhead are not counted).
 - Decode time on the default display-layer path.
+- Whether any colour value is right: the colour group reports metadata, not accuracy, and makes no claim about the picture.
 - Source display refresh: not read yet. `sourceRefreshHz` stays unset in this
   build, so `sourceRefreshLimited` cannot fire on live data until a hook
   supplies it (the classifier and its tests are ready for it).
