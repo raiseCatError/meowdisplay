@@ -43,6 +43,10 @@ final class ConnectionPathDescriptionTests: XCTestCase {
         // 169.254/16 carries no zone: the path's own interface decides.
         XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0"], zone: nil)), "Direct Cable")
         XCTAssertEqual(label(.lan, evidence(interfaces: ["en7", "bridge0"], zone: nil)), "LAN")
+        // With no zone, a cable interface listed first does not vouch for the others.
+        XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0", "en7"], zone: nil)), "LAN")
+        XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0", "en1"], zone: nil),
+                             cables: FakeCableInterfaces(cables: ["bridge0", "en1"])), "Direct Cable")
     }
 
     func testThunderboltPortWithoutABridgeReadsDirectCable() {
