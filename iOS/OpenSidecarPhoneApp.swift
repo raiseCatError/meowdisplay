@@ -592,6 +592,10 @@ struct ReceiverScreen: View {
                                    workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
                                    onWorkspaceViewReset: model.workspace.windowMode
                                        ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                                   workspacePaneKind: model.workspace.windowMode
+                                       ? { p in model.workspace.paneKind(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                                   workspaceOverviewFocused: model.workspace.windowMode
+                                       ? { model.workspace.activeIsOverview } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
@@ -3056,6 +3060,11 @@ struct VideoLayerView: UIViewRepresentable {
     var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
     /// Window mode: a two-finger double-tap resets the pane at this point (normalized to the picture).
     var onWorkspaceViewReset: ((CGPoint) -> Void)?
+    /// Window mode: what the pane at this point (normalized to the picture) shows, for the pointer
+    /// model of a touch starting there (an Overview pane is always a trackpad).
+    var workspacePaneKind: ((CGPoint) -> WorkspaceSource.Kind?)?
+    /// Window mode: the focused pane is an Overview pane (the Mac's cursor is drawn there, larger).
+    var workspaceOverviewFocused: (() -> Bool)?
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
     /// See `VideoView.onBlockedInputAttempt`.
@@ -3090,6 +3099,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.workspaceTouch = onWorkspaceTouch
         view.workspaceZoomPreview = workspaceZoomPreview
         view.workspaceViewReset = onWorkspaceViewReset
+        view.workspacePaneKind = workspacePaneKind
+        view.workspaceOverviewFocused = workspaceOverviewFocused
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
@@ -3239,6 +3250,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.workspaceTouch = onWorkspaceTouch
         uiView.workspaceZoomPreview = workspaceZoomPreview
         uiView.workspaceViewReset = onWorkspaceViewReset
+        uiView.workspacePaneKind = workspacePaneKind
+        uiView.workspaceOverviewFocused = workspaceOverviewFocused
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
@@ -3774,6 +3787,18 @@ struct VideoLayerView: UIViewRepresentable {
         private var blockedSequenceSelectedPane = false
         var workspaceZoomPreview: (() -> WorkspaceLiveZoom?)?
         var workspaceViewReset: ((CGPoint) -> Void)?
+        /// What the pane at a point (normalized to the picture) shows. Leaving Window mode
+        /// (nil) puts the person's own pointer model back.
+        var workspacePaneKind: ((CGPoint) -> WorkspaceSource.Kind?)? {
+            didSet { if workspacePaneKind == nil, sequencePaneKind != nil { sequencePaneKind = nil; applyInputMode() } }
+        }
+        /// The focused pane is an Overview pane: the cursor drawn there has a larger minimum size.
+        var workspaceOverviewFocused: (() -> Bool)?
+        /// The pointer model the person chose (Settings); `pointerEngine` runs the one for the pane
+        /// the current touch sequence started in (`OverviewPaneInput.pointerMode`).
+        private var preferredInputMode: PointerInputMode = .direct
+        /// What the pane the current touch sequence started in shows (nil outside Window mode).
+        private var sequencePaneKind: WorkspaceSource.Kind?
         /// The current two-finger gesture belongs to a tile (decided when it begins).
         private var workspaceGestureOwned = false
         /// Hybrid zoom: a still of the picture, clipped to the pane and scaled by the fingers,
@@ -4161,8 +4186,16 @@ struct VideoLayerView: UIViewRepresentable {
         /// trip the receiver's 5s liveness watchdog. Only do real work when
         /// the mode actually changed.
         func setInputMode(_ mode: PointerInputMode) {
+            preferredInputMode = mode
+            applyInputMode()
+        }
+
+        /// Runs the pointer model for the pane the touch sequence starts in: the person's own,
+        /// except in an Overview pane, which is always a trackpad. Only does work on a change.
+        private func applyInputMode() {
+            let mode = OverviewPaneInput.pointerMode(preferred: preferredInputMode, kind: sequencePaneKind)
             guard mode != pointerEngine.inputMode else { return }
-            dispatchPointerCommands(pointerEngine.setInputMode(mode))
+            dispatchPointerCommands(pointerEngine.setInputModeKeepingTap(mode))
             schedulePointerPoll()
         }
 
@@ -4765,7 +4798,8 @@ struct VideoLayerView: UIViewRepresentable {
                 // shape in a pane of any shape; bounded so it stays visible in a small pane and
                 // doesn't swamp a zoomed one. Turned with the pane.
                 size = CGSize(width: pane.normSize.width * scaleX, height: pane.normSize.height * scaleY)
-                size = PaneCursorSizing.bounded(size)
+                // In the focused Overview pane (where the Mac puts its cursor) at least a real pointer's size.
+                size = PaneCursorSizing.bounded(size, inOverview: workspaceOverviewFocused?() ?? false)
                 paneTurn = CGFloat(pane.rotation) * .pi / 180
             } else {
                 guard cursorNormSize != .zero else { return }
@@ -5750,15 +5784,22 @@ struct VideoLayerView: UIViewRepresentable {
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
             let touches = touches.subtracting(pointer)
             guard !touches.isEmpty else { return }
-            if let workspaceTouch, let first = touches.first {
+            if workspaceTouch != nil || workspacePaneKind != nil, let first = touches.first {
                 // The pane under the finger as drawn, mid-slide too, so the
                 // pane this selects is the one the click lands in.
                 let base = manualZoom.isIdentity ? presentedTransform().displayedRect
                     : unzoomedBaseTransform().displayedRect
                 if base.width > 0, base.height > 0 {
                     let p = first.location(in: self)
-                    if workspaceTouch(CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)) {
+                    let n = CGPoint(x: (p.x - base.minX) / base.width, y: (p.y - base.minY) / base.height)
+                    if let workspaceTouch, workspaceTouch(n) {
                         blockedSequenceSelectedPane = true
+                    }
+                    // A new touch sequence takes the pointer model of the pane it starts in
+                    // (an Overview pane: always a trackpad); later fingers join it unchanged.
+                    if activeFingerTouchIDs.isEmpty, !touches.contains(where: isPencil) {
+                        sequencePaneKind = workspacePaneKind?(n)
+                        applyInputMode()
                     }
                 }
             }

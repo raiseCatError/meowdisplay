@@ -288,11 +288,16 @@ struct CursorPaneSize: Equatable, Sendable {
 enum PaneCursorSizing {
     static let minLongestSide: CGFloat = 16
     static let maxLongestSide: CGFloat = 44
+    /// In an Overview pane every display is drawn small at 1x, so the Mac's cursor would be a few
+    /// points there: it is drawn at least as large as a pointer on a real screen.
+    static let overviewMinLongestSide: CGFloat = 24
 
-    static func bounded(_ size: CGSize) -> CGSize {
+    /// `inOverview`: the cursor is in the focused Overview pane (`overviewMinLongestSide`).
+    static func bounded(_ size: CGSize, inOverview: Bool = false) -> CGSize {
         let longest = max(size.width, size.height)
         guard longest > 0, longest.isFinite else { return size }
-        let f = min(max(longest, minLongestSide), maxLongestSide) / longest
+        let minimum = inOverview ? overviewMinLongestSide : minLongestSide
+        let f = min(max(longest, minimum), maxLongestSide) / longest
         return CGSize(width: size.width * f, height: size.height * f)
     }
 }

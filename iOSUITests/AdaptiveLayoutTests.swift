@@ -148,6 +148,62 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertEqual(app.staticTexts["uitestStagePeekResizes"].label, "Resizes: 1")
     }
 
+    // MARK: - Overview pane (DEBUG seam `MEOW_UITEST_STAGE_PEEK_PANES` on the Stage Peek fixture)
+    //
+    // Window view on a stand-in Mac that offers the Overview pane, the main display already in a
+    // pane ("Full Desktop"), and the real pane chrome under Stage Peek. No video.
+
+    @MainActor
+    private func workspacePane(_ app: XCUIApplication, _ title: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "workspacePane")
+            .matching(NSPredicate(format: "label == %@", "\(title) pane")).firstMatch
+    }
+
+    /// Stage Peek's Displays header adds the Overview as a pane, titled Overview; holding its title
+    /// lists each display, and choosing one shows that display in a pane through the display path.
+    @MainActor
+    func testOverviewPaneIsAddedFromStagePeekAndItsMenuListsTheDisplays() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK"] = "1"
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK_PANES"] = "1"
+        app.launch()
+        XCTAssertTrue(app.buttons["uitestStagePeekResize"].waitForExistence(timeout: 10),
+                      "the Stage Peek fixture opens at launch (a Debug build)")
+        XCTAssertTrue(workspacePane(app, "Full Desktop").waitForExistence(timeout: 5), "the main display starts in a pane")
+        XCTAssertFalse(workspacePane(app, "Overview").exists, "no Overview pane yet")
+
+        openStagePeekFromTheEdge(app)
+        let expand = app.buttons["stagePeekExpand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 3), "Stage Peek offers Expand")
+        if expand.label != "Compact" { expand.tap() }
+        XCTAssertTrue(waitUntil(5) { expand.label == "Compact" }, "the gallery expands")
+        let add = app.buttons["displayOverviewAddAsPane"]
+        for _ in 0..<6 where !(add.exists && add.isHittable) { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(add.exists && add.isHittable, "the Displays section offers the Overview as a pane")
+        keep(app, "overview-pane-offered")
+        add.tap()
+
+        let overview = workspacePane(app, "Overview")
+        XCTAssertTrue(overview.waitForExistence(timeout: 5), "the Overview pane appears, titled Overview")
+        XCTAssertTrue(waitUntil(5) { !app.buttons["stagePeekClose"].exists }, "Stage Peek closes")
+        XCTAssertTrue(workspacePane(app, "Full Desktop").exists, "added beside the pane already there")
+        keep(app, "overview-pane-added")
+
+        try app.holdPaneTitle(.paneTitle("Overview"), in: overview)
+        let displays = ["Built-in Display", "Wide Display", "Portrait Display"]
+        for name in displays {
+            XCTAssertTrue(app.buttons["Show \(name) in a Pane"].waitForExistence(timeout: 5), "the menu lists \(name)")
+        }
+        XCTAssertFalse(app.buttons["Rotate"].exists, "an Overview pane is never turned")
+        XCTAssertFalse(app.buttons["Show Overview Here"].exists, "not offered in the Overview itself")
+        keep(app, "overview-pane-menu")
+
+        app.buttons["Show Wide Display in a Pane"].tap()
+        XCTAssertTrue(workspacePane(app, "Wide Display").waitForExistence(timeout: 5),
+                      "the display shows in a pane of its own")
+        keep(app, "overview-pane-display-shown")
+    }
+
     // MARK: - Multi-Display Overview fixture (DEBUG seam `MEOW_UITEST_OVERVIEW`)
     //
     // The overview needs a Mac's display catalog, which the demo has not got, so the app opens it

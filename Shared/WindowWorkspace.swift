@@ -479,6 +479,79 @@ struct OverviewPaneLayout: Equatable, Sendable {
     }
 }
 
+/// The receiver's rules for an Overview pane: when it is offered, the displays its menu lists,
+/// and where each gesture on a pane goes. Pure; the Stage Peek, pane chrome and touch code follow it.
+enum OverviewPaneInput {
+    /// The displays an Overview pane shows, in reading order: each drawn display (a mirror set
+    /// once), never one of MeowDisplay's own screens. As the Mac's `overviewDisplays`.
+    static func shownDisplays(_ catalog: [CatalogDisplayItem]) -> [CatalogDisplayItem] {
+        let drawn = DisplayOverviewModel(catalog: catalog).drawnDisplays.filter { !$0.isMeow && !$0.isOwn }
+        return drawn.compactMap { d in catalog.first { $0.id == d.id } }
+    }
+
+    /// Offered as a pane source only when the Mac shows Overview panes (`overviewPane`) and has
+    /// two or more displays to show in one.
+    static func offered(macOffers: Bool, displays: [CatalogDisplayItem]) -> Bool {
+        macOffers && shownDisplays(displays).count >= 2
+    }
+
+    /// The fingers on a pane, as the touch code tells them apart.
+    enum Gesture: Equatable, Sendable {
+        /// One finger: the pointer (moves, taps, holds and drags).
+        case oneFinger
+        /// Two fingers moving together.
+        case twoFingerDrag
+        case pinch
+    }
+
+    /// Where a gesture goes.
+    enum Route: Equatable, Sendable {
+        /// The pointer, in this model (a trackpad moves the Mac cursor relatively; a tap clicks;
+        /// tap, then hold and move, drags).
+        case pointer(PointerInputMode)
+        /// The Mac scrolls (at the cursor in an Overview pane).
+        case scrollMac
+        /// The pane's zoom on this device's layout (an Overview pane's is the Mac's camera, 1x-8x).
+        case zoomPane
+        /// The pane's picture moves (a zoomed or filled window or display pane only).
+        case movePane
+        /// Nothing.
+        case none
+    }
+
+    /// `kind`: what the pane under the fingers shows. In an Overview pane one finger is always a
+    /// trackpad, two fingers scroll the Mac and a pinch zooms; nothing moves its view (the Mac's
+    /// camera follows the cursor). Other panes are unchanged.
+    static func route(_ gesture: Gesture, kind: WorkspaceSource.Kind, preferred: PointerInputMode,
+                      inputReachesMac: Bool, moveViewActive: Bool) -> Route {
+        switch (gesture, kind) {
+        case (.oneFinger, .overview): return .pointer(.trackpad)
+        case (.oneFinger, _): return .pointer(preferred)
+        case (.pinch, _): return .zoomPane
+        case (.twoFingerDrag, .overview): return inputReachesMac && !moveViewActive ? .scrollMac : .none
+        case (.twoFingerDrag, _):
+            return WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: inputReachesMac,
+                                                       moveViewActive: moveViewActive) ? .scrollMac : .movePane
+        }
+    }
+
+    /// The one-finger pointer model for a touch sequence that starts in a pane of `kind`.
+    static func pointerMode(preferred: PointerInputMode, kind: WorkspaceSource.Kind?) -> PointerInputMode {
+        guard let kind, case .pointer(let mode) = route(.oneFinger, kind: kind, preferred: preferred,
+                                                        inputReachesMac: true, moveViewActive: false) else { return preferred }
+        return mode
+    }
+
+    /// An Overview pane's zoom after a pinch by `ratio` from `start`: the person's scale, 1x-8x
+    /// (`OverviewPaneLayout`). The centre is the Mac's, so it is sent as the middle. nil: 1x.
+    static func zoom(from start: WorkspacePaneZoom?, ratio: Double) -> WorkspacePaneZoom? {
+        let r = ratio.isFinite && ratio > 0 ? ratio : 1
+        let scale = OverviewPaneLayout.clampZoom((start?.scale ?? 1) * r)
+        guard abs(scale - OverviewPaneLayout.minimumZoom) > 1e-4 else { return nil }
+        return WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5)
+    }
+}
+
 // MARK: - Sources
 
 /// What a tile shows. Identity is checked by the sender, never trusted from
