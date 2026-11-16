@@ -738,6 +738,16 @@ final class SenderController: ObservableObject {
             restartAll()
         }
     }
+    /// Settings ▸ Streaming ▸ Adaptive Automatic (Beta), #123. Off by
+    /// default: Automatic stays today's fixed policy. Only Automatic reads
+    /// it, so a change rebuilds the streams only there.
+    @Published var adaptiveAutomaticBeta = UserDefaults.standard.bool(forKey: AdaptiveStreamingSettings.defaultsKey) {
+        didSet {
+            guard adaptiveAutomaticBeta != oldValue else { return }
+            UserDefaults.standard.set(adaptiveAutomaticBeta, forKey: AdaptiveStreamingSettings.defaultsKey)
+            if streamingMode == .automatic { restartAll() }
+        }
+    }
     // What a session actually gets built with — `StreamingModePolicy`/
     // `StreamQuality.effective` fold in Automatic's fixed default policy;
     // only these (never the raw stored properties above) may reach
@@ -2895,7 +2905,8 @@ final class SenderController: ObservableObject {
                                streamingPriority: effectiveStreamingPriority,
                                codecPreference: effectiveCodecPreference,
                                streamingMode: streamingMode,
-                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil)
+                               customFrameRateSelection: streamingMode == .custom ? customFrameRate : nil,
+                               adaptiveAutomatic: streamingMode == .automatic && adaptiveAutomaticBeta)
         sender.autoReconnectEnabled = autoReconnectEnabled
         let remoteRoute: Bool
         switch target {
