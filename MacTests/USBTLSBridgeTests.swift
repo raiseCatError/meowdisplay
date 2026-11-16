@@ -184,6 +184,46 @@ final class USBTLSBridgeTests: XCTestCase {
         bridge.cancel()
     }
 
+    /// `cancel()` after the listener exists but before its `.ready` is
+    /// handled used to leave `start()` suspended forever: the cancel cleared
+    /// the listener, so its later states were ignored and nothing resumed
+    /// the continuation. The bridge's queue is held inside the fake dial, so
+    /// no listener callback can run until the cancel has landed.
+    func testCancelWhileTheListenerStartsEndsStartOnce() async throws {
+        let bridgeQueue = DispatchQueue(label: "usbtlsbridge.tests.held")
+        let held = HeldQueue(bridgeQueue)
+        defer { held.release() }
+        let bridge = USBTLSBridge(udid: "fake", queue: bridgeQueue) { _, _, _ in
+            held.hold()
+            // Never started: the bridge only keeps and finally cancels it.
+            return NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        }
+        let outcome = OutcomeBox()
+        let finished = expectation(description: "start() finished")
+        let task = Task {
+            do {
+                _ = try await bridge.start()
+                outcome.set("returned")
+            } catch USBTLSBridge.Failure.cancelled {
+                outcome.set("cancelled")
+            } catch {
+                outcome.set("other: \(error)")
+            }
+            finished.fulfill()
+        }
+        // start() is now waiting for a listener whose callbacks are held.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        bridge.cancel()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        // The listener's late states arrive now and must not resume again.
+        held.release()
+        await fulfillment(of: [finished], timeout: 3)
+        XCTAssertEqual(outcome.value, "cancelled")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(outcome.value, "cancelled")
+        task.cancel()
+    }
+
     private func receiveExactly(_ count: Int, on conn: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { cont in
             conn.receive(minimumIncompleteLength: count, maximumLength: count) { data, _, _, error in
@@ -194,6 +234,46 @@ final class USBTLSBridgeTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+/// A dispatch queue held (suspended) from inside a test's fake dial and
+/// released once; a suspended queue must be resumed before it is freed.
+private final class HeldQueue: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var isHeld = false
+
+    init(_ queue: DispatchQueue) { self.queue = queue }
+
+    func hold() {
+        lock.lock(); defer { lock.unlock() }
+        guard !isHeld else { return }
+        isHeld = true
+        queue.suspend()
+    }
+
+    func release() {
+        lock.lock(); defer { lock.unlock() }
+        guard isHeld else { return }
+        isHeld = false
+        queue.resume()
+    }
+}
+
+/// What `start()` ended with, written once from the test's task.
+private final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+
+    func set(_ value: String) {
+        lock.lock(); defer { lock.unlock() }
+        stored = value
+    }
+
+    var value: String? {
+        lock.lock(); defer { lock.unlock() }
+        return stored
     }
 }
 
