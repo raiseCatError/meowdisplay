@@ -42,6 +42,12 @@ struct WorkspaceTileAssignment: Equatable, Sendable {
     /// A whole display in this tile (Full Desktop as a tile source). `windowID` is then its
     /// reserved key (`WorkspaceSource.displayKey`), so window-keyed maps never collide.
     var displayID: UInt32? = nil
+    /// The Overview pane (`"overview": true`): every listed display in its arrangement. `windowID`
+    /// is `WorkspaceSource.overviewKey`, `displayID` nil; `zoom` is the Mac's camera
+    /// (`OverviewPaneLayout.paneZoom`) over the arrangement's bounds.
+    var isOverview = false
+    /// A Mac window (not a display, not the Overview).
+    var isWindow: Bool { displayID == nil && !isOverview }
     /// A floating pane (`layer: "float"`, only from a receiver that said `ws` 2 to a Mac that
     /// offers `windowFloat`): drawn after every tiled pane, in `z` order, and hit first.
     var isFloat = false
@@ -114,6 +120,26 @@ enum WorkspaceRequestValidator {
             // Older receivers send `crop` (a capture crop); it is ignored: the pane shows the whole source.
             let zoom = WorkspacePaneZoom(wire: item["zoom"]) ?? .identity
             let epoch = min(max(item["view"] as? Int ?? 0, 0), Int(Int32.max))
+            if (item["overview"] as? Bool) == true {
+                // Every listed display, once in the layout. Never turned or filled; the zoom's
+                // scale is the person's (1x-8x), its centre the Mac's (it follows the cursor).
+                guard !displays.isEmpty else { rejected[id] = "unavailable"; continue }
+                let key = WorkspaceSource.overviewKey
+                guard !accepted.contains(where: { $0.isOverview }) else { rejected[id] = "duplicateWindow"; continue }
+                let generation: UInt64
+                if let old = previous[id], old.isOverview {
+                    generation = old.assignmentGeneration
+                } else {
+                    generation = nextGeneration
+                    nextGeneration += 1
+                }
+                let scale = OverviewPaneLayout.clampZoom(zoom.scale)
+                accepted.append(WorkspaceTileAssignment(
+                    tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
+                    rotation: .none, fit: .fit, zoom: WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5),
+                    viewEpoch: epoch, assignmentGeneration: generation, isOverview: true, isFloat: isFloat, z: z, isLifted: lifted))
+                continue
+            }
             if let raw = item["display"] {
                 // A whole display: only one this Mac listed, at most once in the layout.
                 guard let displayID = (raw as? Int).flatMap({ UInt32(exactly: $0) }), displays[displayID] != nil else {
@@ -386,6 +412,25 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
         return (pointer.x, pointer.y, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
     }
 
+    /// Puts the workspace pointer at canvas point `p` (normalized) without resolving input: the
+    /// Overview pane keeps it on the real Mac cursor.
+    mutating func placePointer(at p: WorkspacePoint) {
+        pointer = WorkspacePoint(x: min(max(p.x, 0), 1), y: min(max(p.y, 0), 1))
+        if let a = assignment(boundTile) ?? tile(at: pointer) { remember(a) }
+    }
+
+    /// The pane relative motion moves in now: the one a drag is bound to, else the focused one.
+    var relativeTile: String? { boundTile ?? activeTile }
+
+    /// The pane a scroll goes to now: the bound one, else the one under the pointer.
+    var scrollTile: WorkspaceTileAssignment? { assignment(boundTile) ?? tile(at: pointer) }
+
+    /// A pane's zoom changed on the Mac (the Overview's camera following the cursor): nothing else.
+    mutating func setZoom(_ zoom: WorkspacePaneZoom, tile: String) {
+        guard let i = assignments.firstIndex(where: { $0.tileID == tile }) else { return }
+        assignments[i].zoom = zoom
+    }
+
     /// Re-resolve at the current pointer (pointer buttons press where the cursor is).
     mutating func resolveAtPointer(_ phase: Phase) -> Target? { resolve(phase, at: pointer) }
 
@@ -438,9 +483,10 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
     /// (`kx`/`ky`: normalized to the canvas width and height — the pane's own scale with Fit,
     /// Fill and zoom) and the pane's rotation in degrees. The receiver sizes and turns its
     /// cursor sprite from these, so it keeps its shape in a pane of any shape.
-    func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
+    /// `tileID`: only in that pane.
+    func cursorPlacement(forGlobal g: CGPoint, in tileID: String? = nil) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
         guard canvas.width > 0, canvas.height > 0 else { return nil }
-        for a in frontToBack {
+        for a in frontToBack where tileID == nil || a.tileID == tileID {
             guard let frame = drawnFrame(a.windowID), frame.contains(g), let t = transform(for: a) else { continue }
             let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
             guard let visible = t.visibleRect, visible.contains(q) else { continue }
@@ -534,7 +580,7 @@ enum WorkspaceKeyboardGate {
                        focusedWindowIsChild: Bool) -> Decision {
         guard let active else { return .noActiveTile }
         // A desktop tile types wherever the Mac's focus is, as Mirror does.
-        if active.displayID != nil { return .deliver }
+        if active.displayID != nil || active.isOverview { return .deliver }
         guard frontmostPID == active.pid else { return .hostFocusElsewhere }
         guard let focusedWindowID else { return .deliver }   // app in front, no window info (AX unavailable): its own window or nothing
         if focusedWindowID == active.windowID || focusedWindowIsChild || active.follow == .app { return .deliver }
@@ -724,6 +770,31 @@ enum WorkspaceCaptureSizing {
                        (maxPixels / (source.width * source.height)).squareRoot())
         func even(_ v: Double) -> Double { max(2, (v / 2).rounded() * 2) }
         return CGSize(width: even(source.width * perPoint), height: even(source.height * perPoint))
+    }
+}
+
+/// An Overview pane's captures: one per display, each at the pixels it covers in the pane now
+/// (`WorkspaceCaptureSizing`, so zooming in gets sharper up to the display's own pixels). A display
+/// wholly outside the pane is kept at its zoom-1 size and `hiddenFPS`, ready when the view reaches it.
+enum OverviewPaneCapturePlan {
+    struct Request: Equatable {
+        var size: CGSize
+        var fps: Int
+    }
+
+    static let hiddenFPS = 1
+
+    /// `backingScales`: each display's pixels per point (2 when unknown). `fps`: the pane's budget.
+    static func requests(_ layout: OverviewPaneLayout, backingScales: [UInt32: Double], fps: Int) -> [UInt32: Request] {
+        var out: [UInt32: Request] = [:]
+        for d in layout.displays {
+            let visible = layout.visibleRect(for: d) != nil
+            let size = WorkspaceCaptureSizing.size(source: CGSize(width: d.bounds.width, height: d.bounds.height),
+                                                   drawScale: visible ? layout.scale : layout.fitScale,
+                                                   backingScale: backingScales[d.id] ?? 2)
+            out[d.id] = Request(size: size, fps: visible ? max(fps, 1) : min(max(fps, 1), hiddenFPS))
+        }
+        return out
     }
 }
 
