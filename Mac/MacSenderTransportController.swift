@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SystemConfiguration
 
 // MacSenderTransportController — owns the live NWConnection and its
 // Network.framework callback plumbing (viability/path/state handlers, the
@@ -395,31 +396,35 @@ final class MacSenderTransportController: @unchecked Sendable {
             guard upgradeProbes.isEmpty else { return }   // a round is still in flight
         }
 
-        var candidates: [NWEndpoint.Host] = []
-        var linkLocal: [NWEndpoint.Host] = []
+        var direct: [CableCandidateSelection.ProbeCandidate] = []
+        var linkLocal: [CableCandidateSelection.ProbeCandidate] = []
         let scopes = Self.candidateInterfaceNames()
         for addr in peerAddrs {
             if addr.lowercased().hasPrefix("fe80:") {
                 for iface in scopes {
-                    linkLocal.append(NWEndpoint.Host("\(addr)%\(iface)"))
+                    linkLocal.append(.init(host: "\(addr)%\(iface)", scope: iface))
                 }
             } else {
-                candidates.append(NWEndpoint.Host(addr))
+                direct.append(.init(host: addr, scope: nil))
             }
         }
-        candidates.append(contentsOf: linkLocal)
-        guard !candidates.isEmpty else { return }
-        let candidateNames = candidates.prefix(16).map { "\($0)" }
+        let all = direct + linkLocal
+        guard !all.isEmpty else { return }
+        // At most 16 dials: the same list as always up to 16; over it,
+        // duplicates and Wi-Fi-scoped fe80 dials (prohibited below) give way.
+        let candidates = CableCandidateSelection.probeCandidates(all, wifiScopes: Self.wifiInterfaceNames)
+            .map { NWEndpoint.Host($0.host) }
+        let candidateNames = candidates.map { "\($0)" }
         if candidateNames != lastLoggedCandidates {
             lastLoggedCandidates = candidateNames
             Log.info("probing \(candidateNames.count) candidate cable paths"
-                     + " (direct \(candidates.count - linkLocal.count),"
+                     + " (direct \(direct.count),"
                      + " fe80 scopes \(scopes.joined(separator: ","))) — repeats every 10s")
         }
         probeRoundGeneration += 1
         let round = probeRoundGeneration
 
-        for host in candidates.prefix(16) {
+        for host in candidates {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
             guard case .tcp(_, let config) = transport,
@@ -515,6 +520,17 @@ final class MacSenderTransportController: @unchecked Sendable {
             }
         }
         becomeReady(conn, transport: transport)
+    }
+
+    /// BSD names of this Mac's Wi-Fi interfaces (public SystemConfiguration
+    /// inventory). Consulted only when a probe round is over its cap.
+    private static func wifiInterfaceNames() -> Set<String> {
+        let interfaces = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
+        return Set(interfaces.compactMap { interface -> String? in
+            guard let type = SCNetworkInterfaceGetInterfaceType(interface),
+                  (type as String) == (kSCNetworkInterfaceTypeIEEE80211 as String) else { return nil }
+            return SCNetworkInterfaceGetBSDName(interface) as String?
+        })
     }
 
     /// Local zones a link-local probe could ride: interfaces that are up,

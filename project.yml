@@ -262,6 +262,7 @@ targets:
       - Mac/ExplicitConnectAdmission.swift
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
+      - Shared/CableCandidateSelection.swift
       - Shared/RemoteEndpointStore.swift
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift
