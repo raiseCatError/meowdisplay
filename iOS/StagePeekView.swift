@@ -703,15 +703,33 @@ struct StagePeekOverlay: View {
         .zIndex(10)
     }
 
+    /// The buttons' text size relative to the default, for `StagePeekToolbarLayout`.
+    @ScaledMetric(relativeTo: .footnote) private var toolbarTextScale: CGFloat = 1
+
+    /// The toolbar's labels: icon and title, or the icon alone (its title still names it to VoiceOver).
+    private struct ToolbarLabels: ViewModifier {
+        let showsTitles: Bool
+
+        @ViewBuilder func body(content: Content) -> some View {
+            if showsTitles { content.labelStyle(.titleAndIcon) } else { content.labelStyle(.iconOnly) }
+        }
+    }
+
     /// Expand/Compact, Add as Tile (expanded, room for another tile), Close.
     /// Fixed at the bottom centre: it used to follow the highlighted card, so it slid and jumped
     /// while the compact peek scrolled (owner report 2026-10-31).
     private func toolbar(cards: [StagePeekCard]) -> some View {
         let column = safe.midX
         let chosen = machine.highlightedID.flatMap { id in windows.first { $0.id == id } }
-        return HStack(spacing: 6) {
-            // While the apps bar is grown, Compact puts it back to one row first.
-            let compacting = machine.expanded || dockRows > 1
+        // While the apps bar is grown, Compact puts it back to one row first.
+        let compacting = machine.expanded || dockRows > 1
+        let addsTile = machine.expanded && model.canAddTile && chosen != nil
+        // Titles drop to icons (still named for VoiceOver) when they would not fit the window.
+        let titles = StagePeekToolbarLayout.showsTitles(
+            titles: [(compacting ? String(localized: "Compact") : String(localized: "Expand")).count]
+                + (addsTile ? [String(localized: "Add as Tile").count] : []),
+            textScale: toolbarTextScale, available: safe.width)
+        return HStack(spacing: StagePeekToolbarLayout.spacing) {
             Button {
                 if dockRows > 1 {
                     withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { dockRows = 1; dockWide = false }
@@ -738,7 +756,7 @@ struct StagePeekOverlay: View {
                 .accessibilityIdentifier("stagePeekClose")
         }
         .font(.footnote.weight(.semibold))
-        .labelStyle(.titleAndIcon)
+        .modifier(ToolbarLabels(showsTitles: titles))
         // A filled dark capsule, not `.bordered` with a white tint: that
         // drew white labels on a translucent white fill, unreadable over a
         // bright window (see `StagePeekLegibility`).

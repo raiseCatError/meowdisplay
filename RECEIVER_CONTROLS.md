@@ -183,6 +183,18 @@ The keypad stays open while you use Return, modifiers, the Function Tray and sho
 
 **Accessibility.** The button is **Arrow Keys** (Shown/Hidden), with **Up Arrow**, **Down Arrow**, **Left Arrow** and **Right Arrow** as named actions, so VoiceOver, Voice Control and Switch Control can send arrows without a swipe. Each keypad key is a button of the same name; its value names the keypad modifiers it adds, and activating it sends the arrow with those. The keypad's modifiers are **Shift for Arrows**, **Option for Arrows** and **Command for Arrows** (Voice Control also answers to **Arrow Shift** and so on), On or Off, with the hint "Only the arrow keys use it."; activating one latches or unlatches it. With an older Mac and a tray modifier on, they read Unavailable and say why. Reduce Motion turns the keypad's scale into a fade.
 
+### Text size and narrow windows (#121)
+
+The receiver adapts to the window and the text size, never to a device model.
+
+- **Main Tray chips** shrink from 40 pt only as far as the screen edge needs (9 chips are 33 pt on a 360 pt phone, 30 pt at the smallest, 320 pt). Hiding a chip you don't use gives the rest more room.
+- **Stage Peek's buttons** (Expand / Compact, Add as Tile, Close) show their titles while the row fits the window, and drop to icons when it would not (accessibility text sizes, a 320 pt Slide Over, a long translation). Each button keeps its name for VoiceOver and Voice Control.
+- **Video is off** puts **Turn Video On** under the words when they don't fit side by side.
+- **Settings** pickers that are segmented become menus at the accessibility text sizes, so no choice is cut off.
+- **Session Actions**, the Mac lock banner and Home's rows already wrap or scroll at large text.
+
+Not yet adapted, because it needs a device to judge: the Main Tray's chip size (it is a fixed 30 to 40 pt, not Dynamic Type), pane labels' reserved height at accessibility sizes, and Android.
+
 ## Typing
 
 Two things keep what you type visible. Both work only after the Mac has granted this device **Request Control**.
