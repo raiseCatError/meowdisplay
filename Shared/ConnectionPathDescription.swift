@@ -17,13 +17,6 @@ struct ConnectionPathEvidence: Equatable, Sendable {
     /// The far end is a Mac: the only peer that can sit on a Thunderbolt
     /// host-to-host link with this product.
     var peerIsMac: Bool
-
-    /// The interface that carries the connection: the zone of the scoped
-    /// remote address, else the path's first interface.
-    var carryingInterface: String? {
-        if let zone = remoteScopeInterface, !zone.isEmpty { return zone }
-        return interfaceNames.first
-    }
 }
 
 /// Answers whether a network interface is one end of a direct host-to-host
@@ -80,7 +73,8 @@ struct ConnectionPathDescription: Equatable, Sendable {
 
     /// All of: a LAN route to a Mac; no Wi-Fi, cellular, loopback,
     /// peer-to-peer or tunnel interface on the path; a link-local remote;
-    /// and the carrying interface is a host-to-host cable interface. A
+    /// and the carrying interface (every listed interface, when the remote
+    /// address names none) is a host-to-host cable interface. A
     /// link-local peer on wired Ethernet alone proves nothing (Bonjour often
     /// resolves to fe80 on an ordinary switched LAN), so the interface check
     /// is what decides.
@@ -94,8 +88,14 @@ struct ConnectionPathDescription: Equatable, Sendable {
             ConnectionRoute.isPeerToPeerInterface(name) || ConnectionRoute.isTunnelInterface(name)
                 || name.lowercased().hasPrefix("lo")
         }) else { return false }
-        guard let carrier = evidence.carryingInterface else { return false }
-        return cableInterfaces.isHostToHostCableInterface(carrier)
+        // A scoped remote names the interface that carries the connection.
+        // Without a zone nothing says which listed interface does, so every
+        // one of them must be a cable interface.
+        if let zone = evidence.remoteScopeInterface, !zone.isEmpty {
+            return cableInterfaces.isHostToHostCableInterface(zone)
+        }
+        return !evidence.interfaceNames.isEmpty
+            && evidence.interfaceNames.allSatisfy(cableInterfaces.isHostToHostCableInterface)
     }
 
     // MARK: - Endpoint text helpers (for endpoints Network.framework could
