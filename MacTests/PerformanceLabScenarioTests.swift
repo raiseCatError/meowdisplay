@@ -19,6 +19,40 @@ enum PerformanceLabGolden {
                        "\(url.lastPathComponent) differs from the golden file; if intended, rerun with PERF_LAB_UPDATE_GOLDEN=1",
                        file: file, line: line)
     }
+
+    /// Every string value a run bundle may hold, apart from the app version,
+    /// the variant, the commit and the creation date (which have their own
+    /// strict formats): constants from code. The privacy test checks bundles
+    /// against it, and scenarios.json ships it to the analysis tool so its
+    /// privacy check is the same one.
+    static func bundleStringConstants() -> Set<String> {
+        let metricIDs = Set(StreamDiagnosticsMetricDictionary.all.map(\.id))
+        let scenarios = PerformanceLabScenarioCatalog.all + [PerformanceLabScenarioCatalog.synthetic]
+        var constants = Set(scenarios.flatMap { [$0.id, $0.caption, $0.purpose, $0.mode.rawValue, $0.panes.rawValue, $0.workload.rawValue]
+            + $0.steps.flatMap { [$0.instruction, $0.timing.rawValue] } + $0.primaryMetrics.map(\.rawValue) })
+        constants.formUnion(PerformanceLabWorkload.catalog.flatMap { [$0.signature, $0.id.rawValue] + $0.cycle.map(\.kind.rawValue) })
+        constants.formUnion(StreamDiagnosticsMetricDictionary.all.flatMap { [$0.id, $0.unit, $0.source, $0.caveat, $0.timebase.rawValue] })
+        constants.formUnion(PerformanceLabRunManifest.limitationsText)
+        constants.formUnion(PerformanceLabTrialIssue.allCases.map(\.rawValue))
+        constants.formUnion(PerformanceLabReceiverAlignment.allCases.map(\.rawValue))
+        constants.formUnion(PerformanceLabReceiverCounting.allCases.map(\.rawValue))
+        constants.formUnion(["complete", "incomplete", "failed", "cancelled", PerformanceLabRunManifest.format, PerformanceLabTrialRecord.format])
+        constants.formUnion(["sender", "receiver", "mirror", "extend", "window", "unknown", "h264", "hevc", "usb", "awdl", "lan", "remote",
+                             "tcp", "quic", "displayLayer", "metal", "nominal", "fair", "serious", "critical", "unplugged", "charging",
+                             "full", "none", "low", "medium", "high", "atLeast", "below", "macOS", "iOS", "mac", "iPhone", "iPad",
+                             "localMonotonic", "localWallClock", "senderHostClock", "senderWallClock", "wallClockMapped", "sampled"])
+        constants.formUnion(StreamVerdictReason.allCases.map(\.rawValue))
+        constants.formUnion(StreamBottleneckCause.allCases.map(\.rawValue))
+        // Window snapshots may also carry colour metadata and adaptive decisions.
+        constants.formUnion(StreamDiagnosticsColourTests.colourStrings)
+        constants.formUnion(AdaptiveStreamingDecision.Action.allCases.map(\.rawValue))
+        constants.formUnion(AdaptiveStreamingDecision.Reason.allCases.map(\.rawValue))
+        constants.formUnion(AdaptiveStreamingDecision.Cause.allCases.map(\.rawValue))
+        constants.formUnion(AdaptiveStreamingDecision.Dimension.allCases.map(\.rawValue))
+        constants.formUnion(NetworkCost.DataPolicy.allCases.map(\.rawValue))
+        constants.formUnion(metricIDs.union(StreamBottleneckClassifier.derivedIDs).union(metricIDs.map { $0 + ".p50" }))
+        return constants
+    }
 }
 
 /// Workload schedule determinism and the scenario/run model (#123).
@@ -163,6 +197,12 @@ final class PerformanceLabScenarioTests: XCTestCase {
             var workloads = PerformanceLabWorkload.catalog
             var workloadSignatures = PerformanceLabWorkload.catalog.map(\.signature)
             var frameID = FrameIDLayout()
+            /// The analysis tool's privacy check: metric ids (allowed as
+            /// keys) and every constant string a bundle may hold.
+            var metricDictionaryVersion = StreamDiagnosticsMetricDictionary.version
+            var metricIDs = StreamDiagnosticsMetricDictionary.all.map(\.id).sorted()
+            var classifierThresholdNames = StreamBottleneckClassifier.thresholds.keys.sorted()
+            var bundleStringConstants = PerformanceLabGolden.bundleStringConstants().sorted()
         }
         let data = try PerformanceLabBundle.encoder().encode(Catalog())
         try PerformanceLabGolden.check(data + Data("\n".utf8), against: PerformanceLabGolden.toolDir.appendingPathComponent("scenarios.json"))

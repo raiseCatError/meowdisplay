@@ -2,7 +2,9 @@
 //
 // SYNTHETIC. A fixed, scripted event stream (60 FPS, deterministic
 // durations and sizes, one scripted 300 ms stall in trial 3, scripted
-// receiver summaries) is fed through the real StreamDiagnosticsRecorder and
+// receiver summaries: 5 s receiver windows sent every 2 s, so each window is
+// reported two or three times with a changing jitter, the way a receiver
+// does under adaptive streaming) is fed through the real StreamDiagnosticsRecorder and
 // the real PerformanceLabRunController on an injected clock, and written as
 // a real run bundle. It exercises the harness end to end without a device,
 // capture, encoder or network. It measures nothing: every output says
@@ -30,7 +32,8 @@ enum PerformanceLabSyntheticRun {
         let diagnosticsSwitch = StreamDiagnosticsSwitch(enabled: true)
         let time = SyntheticClock(ms: startMs)
         let recorder = StreamDiagnosticsRecorder(side: .sender, windowSeconds: PerformanceLabScenarioCatalog.windowSeconds,
-                                                 diagnosticsSwitch: diagnosticsSwitch, resourceSampler: nil, nowMs: time.ms)
+                                                 diagnosticsSwitch: diagnosticsSwitch, resourceSampler: nil, nowMs: time.ms,
+                                                 seriesID: 4141)
         recorder.updateContext { context in
             context.displayMode = .extend
             context.codec = .hevc
@@ -59,6 +62,11 @@ enum PerformanceLabSyntheticRun {
         var lastKey: Int64 = 0
         var stallFramesLeft = 0
         var trial3MeasuringFrames = 0
+        // Scripted receiver: window u covers frames [300(u-1), 300u); it
+        // starts with the sender window number the last "ping" carried.
+        var lastPingSequence: UInt64?
+        var markers: [Int: UInt64] = [:]
+        var stallReceiverWindow: Int?
         let limitMs = startMs + 10 * 60 * 1000
         while controller.isRunning, time.ms < limitMs {
             if case .waitingForOperator = controller.phase { controller.operatorReady() }
@@ -69,8 +77,15 @@ enum PerformanceLabSyntheticRun {
             }
             if case .measuring(3, _, _) = controller.phase {
                 trial3MeasuringFrames += 1
-                // A scripted 300 ms stall, 5 s into trial 3's measurement.
-                if trial3MeasuringFrames == 300 { stallFramesLeft = 18 }
+                // A scripted 300 ms stall, 11 s into trial 3's measurement:
+                // inside the trial's sender windows whenever the first one
+                // starts (up to 5 s after arming), and inside a receiver
+                // window that began after the trial did (one that began
+                // before it is not the trial's, and is left out).
+                if trial3MeasuringFrames == 660 {
+                    stallFramesLeft = 18
+                    stallReceiverWindow = frame / receiverWindowFrames + 1
+                }
             }
 
             time.ms += frameMs
@@ -81,7 +96,20 @@ enum PerformanceLabSyntheticRun {
                 emitFrame(frame, trial: trial, recorder: recorder, clock: clock, lastKey: &lastKey)
             }
             frame += 1
-            if frame % 300 == 0 { recorder.updatePeer(receiverSummary(trial: trial, update: frame / 300), at: clock) }
+            if frame % pingFrames == 0 {
+                // The sender's ping: its snapshot (which rotates, as the
+                // real one does) carries its last completed window number.
+                lastPingSequence = recorder.snapshot(at: clock).windowSequence
+            }
+            if frame % receiverWindowFrames == 0 {
+                markers[frame / receiverWindowFrames + 1] = lastPingSequence
+            }
+            let completedReceiverWindow = frame / receiverWindowFrames
+            if frame % statsFrames == 0, completedReceiverWindow >= 1 {
+                recorder.updatePeer(receiverSummary(trial: trial, window: completedReceiverWindow, send: frame / statsFrames,
+                                                    marker: markers[completedReceiverWindow],
+                                                    stalled: completedReceiverWindow == stallReceiverWindow), at: clock)
+            }
             if frame % 30 == 0 { controller.tick() }
         }
         guard case .finished(let folder) = controller.phase else { throw SyntheticError.didNotFinish }
@@ -89,6 +117,12 @@ enum PerformanceLabSyntheticRun {
     }
 
     enum SyntheticError: Error { case didNotFinish }
+
+    /// Scripted cadences, in frames at 60 FPS.
+    static let pingFrames = 120            // the sender's ~2 s ping
+    static let statsFrames = 120           // the receiver's ~2 s stats (adaptive cadence)
+    static let receiverWindowFrames = 300  // the receiver's 5 s window
+    static let receiverSeriesID = 4242.0
 
     @MainActor
     private final class SyntheticClock {
@@ -114,24 +148,28 @@ enum PerformanceLabSyntheticRun {
         recorder.recordSendCompletion(durationMs: sendMs, bytes: bytes + 16, error: false, at: clock + encodeMs + sendMs)
     }
 
-    /// What a receiver might report; scripted, slightly different per trial.
-    private static func receiverSummary(trial: Int, update: Int) -> StreamDiagnosticsPeerSummary {
+    /// What a receiver might report about its window `window`; scripted,
+    /// slightly different per trial. The jitter is a session value and
+    /// changes with every send, as the real one does.
+    private static func receiverSummary(trial: Int, window: Int, send: Int, marker: UInt64?, stalled: Bool) -> StreamDiagnosticsPeerSummary {
         var s = StreamDiagnosticsPeerSummary(side: .receiver)
         let t = Double(trial)
-        s.arrivalFPS = 59.8 - 0.2 * t - Double(update % 3) * 0.1
+        s.windowSeriesID = receiverSeriesID
+        s.windowSequence = Double(window)
+        s.peerWindowSequenceAtStart = marker.map { Double($0) }
+        s.arrivalFPS = 59.8 - 0.2 * t - Double(window % 3) * 0.1
         s.arrivalP50Ms = 17
         s.arrivalP95Ms = 18 + t
-        s.arrivalGapsOver250ms = trial == 3 ? 1 : 0
+        s.arrivalGapsOver250ms = stalled ? 1 : 0
         s.enqueueFPS = 59.8 - 0.2 * t
         s.presenterQueueAgeP95Ms = 2.5
-        s.presenterQueueDepthMax = 2
         s.rttMs = 4
-        s.rttJitterMs = 0.75
-        s.frameIDReadCount = 298
+        s.rttJitterMs = 0.75 + Double(send % 3) * 0.05
         s.frameIDUniqueFPS = 58 - 0.5 * t
         s.frameIDDuplicates = 2
         s.frameIDMissing = t
         s.frameIDUnreadable = 0
+        s.frameIDUnexamined = 0
         s.frameIDIntervalP95Ms = 18
         return s
     }

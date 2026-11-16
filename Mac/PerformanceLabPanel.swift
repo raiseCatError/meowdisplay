@@ -86,7 +86,10 @@ final class PerformanceLabPanelModel: ObservableObject {
         run = controller
         controller.start(plan)
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Common run-loop modes: the timer keeps firing while a menu is held
+        // open or a modal panel runs, so no window is missed (the recorder
+        // keeps only the last completed one).
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let run = self.run else { return }
                 run.tick()
@@ -96,6 +99,8 @@ final class PerformanceLabPanelModel: ObservableObject {
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func runSelfTest() {
