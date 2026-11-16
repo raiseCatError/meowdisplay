@@ -107,6 +107,7 @@ other means, or a documented platform difference. **Gap** = not on Android yet.
 | Negative A/V offset (delay video) | Ported | Existing physical-device verification recorded in PARITY.md |
 | Picture in Picture | Adapted | Android system PiP; existing physical-device verification recorded in PARITY.md |
 | Display controls (Mirror/Extend request, video on/off, Mirror display, Extend shape, max FPS, streaming profile) | Ported | Capability-gated controls in Display; Audio Resync is also implemented. Source-inspected |
+| Use Less Data (Display ▸ Data Usage; hello `saveData` and `cost`) | Partial | Automatic follows Data Saver; no mobile-data question, no adaptive telemetry. Unit-tested only; needs a SIM, Data Saver and VPN pass |
 | Localization | Gap | English only |
 
 ## Verification

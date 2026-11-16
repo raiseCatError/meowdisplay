@@ -68,6 +68,7 @@ Release availability and implementation rows reconciled on 2026-11-02 against
 | Foldable hinge splits tiles | Yes | Yes | — | Android emulator; iPhone Duo: geometry unit tests only (CI has only run the folded cover screen) |
 | Mirror Display picker, Extend Shape, Use Full Display | Yes | Yes | Yes | Android controls depend on the connected Mac's advertised capabilities; source-inspected |
 | Video on/off, Streaming Profile, Priority, Maximum FPS, Resync | Yes | Yes | Yes | Android Display/Streaming controls and Audio Resync implemented; source-inspected, physical QA not added here |
+| Use Less Data (Automatic / On / Off, #123) | Yes | Partial | No setting | Android sends `saveData` and a network `cost` hint (Data Saver = constrained; a VPN is never cellular). No mobile-data suggestion or answer, no `effHz`, adaptive telemetry or `diag`. Unit-tested only; not run with a SIM, Data Saver or a VPN |
 | Viewport rotation, Snap Rotation | Yes | No | — | Android draws on a SurfaceView, which can't rotate |
 | Picture in Picture | Yes | Yes | — | Android verified physically |
 | Performance overlay | Yes | Yes | Yes | Android shows fps, bitrate, decode, latency, rtt, drops. Mac Receiver: System → Performance Overlay |

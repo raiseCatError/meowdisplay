@@ -108,6 +108,11 @@ class ReceiverSession(
     private val now: () -> Long = System::currentTimeMillis,
     /** Automatic Remote Access (PROTOCOL.md 6.17); null (demo, tests) never declares or sends it. */
     private val remoteEndpoints: RemoteEndpointsHost? = null,
+    /**
+     * The cost hint of the network carrying a connection, from this device's own address on it
+     * (PROTOCOL.md 6.20); null for "unknown". Called under the session's lock: quick, no network.
+     */
+    private val pathCost: (java.net.InetAddress?) -> NetworkCostHint? = { null },
 ) : InputChannel {
     private val lifecycle = ReceiverSessionState()
     private val admission = ReceiverSessionAdmission()
@@ -212,7 +217,7 @@ class ReceiverSession(
         candidate = newLink
         candidateLastMs = t
         candidatePingMs = t
-        val fields = currentHelloFields()
+        val fields = currentHelloFields(over = newLink)
         candidatePanel = fields
         newLink.send(ReceiverMessages.encode(ReceiverMessages.hello(fields)))
     }
@@ -428,8 +433,10 @@ class ReceiverSession(
         if (link != null) announce(force = false)
     }
 
-    private fun currentHelloFields(): HelloFields =
+    /** The hello for a connection over [over]: the panel, plus the cost of the path that connection takes. */
+    private fun currentHelloFields(over: MediaLink? = link): HelloFields =
         helloFields().let { if (remoteEndpoints != null) it.copy(remoteEndpoints = true) else it }
+            .let { fields -> fields.copy(cost = pathCost(over?.localAddress)) }
 
     private fun announce(force: Boolean) {
         val fields = currentHelloFields()

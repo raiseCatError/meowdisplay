@@ -3,6 +3,7 @@ package com.raisecaterror.meowdisplay.core.controls
 // Ported from Shared/ControlProfile.swift (ReceiverControlPreferences and its
 // repository) and Shared/AudioMediaFrame.swift (AVSyncOffset).
 
+import com.raisecaterror.meowdisplay.core.session.UseLessData
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -76,6 +77,11 @@ data class ReceiverControlPreferences(
     var controlKeyAsCommand: Boolean = false,
     /** Reconnect by itself after a lost connection (iOS Settings → Connections → Auto-Reconnect). */
     var autoReconnectEnabled: Boolean = true,
+    /**
+     * "Use less data" (PROTOCOL.md 6.20), sent as hello `saveData`. Android-only key in this JSON (iOS keeps
+     * it in its own AppStorage); absent or unreadable means Automatic. Takes effect on the live connection.
+     */
+    var useLessData: UseLessData = UseLessData.Automatic,
     var profiles: List<ControlProfile> = ControlProfileSlot.entries.map { ControlProfile.canonical(it) },
     var functionTrayEnabled: Boolean = true,
     var activeFunctionTrayProfile: ControlProfileSlot = ControlProfileSlot.Default,
@@ -170,6 +176,7 @@ data class ReceiverControlPreferences(
         put("stagePeekDock", jsonOf(stagePeekDock.raw))
         put("controlKeyAsCommand", jsonOf(controlKeyAsCommand))
         put("autoReconnectEnabled", jsonOf(autoReconnectEnabled))
+        put("useLessData", jsonOf(useLessData.raw))
         put("profiles", jsonArrayOf(profiles.map { it.toJson() }))
         put("functionTrayEnabled", jsonOf(functionTrayEnabled))
         put("activeFunctionTrayProfile", jsonOf(activeFunctionTrayProfile.raw))
@@ -259,6 +266,8 @@ data class ReceiverControlPreferences(
                 p.stagePeekDock = value("stagePeekDock", fallback.stagePeekDock) { StagePeekDockStyle.of(it.str()) }
                 p.controlKeyAsCommand = value("controlKeyAsCommand", fallback.controlKeyAsCommand) { it.bool() }
                 p.autoReconnectEnabled = value("autoReconnectEnabled", fallback.autoReconnectEnabled) { it.bool() }
+                // Lenient: unlike the Swift-shared keys, a garbage value here only means Automatic and never costs the rest.
+                p.useLessData = UseLessData.of(o["useLessData"].str()) ?: fallback.useLessData
                 p.pictureInPictureEnabled = value("pictureInPictureEnabled", fallback.pictureInPictureEnabled) { it.bool() }
                 p.preferMeowDisplayGestures = value("preferMeowDisplayGestures", fallback.preferMeowDisplayGestures) { it.bool() }
                 p.padControlLayout = value("padControlLayout", fallback.padControlLayout) { PadControlLayoutMode.of(it.str()) }

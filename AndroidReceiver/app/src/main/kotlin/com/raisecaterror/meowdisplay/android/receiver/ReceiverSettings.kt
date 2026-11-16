@@ -90,6 +90,7 @@ import com.raisecaterror.meowdisplay.core.session.MaxFPSPreference
 import com.raisecaterror.meowdisplay.core.session.StreamSettings
 import com.raisecaterror.meowdisplay.core.session.StreamingPriority
 import com.raisecaterror.meowdisplay.core.session.StreamingProfile
+import com.raisecaterror.meowdisplay.core.session.UseLessData
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material3.LinearProgressIndicator
@@ -345,6 +346,17 @@ private fun SettingsPageContent(
                     else " Normal uses the whole edge.")
             )
             StreamingSection(media, stream, live)
+            Section("Data Usage")
+            Choice("Use Less Data", UseLessData.entries, prefs.useLessData, { it.title }) { choice ->
+                set { it.useLessData = choice }
+                // The Mac hears the change on the live connection at once; an unchanged hello is never re-sent.
+                media.session.resendHello()
+            }
+            Caption(
+                "Lowers resolution, bitrate and frame rate on this device only, while your Mac's Streaming Mode is Automatic. " +
+                    "Automatic saves data when Android's Data Saver is on for a metered connection. On always saves data; Off never does. " +
+                    "A change applies right away while connected."
+            )
         }
         SettingsPage.Audio -> {
             Toggle("Audio", prefs.audioPreferred) { on ->

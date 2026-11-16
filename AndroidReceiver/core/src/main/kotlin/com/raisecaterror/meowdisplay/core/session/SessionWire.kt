@@ -86,6 +86,10 @@ data class HelloFields(
     val codecs: List<StreamCodec> = listOf(StreamCodec.H264),
     /** Takes the Mac's Tailscale addresses (hello `remoteEndpoints`, PROTOCOL.md 6.17). */
     val remoteEndpoints: Boolean = false,
+    /** Hello `saveData` (PROTOCOL.md 6.20). The app always sets it, like iOS; null (tests, previews) sends no key. */
+    val useLessData: UseLessData? = null,
+    /** Hello `cost`: the path this connection runs over. Null when unknown: no key. */
+    val cost: NetworkCostHint? = null,
 )
 
 /** Receiver-to-sender control messages, each one JSON object in one frame. */
@@ -113,6 +117,15 @@ object ReceiverMessages {
             put("maxEncodeHigh", fields.maxEncodeHigh)
         }
         fields.maxFPS?.let { put("maxFPS", it) }
+        // "Use less data" (PROTOCOL.md 6.20): the keys the Mac already reads from iOS, nothing else of 6.20.
+        fields.useLessData?.let { put("saveData", it.raw) }
+        fields.cost?.let { hint ->
+            put("cost", buildJsonObject {
+                put("cost", hint.cost.wire)
+                put("conf", hint.confidence.wire)
+                put("iface", hint.iface.wire)
+            })
+        }
         put("codecs", buildJsonArray { (listOf(StreamCodec.H264) + fields.codecs).distinct().forEach { add(JsonPrimitive(it.wire)) } })
         // No QUIC listener: TCP only, and never `qv` (PROTOCOL.md 2.2a).
         put("transports", buildJsonArray { add(JsonPrimitive("tcp")) })

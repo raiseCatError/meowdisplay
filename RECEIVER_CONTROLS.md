@@ -282,7 +282,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Extend Shape, Use Full Display | Yes | Yes | Yes | Yes |
 | Video on / off | Yes | Yes | Yes | Yes |
 | Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | Yes (Display) | Yes (Streaming) |
-| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | No setting: not sent, never data-saving |
+| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | Yes (Display ▸ Data Usage). No mobile-data question and no On Mobile Data answer: Automatic saves on Data Saver only. Not yet run on a device | No setting: not sent, never data-saving |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
@@ -311,6 +311,16 @@ stream, and Custom on the Mac is never overridden.
 - **On**: always saves data. **Off**: never does, not even in Low Data Mode.
 The Mac Receiver has no setting and sends none: the Mac streams to it as
 before (no data saving).
+
+On Android the setting is under Display ▸ Data Usage, **Automatic** by default.
+Android's equivalent of Low Data Mode is **Data Saver**: Automatic saves data
+when Data Saver is on and the connection is metered (or hidden behind a VPN). It
+does not ask about mobile data and has no On Mobile Data answer, so a metered
+connection alone (cellular, a phone hotspot) keeps full quality. A VPN such as
+Tailscale is never treated as mobile data. A change to the setting, the network
+or Data Saver reaches the Mac on the live connection. Android sends the setting
+and a network cost class only (no SSID, address or carrier), and none of the
+adaptive telemetry. Not yet run on a device with a SIM, Data Saver or a VPN.
 What the Mac does is in PROTOCOL.md 6.20. Thresholds and the real data saved
 are not measured yet (PENDING HARDWARE).
 
@@ -386,7 +396,7 @@ key down.
 - The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
 - Hardware keyboard, mouse and stylus input are written but not verified on a physical device (iOS keyboard and mouse are also unverified).
 - No settings search; Haptics sits under Scrolling on the Input page.
-- No **Use Less Data** setting or suggestion, and no effective-refresh, cost or adaptive telemetry keys (PROTOCOL.md 6.20): the Mac keeps today's fixed Automatic policy for Android receivers.
+- **Use Less Data** has no mobile-data suggestion or On Mobile Data answer; Automatic follows Data Saver only. Android sends no effective-refresh or adaptive telemetry keys (PROTOCOL.md 6.20), so the Mac keeps its fixed Automatic policy and never runs the adaptive controller for it.
 
 **Mac Receiver compared with the mobile apps**
 - No Stage Peek, Rail, Full Desktop card or **Switch to Window view?** prompt. Windows opens the overview.

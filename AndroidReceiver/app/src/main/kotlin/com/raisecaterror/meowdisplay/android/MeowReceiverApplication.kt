@@ -105,6 +105,8 @@ class MeowReceiverApplication : Application() {
             installID = identity.installID, maxFPS = refresh.roundToInt().takeIf { it > 0 },
             trayEnabled = controls.current.trayEnabled, keyboardButtonEnabled = controls.current.keyboardButtonEnabled,
             windowWorkspace = WorkspaceWire.VERSION,
+            // Always sent, like iOS: "auto" until the person picks On or Off (PROTOCOL.md 6.20).
+            useLessData = controls.current.useLessData,
         )
     }
 }

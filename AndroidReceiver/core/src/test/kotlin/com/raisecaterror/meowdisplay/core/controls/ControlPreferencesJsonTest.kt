@@ -1,5 +1,10 @@
 package com.raisecaterror.meowdisplay.core.controls
 
+import com.raisecaterror.meowdisplay.core.session.UseLessData
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -273,5 +278,46 @@ class WindowSwitcherPreferenceTest {
         val repository = ReceiverControlPreferencesRepository(store)
         repository.save(ReceiverControlPreferences().also { it.stagePeekDock = StagePeekDockStyle.Compact })
         assertEquals(StagePeekDockStyle.Compact, repository.load(ReceiverControlPreferences()).stagePeekDock)
+    }
+
+    /** Issue #123: Use Less Data defaults to Automatic and each choice survives a save and load. */
+    @Test
+    fun useLessDataDefaultsToAutomaticAndEveryChoiceRoundTrips() {
+        assertEquals(UseLessData.Automatic, ReceiverControlPreferences().useLessData)
+        for (choice in UseLessData.entries) {
+            val store = MapStore()
+            val repository = ReceiverControlPreferencesRepository(store)
+            repository.save(ReceiverControlPreferences().also { it.useLessData = choice })
+            assertEquals(choice, repository.load().useLessData)
+            assertEquals(choice, ReceiverControlPreferences().also { it.useLessData = choice }.deepCopy().useLessData)
+        }
+        assertEquals("\"off\"", ReceiverControlPreferences().also { it.useLessData = UseLessData.Off }.toJson()["useLessData"]?.toString())
+    }
+
+    @Test
+    fun aBlobWithoutUseLessDataDecodesToAutomaticAndKeepsEverythingElse() {
+        val old = ReceiverControlPreferences().also { it.trayEnabled = false; it.useLessData = UseLessData.On }
+        val store = MapStore()
+        store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] =
+            JsonObject(old.toJson().filterKeys { it != "useLessData" }).toString()
+        val loaded = ReceiverControlPreferencesRepository(store).load()
+        assertEquals(UseLessData.Automatic, loaded.useLessData)
+        assertFalse(loaded.trayEnabled)
+    }
+
+    @Test
+    fun garbageUseLessDataReadsAsAutomaticWithoutLosingTheOtherSettings() {
+        val garbage = listOf(
+            JsonPrimitive("sometimes"), JsonPrimitive(""), JsonPrimitive("ON"), JsonPrimitive(true), JsonPrimitive(7),
+            JsonPrimitive(1.5), JsonNull, JsonArray(listOf(JsonPrimitive("on"))), JsonObject(mapOf("raw" to JsonPrimitive("on"))),
+        )
+        for (value in garbage) {
+            val old = ReceiverControlPreferences().also { it.trayEnabled = false }
+            val store = MapStore()
+            store.values[ReceiverControlPreferencesRepository.DEFAULTS_KEY] = JsonObject(old.toJson() + ("useLessData" to value)).toString()
+            val loaded = ReceiverControlPreferencesRepository(store).load()
+            assertEquals("$value", UseLessData.Automatic, loaded.useLessData)
+            assertFalse("$value must not cost the rest of the blob", loaded.trayEnabled)
+        }
     }
 }
