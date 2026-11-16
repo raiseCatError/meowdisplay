@@ -684,3 +684,194 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertFalse(m.canControlMac, "a session that isn't live controls nothing")
     }
 }
+
+/// The receiver's Overview pane (every Mac display as one pane): when it is offered, how it is
+/// named and added, where each gesture on it goes, and its menu's display path.
+@MainActor
+final class OverviewPaneReceiverTests: XCTestCase {
+    private func display(_ id: UInt32, _ name: String, main: Bool = false, x: CGFloat, meow: Bool = false,
+                         mirrorOf: UInt32? = nil) -> CatalogDisplayItem {
+        let frame = CGRect(x: x, y: 0, width: 1920, height: 1080)
+        return CatalogDisplayItem(id: id, name: name, width: 1920, height: 1080, isMain: main, isVirtual: meow,
+                                  overview: OverviewDisplay(id: id, name: name, frame: frame, isMain: main, isVirtual: meow,
+                                                            isMeow: meow, mirrorOf: mirrorOf))
+    }
+
+    private var twoDisplays: [CatalogDisplayItem] {
+        [display(1, "Built-in Display", main: true, x: 0), display(2, "Studio Display", x: 1920)]
+    }
+
+    private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true,
+                       sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
+        let m = WorkspaceModel(defaults: UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
+        m.send = { sent($0); return true }
+        m.inputAllowed = { true }
+        m.apply(.connected(peerID: "mac-a"))
+        var features: Set<String> = [WindowWorkspaceWire.welcomeFeature]
+        if overviewFeature { features.insert(WindowWorkspaceWire.overviewPaneFeature) }
+        m.apply(.features(features))
+        m.apply(.mode(window: true))
+        m.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false,
+                                                 displays: displays)))
+        m.updateSpace(WorkspaceSize(width: 1200, height: 800), hinge: nil)
+        return m
+    }
+
+    /// The pure table: in an Overview pane one finger is a trackpad whatever the setting, two
+    /// fingers scroll the Mac, a pinch zooms, and nothing moves the view. Other panes are as before.
+    func testEachGestureRoutesInAnOverviewPaneAndInOtherPanes() {
+        func route(_ g: OverviewPaneInput.Gesture, _ kind: WorkspaceSource.Kind, _ preferred: PointerInputMode = .direct,
+                   input: Bool = true, moveView: Bool = false) -> OverviewPaneInput.Route {
+            OverviewPaneInput.route(g, kind: kind, preferred: preferred, inputReachesMac: input, moveViewActive: moveView)
+        }
+        XCTAssertEqual(route(.oneFinger, .overview, .direct), .pointer(.trackpad), "a trackpad even with Direct Touch chosen")
+        XCTAssertEqual(route(.oneFinger, .overview, .trackpad), .pointer(.trackpad))
+        XCTAssertEqual(route(.twoFingerDrag, .overview), .scrollMac)
+        XCTAssertEqual(route(.twoFingerDrag, .overview, input: false), .none, "View Only: the view still never moves")
+        XCTAssertEqual(route(.twoFingerDrag, .overview, moveView: true), .none, "Move View moves nothing in the Overview")
+        XCTAssertEqual(route(.pinch, .overview), .zoomPane)
+        for kind in [WorkspaceSource.Kind.window, .display] {
+            XCTAssertEqual(route(.oneFinger, kind, .direct), .pointer(.direct), "\(kind) keeps the person's pointer model")
+            XCTAssertEqual(route(.oneFinger, kind, .trackpad), .pointer(.trackpad))
+            XCTAssertEqual(route(.twoFingerDrag, kind), .scrollMac)
+            XCTAssertEqual(route(.twoFingerDrag, kind, input: false), .movePane, "View Only pans the pane locally, as before")
+            XCTAssertEqual(route(.twoFingerDrag, kind, moveView: true), .movePane)
+            XCTAssertEqual(route(.pinch, kind), .zoomPane)
+        }
+        XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .overview), .trackpad)
+        XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .display), .direct)
+        XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: nil), .direct, "outside every pane")
+    }
+
+    /// A pinch's zoom is the person's scale, 1x to 8x, with the centre left to the Mac.
+    func testOverviewZoomIsTheScaleOneToEight() {
+        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 1), "1x is no zoom")
+        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 0.5), "never below 1x")
+        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 2), WorkspacePaneZoom(scale: 2, centerX: 0.5, centerY: 0.5))
+        XCTAssertEqual(OverviewPaneInput.zoom(from: WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5), ratio: 2)?.scale, 6)
+        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 100)?.scale, 8)
+        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: .nan))
+    }
+
+    /// Offered only with the Mac's `overviewPane` and two or more displays it would show (never
+    /// MeowDisplay's own screens; a mirror set counts once).
+    func testOfferedOnlyWithTheFeatureAndTwoDisplaysToShow() {
+        XCTAssertTrue(OverviewPaneInput.offered(macOffers: true, displays: twoDisplays))
+        XCTAssertFalse(OverviewPaneInput.offered(macOffers: false, displays: twoDisplays), "an older Mac")
+        XCTAssertFalse(OverviewPaneInput.offered(macOffers: true, displays: [twoDisplays[0]]), "one display")
+        let meow = [twoDisplays[0], display(3, "MeowDisplay", x: 1920, meow: true)]
+        XCTAssertFalse(OverviewPaneInput.offered(macOffers: true, displays: meow), "this device's own screen isn't shown")
+        let mirrored = [twoDisplays[0], display(4, "Projector", x: 0, mirrorOf: 1)]
+        XCTAssertFalse(OverviewPaneInput.offered(macOffers: true, displays: mirrored), "a mirror repeats its display")
+        XCTAssertEqual(OverviewPaneInput.shownDisplays(twoDisplays + [display(3, "MeowDisplay", x: 3840, meow: true)]).map(\.id), [1, 2])
+
+        XCTAssertTrue(model(displays: twoDisplays).offersOverviewPane)
+        XCTAssertFalse(model(displays: twoDisplays, overviewFeature: false).offersOverviewPane)
+        XCTAssertFalse(model(displays: [twoDisplays[0]]).offersOverviewPane)
+    }
+
+    /// Added like any pane, titled Overview, sent as `overview: true`, once per layout.
+    func testAddedOncePerLayoutTitledOverviewAndSentAsTheOverview() async throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        m.choose(m.overviewWindow, asNewTile: true)
+        m.choose(m.overviewWindow, asNewTile: true)
+        let sources = m.layout.orderedTileIDs.compactMap { m.layout.tiles[$0]?.source }
+        XCTAssertEqual(sources.count, 2)
+        XCTAssertEqual(sources.filter(\.isOverview).count, 1, "one Overview pane, beside the display")
+        let id = try XCTUnwrap(m.layout.orderedTileIDs.first { m.layout.tiles[$0]?.source?.isOverview == true })
+        XCTAssertEqual(m.windowItem(WorkspaceSource.overview(host: "mac-a"))?.title, "Overview", "the Mac sends no title for it")
+        XCTAssertFalse(m.canFloat(pane: id), "it stays a tiled pane")
+        XCTAssertFalse(m.activeIsOverview)
+        m.apply(try XCTUnwrap(WorkspaceEvent.parse(type: WireMessage.workspaceState, ["tiles": [[String: Any]](), "active": id])))
+        XCTAssertTrue(m.activeIsOverview, "the Mac focused it: its cursor is drawn there")
+        let deadline = Date().addingTimeInterval(5)
+        func overviewTile() -> [String: Any]? {
+            sent.last { $0["type"] as? String == WireMessage.workspaceRequest }
+                .flatMap { $0["tiles"] as? [[String: Any]] }?.first { $0["overview"] as? Bool == true }
+        }
+        while overviewTile() == nil, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        let tile = try XCTUnwrap(overviewTile())
+        XCTAssertNil(tile["window"])
+        XCTAssertNil(tile["display"])
+    }
+
+    /// A pinch zooms the Overview pane 1x-8x and is sent; it never asks for a still and a
+    /// two-finger drag never moves it (that scrolls the Mac).
+    func testPinchZoomsTheOverviewWithoutAStillAndNothingPansIt() throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        m.choose(m.overviewWindow, asNewTile: false)
+        let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        let c = WorkspacePoint(x: 0.5, y: 0.5)
+        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1),
+                       "a two-finger drag isn't the pane's")
+        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
+        XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: WorkspacePoint(x: 0.7, y: 0.6),
+                              scale: 2.5, turn: 40))
+        XCTAssertEqual(m.layout.tiles[id]?.zoom, WorkspacePaneZoom(scale: 2.5, centerX: 0.5, centerY: 0.5),
+                       "the scale only: the Mac centres it on the cursor")
+        XCTAssertEqual(m.layout.tiles[id]?.rotation, WorkspaceRotation.none, "never turned")
+        XCTAssertNil(m.zoomPreview, "no local preview: the live picture shows the new view")
+        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 50))
+        XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale, 8)
+        // Zoomed in, a two-finger drag still isn't the pane's (the Mac's camera follows the cursor).
+        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1))
+        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
+        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 0.01))
+        XCTAssertNil(m.layout.tiles[id]?.zoom, "back to 1x: everything fits")
+        m.requestBackdrop(id, refresh: true)
+        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest }, "no still is ever asked for")
+    }
+
+    /// Its menu's "Show <display> in a Pane": the display pane source, in a new pane when there's
+    /// room; a display already shown gets no second pane. A display pane's menu offers the Overview.
+    func testShowDisplayInPaneUsesTheDisplayPanePath() throws {
+        let m = model(displays: twoDisplays)
+        m.choose(m.overviewWindow, asNewTile: false)
+        let overview = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        XCTAssertEqual(m.overviewPaneDisplays.map(\.name), ["Built-in Display", "Studio Display"])
+        m.showDisplayInPane(twoDisplays[1], from: overview)
+        let sources = m.layout.orderedTileIDs.compactMap { m.layout.tiles[$0]?.source }
+        XCTAssertEqual(sources.count, 2, "a new pane beside the Overview")
+        XCTAssertTrue(sources.contains { $0.isOverview })
+        XCTAssertTrue(sources.contains { $0.kind == .display && $0.windowID == WorkspaceSource.displayKey(2) },
+                      "the display pane source")
+        m.showDisplayInPane(twoDisplays[1], from: overview)
+        XCTAssertEqual(m.layout.tiles.count, 2, "already shown: no second pane")
+
+        let other = model(displays: twoDisplays)
+        other.choose(other.displayWindow(twoDisplays[0]), asNewTile: false)
+        let pane = try XCTUnwrap(other.layout.orderedTileIDs.first)
+        other.showOverviewPane(in: pane)
+        XCTAssertEqual(other.layout.tiles[pane]?.source?.kind, .overview)
+        XCTAssertEqual(other.layout.tiles.count, 1)
+    }
+
+    /// A tap made before the pointer model changes (a sequence starting in another pane) still clicks.
+    func testChangingThePointerModelBetweenSequencesKeepsABufferedTap() {
+        let engine = PointerGestureEngine()
+        engine.setInputMode(.trackpad)
+        _ = engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .began, viewPoint: CGPoint(x: 10, y: 10),
+                                             normalized: CGPoint(x: 0.3, y: 0.3), time: 0))
+        _ = engine.handle(PointerTouchSample(id: AnyHashable(1), phase: .ended, viewPoint: CGPoint(x: 11, y: 10),
+                                             normalized: CGPoint(x: 0.31, y: 0.3), time: 0.02))
+        XCTAssertEqual(engine.mode, .tapBuffered)
+        XCTAssertEqual(engine.setInputModeKeepingTap(.direct),
+                       [.mouseDown(button: .left, clickCount: 1), .mouseUp(button: .left, clickCount: 1)])
+        XCTAssertEqual(engine.inputMode, .direct)
+        XCTAssertEqual(engine.mode, .idle)
+        XCTAssertEqual(engine.setInputModeKeepingTap(.direct), [], "no change, nothing sent")
+    }
+
+    /// The Mac's cursor in an Overview pane is drawn at least a real pointer's size.
+    func testTheCursorInAnOverviewPaneHasALargerMinimumSize() {
+        let tiny = CGSize(width: 3, height: 4)
+        XCTAssertEqual(PaneCursorSizing.bounded(tiny).height, PaneCursorSizing.minLongestSide, accuracy: 1e-9)
+        let inOverview = PaneCursorSizing.bounded(tiny, inOverview: true)
+        XCTAssertEqual(inOverview.height, PaneCursorSizing.overviewMinLongestSide, accuracy: 1e-9)
+        XCTAssertEqual(inOverview.width / inOverview.height, 0.75, accuracy: 1e-9, "its shape is kept")
+        XCTAssertEqual(PaneCursorSizing.bounded(CGSize(width: 30, height: 40), inOverview: true), CGSize(width: 30, height: 40))
+    }
+}

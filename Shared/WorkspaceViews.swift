@@ -916,8 +916,10 @@ struct WorkspaceChromeView: View {
 
     private func paneMenuRows(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
         let full = model.localFullscreen == m.tile
-        let isDesktop = tile.source?.isDisplay == true
-        let isWindow = tile.source != nil && !isDesktop
+        // The Overview (every display) is neither a desktop nor a window: never turned or filled.
+        let isOverview = tile.source?.isOverview == true
+        let isDesktop = tile.source?.isDisplay == true && !isOverview
+        let isWindow = tile.source != nil && !isDesktop && !isOverview
         return VStack(alignment: .leading, spacing: 0) {
             if model.missionControlPaused(m.tile), let action = model.missionControlAction {
                 // Mission Control holds this window's picture: the way out, notice folded or not.
@@ -936,15 +938,26 @@ struct WorkspaceChromeView: View {
                 // The only way from a desktop pane back to the plain full-screen desktop (Mirror/Extend).
                 menuRow("View Full Screen", "display") { onViewFullScreen() }
             }
-            menuRow(model.effectiveFit(m.tile) == .fill ? (isDesktop ? "Show Whole Desktop" : "Show Whole Window") : "Fill Pane",
-                    model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
-                model.toggleFit(m.tile)
+            if !isOverview {
+                menuRow(model.effectiveFit(m.tile) == .fill ? (isDesktop ? "Show Whole Desktop" : "Show Whole Window") : "Fill Pane",
+                        model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
+                    model.toggleFit(m.tile)
+                }
             }
             if tile.zoom != nil || tile.rotation != .none || tile.fit == .fill {
                 menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
             }
-            menuRow("Rotate", "rotate.right") { model.rotate(m.tile) }
-            menuRow(isDesktop ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            if !isOverview { menuRow("Rotate", "rotate.right") { model.rotate(m.tile) } }
+            menuRow(isDesktop || isOverview ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            if isOverview {
+                // Each display it shows, in a pane of its own (the display pane path).
+                ForEach(model.overviewPaneDisplays) { d in
+                    menuRow("Show \(d.name) in a Pane", "display") { model.showDisplayInPane(d, from: m.tile) }
+                }
+            } else if m.tab == nil, model.offersOverviewPane {
+                menuRow("Show Overview Here", "rectangle.3.group",
+                        hint: "Shows every display in this pane, controlled like a trackpad.") { model.showOverviewPane(in: m.tile) }
+            }
             #if os(iOS)
             if model.canFloat(pane: m.tile, tab: m.tab) {
                 menuRow(m.tab == nil ? "Float This Pane" : "Float This Tab", "macwindow.on.rectangle",
