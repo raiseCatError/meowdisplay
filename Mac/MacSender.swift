@@ -7561,6 +7561,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let diagnosticsSubmitMs = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
         if diagnosticsOn {
             recordSubmitDiagnostics(pts: pts, origin: origin, generation: generation, at: diagnosticsSubmitMs)
+            // Colour metadata (#241), read-only, once per generation / pixel format.
+            diagnostics.sampleColourSubmitted(pixelBuffer, windowComposite: mode == .window, generation: generation)
         }
         let encodeSignpost = StreamDiagnosticsSignposts.begin("Encode", enabled: diagnosticsOn)
         pipelineState.incrementPendingEncodes()
@@ -7655,6 +7657,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let keyframe = MacSender.isKeyframe(buffer)
             guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return noteOutput(.failed) }
             noteOutput(.sent, bytes: data.count, keyframe: keyframe)
+            // Colour metadata (#241), read-only: keyframes only, once per generation / format description.
+            if diagnosticsOn, keyframe, let fmt = CMSampleBufferGetFormatDescription(buffer) {
+                diagnostics.sampleColourEncoderOutput(fmt, generation: generation)
+            }
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
