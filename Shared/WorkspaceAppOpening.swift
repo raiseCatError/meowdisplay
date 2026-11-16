@@ -217,6 +217,16 @@ struct WorkspaceAppOpening: Equatable, Sendable {
     /// Show a Window on Mac: the launch asks the Mac to bring the app forward, which makes an app
     /// that's running without a window open one (a background open doesn't, e.g. Ghostty).
     private(set) var reveal = false
+    /// Open Fullscreen (Stage Peek, #287): the window, once placed, is shown alone and fullscreen
+    /// on this device (`WorkspaceAppFirst`) instead of going into a tile.
+    private(set) var fullscreenOnPlace = false
+    /// The windows to choose from were already open (Open Fullscreen of a running app): nothing
+    /// was launched.
+    private(set) var attached = false
+
+    /// Its progress, the choice and what went wrong show over the layout (a drop, Open
+    /// Fullscreen), not in the window picker.
+    var showsOverLayout: Bool { drop != nil || fullscreenOnPlace }
 
     /// The person confirmed opening `bundleID`. With control: launch now; otherwise wait for it.
     static func start(bundleID: String, name: String, tile: String?, tileSource: WorkspaceSource?, drop: Drop? = nil,
@@ -230,6 +240,43 @@ struct WorkspaceAppOpening: Equatable, Sendable {
         guard control == .allowed else { return (o, .none) }
         o.beginLaunch(windows, now: now)
         return (o, .launch)
+    }
+
+    /// Open Fullscreen for `bundleID` (Stage Peek's All Apps, an app's windows, its empty state).
+    /// Windows it already has are used as they are, which needs no control: one is placed now,
+    /// several are offered to pick from (never chosen here). With none it opens as the picker
+    /// does, but only with control already granted: this never asks for control itself, so the
+    /// Request Control row stays the only way to get it.
+    static func startFullscreen(bundleID: String, name: String, reveal: Bool = false, control: Control,
+                                windows: [CatalogWindowItem], now: TimeInterval) -> (WorkspaceAppOpening, Step) {
+        var o = WorkspaceAppOpening(bundleID: bundleID, name: name, tile: nil, tileSource: nil,
+                                    phase: .awaitingControl, startedAt: now, phaseSince: now)
+        o.fullscreenOnPlace = true
+        o.reveal = reveal
+        // Nothing launched, nothing known yet: every listed window of the app is a candidate.
+        let open = o.newWindows(windows)
+        if open.count == 1 {
+            o.phase = .placed(open[0])
+            return (o, .place(open[0]))
+        }
+        if open.count > 1 {
+            o.attached = true
+            o.phase = .choosing(open)
+            return (o, .choose(open))
+        }
+        guard control == .allowed else {
+            o.phase = .failed(.controlDenied)
+            return (o, .fail(.controlDenied))
+        }
+        o.beginLaunch(windows, now: now)
+        return (o, .launch)
+    }
+
+    /// Whether a failure offers Try Again (or Request Control Again) as it is. Open Fullscreen
+    /// never requests control itself, so a failure about control only says so.
+    var offersRetry: Bool {
+        guard case .failed(let f) = phase, f.retryable else { return false }
+        return !(fullscreenOnPlace && [.controlDenied, .controlEnded].contains(f))
     }
 
     var isWaiting: Bool {
@@ -372,6 +419,85 @@ struct WorkspaceAppOpening: Equatable, Sendable {
     }
 
     private static func identities(_ ws: [CatalogWindowItem]) -> [String] { ws.map { "\($0.id)#\($0.generation)" } }
+}
+
+/// Open Fullscreen (#287): one Mac app's window alone in a single pane, fullscreen on this device
+/// (the same receiver-local fullscreen as Fullscreen on This Device: presentation only, Fit/Fill
+/// as ever). What showed before is kept here, and Exit Fullscreen puts it back: the panes and
+/// floats, the pane that was fullscreen, and Mirror or Extend when this is what left them. When
+/// the window closes or the app quits, the fullscreen ends by itself and says so (reopen, choose
+/// another, exit) rather than leaving an empty pane fullscreen. Touch still reaches the Mac as
+/// its pointer and keyboard events at the window's place: nothing about input changes.
+struct WorkspaceAppFirst: Equatable, Sendable {
+    /// What this device showed before Open Fullscreen.
+    struct Previous: Equatable, Sendable {
+        /// The saved Window view arrangement (panes and floats), also kept while in Mirror/Extend.
+        var layout: WorkspaceLayout
+        /// The pane that was fullscreen on this device in Window view, if any.
+        var fullscreen: String?
+        /// Mirror or Extend when Open Fullscreen is what started Window view: Exit asks the Mac
+        /// for it again. Nil: Window view was already showing (or the mode wasn't known).
+        var mode: ReceiverDisplayMode?
+
+        static func current(layout: WorkspaceLayout, fullscreen: String?, windowMode: Bool,
+                            extending: Bool, mirroring: Bool) -> Previous {
+            if windowMode { return Previous(layout: layout, fullscreen: fullscreen, mode: nil) }
+            let mode: ReceiverDisplayMode? = extending ? .extend : mirroring ? .mirror : nil
+            return Previous(layout: layout, fullscreen: nil, mode: mode)
+        }
+    }
+
+    /// Why the app's fullscreen ended by itself.
+    enum End: Equatable, Sendable {
+        /// The Mac proved its window closed; the app still runs.
+        case windowClosed
+        /// The window closed and the app no longer runs on the Mac.
+        case appQuit
+    }
+
+    let host: String
+    let bundleID: String
+    let name: String
+    /// The single pane showing the app's window.
+    let tile: String
+    let previous: Previous
+    private(set) var ended: End?
+
+    /// A new Open Fullscreen. One that's still showing (or just ended) hands on what showed
+    /// before it, so Exit goes back to the view from before the first, never to another app alone.
+    static func begin(host: String, bundleID: String, name: String, tile: String, continuing current: WorkspaceAppFirst?,
+                      fullscreen: String?, previous: Previous) -> WorkspaceAppFirst {
+        let carried = current.flatMap { c in c.host == host && (c.ended != nil || c.isCurrent(fullscreen: fullscreen)) ? c.previous : nil }
+        return WorkspaceAppFirst(host: host, bundleID: bundleID, name: name, tile: tile, previous: carried ?? previous)
+    }
+
+    /// Its pane is still the one fullscreen here: Exit Fullscreen puts `previous` back.
+    func isCurrent(fullscreen: String?) -> Bool { ended == nil && fullscreen == tile }
+
+    /// The Mac proved windows closed (`emptied`: panes left with none, `removed`: floats gone).
+    /// True when that ended this fullscreen: its pane is empty now, so it leaves fullscreen and
+    /// says why. `appRunning`: the app is among the Mac's running apps, as last listed.
+    mutating func windowsClosed(emptied: Set<String>, removed: Set<String>, fullscreen: String?, appRunning: Bool) -> Bool {
+        guard isCurrent(fullscreen: fullscreen), emptied.contains(tile) || removed.contains(tile) else { return false }
+        ended = appRunning ? .windowClosed : .appQuit
+        return true
+    }
+
+    /// A later listing: an app that no longer runs quit (its windows closing came first).
+    mutating func listed(running: [CatalogAppItem]) -> Bool {
+        guard ended == .windowClosed, !running.contains(where: { $0.bundleID == bundleID }) else { return false }
+        ended = .appQuit
+        return true
+    }
+
+    /// The short note that touch reaches the Mac as mouse and trackpad input (not multitouch):
+    /// true the first time on this install, then never again.
+    static let inputNoteKey = "workspace.appFirstInputNoteShown"
+    static func takeInputNote(_ defaults: UserDefaults) -> Bool {
+        guard !defaults.bool(forKey: inputNoteKey) else { return false }
+        defaults.set(true, forKey: inputNoteKey)
+        return true
+    }
 }
 
 extension WorkspaceAppOpening.Control {

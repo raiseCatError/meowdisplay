@@ -1581,7 +1581,7 @@ struct OpenedWindowChoice: ViewModifier {
     let forDrop: Bool
 
     func body(content: Content) -> some View {
-        let mine = (model.appOpening?.drop != nil) == forDrop
+        let mine = (model.appOpening?.showsOverLayout ?? false) == forDrop
         let windows: [CatalogWindowItem]? = { if mine, case .choosing(let ws) = model.appOpening?.phase { return ws }; return nil }()
         let round = model.appOpeningRound
         content.confirmationDialog(model.appOpening.map { String(localized: "Which \($0.name) window?") } ?? "",
@@ -1595,6 +1595,7 @@ struct OpenedWindowChoice: ViewModifier {
             Button("Cancel", role: .cancel) { model.dismissAppOpening() }
         } message: { _ in
             Text(model.appOpening?.pickWasStale == true ? "That window closed. Choose another."
+                 : model.appOpening?.attached == true ? "Choose the window to show fullscreen."
                  : "It opened more than one window. Choose the one to show.")
         }
     }
@@ -1610,7 +1611,7 @@ struct AppOpeningFailureAlert: ViewModifier {
 
     func body(content: Content) -> some View {
         let opening = model.appOpening
-        let mine = (opening?.drop != nil) == forDrop
+        let mine = (opening?.showsOverLayout ?? false) == forDrop
         let failure: WorkspaceAppOpening.Failure? = { if mine, case .failed(let f) = opening?.phase { return f }; return nil }()
         let round = model.appOpeningRound
         let name = opening?.name ?? ""
@@ -1622,7 +1623,7 @@ struct AppOpeningFailureAlert: ViewModifier {
                 // A background open again wouldn't make a window: this one brings the app forward on the Mac.
                 Button(String(localized: "Show a Window on Mac")) { model.retryAppOpening(reveal: true) }
                     .accessibilityIdentifier("appOpeningShowWindowOnMac")
-            } else if f.retryable, model.controlState() != .requestsDisabled {
+            } else if opening?.offersRetry == true, model.controlState() != .requestsDisabled {
                 Button([.controlDenied, .controlEnded].contains(f) ? String(localized: "Request Control Again") : String(localized: "Try Again")) {
                     model.retryAppOpening()
                 }
@@ -1785,8 +1786,9 @@ struct WorkspaceAppDropDialogs: ViewModifier {
             if d.windows.isEmpty { Text(message(d)) }
         }
         .overlay(alignment: .bottom) {
-            if let o = model.appOpening, o.drop != nil, o.isWaiting { openingStatus(o) }
+            if let o = model.appOpening, o.showsOverLayout, o.isWaiting { openingStatus(o) }
         }
+        .modifier(WorkspaceAppFirstDialogs(model: model, macName: macName))
         .modifier(OpenedWindowChoice(model: model, forDrop: true))
         .modifier(AppOpeningFailureAlert(model: model, macName: macName, forDrop: true) { _ in
             model.openOverview(replacing: nil)
@@ -1836,6 +1838,54 @@ struct WorkspaceAppDropDialogs: ViewModifier {
         }
         return model.appOpeningSlow ? String(localized: "\(o.name) is taking a while to open…")
                                     : String(localized: "Opening \(o.name) on \(macName)…")
+    }
+}
+
+/// Open Fullscreen (#287) over the layout: the one-time note that touch reaches the Mac as mouse
+/// and trackpad input, and, once the app's window closed or the app quit (its fullscreen already
+/// left, nothing frozen shown as live), what happened with Reopen, Choose Another Window or Exit.
+struct WorkspaceAppFirstDialogs: ViewModifier {
+    @ObservedObject var model: WorkspaceModel
+    let macName: String
+
+    func body(content: Content) -> some View {
+        // Not over an opening in progress (Reopen) or the Leave Extend question.
+        let ended: WorkspaceAppFirst? = model.appOpening == nil && model.leaveExtendRequest == nil
+            && model.appFirst?.ended != nil ? model.appFirst : nil
+        content
+            .overlay(alignment: .bottom) {
+                if model.appFirstInputNote {
+                    Button { model.dismissAppFirstInputNote() } label: {
+                        Label("Touch reaches \(macName) as mouse and trackpad input, not multitouch.", systemImage: "cursorarrow.rays")
+                            .font(.footnote.weight(.semibold)).lineLimit(3).multilineTextAlignment(.leading)
+                            .padding(.horizontal, 14).padding(.vertical, 9)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 96)
+                    .padding(.horizontal, 16)
+                    .accessibilityHint(Text("Dismisses this note."))
+                    .accessibilityIdentifier("appFirstInputNote")
+                }
+            }
+            .alert(ended.map { title($0) } ?? "",
+                   isPresented: Binding(get: { ended != nil }, set: { _ in }),
+                   presenting: ended) { s in
+                Button(String(localized: "Reopen \(s.name)")) { model.reopenAppFirst() }
+                    .accessibilityIdentifier("appFirstReopen")
+                Button(String(localized: "Choose Another Window")) { model.chooseAnotherAfterAppFirst() }
+                    .accessibilityIdentifier("appFirstChooseAnother")
+                Button(String(localized: "Exit"), role: .cancel) { model.exitAppFirst() }
+                    .accessibilityIdentifier("appFirstExit")
+            } message: { s in
+                Text(s.ended == .appQuit
+                     ? String(localized: "\(s.name) quit on \(macName), so there's nothing to show fullscreen. Exit goes back to what you had before.")
+                     : String(localized: "The \(s.name) window closed on \(macName), so there's nothing to show fullscreen. Exit goes back to what you had before."))
+            }
+    }
+
+    private func title(_ s: WorkspaceAppFirst) -> String {
+        s.ended == .appQuit ? String(localized: "\(s.name) Quit") : String(localized: "\(s.name) Window Closed")
     }
 }
 

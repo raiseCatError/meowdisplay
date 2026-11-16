@@ -520,6 +520,8 @@ struct StagePeekGallery: View {
     var height: CGFloat = 600
     /// Open as Floating Window (nil: not offered).
     var onFloat: ((CatalogWindowItem) -> Void)?
+    /// Open Fullscreen for the app shown (its header, its empty state; nil: not offered).
+    var onFullscreen: ((MacAppItem) -> Void)? = nil
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -1029,6 +1031,18 @@ struct StagePeekGallery: View {
                     .font(.caption).foregroundStyle(.white.opacity(0.75))
             }
             Spacer()
+            // Its windows show below; with none, its empty state offers it (beside Open on Mac).
+            if count > 0, let onFullscreen, model.canOpenFullscreen(app) {
+                Button { onFullscreen(app) } label: {
+                    Label("Open Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                }
+                .buttonStyle(.plain).foregroundStyle(.white)
+                .legibleGlass(Capsule())
+                .accessibilityLabel(String(localized: "Open \(app.name) fullscreen on this device"))
+                .accessibilityIdentifier("stagePeekAppOpenFullscreen")
+            }
         }
         .shadow(color: .black.opacity(0.5), radius: 3)
     }
@@ -1050,6 +1064,18 @@ struct StagePeekGallery: View {
                 .disabled(!inputAllowed)
                 .opacity(inputAllowed ? 1 : 0.5)
                 .accessibilityIdentifier("stagePeekOpenOnMac")
+                // Opens it the same way, then shows its window alone, fullscreen here (control only,
+                // as Open on Mac: without it the Request Control row below is the way).
+                if let onFullscreen, inputAllowed, model.canOpenFullscreen(app) {
+                    Button { onFullscreen(app) } label: {
+                        Label("Open Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right").font(.body.weight(.semibold))
+                            .padding(.horizontal, 18).padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.white)
+                    .legibleGlass(Capsule())
+                    .accessibilityLabel(String(localized: "Open \(app.name) on the Mac, fullscreen on this device"))
+                    .accessibilityIdentifier("stagePeekOpenFullscreen")
+                }
                 if !inputAllowed {
                     Text("Opening apps needs control of the Mac.")
                         .font(.caption).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
@@ -1081,6 +1107,8 @@ struct StagePeekLaunchpad: View {
     let inputAllowed: Bool
     let onPick: (MacAppItem) -> Void
     let onClose: () -> Void
+    /// Open Fullscreen: the app's window alone, fullscreen on this device (nil: not offered).
+    var onFullscreen: ((MacAppItem) -> Void)? = nil
     @State private var query = ""
     @FocusState private var searchFocused: Bool
     @AppStorage("stagePeek.favorites") private var favoritesRaw = ""
@@ -1168,6 +1196,14 @@ struct StagePeekLaunchpad: View {
                                 : Label("Add to Favorites", systemImage: "star")
                         }
                         Button { onPick(app) } label: { Label("Show Windows", systemImage: "macwindow.on.rectangle") }
+                        if let onFullscreen, model.canOpenFullscreen(app) {
+                            // A window it has needs no control; opening it does (hidden without).
+                            Button { onFullscreen(app) } label: {
+                                Label("Open Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .accessibilityLabel(String(localized: "Open \(app.name) fullscreen on this device"))
+                            .accessibilityIdentifier("stagePeekAllAppsOpenFullscreen")
+                        }
                         if inputAllowed {
                             Button { model.launch(app.bundleID) } label: { Label("Open on Mac", systemImage: "arrow.up.forward.app") }
                         } else if let controlRequest, controlRequest.state != .requestsDisabled {

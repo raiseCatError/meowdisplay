@@ -71,6 +71,8 @@ Peek does (read only), and shows its app icon on a dark card until it comes.
 
 **Fullscreen on This Device** temporarily shows only the selected pane on the receiving device; **Exit Fullscreen** restores the previous pane arrangement. This differs from switching to **Mirror** or choosing **Full Desktop** in Stage Peek, which changes the content being viewed.
 
+**Open Fullscreen** (iPhone and iPad, from an app in Stage Peek's All Apps menu, its filtered view or its Open on Mac empty state) shows that app's existing window alone in Fullscreen on This Device (several: you pick; none: with control it opens the app as Open on Mac does and waits for its window), Exit Fullscreen puts back your previous panes and floats or Mirror/Extend, and a closed window or quit app ends it with Reopen, Choose Another Window or Exit — it is a shortcut on this device, not app isolation: touch still reaches the Mac as ordinary system-wide mouse, trackpad and keyboard events at the window's position (not native multitouch).
+
 Removing a tile never closes the Mac window. **Close Window on Mac…** is
 separate, asks first, and needs control of the Mac.
 

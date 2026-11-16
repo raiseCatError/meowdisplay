@@ -504,7 +504,8 @@ struct StagePeekOverlay: View {
                              animate { machine.cancelAll() }
                              model.stagePeekOpen = false
                              model.openFloating(w)
-                         })
+                         },
+                         onFullscreen: { app in openFullscreen(app) })
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)
@@ -535,7 +536,8 @@ struct StagePeekOverlay: View {
                                    if !machine.isVisible { finish(machine.openDirectly()) }
                                    tapApp(app, forceFilter: true)
                                },
-                               onClose: { closeLaunchpad() })
+                               onClose: { closeLaunchpad() },
+                               onFullscreen: { app in openFullscreen(app) })
                 .frame(width: safe.width, height: safe.height)
                 .position(x: safe.midX, y: safe.midY)
             // Swipe up from the bottom edge: back to the peek (owner, 2026-10-31).
@@ -597,6 +599,17 @@ struct StagePeekOverlay: View {
         withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { appFilter = Self.finderBundleID }
         if !machine.isVisible { finish(machine.openDirectly()) }
         if !machine.expanded { animate { machine.expand() } }
+    }
+
+    /// Open Fullscreen (All Apps, an app's windows, its empty state): the peek closes and the
+    /// model attaches or opens the app, then shows its window alone, fullscreen on this device.
+    private func openFullscreen(_ app: MacAppItem) {
+        haptics.play(.select, enabled: hapticsEnabled)
+        searchFocused = false
+        closeLaunchpad()
+        animate { machine.cancelAll() }
+        model.stagePeekOpen = false
+        model.openAppFullscreen(app)
     }
 
     private func pick(_ w: CatalogWindowItem) {
