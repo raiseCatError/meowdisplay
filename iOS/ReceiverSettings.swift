@@ -352,6 +352,8 @@ private struct DisplaySettingsPage: View {
     @ObservedObject var controlStore: ReceiverControlStore
     @ObservedObject var pictureInPicture: ReceiverPictureInPictureController
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(UseLessDataSettings.preferenceKey) private var useLessData = NetworkCost.DataPreference.auto.rawValue
+    @AppStorage(UseLessDataSettings.answerKey) private var useLessDataAnswer = NetworkCost.MeteredAnswer.unanswered.rawValue
 
     var body: some View {
         SettingsForm {
@@ -397,6 +399,7 @@ private struct DisplaySettingsPage: View {
             }
             streamingProfileSection
             maxFPSSection
+            useLessDataSection
         }
         .navigationTitle(MobileSettingsCategory.display.title)
     }
@@ -659,6 +662,36 @@ private struct DisplaySettingsPage: View {
             } footer: {
                 Text("Caps how fast this Mac streams to this device, on top of its normal profile/display limits.")
             }
+        }
+    }
+
+    /// "Use less data" (#123): Automatic / On / Off, and in Automatic the
+    /// remembered answer for mobile data, which stays reversible here. Sent
+    /// to the Mac in hello; it never stops a stream, only lowers quality on
+    /// this device's stream while the Mac's Streaming Mode is Automatic.
+    @ViewBuilder
+    private var useLessDataSection: some View {
+        let preference = NetworkCost.DataPreference(rawValue: useLessData) ?? .auto
+        Section {
+            Picker("Use Less Data", selection: Binding(
+                get: { preference },
+                set: { useLessData = $0.rawValue; ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load()) })) {
+                Text("Automatic").tag(NetworkCost.DataPreference.auto)
+                Text("On").tag(NetworkCost.DataPreference.on)
+                Text("Off").tag(NetworkCost.DataPreference.off)
+            }
+            .settingsAnchor("useLessData")
+            if preference == .auto {
+                Picker("On Mobile Data", selection: Binding(
+                    get: { NetworkCost.MeteredAnswer(rawValue: useLessDataAnswer) ?? .unanswered },
+                    set: { useLessDataAnswer = $0.rawValue; ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load()) })) {
+                    Text("Ask").tag(NetworkCost.MeteredAnswer.unanswered)
+                    Text("Save Data").tag(NetworkCost.MeteredAnswer.saveData)
+                    Text("Full Quality").tag(NetworkCost.MeteredAnswer.keepQuality)
+                }
+            }
+        } footer: {
+            Text("Automatic saves data in Low Data Mode, and on mobile data once you agree. Saving data lowers resolution, bitrate and frame rate for this device only. The stream never stops. Applies while the Mac's Streaming Mode is Automatic.")
         }
     }
 
