@@ -258,7 +258,9 @@ struct StreamDiagnosticsSnapshot: Codable, Equatable, Sendable {
     var resources: StreamDiagnosticsResourceSample?
     /// Adaptive Automatic controller decisions (phase 2), newest last; nil
     /// when none were recorded (the controller is off, or diagnostics were).
-    var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision]? = nil
+    var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision]? = ni,
+    /// Colour metadata sampled in the pipeline (#241); nil until sampled.
+    var colour: StreamDiagnosticsColourSection?
 
     func stage(_ stage: DiagnosticsStage) -> StreamDiagnosticsStageSummary? {
         stages.first { $0.id == stage.definition.id }
@@ -364,7 +366,9 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private var resources: StreamDiagnosticsResourceSample?
     private var generation: UInt64?
     private var presenterInFlight = 0
-    private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = []
+    private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = [,
+    /// Colour metadata per pipeline stage (#241). Own lock; see StreamDiagnosticsColour.swift.
+    let colourStore = DiagnosticsColourStore()
 
     init(side: StreamDiagnosticsSide,
          windowSeconds: Double = 5,
@@ -617,6 +621,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         generation = nil
         context = StreamDiagnosticsContext()
         adaptiveDecisions = []
+        colourStore.clear()
     }
 
     /// The last completed window, or the in-progress one before any completed.
@@ -666,7 +671,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
             side: side, windowSeconds: seconds, windowIsPartial: partial, stages: stages,
             counters: counters, sessionCounters: sessionCounters, gauges: gauges,
             rttJitterMs: rttJitter, context: context, peer: peer, resources: resources,
-            adaptiveDecisions: adaptiveDecisions.isEmpty ? nil : adaptiveDecisions)
+            adaptiveDecisions: adaptiveDecisions.isEmpty ? nil : adaptiveDecisions,
+            colour: colourStore.section())
     }
 
     // MARK: Locked helpers
