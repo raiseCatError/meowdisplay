@@ -52,8 +52,9 @@ enum CableCandidateSelection {
     /// The candidates one probe round dials. Up to `limit` the list is
     /// returned untouched (duplicates included, as before). Over it,
     /// duplicates go first, then the order of preference is:
-    /// 1. link-local candidates on a non-Wi-Fi scope (the cable);
-    /// 2. direct (unscoped) candidates;
+    /// 1. link-local candidates on a non-Wi-Fi scope, and unscoped
+    ///    link-local addresses (the cable);
+    /// 2. other direct (unscoped) candidates;
     /// 3. link-local candidates on a Wi-Fi scope, which the probe's
     ///    Wi-Fi prohibition makes undialable.
     /// `wifiScopes` is asked only over the limit.
@@ -68,7 +69,9 @@ enum CableCandidateSelection {
         guard unique.count > limit else { return unique }
         let wifi = wifiScopes()
         return keepByRank(unique, limit: limit) { candidate in
-            guard let scope = candidate.scope else { return 1 }
+            // An unscoped link-local address (the cable's 169.254 address)
+            // is as likely the cable as a scoped fe80 one.
+            guard let scope = candidate.scope else { return isLinkLocal(candidate.host) ? 0 : 1 }
             return wifi.contains(scope) ? 2 : 0
         }
     }

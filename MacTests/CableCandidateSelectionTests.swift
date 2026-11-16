@@ -116,6 +116,18 @@ final class CableCandidateSelectionTests: XCTestCase {
         XCTAssertFalse(selected.contains(Probe(host: "2001:db8::16", scope: nil)))
     }
 
+    func testOverTheProbeCapAnUnscopedLinkLocalAddressIsStillDialled() {
+        // The cable's IPv4 link-local address carries no scope; sixteen
+        // fe80 pairings on other interfaces must not push it out.
+        let scopes = (0..<16).map { "en\($0 + 10)" }
+        let list = [Probe(host: "169.254.10.20", scope: nil), Probe(host: "192.168.1.5", scope: nil)]
+            + scopes.map { Probe(host: "fe80::b%\($0)", scope: $0) }
+        let selected = CableCandidateSelection.probeCandidates(list) { [] }
+        XCTAssertEqual(selected.count, 16)
+        XCTAssertEqual(selected.first, Probe(host: "169.254.10.20", scope: nil))
+        XCTAssertFalse(selected.contains(Probe(host: "192.168.1.5", scope: nil)))
+    }
+
     func testLinkLocalText() {
         for text in ["fe80::1", "FEBF::2", "169.254.0.1"] {
             XCTAssertTrue(CableCandidateSelection.isLinkLocal(text), text)
