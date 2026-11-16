@@ -2768,6 +2768,11 @@ the old `stats` content.
 | `dec95` | decode time p95 in ms (Metal path only) |
 | `presAge`, `late` | presenter queue age (ms) and late drops (defined; not sent yet) |
 | `jit` | mean change between consecutive control round trips in the window, ms (`rtt` is the existing key) |
+
+`rtt` keeps its meaning and its whole-millisecond rounding: the last control round trip, so 0 means
+under 0.5 ms (Thunderbolt, the same Mac) or no `pong` yet. The Mac's controller treats one 0 as
+unknown and three 0 samples in a row as a 0 ms baseline, so a sub-millisecond link can still show
+network headroom.
 | `thermal` | 0 nominal, 1 fair, 2 serious, 3 critical |
 | `lowPower` | bool, Low Power Mode |
 
@@ -2778,9 +2783,13 @@ capture update (which also recreates the encoder at the new rate), bitrate chang
 encoder session (with a keyframe), and raster changes restart that receiver's capture. Rate limits,
 per receiver and whatever caused the change (the controller, a data-policy change, a thermal or
 policy clamp, a reset on reconnect, or a receiver switching between sending the telemetry keys and
-not): at most one capture restart per 20 s, and at most one bitrate change per 4 s. A change inside
-its limit waits and the latest wanted point applies when the limit has passed; the parts of a change
-that are not limited (FPS) apply at once. A raster step whose captured size equals the current one
+not): at most one raster raise per 20 s after the previous adaptive capture restart (counted from
+when that restart really ran), and at most one bitrate change per 4 s. The controller's own lower
+raster (a severe step down or a failed probe's revert) is not held. A change inside its limit waits
+and the latest wanted point applies when the limit has passed; the parts of a change that are not
+limited (FPS, and bitrate outside its own limit) apply at once. After 30 s without receiver `stats`
+telemetry, the receiver gets today's fixed point again, through the same limits, until telemetry
+resumes. A raster step whose captured size equals the current one
 (the receiver's decode ceiling, `maxEncodeWide/High`) is not a restart. The bitrate never goes above
 the Best target (18 Mbps). **Source cap (switch on only):** the Mac never captures above the
 source's own refresh in Mirror (the mirrored display's refresh) and Extend (the virtual display's),
@@ -2797,8 +2806,8 @@ the first capture is configured whenever the path is already known. `saveData:"o
 quality always, Low Data Mode included (a deliberate, reversible override). `keepQuality` (the "No"
 answer, or Full Quality under On Mobile Data) only means "don't save on mobile data": with
 `saveData:"auto"`, Low Data Mode at either end still saves. A capture restart caused by a data-policy
-change (not by the controller) happens at most once per 20 s per receiver; a policy that changes
+change (not by the controller) happens at most once per 20 s per receiver; a raster that changes
 again inside that time waits, and the latest one applies when the 20 s have passed, so a flapping
-path or hint cannot restart capture repeatedly. A change that needs no restart (FPS, bitrate)
-applies at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
+path or hint cannot restart capture repeatedly. The policy itself and the parts of its change that
+need no restart (FPS, bitrate) apply at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
 (parity gap).
