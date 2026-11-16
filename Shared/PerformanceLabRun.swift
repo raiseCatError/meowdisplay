@@ -10,12 +10,26 @@
 // The receiver side comes from the optional `diag` summaries the receiver
 // sent (its own 5 s windows, not aligned with the sender's). Each receiver
 // window is kept once, by (series, sequence), however often it was sent. A
-// window is kept only if it provably began inside the trial: the receiver
-// reports the sender window sequence it had heard when the window began
-// (`wps`), and a sequence the sender completed no earlier than the trial's
-// first window began proves it, by causality alone (no clock is compared
-// across devices). Receivers that do not report it are kept by arrival
-// time, and the trial's receiver side is marked partial.
+// window is kept only if both ends of "began inside the trial" are proven,
+// by causality alone (no clock is compared across devices):
+// - after the trial began: the receiver reports the sender window sequence
+//   it had heard when the window began (`wps`); a sequence the sender
+//   completed no earlier than the trial's first window began proves it;
+// - before the trial ended: the summary of this window, or of the previous
+//   window of its series, arrived on this Mac before the trial's last
+//   sender window ended. A receiver window begins when the previous one
+//   completes, and a summary is sent only after its window completed.
+//   Exception: a receiver restart (a presentation generation change, or
+//   diagnostics switched off and on there) restarts the receiver's window
+//   in progress at that moment, which the summaries do not show.
+// Window numbers that the second rule proves began inside the trial but
+// that never arrived count as missed. Receivers that send no marker are
+// kept by arrival time, and the trial's receiver side is marked partial.
+//
+// The sender side is one recorder: if the windows read come from another
+// recorder (a new session, or a reset), that is a recorded issue, or an
+// expected restart in a scenario that expects restarts. Receiver markers
+// are read against the sender recorder whose window carried the summary.
 //
 // A run bundle is a folder: manifest.json + trial-NN.json, every trial
 // written whatever its status. Pure Foundation, compiled into every app
@@ -48,12 +62,16 @@ enum PerformanceLabTrialIssue: String, Codable, Sendable, CaseIterable {
     case fixtureNotOpen
     /// The run was cancelled before this planned trial began.
     case notStarted
+    /// The sender windows came from another diagnostics recorder part-way
+    /// through (a new session, or the recorder was reset), in a scenario
+    /// that does not expect restarts, or overlapping the previous window.
+    case senderRecorderChanged
 }
 
 /// How the receiver windows of a trial were tied to it.
 enum PerformanceLabReceiverAlignment: String, Codable, Sendable, CaseIterable {
     /// Every kept window provably began after the trial's first sender
-    /// window began.
+    /// window began and before its last one ended (see the file header).
     case aligned
     /// Some kept windows could not be tied to the trial (the receiver sent
     /// no start marker); they were kept by arrival time and may include up
@@ -176,9 +194,12 @@ struct PerformanceLabTrialRecord: Codable, Equatable, Sendable {
     /// nil when no receiver summary was kept.
     var receiverAlignment: PerformanceLabReceiverAlignment? = nil
     var receiverCounting: PerformanceLabReceiverCounting? = nil
-    /// Receiver window numbers missing between kept windows of one series
-    /// (never reported, or reported between two reads); nil without
-    /// window numbers.
+    /// Receiver window numbers that provably began inside the trial but were
+    /// not kept: between kept windows of one series, and, once every sender
+    /// window was collected, after the last kept window of the receiver's
+    /// current series up to the last one proven to have begun before the
+    /// trial ended (never reported, reported between two reads, or not
+    /// reported within the grace); nil without window numbers.
     var receiverWindowsMissed: Int? = nil
     /// Window discontinuities caused by a restart the scenario expects
     /// (recorded, not an issue), and the time between those windows that
@@ -206,11 +227,28 @@ struct PerformanceLabTrialCollector: Sendable {
     private var lastSequence: UInt64?
     /// End of the last window read before the trial's first window.
     private var lastWindowEnd: (sequence: UInt64, endMs: Double)?
-    /// The sender window sequence a receiver window's start marker must
-    /// reach to prove it began inside the trial.
-    private var alignmentThreshold: UInt64?
+    /// The sender recorder (series) of the last window read.
+    private var lastSenderSeries: UInt32?
+    private var senderSeriesSeen = false
+    /// The recorder changed: the next trial window starts a new span.
+    private var senderSeriesChangePending = false
+    /// Per sender recorder in the trial: the sender window sequence a
+    /// receiver window's start marker must reach to prove it began inside
+    /// the trial, and that recorder's last trial window.
+    private var senderSpans: [UInt32?: SenderSpan] = [:]
     private var lastProgressMs: Double
     private var keptReceiverWindows: Set<ReceiverWindowKey> = []
+    /// Receiver windows kept by their start marker: still subject to the
+    /// trial-end proof in `record` (indices into `observations`).
+    private var markerKeys: [Int: ReceiverWindowKey] = [:]
+    /// Earliest arrival seen of each numbered receiver window's summary.
+    private var receiverArrivals: [ReceiverWindowKey: Double] = [:]
+    /// Windows proven to have begun after the trial ended.
+    private var receiverWindowsAfterTrial: Set<ReceiverWindowKey> = []
+    /// The receiver series of the latest numbered summary: an earlier
+    /// series ended with a receiver reset, which discards the window in
+    /// progress, so only this one can still owe a window.
+    private var latestReceiverSeries: Double?
     private var lastLegacyPeer: StreamDiagnosticsPeerSummary?
     private var receiverUnaligned = false
     private var receiverLegacy = false
@@ -229,6 +267,11 @@ struct PerformanceLabTrialCollector: Sendable {
         let sequence: Double
     }
 
+    private struct SenderSpan: Sendable {
+        var threshold: UInt64
+        var last: UInt64
+    }
+
     init(scenario: PerformanceLabScenario, trialIndex: Int, synthetic: Bool, armedAtMs: Double) {
         self.scenario = scenario
         self.trialIndex = trialIndex
@@ -244,8 +287,11 @@ struct PerformanceLabTrialCollector: Sendable {
     private var windowMs: Double { PerformanceLabScenarioCatalog.windowSeconds * 1000 }
 
     /// After the last sender window, receiver windows that began inside the
-    /// trial are still being reported for up to this long.
-    var receiverGraceMs: Double { 2 * windowMs }
+    /// trial are still being reported for up to this long: the window that
+    /// spans the trial's end completes up to one window later, and at the
+    /// ~5 s stats cadence it is sent up to one more window after that; the
+    /// third window is the margin (latency, the poll, cadence drift).
+    var receiverGraceMs: Double { 3 * windowMs }
 
     /// The trial can be recorded: sender windows done, and no receiver
     /// window that began inside the trial is still expected.
@@ -263,21 +309,46 @@ struct PerformanceLabTrialCollector: Sendable {
     /// One read (poll). `window` is nil before the recorder completed one.
     mutating func ingest(_ window: StreamDiagnosticsCompletedWindow?, at nowMs: Double) {
         guard let window else { return }
+        let series = window.snapshot.windowSeriesID
+        let seriesChanged = senderSeriesSeen && series != lastSenderSeries
+        senderSeriesSeen = true
+        lastSenderSeries = series
+        if !isDone, seriesChanged {
+            // Another recorder: its numbers are not comparable with the old one's.
+            lastSequence = nil
+            lastWindowEnd = nil
+            if !windows.isEmpty { senderSeriesChangePending = true }
+        }
         if !isDone, window.sequence != lastSequence {
             ingestSenderWindow(window, at: nowMs)
         }
         if isDone, doneAtMs == nil { doneAtMs = nowMs }
-        ingestReceiverSummary(window.snapshot.peer, arrivedAtMs: window.peerUpdatedMs ?? nowMs)
+        ingestReceiverSummary(window.snapshot.peer, arrivedAtMs: window.peerUpdatedMs ?? nowMs, senderSeries: series)
     }
 
     private mutating func ingestSenderWindow(_ window: StreamDiagnosticsCompletedWindow, at nowMs: Double) {
         defer { lastSequence = window.sequence }
         let endMs = window.startMs + window.durationMs
+        let series = window.snapshot.windowSeriesID
         guard window.startMs >= armedAtMs else {
             lastWindowEnd = (window.sequence, endMs)
             return
         }
-        if let previous = windows.last {
+        if let previous = windows.last, senderSeriesChangePending {
+            // The first window read from another recorder. Its markers
+            // start at its own first trial window (a conservative bound).
+            senderSeriesChangePending = false
+            let previousEndMs = previous.startMs + previous.durationMs
+            if scenario.expectsRestarts, window.startMs >= previousEndMs - 1 {
+                expectedRestartCount += 1
+                restartUnmeasuredMs += Swift.max(window.startMs - previousEndMs, 0)
+            } else {
+                issues.insert(.senderRecorderChanged)
+            }
+            if senderSpans[series] == nil {
+                senderSpans[series] = SenderSpan(threshold: window.sequence, last: window.sequence)
+            }
+        } else if let previous = windows.last {
             if window.sequence != previous.sequence &+ 1 {
                 issues.insert(.windowGap)   // a window completed between two reads
             }
@@ -296,17 +367,20 @@ struct PerformanceLabTrialCollector: Sendable {
             // The trial's first window. A ping that carried the previous
             // window's number was sent once that window had completed; if the
             // first window began at that same instant, that number is enough.
+            let threshold: UInt64
             if let before = lastWindowEnd, before.sequence &+ 1 == window.sequence, abs(before.endMs - window.startMs) <= 1 {
-                alignmentThreshold = before.sequence
+                threshold = before.sequence
             } else {
-                alignmentThreshold = window.sequence
+                threshold = window.sequence
             }
+            senderSpans[series] = SenderSpan(threshold: threshold, last: window.sequence)
         }
         windows.append(window)
+        senderSpans[series]?.last = window.sequence
         lastProgressMs = nowMs
     }
 
-    private mutating func ingestReceiverSummary(_ peer: StreamDiagnosticsPeerSummary?, arrivedAtMs: Double) {
+    private mutating func ingestReceiverSummary(_ peer: StreamDiagnosticsPeerSummary?, arrivedAtMs: Double, senderSeries: UInt32?) {
         guard let peer, peer.side == .receiver, let first = windows.first else { return }
         // Arrival rule for receivers without a start marker: a summary
         // describes a window that ended before it arrived and is about one
@@ -327,21 +401,43 @@ struct PerformanceLabTrialCollector: Sendable {
         // A partial receiver window (no number yet) is not a whole window.
         guard let sequence = peer.windowSequence else { return }
         let key = ReceiverWindowKey(series: series, sequence: sequence)
+        receiverArrivals[key] = Swift.min(receiverArrivals[key] ?? arrivedAtMs, arrivedAtMs)
+        latestReceiverSeries = series
         guard !keptReceiverWindows.contains(key) else { return }
+        let byMarker: Bool
         if let marker = peer.peerWindowSequenceAtStart {
             receiverReportsMarkers = true
-            guard let threshold = alignmentThreshold, marker >= Double(threshold) else { return }
-            if isDone, let last = windows.last, marker >= Double(last.sequence) {
+            // The marker counts the windows of the sender recorder whose
+            // window carried this summary.
+            guard let span = senderSpans[senderSeries], marker >= Double(span.threshold) else { return }
+            if isDone, let last = windows.last, senderSeries == last.snapshot.windowSeriesID, marker >= Double(last.sequence) {
                 // Began after the receiver heard the trial ended.
                 receiverMovedOn = true
+                receiverWindowsAfterTrial.insert(key)
                 return
             }
+            byMarker = true
         } else {
             guard !isDone, arrivedLateEnough else { return }
             receiverUnaligned = true
+            byMarker = false
         }
         keptReceiverWindows.insert(key)
+        if byMarker { markerKeys[observations.count] = key }
         observations.append(.init(offsetSeconds: offset, summary: peer))
+    }
+
+    /// Per receiver series: the highest window number whose summary arrived
+    /// before the trial's last sender window ended. That window had
+    /// completed by then, so the next one had begun.
+    private func lastReceiverWindowsEndedInsideTrial() -> [Double: Double] {
+        guard let last = windows.last else { return [:] }
+        let trialEndMs = last.startMs + last.durationMs
+        var out: [Double: Double] = [:]
+        for (key, arrivedAtMs) in receiverArrivals where arrivedAtMs <= trialEndMs {
+            out[key.series] = Swift.max(out[key.series] ?? key.sequence, key.sequence)
+        }
+        return out
     }
 
     mutating func note(_ issue: PerformanceLabTrialIssue) { issues.insert(issue) }
@@ -350,6 +446,20 @@ struct PerformanceLabTrialCollector: Sendable {
     func record(forcedStatus: PerformanceLabTrialStatus? = nil, fixture: PerformanceLabFixtureRecord?) -> PerformanceLabTrialRecord {
         var issues = self.issues
         let first = windows.first?.startMs ?? 0
+        // The trial-end proof: a window kept by its start marker must have
+        // begun before the trial's last sender window ended.
+        let endedInside = lastReceiverWindowsEndedInsideTrial()
+        var observations: [PerformanceLabReceiverObservation] = []
+        var kept: Set<ReceiverWindowKey> = []
+        for (i, observation) in self.observations.enumerated() {
+            if let key = markerKeys[i] {
+                guard let ended = endedInside[key.series], key.sequence <= ended + 1 else { continue }
+                kept.insert(key)
+            } else if let series = observation.summary.windowSeriesID, let sequence = observation.summary.windowSequence {
+                kept.insert(ReceiverWindowKey(series: series, sequence: sequence))
+            }
+            observations.append(observation)
+        }
         var counters: [String: Int64] = [:]
         var gaps: [String: [Int]] = [:]
         for w in windows {
@@ -395,7 +505,13 @@ struct PerformanceLabTrialCollector: Sendable {
         if !observations.isEmpty {
             record.receiverAlignment = receiverUnaligned ? .partial : .aligned
             record.receiverCounting = receiverLegacy ? .possiblyDoubleCounted : .perWindow
-            if !receiverLegacy { record.receiverWindowsMissed = Self.missedWindows(keptReceiverWindows) }
+            if !receiverLegacy {
+                // Trailing windows are owed only once every sender window
+                // is in and the receiver had its grace to report them.
+                let owing = isDone ? latestReceiverSeries : nil
+                record.receiverWindowsMissed = Self.missedWindows(kept, endedInside: endedInside, owingSeries: owing,
+                                                                  after: receiverWindowsAfterTrial)
+            }
         }
         if expectedRestartCount > 0 {
             record.expectedRestarts = expectedRestartCount
@@ -404,12 +520,21 @@ struct PerformanceLabTrialCollector: Sendable {
         return record
     }
 
-    /// Per series: numbers between the lowest and highest kept window that
-    /// were not kept.
-    private static func missedWindows(_ keys: Set<ReceiverWindowKey>) -> Int {
-        Dictionary(grouping: keys, by: \.series).values.reduce(0) { total, group in
-            let numbers = group.map(\.sequence)
-            guard let lo = numbers.min(), let hi = numbers.max() else { return total }
+    /// Per series: numbers from the lowest kept window up to the highest
+    /// kept one that were not kept. For `owingSeries` (the receiver's
+    /// current series, once the trial is done) the range runs up to the
+    /// window after the last one that ended inside the trial, if that is
+    /// higher: it began inside the trial too. A window proven to have begun
+    /// after the trial (a receiver restart, see the file header) is not owed.
+    private static func missedWindows(_ keys: Set<ReceiverWindowKey>, endedInside: [Double: Double],
+                                      owingSeries: Double?, after: Set<ReceiverWindowKey>) -> Int {
+        Dictionary(grouping: keys, by: \.series).reduce(0) { total, entry in
+            let numbers = entry.value.map(\.sequence)
+            guard let lo = numbers.min(), var hi = numbers.max() else { return total }
+            if entry.key == owingSeries, let ended = endedInside[entry.key], ended + 1 > hi,
+               !after.contains(ReceiverWindowKey(series: entry.key, sequence: ended + 1)) {
+                hi = ended + 1
+            }
             return total + Swift.max(Int(hi - lo) + 1 - numbers.count, 0)
         }
     }
@@ -449,7 +574,7 @@ struct PerformanceLabRunManifest: Codable, Equatable, Sendable {
 
     static let limitationsText: [String] = StreamDiagnosticsExport.limitationsText + [
         "Trials cover whole 5 s diagnostics windows after the warm-up; up to one window at each end is outside the measurement.",
-        "Receiver numbers are the receiver's own 5 s windows, each counted once, that began after the trial's first sender window began; they are not aligned with the sender's windows and the last one may end up to one window after the trial.",
+        "Receiver numbers are the receiver's own 5 s windows, each counted once, that provably began after the trial's first sender window began and before its last one ended (unless the receiver restarted at that moment); they are not aligned with the sender's windows, so the last one may run up to one receiver window past the trial's end.",
         "Frame-ID counts exist only on the receiver's experimental Metal path, which itself changes presentation timing.",
         "Operator steps are done by hand; their timing varies between trials.",
     ]
