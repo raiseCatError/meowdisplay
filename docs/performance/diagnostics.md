@@ -52,13 +52,18 @@ Two kinds of quiet are told apart:
   went uncounted.)
 
 A new capture or presentation generation (`noteGeneration`) restarts every
-interval baseline, so a reconnect gap is not counted as a stall; the gap
+interval baseline, so a restart gap is not counted as a stall; the gap
 from the last frame before it to the first frame after it is kept as
-`sender.restart.frame_gap_ms` / `receiver.restart.frame_gap_ms`. A new
-receiver session resets the recorder.
+`sender.restart.frame_gap_ms` / `receiver.restart.frame_gap_ms`. A window
+that had already run its full length when the generation changed is
+completed first, with its data, and only then does the new window start. A
+new receiver session (a full reconnect) resets the receiver's recorder, so
+that reconnect records no `receiver.restart.frame_gap_ms` sample: on the
+receiver only a resync inside one session is measured.
 
 Each completed window has a number (`windowSequence`, 1, 2, … per recorder,
-never reused) and the recorder a random series number (`windowSeriesID`, new
+never reused; on the wire it stops at the 1,000,000 value ceiling, about 58
+days of 5 s windows of one recorder) and the recorder a random series number (`windowSeriesID`, new
 on every reset). The receiver also notes which sender window number it had
 last heard (`peerWindowSequenceAtStart`) when each window began. Together
 they let the Performance Lab count each receiver window once and prove that
@@ -125,7 +130,7 @@ receiver clock mapped onto the sender's with the ping/pong offset;
 | `receiver.presentation.enqueue_interval_ms` | ms | receiver | localMonotonic | Successive AVSampleBufferDisplayLayer.enqueue calls in ReceiverVideoPresenter | Enqueued for presentation, not presented: the layer decides when a frame reaches the screen. |
 | `receiver.presentation.observed_submit_to_glass_ms` | ms | receiver | wallClockMapped | Metal drawable presented handler (StreamReceiver.recordPresented) minus cap | Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. Values outside -50 to 5000 ms are dropped, so p99 and max under-report a pathological latency. |
 | `receiver.rtt_ms` | ms | receiver | localWallClock | Receiver ping to sender pong on the control channel | Control-message round trip; it rides behind any queued video on the same connection. Both ends are this device's wall clock (the ping time also feeds the clock offset, so it cannot be monotonic), so a clock step during a round trip skews one sample; samples outside 0-2000 ms are dropped. |
-| `receiver.restart.frame_gap_ms` | ms | receiver | localMonotonic | Last frame arrival before a presentation generation change to the first arrival after it | One sample per restart (resync, reconnect). The arrival interval restarts its baseline at a restart, so this gap is not in it. |
+| `receiver.restart.frame_gap_ms` | ms | receiver | localMonotonic | Last frame arrival before a presentation generation change to the first arrival after it | One sample per resync inside a session. A full reconnect resets the receiver's recorder and records no sample. The arrival interval restarts its baseline at a resync, so this gap is not in it. |
 | `receiver.frame_id.unique_interval_ms` | ms | receiver | localMonotonic | PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID | Lab fixture on screen and experimental Metal path only (which itself changes timing). At the decoded-frame handoff, not on glass. |
 | `sender.capture.complete` | frames | sender | none | SCK callback, status complete with pixels | Display capture only (Mirror, Extend). The closest available proxy for source-unique frames: ScreenCaptureKit sends a complete frame when content changed. |
 | `sender.capture.idle` | frames | sender | none | SCK callback, status idle | The source did not change; not a drop. |
@@ -272,7 +277,7 @@ estimate starts at 0 (RFC 3550), so one early outlier cannot carry a verdict.
 | verdict | primary signal | supporting signals |
 | --- | --- | --- |
 | `sourceRefreshLimited` | source refresh < `rateShortfall` × target | complete capture rate ≥ (1 − `refreshMatchTolerance`) × refresh; encoder and send headroom (< `headroomShare`) |
-| `senderCaptureLimited` | complete capture rate < `captureShortfall` × min(target, refresh) | required: source demand ≥ `captureShortfall` × min(target, refresh) (`derived.source_demand_fps`, known only from something independent of capture, such as the Performance Lab fixture's draw rate); capture idle share < `activeSourceIdleShare`; encoder and send headroom. Without the demand evidence a 30 fps video at a 60 FPS target looks the same, so the answer is `unknownInsufficientData` with reason `sourceDemandUnknown` |
+| `senderCaptureLimited` | complete capture rate < `captureShortfall` × min(target, refresh) | required: source demand ≥ `captureShortfall` × min(target, refresh) (`derived.source_demand_fps`, known only from something independent of capture). No code supplies it yet (the Performance Lab records the fixture's draw rate in the bundle but does not feed it to the classifier), so this verdict is never issued today: such a window reads `unknownInsufficientData` with reason `sourceDemandUnknown`; capture idle share < `activeSourceIdleShare`; encoder and send headroom. Without the demand evidence a 30 fps video at a 60 FPS target looks the same, so the answer is `unknownInsufficientData` with reason `sourceDemandUnknown` |
 | `windowCompositionLimited` | compose p95 ≥ budget (Window view only) | compose p50 ≥ budget/2; composites < `captureShortfall` × target |
 | `encoderOverloaded` | encoder-busy share ≥ `backpressureShare` | encode p95 ≥ `encodeBudgetFactor` × budget; submit rate < `rateShortfall` × min(target, capture rate) |
 | `networkDeliveryLimited` | send backpressure share ≥ `backpressureShare` (or, without it, arrival p95 ≥ `deliveryBudgetFactor` × budget) | send p95 ≥ `deliveryBudgetFactor` × budget; arrival p95 ≥ `deliveryBudgetFactor` × budget; RTT jitter ≥ `rttJitterMs`; sender submit rate ≥ `rateShortfall` × target |

@@ -967,9 +967,13 @@ keys are ignored; values are clamped to 0…1,000,000 and anything that is not
 a number is dropped.
 
 - Both ends: `wseq` (the window's number, 1, 2, … per recorder, never
-  reused; absent while the window is partial). The receiver sends its `stats`
-  every ~5 s, or every ~2 s while the Mac announces adaptive mode (6.20), so
-  the same window is often reported more than once: count it once.
+  reused below the 1,000,000 value ceiling: a recorder that runs past it,
+  about 58 days of 5 s windows, sends 1,000,000 for every later window, as it
+  does in `wps`; absent while the window is partial). The receiver sends its
+  `stats` every ~5 s, or every ~2 s while the Mac announces adaptive mode
+  (6.20). At ~2 s the same window is usually reported two or three times
+  (count it once); at ~5 s about once, and because the two cadences drift
+  a window is sometimes never reported.
 - In the sender's `ping`: `tgt` (target FPS), `capU` (complete capture
   frames/s; absent without display capture, e.g. Window view), `idle` (share
   of capture callbacks reporting idle), `hz` (source refresh, when known),

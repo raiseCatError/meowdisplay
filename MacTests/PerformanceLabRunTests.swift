@@ -241,9 +241,13 @@ final class PerformanceLabRunTests: XCTestCase {
         XCTAssertEqual(rec.status, .complete)
     }
 
-    private func window(_ sequence: UInt64, startMs: Double, peer: StreamDiagnosticsPeerSummary?, peerAtMs: Double? = nil) -> StreamDiagnosticsCompletedWindow {
+    /// One sender window read. `series` names the sender recorder (a fresh
+    /// recorder would pick a random one).
+    private func window(_ sequence: UInt64, startMs: Double, peer: StreamDiagnosticsPeerSummary?, peerAtMs: Double? = nil,
+                        series: UInt32 = 1) -> StreamDiagnosticsCompletedWindow {
         var snapshot = recorder().snapshot(at: 0)
         snapshot.peer = peer
+        snapshot.windowSeriesID = series
         return StreamDiagnosticsCompletedWindow(sequence: sequence, startMs: startMs, durationMs: 5_000,
                                                 histograms: [DiagnosticsHistogram](repeating: .init(), count: DiagnosticsStage.allCases.count),
                                                 snapshot: snapshot, peerUpdatedMs: peerAtMs)
@@ -295,6 +299,88 @@ final class PerformanceLabRunTests: XCTestCase {
         let partial = u.record(fixture: nil)
         XCTAssertEqual(partial.receiverSummaries.map { $0.summary.windowSequence }, [6])
         XCTAssertEqual(partial.receiverAlignment, .partial)
+    }
+
+    /// Review finding 1: the start marker only proves a lower bound. A
+    /// receiver window that began after the trial's last sender window
+    /// ended, before the receiver heard of it, carries the same marker as one
+    /// inside; it is kept only if its own summary, or the previous window's,
+    /// arrived before the trial ended (finding 3: the grace is three windows,
+    /// and a window proven to have begun inside but never reported is missed).
+    func testReceiverWindowThatBeganAfterTheTrialIsNotKept() {
+        for reportsTwelve in [true, false] {
+            var c = PerformanceLabTrialCollector(scenario: scenario(windows: 2), trialIndex: 1, synthetic: true, armedAtMs: 10_000)
+            c.ingest(window(1, startMs: 5_000, peer: nil), at: 10_100)          // warm-up: threshold 1
+            c.ingest(window(2, startMs: 10_000, peer: receiverSummary(series: 7, sequence: 10, marker: 1), peerAtMs: 15_050), at: 15_100)
+            c.ingest(window(3, startMs: 15_000, peer: receiverSummary(series: 7, sequence: 11, marker: 2), peerAtMs: 19_000), at: 20_100)
+            XCTAssertTrue(c.isDone, "the trial ended at 20 s")
+            if reportsTwelve {
+                // 12 began when 11 completed, before 11's summary arrived at 19 s: inside.
+                c.ingest(window(3, startMs: 15_000, peer: receiverSummary(series: 7, sequence: 12, marker: 2), peerAtMs: 20_500), at: 21_000)
+            }
+            // 13 began when 12 completed, after 20 s; the receiver had not yet
+            // heard of sender window 3, so its marker is still 2.
+            c.ingest(window(3, startMs: 15_000, peer: receiverSummary(series: 7, sequence: 13, marker: 2), peerAtMs: 25_500), at: 26_000)
+            XCTAssertFalse(c.isFinished(at: 30_100), "grace: 15 s from 20.1 s, not 10 s")
+            XCTAssertTrue(c.isFinished(at: 35_100))
+            let rec = c.record(fixture: nil)
+            let expectedKept: [Double?] = reportsTwelve ? [10, 11, 12] : [10, 11]
+            let expectedMissed: Int? = reportsTwelve ? 0 : 1
+            XCTAssertEqual(rec.receiverSummaries.map { $0.summary.windowSequence }, expectedKept)
+            XCTAssertEqual(rec.receiverWindowsMissed, expectedMissed, "12 began inside the trial and was never reported")
+            XCTAssertEqual(rec.receiverAlignment, .aligned)
+            XCTAssertEqual(rec.status, .complete)
+
+            // The receiver moving on (marker = the trial's last sender window)
+            // still ends the wait at once.
+            c.ingest(window(3, startMs: 15_000, peer: receiverSummary(series: 7, sequence: 14, marker: 3), peerAtMs: 30_500), at: 31_000)
+            XCTAssertTrue(c.isFinished(at: 31_000))
+            XCTAssertEqual(c.record(fixture: nil), rec, "a window that began after the trial changes nothing")
+        }
+    }
+
+    /// Review finding 2: the windows come from another sender recorder part
+    /// way through (a new session, or a reset). Its numbers restart, so the
+    /// change is detected by the series, and receiver markers are read
+    /// against the recorder whose window carried them.
+    func testSenderRecorderChangeIsAnIssueOrAnExpectedRestart() throws {
+        for restarts in [false, true] {
+            var c = PerformanceLabTrialCollector(scenario: scenario(windows: 4, restarts: restarts), trialIndex: 1,
+                                                 synthetic: true, armedAtMs: 0)
+            c.ingest(window(7, startMs: 0, peer: receiverSummary(series: 5, sequence: 20, marker: 7), peerAtMs: 5_050), at: 5_100)
+            c.ingest(window(8, startMs: 5_000, peer: nil), at: 10_100)
+            // Recorder B (a new session): numbers start again at 1, 2 s later.
+            c.ingest(window(1, startMs: 12_000, peer: receiverSummary(series: 9, sequence: 21, marker: 1), peerAtMs: 17_050, series: 2),
+                     at: 17_100)
+            c.ingest(window(2, startMs: 17_000, peer: receiverSummary(series: 9, sequence: 22, marker: 1), peerAtMs: 21_000, series: 2),
+                     at: 22_100)
+            XCTAssertTrue(c.isDone)
+            c.ingest(window(2, startMs: 17_000, peer: receiverSummary(series: 9, sequence: 23, marker: 2), peerAtMs: 26_000, series: 2),
+                     at: 26_100)
+            XCTAssertTrue(c.isFinished(at: 26_100), "the receiver heard recorder B's last trial window")
+            let rec = c.record(fixture: nil)
+            XCTAssertEqual(rec.windows.map(\.sequence), [7, 8, 1, 2])
+            XCTAssertFalse(rec.issues.contains(.windowGap), "the sequence restart is the recorder change, not a gap")
+            XCTAssertEqual(rec.receiverSummaries.map { $0.summary.windowSequence }, [20, 21, 22],
+                           "markers 1 count recorder B's windows, not A's (threshold 7)")
+            XCTAssertEqual(rec.receiverWindowsMissed, 0)
+            if restarts {
+                XCTAssertEqual(rec.status, .complete)
+                XCTAssertEqual(rec.expectedRestarts, 1)
+                XCTAssertEqual(try XCTUnwrap(rec.restartUnmeasuredSeconds), 2, accuracy: 1e-9)
+            } else {
+                XCTAssertEqual(rec.issues, [.senderRecorderChanged])
+                XCTAssertEqual(rec.status, .incomplete)
+                XCTAssertNil(rec.expectedRestarts)
+            }
+        }
+        // A recorder whose window overlaps the previous one (another live
+        // session) is never a restart.
+        var c = PerformanceLabTrialCollector(scenario: scenario(windows: 3, restarts: true), trialIndex: 1, synthetic: true, armedAtMs: 0)
+        c.ingest(window(1, startMs: 0, peer: nil), at: 5_100)
+        c.ingest(window(40, startMs: 3_000, peer: nil, series: 3), at: 8_100)
+        c.ingest(window(41, startMs: 8_000, peer: nil, series: 3), at: 13_100)
+        XCTAssertTrue(c.record(fixture: nil).issues.contains(.senderRecorderChanged))
     }
 
     /// Property: repeating reads (the poll runs faster than anything

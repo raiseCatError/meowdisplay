@@ -102,7 +102,7 @@ Not measured by this bundle: capture-to-photon and input-to-photon (need externa
   - Cross-device spans use a ping/pong clock offset; error is up to about half the best round trip.
   - Byte counts are app payload, not bytes billed by a network.
   - Trials cover whole 5 s diagnostics windows after the warm-up; up to one window at each end is outside the measurement.
-  - Receiver numbers are the receiver's own 5 s windows, each counted once, that began after the trial's first sender window began; they are not aligned with the sender's windows and the last one may end up to one window after the trial.
+  - Receiver numbers are the receiver's own 5 s windows, each counted once, that provably began after the trial's first sender window began and before its last one ended (unless the receiver restarted at that moment); they are not aligned with the sender's windows, so the last one may run up to one receiver window past the trial's end.
   - Frame-ID counts exist only on the receiver's experimental Metal path, which itself changes presentation timing.
   - Operator steps are done by hand; their timing varies between trials.
 - How another tester reproduces:

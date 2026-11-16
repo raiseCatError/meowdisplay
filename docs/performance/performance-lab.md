@@ -117,32 +117,66 @@ the session if several devices stream. **Start Run**:
    network or power change. The panel's 0.5 s poll runs in the common
    run-loop modes, so a held menu or a modal panel does not make it miss a
    window.
-3. After the last sender window the trial waits up to two windows for
-   receiver windows that began inside it (it stops as soon as the receiver
-   reports a window that began after the trial ended).
+3. After the last sender window the trial waits up to three windows (15 s)
+   for receiver windows that began inside it: the one spanning the trial's
+   end completes up to a window later, and at the ~5 s `stats` cadence is
+   sent up to a window after that. It stops as soon as the receiver reports
+   a window that began after the trial ended.
 4. Every planned trial is written whatever happened: `complete`,
-   `incomplete` (missing windows, window gap, unexpected restart, no
-   receiver summary, stalled), `failed` (no session, diagnostics off) or
+   `incomplete` (missing windows, window gap, unexpected restart, sender
+   recorder changed, no receiver summary, stalled), `failed` (no session,
+   diagnostics off) or
    `cancelled` (the trial running when the operator cancelled, even during
    its warm-up, and every later trial with `notStarted`). A run cancelled
    before its first trial began writes nothing.
 
 **Receiver windows.** The receiver sends its last completed 5 s window in
-every `stats` (every ~5 s, or ~2 s under adaptive streaming), so one window
-usually arrives two or three times. Each window has a number and a series
-(new per receiver session), and the trial keeps each (series, number) once,
-so receiver sums are sums over distinct windows. A receiver window is kept
-only if it provably began inside the trial: the receiver reports the sender
-window number it had last heard when the window began (`wps`); a number at
-least the one the sender had completed when the trial's first window began
-proves it by causality alone, without comparing the two devices' clocks.
-`receiverAlignment` is `aligned` when every kept window was proven this way,
-`partial` when some were kept by arrival time (at least two windows after the
-trial began) because the receiver sent no marker. A receiver that sends no
-window numbers at all (an older build) is merged by equality only;
-`receiverCounting` is then `possiblyDoubleCounted` and the report says so.
-`receiverWindowsMissed` counts window numbers between kept windows that never
-arrived.
+every `stats`. Under adaptive streaming (`stats` every ~2 s) one window
+usually arrives two or three times; at the default ~5 s cadence about once,
+and because the two cadences drift, a window is sometimes never reported
+(it then shows in `receiverWindowsMissed`). Each window has a number and a
+series (new per receiver session), and the trial keeps each (series, number)
+once, so receiver sums are sums over distinct windows. A receiver window is
+kept only if both ends are proven by causality alone, without comparing the
+two devices' clocks:
+
+- it began after the trial began: the receiver reports the sender window
+  number it had last heard when the window began (`wps`), and a number at
+  least the one the sender had completed when the trial's first window
+  began proves it;
+- it began before the trial ended: its own summary, or the previous
+  window's in the same series, arrived on the Mac before the trial's last
+  sender window ended (a receiver window begins when the previous one
+  completes, and a summary is sent only after its window completed). One
+  exception the summaries cannot show: a receiver restart (a resync, or
+  diagnostics switched off and on there) restarts the receiver's window in
+  progress at that moment, so a window restarted just after the trial ended
+  can still be kept.
+
+A window that began after the trial but before the receiver heard of the
+trial's last sender window carries the same `wps` as one inside; the second
+rule keeps it out. So the last kept window began inside the trial and may
+run up to one receiver window past its end. `receiverAlignment` is `aligned`
+when every kept window was proven this way, `partial` when some were kept by
+arrival time (at least two windows after the trial began) because the
+receiver sent no marker. A receiver that sends no window numbers at all (an
+older build) is merged by equality only; `receiverCounting` is then
+`possiblyDoubleCounted` and the report says so. `receiverWindowsMissed`
+counts window numbers proven to have begun inside the trial that were not
+kept: between kept windows of one series, and (once every sender window is
+in) after the last kept window of the receiver's current series up to the
+one after the last window whose summary arrived before the trial ended. A
+window number that would need the grace to arrive and did not is counted
+here, never silently dropped.
+
+Window numbers stop at the wire's 1,000,000 value ceiling (PROTOCOL.md
+6.2.1), about 58 days of 5 s windows of one recorder. Past it on the
+sender, every marker reads 1,000,000 and is below the trial's threshold,
+so no receiver window is kept and the trial is `incomplete` with
+`noReceiverSummary`; a new session (a new sender recorder) starts again
+at 1. Past it on the receiver,
+its windows all carry the same number and are counted as one; the
+receiver's numbering survives a new session, so restart the receiver app.
 
 **Expected restarts.** In scenarios that expect a restart (reconnection,
 capture retune, transitions) a window that starts later than the previous one
@@ -152,6 +186,30 @@ because the recorder restarts its window at a restart) and does not make the
 trial incomplete; `sender.restart.frame_gap_ms` holds the last frame before
 each restart to the first after it. A restart in any other scenario, or a
 discontinuity without one, is still `windowGap`/`unexpectedRestart`.
+
+**Sender recorder.** Each streaming session has its own diagnostics
+recorder; the Lab reads whichever session is selected (the first live one
+when none is). If the windows read come from another recorder part way
+through a trial (a new session, for example if a reconnect creates one, or
+a reset), the trial records `senderRecorderChanged` and is `incomplete`. In
+a scenario that expects restarts it is counted as an expected restart
+instead (`expectedRestarts`, with the time between the two recorders'
+windows in `restartUnmeasuredSeconds`), unless the new recorder's window
+overlaps the old one's (another live session), which is always
+`senderRecorderChanged`. Receiver markers are read against the recorder
+whose window carried the summary; the new recorder's first trial window is
+its threshold. Each window's `snapshot.windowSeriesID` in the bundle shows
+which recorder it came from. If no session is live at a poll (between a
+disconnect and a reconnect) the trial fails with `noSession`.
+
+**Reconnection trials** (`extend.reconnection`) normally read
+`receiverAlignment: partial`: after a full reconnect the receiver's recorder
+starts a new series, and its first window carries no `wps` (it had heard no
+sender window yet), so that window is kept by arrival time. This is
+expected, not a fault. If the reconnect falls in the trial's last window,
+that first window arrives after the last sender window and is not kept.
+A full reconnect also records no `receiver.restart.frame_gap_ms` sample
+(the receiver's recorder starts over); only a resync inside a session does.
 
 Bundle: `perf-lab-<scenario>-<yyyyMMdd-HHmm>[-<variant>][-synthetic]/`
 with `manifest.json` (format `meowdisplay-performance-lab-run`, schema 1:
@@ -203,9 +261,15 @@ python3 tools/perf-lab/perf_lab.py compare <bundle-A> <bundle-B> [--allow-partia
   ships with the tool in `scenarios.json`, generated from the app; the app
   version, variant, commit and date have strict formats). A listed trial
   whose file is missing, and a planned trial that is not listed, stay in the
-  report as `failed` (`missingTrialData`). A malformed bundle, a file over
-  64 MB or a trial file outside the bundle folder is refused with exit 2 and
-  one line, never a traceback.
+  report as `failed` (`missingTrialData`). A trial labelled `complete` must
+  list no issues, at least `requestedWindows` windows and a measured time
+  above 0, or the bundle is refused (the minimum-trials gate counts complete
+  trials). A malformed bundle, a file over 64 MB, a bundle over 128 MB in
+  total (a trial of the longest scenario is about 1.8 MB), anything that is
+  not a regular file (a FIFO, a folder, a device), a trial file outside the
+  bundle folder, any other file-system error, and an `--out` path that cannot
+  be written (for example in a missing folder) are refused with exit 2 and
+  one line, never a traceback or a hang.
 - Per trial: source-unique, capture, submit, encode, send rates; frame time
   at submission p50/p95/p99; capture interval, source age, encode and send
   p50/p95/p99 exact to the bucket; gaps over 100/250/500 ms per interval stage;
