@@ -265,6 +265,9 @@ targets:
       - Shared/WakeConnectAttempt.swift
       - Shared/ConnectionRoute.swift
       - Shared/CableCandidateSelection.swift
+      - Shared/ConnectionPathDescription.swift
+      - Shared/ConnectionPathEvidence+NWPath.swift
+      - Shared/HostToHostCableInterfaces.swift
       - Shared/RemoteEndpointStore.swift
       - Shared/RemoteEndpointValidation.swift
       - Shared/RemoteConnectRequestPolicy.swift

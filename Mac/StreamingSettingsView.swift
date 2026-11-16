@@ -140,7 +140,7 @@ struct StreamingSettingsView: View {
                                 LabeledContent("A/V Sync",
                                     value: "\(session.receiverAVSyncOffsetMs >= 0 ? "+" : "")\(session.receiverAVSyncOffsetMs) ms")
                             }
-                            LabeledContent("Route", value: entry.route?.rawValue ?? "—")
+                            LabeledContent("Route", value: entry.routeLabel ?? "—")
                             if let session = controller.session(for: entry.id) {
                                 AdaptiveStreamUsageRows(monitor: session.sender.adaptive.monitor)
                             }

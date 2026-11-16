@@ -41,6 +41,7 @@ struct PerfStats: Equatable {
     var rttMs = 0.0              // control-channel round trip
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
     var transport = "—"          // USB, AWDL, or LAN from the live NWPath
+    var transportLabel = "—"     // how the overlay words it ("Direct Cable" for a verified Thunderbolt link)
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // cursor updates dropped as stale/reordered (this window)
     var macDrops = 0             // enc + net drops, this ~2s ping window
@@ -89,10 +90,16 @@ final class ReceiverTransportState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return cost
     }
+    private var displayLabel = "—"
 
-    func set(_ newValue: String) {
+    /// `newValue` is the route label diagnostics and the Mac's stats log
+    /// keep (`ConnectionRoute.rawValue`); `label` is how the status text and
+    /// overlay word it (`ConnectionPathDescription.label`), the route label
+    /// itself when omitted. Both change together.
+    func set(_ newValue: String, label: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         value = newValue
+        displayLabel = label ?? newValue
     }
 
     func clear() {
@@ -102,6 +109,11 @@ final class ReceiverTransportState: @unchecked Sendable {
     func get() -> String {
         lock.lock(); defer { lock.unlock() }
         return value
+    }
+
+    func label() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return displayLabel
     }
 }
 
@@ -2752,6 +2764,10 @@ final class StreamReceiver: ObservableObject {
         Self.updateTransport(for: conn, path: path, transportState: transportState)
     }
 
+    /// Decides "Direct Cable" wording for the live path (Thunderbolt IP
+    /// lookup on macOS; never on iOS). Stateless, so one shared instance.
+    private static let hostToHostCableInterfaces: HostToHostCableInterfaceChecking = HostToHostCableInterfaces.current
+
     /// Static so `onPathUpdate`'s host-effect closure can call it with a
     /// directly-captured `transportState` instead of `self` — this is the
     /// only state the original instance method touched (see the call-site
@@ -2764,12 +2780,19 @@ final class StreamReceiver: ObservableObject {
             isUSB: path.usesInterfaceType(.loopback) || isLoopbackPeer,
             interfaceNames: path.availableInterfaces.map(\.name),
             remoteEndpointDescription: peer)
-        transportState.set(route.rawValue)
+        // The far end of a receiver's session is always a Mac sender. Only
+        // the macOS receiver can find a Thunderbolt link; elsewhere the
+        // check answers no and the wording is the route.
+        let description = ConnectionPathDescription(
+            route: route,
+            evidence: ConnectionPathEvidence(path: path, fallbackEndpoint: conn.endpoint, peerIsMac: true),
+            cableInterfaces: hostToHostCableInterfaces)
+        transportState.set(route.rawValue, label: description.label)
         transportState.setPathCost(expensive: path.isExpensive, constrained: path.isConstrained)
         ReceiverAdaptiveState.shared.setPath(NetworkCost.endpointReport(
             NetworkCost.PathFlags(path: path), reachability: route == .remote ? .remote : .local))
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
-        Log.info("connection path from \(peer): \(names) route=\(route.rawValue)")
+        Log.info("connection path from \(peer): \(names) route=\(route.rawValue) label=\(description.label)")
     }
 
     /// Same same-source SPKI re-encode `TrustStore`/`TLSConfigurator` use
@@ -4756,6 +4779,7 @@ final class StreamReceiver: ObservableObject {
             stats.rttMs = lastRttMs
             stats.e2eSamples = e2eRing
             stats.transport = transport
+            stats.transportLabel = transportState.label()
             stats.macDrops = macDrops
             stats.macEncDrops = macEncDrops
             stats.macNetDrops = macNetDrops
@@ -5885,7 +5909,7 @@ final class StreamReceiver: ObservableObject {
             },
             setStatusConnected: {
                 queue.async {
-                    let text = "Connected · \(transportState.get())"
+                    let text = "Connected · \(transportState.label())"
                     Log.info("status: \(text)")
                     DispatchQueue.main.async { sink.publishStatus(text) }
                 }

@@ -284,6 +284,10 @@ final class DeviceSession: ObservableObject, Identifiable {
     // Nil while dialing so the UI never presents a requested target as the
     // route that Network.framework actually selected.
     @Published var route: ConnectionRoute?
+    // How that route is worded for the user (see `routeLabel`). Published
+    // on its own so a LAN path turning into a direct cable refreshes the UI
+    // even though `route` keeps the same value.
+    @Published var pathDescription: ConnectionPathDescription?
     // The secure network protocol of the established connection (TCP/QUIC),
     // reported by the sender alongside `route`; nil while dialing and on USB.
     @Published var networkProtocol: NetworkTransportProtocol?
@@ -378,7 +382,15 @@ final class DeviceSession: ObservableObject, Identifiable {
     @Published var displayModeNotice: String?
 
     var statusWithRoute: String {
-        route.map { "\(status) · \($0.rawValue)" } ?? status
+        routeLabel.map { "\(status) · \($0)" } ?? status
+    }
+
+    /// The route as the UI words it: "Direct Cable" for a verified
+    /// Mac-to-Mac Thunderbolt link, else the route's own label. A wording
+    /// left over from another route never shows. Display only — `route`
+    /// stays the value arbitration, overrides and diagnostics use.
+    var routeLabel: String? {
+        ConnectionPathDescription.label(route: route, description: pathDescription)
     }
 
     // Single source for every surface's Pause/Resume affordance (Devices →
@@ -3342,6 +3354,9 @@ final class SenderController: ObservableObject {
         sender.onTransportPath = { [weak session] route in
             session?.route = route
         }
+        sender.onTransportPathDescription = { [weak session] description in
+            session?.pathDescription = description
+        }
         sender.onNetworkProtocol = { [weak session] networkProtocol in
             session?.networkProtocol = networkProtocol
         }
@@ -3607,6 +3622,8 @@ final class SenderController: ObservableObject {
         let name: String
         let statusText: String
         let route: ConnectionRoute?
+        /// `DeviceSession.routeLabel`: what every surface shows for `route`.
+        let routeLabel: String?
         let mode: CaptureMode
         let videoActive: Bool
         let audioActive: Bool
@@ -3637,6 +3654,7 @@ final class SenderController: ObservableObject {
             .map { session in
                 ActiveDisplayEntry(id: session.id, peerID: session.deviceID, name: session.name,
                                    statusText: session.statusWithRoute, route: session.route,
+                                   routeLabel: session.routeLabel,
                                    mode: session.displayAssignment.mode, videoActive: session.videoActive,
                                    audioActive: session.audioActive,
                                    allowInput: EffectiveInputAuthorization.allowed(
@@ -3658,7 +3676,7 @@ final class SenderController: ObservableObject {
     /// through a reconnect.
     var canonicalStatusText: String {
         CanonicalRuntimeStatus.aggregateStatusText(
-            entries: activeDisplayEntries.map { (mode: $0.mode, route: $0.route, phase: $0.phase) })
+            entries: activeDisplayEntries.map { (mode: $0.mode, routeLabel: $0.routeLabel, phase: $0.phase) })
     }
 
     var canonicalPhase: CanonicalConnectionPhase {
