@@ -454,7 +454,10 @@ enum WorkspaceRequests {
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
                                     "follow": source.follow.rawValue,
                                     "rotation": tile.rotation.rawValue, "fit": tile.fit.rawValue]
-            if source.isDisplay {
+            if source.isOverview {
+                // Every Mac display in its arrangement (`overviewPane`); an older Mac refuses it.
+                t["overview"] = true
+            } else if source.isDisplay {
                 // A whole Mac display (Full Desktop in a pane), by its real display id.
                 guard let d = displayID(source) else { continue }
                 t["display"] = Int(d)
@@ -677,6 +680,8 @@ final class WorkspaceModel: ObservableObject {
     /// The Mac leaves out a float sent with `lift` (`floatLift`), so this device can draw it under
     /// the finger while it moves or resizes and it's never on screen twice.
     @Published private(set) var canLiftFloats = false
+    /// The Mac shows an Overview pane (`overviewPane`): every display at once, live, as one pane.
+    @Published private(set) var canShowOverviewPane = false
     /// Floats this device draws itself right now (a finger moves or resizes them): sent with `lift`.
     @Published private(set) var liftedFloats: Set<String> = []
     /// Floats just let go of: still drawn here until the Mac's picture shows them where they
@@ -919,6 +924,7 @@ final class WorkspaceModel: ObservableObject {
             canResizeWindowsOnMac = f.contains(WindowFrameWire.welcomeFeature)
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
+            canShowOverviewPane = f.contains(WindowWorkspaceWire.overviewPaneFeature)
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
@@ -1048,6 +1054,7 @@ final class WorkspaceModel: ObservableObject {
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
+            canShowOverviewPane = false
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
             windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
@@ -1126,6 +1133,10 @@ final class WorkspaceModel: ObservableObject {
         var rebased = saved
         for (id, tile) in saved.tiles {
             guard let source = tile.source else { continue }
+            if source.isOverview {
+                if c.displays.isEmpty { missing.insert(id) }
+                continue
+            }
             if source.isDisplay {
                 if !c.displays.contains(where: { WorkspaceSource.displayKey($0.id) == source.windowID }) { missing.insert(id) }
                 continue
@@ -1313,15 +1324,21 @@ final class WorkspaceModel: ObservableObject {
         if began || zoomGesture == nil {
             let f = frames
             guard let id = f.hitTest(initial), let rect = f.tiles[id],
-                  let tile = layout.tiles[id], tile.source != nil,
-                  isPinch || tile.zoom != nil || effectiveFit(id) == .fill,
-                  windowSize(tile) != nil else { zoomGesture = nil; zoomPreview = nil; return false }
+                  let tile = layout.tiles[id], let shown = tile.source else { zoomGesture = nil; zoomPreview = nil; return false }
+            // An Overview pane only zooms (on the Mac, about its cursor); nothing moves its view here.
+            let owned = shown.isOverview
+                ? OverviewPaneInput.route(isPinch ? .pinch : .twoFingerDrag, kind: .overview, preferred: .trackpad,
+                                          inputReachesMac: true, moveViewActive: false) == .zoomPane
+                : (isPinch || tile.zoom != nil || effectiveFit(id) == .fill) && windowSize(tile) != nil
+            guard owned else { zoomGesture = nil; zoomPreview = nil; return false }
             zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
             zoomPreview = nil
             if active != id { focus(id, raise: false) }   // zooming is this device's view only
             requestBackdrop(id)
         }
-        guard var g = zoomGesture, let tile = layout.tiles[g.tile], let source = windowSize(tile) else { return false }
+        guard var g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
+        if tile.source?.isOverview == true { return overviewPinch(g.tile, from: g.start, ratio: scale, ended: ended) }
+        guard let source = windowSize(tile) else { return false }
         let pane = WorkspaceSize(width: g.rect.width * size.width, height: g.rect.height * size.height)
         func inPane(_ p: WorkspacePoint) -> WorkspacePoint {
             WorkspacePoint(x: (p.x - g.rect.x) / max(g.rect.width, 1e-6), y: (p.y - g.rect.y) / max(g.rect.height, 1e-6))
@@ -1358,6 +1375,24 @@ final class WorkspaceModel: ObservableObject {
         return true
     }
 
+    /// An Overview pane's pinch: its zoom is the person's scale (1x-8x), sent as it changes; the Mac
+    /// centres the view on its cursor and moves it from there. No local preview and no still: the
+    /// Mac's live picture shows the new view.
+    private func overviewPinch(_ id: String, from start: WorkspacePaneZoom?, ratio: Double, ended: Bool) -> Bool {
+        let next = saved.zooming(id, to: OverviewPaneInput.zoom(from: start, ratio: ratio))
+        if next != saved {
+            saved = next
+            publish(); scheduleThrottledSend()
+        }
+        zoomPreview = nil
+        if ended {
+            zoomGesture = nil
+            persist()
+            sendNow()
+        }
+        return true
+    }
+
     /// Where the pane draws its whole source (picture-normalized; larger than the pane when
     /// filled or zoomed in, smaller when zoomed out), as the Mac composes it.
     private func drawnSourceRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
@@ -1379,8 +1414,9 @@ final class WorkspaceModel: ObservableObject {
     }
 
     /// Asks the Mac for the pane's whole source (bounded: once a second unless refreshing after a gesture).
+    /// Never for an Overview pane: its picture is every display, live, and no still is zoomed.
     func requestBackdrop(_ id: String, refresh: Bool = false) {
-        guard windowMode, let tile = layout.tiles[id], tile.source != nil else { return }
+        guard windowMode, let tile = layout.tiles[id], let source = tile.source, !source.isOverview else { return }
         let now = Date()
         if !refresh, let at = backdropAskedAt[id], now.timeIntervalSince(at) < 1 { return }
         backdropAskedAt[id] = now
@@ -1686,8 +1722,56 @@ final class WorkspaceModel: ObservableObject {
         return catalog?.displays.first { WorkspaceSource.displayKey($0.id) == w.id }.flatMap { displayThumbnails[$0.id] }
     }
 
+    // MARK: The Overview pane (every display at once)
+
+    /// Offered as a pane source: the Mac shows Overview panes and has two or more displays for one.
+    var offersOverviewPane: Bool {
+        OverviewPaneInput.offered(macOffers: canShowOverviewPane, displays: catalog?.displays ?? [])
+    }
+
+    /// The Overview as a pane source: a pseudo-window Stage Peek and the panes use. The Mac sends
+    /// no app or title for it, so it is called Overview here.
+    var overviewWindow: CatalogWindowItem {
+        let name = String(localized: "Overview")
+        return CatalogWindowItem(id: WorkspaceSource.overviewKey, generation: 0, bundleID: "", app: name, title: name,
+                                 width: 0, height: 0, minimized: false, active: false)
+    }
+
+    /// The displays an Overview pane shows, each offered in a pane of its own from its menu.
+    var overviewPaneDisplays: [CatalogDisplayItem] { OverviewPaneInput.shownDisplays(catalog?.displays ?? []) }
+
+    /// Whether the pane holding the focus shows the Overview (the Mac draws its cursor there).
+    var activeIsOverview: Bool { active.flatMap { layout.tiles[$0]?.source?.isOverview } ?? false }
+
+    /// What the pane at `p` (normalized to the picture) shows: nil where there's no pane or it's empty.
+    func paneKind(at p: WorkspacePoint) -> WorkspaceSource.Kind? {
+        frames.hitTest(p).flatMap { layout.tiles[$0]?.source?.kind }
+    }
+
+    /// From an Overview pane's menu: a display in a pane of its own, through the display pane
+    /// path. The pane already showing it is selected; else it gets a new pane when there's room,
+    /// or takes the Overview's place when there isn't.
+    func showDisplayInPane(_ d: CatalogDisplayItem, from overview: String) {
+        let w = displayWindow(d)
+        let shown = host.map { layout.tile(holding: $0, windowID: w.id) != nil } ?? false
+        if shown || canAddTile {
+            choose(w, asNewTile: true)
+        } else {
+            replacingTile = overview
+            choose(w, asNewTile: false)
+        }
+    }
+
+    /// A pane's menu: the Overview in this pane. One per layout: an Overview pane elsewhere swaps
+    /// places with this one.
+    func showOverviewPane(in id: String) {
+        replacingTile = id
+        choose(overviewWindow, asNewTile: false)
+    }
+
     /// The catalog entry a pane source shows (a display's pseudo-window for displays).
     func windowItem(_ source: WorkspaceSource) -> CatalogWindowItem? {
+        if source.isOverview { return overviewWindow }
         if source.isDisplay { return display(for: source).map(displayWindow) }
         return catalog?.windows.first { $0.id == source.windowID }
     }
@@ -1859,6 +1943,7 @@ final class WorkspaceModel: ObservableObject {
         guard let c = catalog else { return }
         missing = Set(saved.tiles.compactMap { id, tile in
             guard let source = tile.source else { return nil }
+            if source.isOverview { return c.displays.isEmpty ? id : nil }
             if source.isDisplay { return c.displays.contains { WorkspaceSource.displayKey($0.id) == source.windowID } ? nil : id }
             let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
             return listed ? nil : id
@@ -2990,6 +3075,9 @@ extension WorkspaceModel {
     /// (a tab of a pane always can, its pane stays).
     func canFloat(pane id: String, tab: Int? = nil) -> Bool {
         guard canFloat, floatsAllowedHere, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
+        // The Overview stays a tiled pane: a float is lifted from a still, and it has none.
+        let floated = tab.flatMap { t in layout.tiles[id]?.tabs.indices.contains(t) == true ? layout.tiles[id]?.tabs[t] : nil } ?? layout.tiles[id]?.source
+        if floated?.isOverview == true { return false }
         if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
         return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
     }

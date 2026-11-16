@@ -1768,6 +1768,27 @@ never missing. `lift` on a tiled pane, or from a receiver that hasn't sent
 float. A receiver never sends `lift` to a Mac without `floatLift`; there the
 Mac keeps drawing a moving float a moment behind the finger, as before.
 
+**Overview pane** (welcome feature `overviewPane`, additive, no `pv` bump). A
+tile sent with `"overview": true` and neither `window` nor `display` shows
+every Mac display (except MeowDisplay's own virtual displays and mirrors)
+where it sits in the Mac's arrangement, each from its own live display
+capture at the pixels it covers in the pane. At most one per layout (a second
+is `duplicateWindow`); with no listed display it is `unavailable`, as it is
+on a Mac without the feature (no `window`). `rotation` and `fit` are ignored.
+`zoom`'s scale is the person's, 1 to 8 (1 fits every display); its centre is
+the Mac's: a new scale centres the view on the cursor, and above 1 the view
+moves only when the cursor comes within 12% of the pane's shorter side of an
+edge. `workspaceState` echoes `overview: true` and the camera as `zoom`
+(`[scale, cx, cy]`, the centre normalized to the arrangement's bounds). Input
+while the pane is focused: `pointer` `moveRelative` moves the real cursor by
+`dx`/`dy` canvas pixels divided by the camera's scale, across displays and
+kept on one (a gap lands on the nearest display); `down`/`up` click at the
+cursor; `scroll` scrolls at the cursor, 2 canvas pixels per point at every
+zoom; an absolute touch lands on the display under it. The captures leave the
+cursor out; the cursor placement maps the real cursor into the focused
+Overview pane, so the receiver draws it there once. A receiver never sends
+`overview` to a Mac without `overviewPane`.
+
 Saved layouts (`WorkspaceLayoutRecord`, shared with Android's vectors) stay
 `schema` 3 and byte-identical while a layout has no floats. A layout with
 floats is `schema` 4 and adds `floats: [{tile, x, y, w, h, tuck?,
@@ -2283,6 +2304,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 (additive) | Window workspaces (section 6.10): `hello.ws`, `welcome.features: ["window"]`, catalog/thumbnail/workspace messages, `displayModeRequest`/`displayModeState` `window`; gated by capability, no bump |
 | 22 (additive) | Floating panes (section 6.10): `hello.ws` 2, `welcome.features: ["windowFloat"]`, `workspaceRequest`/`workspaceState` tile `layer: "float"` and `z`, saved-layout `schema` 4 `floats`; gated by capability, no bump, ws-1 receivers unchanged |
 | 22 (additive) | Lifted floats (section 6.10): `welcome.features: ["floatLift"]`, float tile `lift: true` (left out of the picture and input while the receiver draws it); gated by capability, no bump |
+| 22 (additive) | Overview pane (section 6.10): `welcome.features: ["overviewPane"]`, tile `overview: true` (every display in its arrangement, the Mac's camera in `zoom`); gated by capability, no bump |
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 | 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |

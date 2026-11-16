@@ -1622,6 +1622,16 @@ final class PointerGestureEngine {
         return out
     }
 
+    /// `setInputMode(_:)` between touch sequences, when the model follows the pane a sequence
+    /// starts in (an Overview pane is always a trackpad): a tap already made still clicks, its
+    /// buffered click going first, instead of being dropped by the reset.
+    @discardableResult
+    func setInputModeKeepingTap(_ newMode: PointerInputMode) -> [PointerCommand] {
+        guard newMode != inputMode else { return [] }
+        let tap = mode == .tapBuffered ? flushTapChain() : []
+        return tap + setInputMode(newMode)
+    }
+
     // MARK: - Safety / cleanup
 
     /// Releases any held synthetic button and returns the receiver to

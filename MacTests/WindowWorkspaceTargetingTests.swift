@@ -722,3 +722,245 @@ final class WorkspaceZoomTests: XCTestCase {
         XCTAssertNil(layout.tiles["a"]?.zoom)
     }
 }
+
+/// The Overview pane: every Mac display in its arrangement, a camera that fits at 1x and follows
+/// the cursor near the edges above it, the cursor kept on a display, its wire form and its captures.
+final class OverviewPaneTests: XCTestCase {
+    /// A MacBook display and a taller external display to its right, higher up.
+    private let laptop = OverviewPaneLayout.Display(id: 1, bounds: WorkspaceRect(x: 0, y: 0, width: 1512, height: 982))
+    private let external = OverviewPaneLayout.Display(id: 2, bounds: WorkspaceRect(x: 1512, y: -200, width: 2560, height: 1440))
+    private let pane = WorkspaceRect(x: 100, y: 50, width: 1000, height: 600)
+
+    private func layout(zoom: Double = 1, center: WorkspacePoint? = nil) -> OverviewPaneLayout {
+        OverviewPaneLayout(displays: [laptop, external], pane: pane, zoom: zoom, center: center)
+    }
+
+    private func assertEqual(_ a: WorkspacePoint?, _ b: WorkspacePoint, accuracy: Double = 1e-6, _ message: String = "",
+                             file: StaticString = #filePath, line: UInt = #line) {
+        guard let a else { return XCTFail("no point \(message)", file: file, line: line) }
+        XCTAssertEqual(a.x, b.x, accuracy: accuracy, message, file: file, line: line)
+        XCTAssertEqual(a.y, b.y, accuracy: accuracy, message, file: file, line: line)
+    }
+
+    func testTheOverviewIsItsOwnKindOfSource() {
+        let overview = WorkspaceSource.overview(host: "mac-a")
+        XCTAssertEqual(overview.kind, .overview)
+        XCTAssertTrue(overview.isOverview)
+        XCTAssertTrue(overview.isDisplay, "never taken for a window")
+        let display = WorkspaceSource(host: "mac-a", windowID: WorkspaceSource.displayKey(1))
+        XCTAssertEqual(display.kind, .display)
+        XCTAssertFalse(display.isOverview)
+        XCTAssertEqual(WorkspaceSource(host: "mac-a", windowID: 10).kind, .window)
+        XCTAssertEqual(WorkspaceSource.overviewKey, WorkspaceSource.displayKey(0), "kCGNullDirectDisplay: no real display has it")
+    }
+
+    func testZoomOneFitsEveryDisplayInThePane() {
+        let l = layout()
+        let union = WorkspaceRect(x: 0, y: -200, width: 4072, height: 1440)
+        XCTAssertEqual(l.union, union)
+        XCTAssertEqual(l.fitScale, 1000.0 / 4072, accuracy: 1e-12, "the wider side fills the pane")
+        assertEqual(l.center, WorkspacePoint(x: union.midX, y: union.midY))
+        let a = l.rect(for: laptop), b = l.rect(for: external)
+        XCTAssertEqual(a.x, pane.x, accuracy: 1e-9)
+        XCTAssertEqual(b.maxX, pane.maxX, accuracy: 1e-9)
+        XCTAssertEqual(b.y - pane.y, pane.maxY - b.maxY, accuracy: 1e-9, "centred the other way")
+        XCTAssertEqual(a.maxX, b.x, accuracy: 1e-9, "side by side as on the Mac")
+        XCTAssertEqual(a.width / a.height, 1512.0 / 982, accuracy: 1e-9, "never stretched")
+        for d in [laptop, external] {
+            XCTAssertEqual(l.visibleRect(for: d)?.area ?? 0, l.rect(for: d).area, accuracy: 1e-3, "all of it is in the pane")
+        }
+        // At 1x the view never moves, wherever it is asked to be.
+        assertEqual(layout(center: WorkspacePoint(x: 0, y: 0)).center, l.center)
+        assertEqual(l.following(cursor: WorkspacePoint(x: 4000, y: 1200)).center, l.center)
+    }
+
+    func testPanePointsAndGlobalPointsMapBothWays() throws {
+        for l in [layout(), layout(zoom: 3, center: WorkspacePoint(x: 900, y: 400)), layout(zoom: 8, center: WorkspacePoint(x: 3000, y: 100))] {
+            for g in [WorkspacePoint(x: 0, y: 0), WorkspacePoint(x: 1511, y: 981), WorkspacePoint(x: 2500, y: -150), WorkspacePoint(x: 4071, y: 1239)] {
+                assertEqual(l.globalPoint(fromPane: l.panePoint(fromGlobal: g)), g)
+            }
+            for p in [WorkspacePoint(x: 100, y: 50), WorkspacePoint(x: 600, y: 350), WorkspacePoint(x: 1099, y: 649)] {
+                assertEqual(l.panePoint(fromGlobal: l.globalPoint(fromPane: p)), p)
+            }
+            // A display's corners land on its rectangle.
+            let r = l.rect(for: external)
+            assertEqual(l.panePoint(fromGlobal: WorkspacePoint(x: 1512, y: -200)), WorkspacePoint(x: r.x, y: r.y))
+            assertEqual(l.panePoint(fromGlobal: WorkspacePoint(x: 4072, y: 1240)), WorkspacePoint(x: r.maxX, y: r.maxY))
+            // The camera as a pane zoom over the arrangement maps exactly the same (input and cursor use it).
+            let u = try XCTUnwrap(l.union)
+            let t = TileContentTransform(tile: pane, source: WorkspaceSize(width: u.width, height: u.height),
+                                         rotation: .none, fit: .fit, zoom: l.paneZoom)
+            for g in [WorkspacePoint(x: 10, y: 20), WorkspacePoint(x: 2600, y: 900)] {
+                assertEqual(t.canvasPoint(fromSource: WorkspacePoint(x: g.x - u.x, y: g.y - u.y)), l.panePoint(fromGlobal: g))
+            }
+        }
+    }
+
+    func testZoomIsKeptBetweenOneAndEight() {
+        XCTAssertEqual(layout(zoom: 0.7).zoom, 1)
+        XCTAssertEqual(layout(zoom: 20).zoom, 8)
+        XCTAssertEqual(layout(zoom: .nan).zoom, 1)
+        XCTAssertEqual(layout(zoom: 2.5).zoom, 2.5)
+        XCTAssertEqual(layout(zoom: 8).scale, layout().fitScale * 8, accuracy: 1e-12)
+        // The view never leaves the arrangement: asked to centre past its corner, it stops at the edge.
+        let l = layout(zoom: 4, center: WorkspacePoint(x: -5000, y: -5000))
+        assertEqual(l.globalPoint(fromPane: WorkspacePoint(x: pane.x, y: pane.y)), WorkspacePoint(x: 0, y: -200))
+        // Zooming centres on the cursor.
+        assertEqual(layout().zoomed(to: 4, cursor: WorkspacePoint(x: 700, y: 500)).center, WorkspacePoint(x: 700, y: 500))
+    }
+
+    func testTheViewFollowsTheCursorOnlyInsideTheEdgeMargin() {
+        let l = layout(zoom: 4, center: WorkspacePoint(x: 700, y: 500))
+        assertEqual(l.center, WorkspacePoint(x: 700, y: 500))
+        let margin = OverviewPaneLayout.edgeMarginShare * pane.height
+        // Just short of the margin: nothing moves.
+        let near = WorkspacePoint(x: 700 + (pane.width / 2 - margin - 1) / l.scale, y: 500)
+        XCTAssertEqual(l.following(cursor: near), l)
+        // Inside the right margin: the view moves right just enough to keep the cursor on the margin.
+        let edge = WorkspacePoint(x: 700 + (pane.width / 2 - 10) / l.scale, y: 500)
+        let moved = l.following(cursor: edge)
+        XCTAssertGreaterThan(moved.center.x, l.center.x)
+        XCTAssertEqual(moved.center.y, l.center.y, accuracy: 1e-9, "only the axis that reached its edge")
+        XCTAssertEqual(moved.panePoint(fromGlobal: edge).x, pane.maxX - margin, accuracy: 1e-6)
+        // Top margin, the other way.
+        let top = WorkspacePoint(x: 700, y: 500 - (pane.height / 2 - 5) / l.scale)
+        let up = l.following(cursor: top)
+        XCTAssertLessThan(up.center.y, l.center.y)
+        XCTAssertEqual(up.panePoint(fromGlobal: top).y, pane.y + margin, accuracy: 1e-6)
+        // At the arrangement's edge the view stops; the cursor may then reach the pane's edge.
+        let end = l.following(cursor: WorkspacePoint(x: 4071.9, y: 1239.9))
+        assertEqual(end.globalPoint(fromPane: WorkspacePoint(x: pane.maxX, y: pane.maxY)), WorkspacePoint(x: 4072, y: 1240))
+    }
+
+    func testAFingersMovementBecomesCursorMovementThroughTheCamera() {
+        let fit = layout()
+        assertEqual(fit.globalVector(fromPane: 10, -5), WorkspacePoint(x: 10 / fit.scale, y: -5 / fit.scale))
+        let close = layout(zoom: 2)
+        XCTAssertEqual(close.globalVector(fromPane: 10, 0).x, fit.globalVector(fromPane: 10, 0).x / 2, accuracy: 1e-9,
+                       "zoomed in, the same movement moves the cursor less")
+        let empty = OverviewPaneLayout(displays: [], pane: pane, zoom: 1)
+        assertEqual(empty.globalVector(fromPane: 10, 10), WorkspacePoint(x: 0, y: 0))
+    }
+
+    func testTheCursorStaysOnADisplayAndAGapLandsOnTheNearestOne() {
+        let l = layout()
+        let inset = OverviewPaneLayout.edgeInset
+        // On a display: unchanged.
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 2000, y: -150)), WorkspacePoint(x: 2000, y: -150))
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 10, y: 10)), WorkspacePoint(x: 10, y: 10))
+        // Below the laptop (the gap beside the taller display): onto the laptop's bottom edge.
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 1000, y: 1100)), WorkspacePoint(x: 1000, y: 982 - inset))
+        // Above the laptop, nearer it than the external display.
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 1400, y: -100)), WorkspacePoint(x: 1400, y: 0))
+        // Nearer the external display's left edge.
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 1490, y: -190)), WorkspacePoint(x: 1512, y: -190))
+        // Past the arrangement's edge.
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: 9000, y: 500)), WorkspacePoint(x: 4072 - inset, y: 500))
+        assertEqual(l.clampToDisplays(WorkspacePoint(x: -50, y: -50)), WorkspacePoint(x: 0, y: 0))
+        XCTAssertNil(OverviewPaneLayout(displays: [], pane: pane, zoom: 1).clampToDisplays(WorkspacePoint(x: 0, y: 0)))
+    }
+
+    func testTheOverviewTileRoundTripsThroughTheRequestAndTheMacsParse() throws {
+        let tile = WorkspaceTile(id: "o", source: .overview(host: "mac-a"), zoom: WorkspacePaneZoom(scale: 3, centerX: 0.2, centerY: 0.9))
+        let layout = WorkspaceLayout(preset: .single, tiles: [tile])
+        let frames = WorkspaceGeometry.frames(for: layout, in: WorkspaceSize(width: 2000, height: 1000))
+        let message = WorkspaceRequests.workspace(layout, frames: frames, host: "mac-a", focus: "o", generation: { _ in nil })
+        let tiles = message["tiles"] as? [[String: Any]] ?? []
+        XCTAssertEqual(tiles.count, 1)
+        XCTAssertEqual(tiles.first?["overview"] as? Bool, true)
+        // Neither a window nor a display: a Mac without the feature refuses it (no window to show).
+        XCTAssertNil(tiles.first?["window"])
+        XCTAssertNil(tiles.first?["display"])
+
+        let canvas = CGSize(width: 2000, height: 1000)
+        let displays: [UInt32: CGRect] = [1: CGRect(x: 0, y: 0, width: 1512, height: 982)]
+        var next: UInt64 = 1
+        let r = WorkspaceRequestValidator.validate(tiles: tiles, catalog: [:], hostID: "mac-a", canvasPixels: canvas,
+                                                   previous: [:], nextGeneration: &next, displays: displays)
+        let a = try XCTUnwrap(r.assignments.first)
+        XCTAssertEqual(r.assignments.count, 1)
+        XCTAssertTrue(a.isOverview)
+        XCTAssertFalse(a.isWindow)
+        XCTAssertEqual(a.windowID, WorkspaceSource.overviewKey)
+        XCTAssertNil(a.displayID)
+        XCTAssertEqual(a.zoom.scale, 3, "the person's zoom; the centre is the Mac's")
+        XCTAssertEqual(a.rotation, .none)
+        XCTAssertEqual(a.fit, .fit)
+        // The same pane again keeps its generation (no held input released, no capture restarted).
+        let again = WorkspaceRequestValidator.validate(tiles: tiles, catalog: [:], hostID: "mac-a", canvasPixels: canvas,
+                                                       previous: ["o": a], nextGeneration: &next, displays: displays)
+        XCTAssertEqual(again.assignments.first?.assignmentGeneration, a.assignmentGeneration)
+        // Zoom below 1 is 1 here; a second Overview, or the reserved key sent as a window, is refused.
+        let two = WorkspaceRequestValidator.validate(tiles: [
+            ["id": "a", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "overview": true, "zoom": [0.7, 0.5, 0.5]],
+            ["id": "b", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0, "overview": true],
+            ["id": "c", "x": 0.5, "y": 0.0, "w": 0.1, "h": 0.1, "window": Int(WorkspaceSource.overviewKey), "gen": 0],
+        ], catalog: [:], hostID: "mac-a", canvasPixels: canvas, previous: [:], nextGeneration: &next, displays: displays)
+        XCTAssertEqual(two.assignments.map(\.tileID), ["a"])
+        XCTAssertEqual(two.assignments.first?.zoom.scale, 1)
+        XCTAssertEqual(two.rejected["b"], "duplicateWindow")
+        XCTAssertEqual(two.rejected["c"], "unavailable", "the reserved key is never a window number")
+        // No listed display: refused.
+        let none = WorkspaceRequestValidator.validate(tiles: tiles, catalog: [:], hostID: "mac-a", canvasPixels: canvas,
+                                                      previous: [:], nextGeneration: &next)
+        XCTAssertEqual(none.rejected["o"], "unavailable")
+    }
+
+    func testTheMacAdvertisesTheOverviewPaneOnlyWithWindowMode() {
+        XCTAssertEqual(WindowWorkspaceWire.overviewPaneFeature, "overviewPane")
+        let on = MacSender.welcomeFeatures(windowStreamingAllowed: true)
+        XCTAssertTrue(on.contains(WindowWorkspaceWire.overviewPaneFeature))
+        XCTAssertLessThanOrEqual(on.count, 16, "a receiver reads at most 16")
+        XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(WindowWorkspaceWire.overviewPaneFeature))
+    }
+
+    func testEachDisplayIsCapturedAtThePixelsItCoversAndHiddenOnesIdle() throws {
+        let backing: [UInt32: Double] = [1: 2, 2: 2]
+        let fit = OverviewPaneCapturePlan.requests(layout(), backingScales: backing, fps: 30)
+        XCTAssertEqual(fit[1]?.fps, 30)
+        XCTAssertEqual(fit[2]?.fps, 30)
+        XCTAssertEqual(fit[1]?.size, WorkspaceCaptureSizing.size(source: CGSize(width: 1512, height: 982),
+                                                                 drawScale: layout().fitScale, backingScale: 2))
+        // Zoomed in on the laptop: it is captured sharper; the external display is out of view.
+        let close = layout(zoom: 4, center: WorkspacePoint(x: 700, y: 500))
+        XCTAssertNil(close.visibleRect(for: external))
+        let zoomed = OverviewPaneCapturePlan.requests(close, backingScales: backing, fps: 30)
+        XCTAssertGreaterThan(try XCTUnwrap(zoomed[1]).size.width, try XCTUnwrap(fit[1]).size.width)
+        XCTAssertEqual(zoomed[1]?.fps, 30)
+        XCTAssertEqual(zoomed[2]?.fps, OverviewPaneCapturePlan.hiddenFPS)
+        XCTAssertEqual(zoomed[2]?.size, fit[2]?.size, "kept at its 1x size, ready when the view reaches it")
+        // At 8x never more than the display's own pixels.
+        let most = OverviewPaneCapturePlan.requests(layout(zoom: 8, center: WorkspacePoint(x: 700, y: 500)), backingScales: backing, fps: 30)
+        XCTAssertEqual(most[1]?.size, CGSize(width: 3024, height: 1964))
+    }
+
+    /// The real cursor is drawn by the receiver once, where it is in the Overview pane.
+    func testTheCursorIsPlacedWhereItIsInTheOverviewPane() throws {
+        let canvas = CGSize(width: 2000, height: 1000)
+        let rect = WorkspaceRect(x: 0.05, y: 0.05, width: 0.5, height: 0.6)
+        let l = OverviewPaneLayout(displays: [laptop, external], pane: rect.scaled(to: WorkspaceSize(width: 2000, height: 1000)),
+                                   zoom: 2, center: WorkspacePoint(x: 1600, y: 400))
+        let u = try XCTUnwrap(l.union)
+        let a = WorkspaceTileAssignment(tileID: "o", rect: rect, windowID: WorkspaceSource.overviewKey, windowGeneration: 0, pid: 0,
+                                        bundleID: "", follow: .window, rotation: .none, fit: .fit, zoom: l.paneZoom,
+                                        assignmentGeneration: 1, isOverview: true)
+        var targeting = WorkspaceInputTargeting()
+        targeting.canvas = canvas
+        targeting.windowFrames = [WorkspaceSource.overviewKey: CGRect(x: u.x, y: u.y, width: u.width, height: u.height)]
+        _ = targeting.update(assignments: [a])
+        XCTAssertEqual(targeting.relativeTile, "o", "the only pane is the focused one")
+        let g = WorkspacePoint(x: 1700, y: 300)
+        let placed = try XCTUnwrap(targeting.cursorPlacement(forGlobal: CGPoint(x: g.x, y: g.y), in: "o"))
+        let expected = l.panePoint(fromGlobal: g)
+        XCTAssertEqual(placed.x, expected.x / canvas.width, accuracy: 1e-9)
+        XCTAssertEqual(placed.y, expected.y / canvas.height, accuracy: 1e-9)
+        XCTAssertEqual(placed.kx, l.scale / canvas.width, accuracy: 1e-12, "one Mac point at the camera's scale")
+        // A touch there lands on the display under it.
+        let hit = try XCTUnwrap(targeting.globalPoint(at: WorkspacePoint(x: expected.x / canvas.width, y: expected.y / canvas.height)))
+        XCTAssertEqual(hit.x, g.x, accuracy: 1e-6)
+        XCTAssertEqual(hit.y, g.y, accuracy: 1e-6)
+        // Keys go wherever the Mac's focus is, and all of the Mac's sound plays, as with a desktop pane.
+        XCTAssertEqual(WorkspaceKeyboardGate.decide(active: a, frontmostPID: 42, focusedWindowID: 0, focusedWindowIsChild: false), .deliver)
+        XCTAssertEqual(WindowAudioSources.of([a]), .everything)
+    }
+}

@@ -8,6 +8,9 @@
 //   second after the Display Overview or the arrangement editor opens it narrows the canvas it
 //   gives the overlay, and a fixture-only button does the same on demand. A label counts the
 //   resizes.
+// - With `MEOW_UITEST_STAGE_PEEK_PANES=1` as well: the model is in Window view on a stand-in Mac
+//   that also offers the Overview pane (`overviewPane`), with the main display already in a pane,
+//   and the host draws the real pane chrome (titles and their menus) under the overlay. No video.
 
 #if DEBUG
 import SwiftUI
@@ -15,12 +18,23 @@ import UIKit
 
 enum UITestStagePeekFixture {
     static let isEnabled = ProcessInfo.processInfo.environment["MEOW_UITEST_STAGE_PEEK"] == "1"
+    static let showsPanes = ProcessInfo.processInfo.environment["MEOW_UITEST_STAGE_PEEK_PANES"] == "1"
 
     /// The overview fixture's offline model, also marked as a Mac that offers the window workspace
     /// (the overlay only opens then). Its `send` stays the default, which sends nothing.
     @MainActor static func makeModel() -> WorkspaceModel {
         let model = UITestOverviewFixture.makeModel()
-        model.apply(.features([WindowWorkspaceWire.welcomeFeature, DisplayArrangeWire.welcomeFeature]))
+        guard showsPanes else {
+            model.apply(.features([WindowWorkspaceWire.welcomeFeature, DisplayArrangeWire.welcomeFeature]))
+            return model
+        }
+        model.apply(.connected(peerID: "uitest-mac"))
+        model.apply(.features([WindowWorkspaceWire.welcomeFeature, DisplayArrangeWire.welcomeFeature,
+                               WindowWorkspaceWire.overviewPaneFeature]))
+        model.apply(.mode(window: true))
+        if let main = UITestOverviewFixture.displays.first(where: \.isMain) {
+            model.choose(model.displayWindow(main), asNewTile: false)
+        }
         return model
     }
 }
@@ -39,6 +53,9 @@ struct UITestStagePeekFixtureHost: View {
             let canvas = canvasFrame(in: geo.size)
             ZStack(alignment: .topLeading) {
                 Color(white: 0.12)
+                if UITestStagePeekFixture.showsPanes {
+                    WorkspaceChromeView(model: model, picture: canvas, inputAllowed: true, safeArea: safeFrame(canvas))
+                }
                 StagePeekOverlay(model: model, edge: .left, frame: canvas, safe: safeFrame(canvas),
                                  avoiding: [], hapticsEnabled: false, inputAllowed: true, onDisplay: { _ in })
                 resizeControls

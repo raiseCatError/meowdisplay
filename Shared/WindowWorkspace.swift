@@ -326,6 +326,232 @@ struct TileContentTransform: Equatable, Sendable {
     }
 }
 
+// MARK: - Overview pane
+
+/// Where every Mac display lands in an Overview pane, and back. Displays and the camera centre are
+/// in global Mac points (top-left origin, `CGDisplayBounds`); the pane is in canvas pixels.
+///
+/// Zoom 1 fits the whole arrangement in the pane. Above 1 the camera centre is a global point at
+/// the pane's centre, kept so the view never leaves the arrangement's bounds; it moves only when
+/// the cursor comes within `edgeMarginShare` of the pane's edge (`following(cursor:)`), as macOS
+/// zoom does with "move when the pointer reaches an edge". Pure: the Mac's compositor, capture
+/// sizing and input share it, and `paneZoom` makes `TileContentTransform` map exactly the same way.
+struct OverviewPaneLayout: Equatable, Sendable {
+    struct Display: Equatable, Sendable {
+        var id: UInt32
+        var bounds: WorkspaceRect
+    }
+
+    static let minimumZoom = 1.0
+    static let maximumZoom = 8.0
+    /// The view follows the cursor once it is this share of the pane's shorter side from an edge.
+    static let edgeMarginShare = 0.12
+    /// A scroll is as long at every zoom (canvas pixels per Mac point), as on a real trackpad.
+    static let scrollPixelsPerPoint = 2.0
+    /// How far inside a display's far edges a clamped cursor stays (points).
+    static let edgeInset = 1e-3
+
+    let displays: [Display]
+    let pane: WorkspaceRect
+    let zoom: Double
+    /// The global point at the pane's centre (already clamped).
+    let center: WorkspacePoint
+
+    /// `center` nil: the arrangement's centre.
+    init(displays: [Display], pane: WorkspaceRect, zoom: Double, center: WorkspacePoint? = nil) {
+        let kept = displays.filter { $0.bounds.width > 0 && $0.bounds.height > 0 }
+        let z = OverviewPaneLayout.clampZoom(zoom)
+        let union = OverviewPaneLayout.bounds(of: kept.map(\.bounds))
+        let fit = OverviewPaneLayout.scale(fitting: union, in: pane)
+        self.displays = kept
+        self.pane = pane
+        self.zoom = z
+        self.center = OverviewPaneLayout.clamp(center ?? WorkspacePoint(x: union?.midX ?? 0, y: union?.midY ?? 0),
+                                               union: union, pane: pane, scale: fit * z)
+    }
+
+    static func clampZoom(_ z: Double) -> Double { z.isFinite ? min(max(z, minimumZoom), maximumZoom) : minimumZoom }
+
+    /// The arrangement's bounds: every display together.
+    var union: WorkspaceRect? { Self.bounds(of: displays.map(\.bounds)) }
+
+    /// Canvas pixels per point that fit every display in the pane.
+    var fitScale: Double { Self.scale(fitting: union, in: pane) }
+    /// Canvas pixels per point now.
+    var scale: Double { fitScale * zoom }
+
+    func panePoint(fromGlobal g: WorkspacePoint) -> WorkspacePoint {
+        WorkspacePoint(x: pane.midX + (g.x - center.x) * scale, y: pane.midY + (g.y - center.y) * scale)
+    }
+
+    func globalPoint(fromPane p: WorkspacePoint) -> WorkspacePoint {
+        let s = scale
+        guard s > 0 else { return center }
+        return WorkspacePoint(x: center.x + (p.x - pane.midX) / s, y: center.y + (p.y - pane.midY) / s)
+    }
+
+    /// A display's whole rectangle in the pane (it may reach past the pane's edges when zoomed in).
+    func rect(for d: Display) -> WorkspaceRect {
+        let o = panePoint(fromGlobal: WorkspacePoint(x: d.bounds.x, y: d.bounds.y))
+        return WorkspaceRect(x: o.x, y: o.y, width: d.bounds.width * scale, height: d.bounds.height * scale)
+    }
+
+    /// The part of a display the pane shows; nil when it is wholly outside the pane.
+    func visibleRect(for d: Display) -> WorkspaceRect? { rect(for: d).intersection(pane) }
+
+    /// A finger's movement in canvas pixels -> the cursor's movement in global points.
+    func globalVector(fromPane dx: Double, _ dy: Double) -> WorkspacePoint {
+        let s = scale
+        guard s > 0 else { return WorkspacePoint(x: 0, y: 0) }
+        return WorkspacePoint(x: dx / s, y: dy / s)
+    }
+
+    /// `g` kept on a display: itself when a display has it, else the nearest point of the nearest
+    /// display (a point in a gap between displays, or past the arrangement's edge). Nil: no displays.
+    func clampToDisplays(_ g: WorkspacePoint) -> WorkspacePoint? {
+        var best: (point: WorkspacePoint, distance: Double)?
+        for d in displays {
+            let b = d.bounds
+            let p = WorkspacePoint(x: min(max(g.x, b.x), max(b.maxX - Self.edgeInset, b.x)),
+                                   y: min(max(g.y, b.y), max(b.maxY - Self.edgeInset, b.y)))
+            let dx = p.x - g.x, dy = p.y - g.y
+            let distance = dx * dx + dy * dy
+            if let b = best, b.distance <= distance { continue }
+            best = (p, distance)
+        }
+        return best?.point
+    }
+
+    /// The camera centred on `g` (as far as the arrangement's bounds allow).
+    func centered(on g: WorkspacePoint) -> OverviewPaneLayout {
+        OverviewPaneLayout(displays: displays, pane: pane, zoom: zoom, center: g)
+    }
+
+    /// The same view at another zoom, centred on the cursor `g` (zoom 1: everything, fitted).
+    func zoomed(to z: Double, cursor g: WorkspacePoint) -> OverviewPaneLayout {
+        OverviewPaneLayout(displays: displays, pane: pane, zoom: z, center: g)
+    }
+
+    /// The edge rule: the centre moves only when the cursor's place in the pane is within the edge
+    /// margin, by just enough to put it back on the margin. At zoom 1 nothing moves.
+    func following(cursor g: WorkspacePoint) -> OverviewPaneLayout {
+        let s = scale
+        guard s > 0, pane.width > 0, pane.height > 0 else { return self }
+        let margin = Self.edgeMarginShare * min(pane.width, pane.height)
+        let p = panePoint(fromGlobal: g)
+        var c = center
+        if p.x < pane.x + margin { c.x -= (pane.x + margin - p.x) / s } else if p.x > pane.maxX - margin { c.x += (p.x - (pane.maxX - margin)) / s }
+        if p.y < pane.y + margin { c.y -= (pane.y + margin - p.y) / s } else if p.y > pane.maxY - margin { c.y += (p.y - (pane.maxY - margin)) / s }
+        guard c != center else { return self }
+        return OverviewPaneLayout(displays: displays, pane: pane, zoom: zoom, center: c)
+    }
+
+    /// This camera as a pane zoom over the arrangement's bounds: with the union as the source and
+    /// Fit, `TileContentTransform` maps every point exactly as this layout does.
+    var paneZoom: WorkspacePaneZoom {
+        guard let u = union, u.width > 0, u.height > 0 else { return .identity }
+        return WorkspacePaneZoom(scale: zoom, centerX: (center.x - u.x) / u.width, centerY: (center.y - u.y) / u.height)
+    }
+
+    private static func bounds(of rects: [WorkspaceRect]) -> WorkspaceRect? {
+        guard let first = rects.first else { return nil }
+        var x0 = first.x, y0 = first.y, x1 = first.maxX, y1 = first.maxY
+        for r in rects.dropFirst() { x0 = min(x0, r.x); y0 = min(y0, r.y); x1 = max(x1, r.maxX); y1 = max(y1, r.maxY) }
+        return WorkspaceRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+
+    private static func scale(fitting union: WorkspaceRect?, in pane: WorkspaceRect) -> Double {
+        guard let u = union, u.width > 0, u.height > 0, pane.width > 0, pane.height > 0 else { return 0 }
+        return min(pane.width / u.width, pane.height / u.height)
+    }
+
+    /// Per axis: the arrangement's middle when the view is wider than it, else kept so the view
+    /// stays inside it.
+    private static func clamp(_ c: WorkspacePoint, union: WorkspaceRect?, pane: WorkspaceRect, scale: Double) -> WorkspacePoint {
+        guard let u = union, scale > 0, c.x.isFinite, c.y.isFinite else {
+            return WorkspacePoint(x: union?.midX ?? 0, y: union?.midY ?? 0)
+        }
+        func axis(_ v: Double, _ lo: Double, _ extent: Double, _ view: Double) -> Double {
+            let half = view / scale / 2
+            return extent <= 2 * half ? lo + extent / 2 : min(max(v, lo + half), lo + extent - half)
+        }
+        return WorkspacePoint(x: axis(c.x, u.x, u.width, pane.width), y: axis(c.y, u.y, u.height, pane.height))
+    }
+}
+
+/// The receiver's rules for an Overview pane: when it is offered, the displays its menu lists,
+/// and where each gesture on a pane goes. Pure; the Stage Peek, pane chrome and touch code follow it.
+enum OverviewPaneInput {
+    /// The displays an Overview pane shows, in reading order: each drawn display (a mirror set
+    /// once), never one of MeowDisplay's own screens. As the Mac's `overviewDisplays`.
+    static func shownDisplays(_ catalog: [CatalogDisplayItem]) -> [CatalogDisplayItem] {
+        let drawn = DisplayOverviewModel(catalog: catalog).drawnDisplays.filter { !$0.isMeow && !$0.isOwn }
+        return drawn.compactMap { d in catalog.first { $0.id == d.id } }
+    }
+
+    /// Offered as a pane source only when the Mac shows Overview panes (`overviewPane`) and has
+    /// two or more displays to show in one.
+    static func offered(macOffers: Bool, displays: [CatalogDisplayItem]) -> Bool {
+        macOffers && shownDisplays(displays).count >= 2
+    }
+
+    /// The fingers on a pane, as the touch code tells them apart.
+    enum Gesture: Equatable, Sendable {
+        /// One finger: the pointer (moves, taps, holds and drags).
+        case oneFinger
+        /// Two fingers moving together.
+        case twoFingerDrag
+        case pinch
+    }
+
+    /// Where a gesture goes.
+    enum Route: Equatable, Sendable {
+        /// The pointer, in this model (a trackpad moves the Mac cursor relatively; a tap clicks;
+        /// tap, then hold and move, drags).
+        case pointer(PointerInputMode)
+        /// The Mac scrolls (at the cursor in an Overview pane).
+        case scrollMac
+        /// The pane's zoom on this device's layout (an Overview pane's is the Mac's camera, 1x-8x).
+        case zoomPane
+        /// The pane's picture moves (a zoomed or filled window or display pane only).
+        case movePane
+        /// Nothing.
+        case none
+    }
+
+    /// `kind`: what the pane under the fingers shows. In an Overview pane one finger is always a
+    /// trackpad, two fingers scroll the Mac and a pinch zooms; nothing moves its view (the Mac's
+    /// camera follows the cursor). Other panes are unchanged.
+    static func route(_ gesture: Gesture, kind: WorkspaceSource.Kind, preferred: PointerInputMode,
+                      inputReachesMac: Bool, moveViewActive: Bool) -> Route {
+        switch (gesture, kind) {
+        case (.oneFinger, .overview): return .pointer(.trackpad)
+        case (.oneFinger, _): return .pointer(preferred)
+        case (.pinch, _): return .zoomPane
+        case (.twoFingerDrag, .overview): return inputReachesMac && !moveViewActive ? .scrollMac : .none
+        case (.twoFingerDrag, _):
+            return WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: inputReachesMac,
+                                                       moveViewActive: moveViewActive) ? .scrollMac : .movePane
+        }
+    }
+
+    /// The one-finger pointer model for a touch sequence that starts in a pane of `kind`.
+    static func pointerMode(preferred: PointerInputMode, kind: WorkspaceSource.Kind?) -> PointerInputMode {
+        guard let kind, case .pointer(let mode) = route(.oneFinger, kind: kind, preferred: preferred,
+                                                        inputReachesMac: true, moveViewActive: false) else { return preferred }
+        return mode
+    }
+
+    /// An Overview pane's zoom after a pinch by `ratio` from `start`: the person's scale, 1x-8x
+    /// (`OverviewPaneLayout`). The centre is the Mac's, so it is sent as the middle. nil: 1x.
+    static func zoom(from start: WorkspacePaneZoom?, ratio: Double) -> WorkspacePaneZoom? {
+        let r = ratio.isFinite && ratio > 0 ? ratio : 1
+        let scale = OverviewPaneLayout.clampZoom((start?.scale ?? 1) * r)
+        guard abs(scale - OverviewPaneLayout.minimumZoom) > 1e-4 else { return nil }
+        return WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5)
+    }
+}
+
 // MARK: - Sources
 
 /// What a tile shows. Identity is checked by the sender, never trusted from
@@ -353,7 +579,19 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     static let displayKeyBit: UInt32 = 0x8000_0000
     static func displayKey(_ displayID: UInt32) -> UInt32 { displayKeyBit | (displayID & ~displayKeyBit) }
     static func isDisplayKey(_ id: UInt32) -> Bool { id & displayKeyBit != 0 }
+    /// True for every source that isn't a Mac window: a display, and the Overview too.
     var isDisplay: Bool { Self.isDisplayKey(windowID) }
+
+    /// The Overview pane source: every Mac display at once, where it sits in the Mac's arrangement
+    /// (`OverviewPaneLayout`). Its reserved key is the display key of `kCGNullDirectDisplay` (0),
+    /// which no real display has, so it is never taken for a window or a display. On the wire it
+    /// is `"overview": true` instead of `"window"` or `"display"`.
+    static let overviewKey: UInt32 = displayKeyBit
+    static func overview(host: String) -> WorkspaceSource { WorkspaceSource(host: host, windowID: overviewKey) }
+    var isOverview: Bool { windowID == Self.overviewKey }
+
+    enum Kind: Equatable, Sendable { case window, display, overview }
+    var kind: Kind { isOverview ? .overview : isDisplay ? .display : .window }
 }
 
 struct WorkspaceTile: Equatable, Codable, Sendable {
