@@ -2872,7 +2872,7 @@ final class StreamReceiver: ObservableObject {
             if diagnostics.isEnabled { diagnostics.recordRTT(rtt, at: StreamDiagnosticsClock.nowMs()) }
         case "ping":
             // Adaptive (#123): `adaptive: 1` asks for 2 s `stats` with telemetry.
-            ReceiverAdaptiveState.shared.observeMacPing(obj, now: ProcessInfo.processInfo.systemUptime)
+            ReceiverAdaptiveState.shared.observeMacPing(obj, now: StreamDiagnosticsClock.nowSeconds())
             // The Mac piggybacks its send-side health on liveness pings.
             if let enc = obj["encDrops"] as? Int {
                 macEncDrops = enc
@@ -4651,7 +4651,7 @@ final class StreamReceiver: ObservableObject {
         // and is more precise than counting raw TCP chunks (which could
         // span multiple frames or arrive as a fraction of one).
         bytesThisWindow += CMSampleBufferGetTotalSampleSize(sample)
-        ReceiverAdaptiveState.shared.noteFrame(now: ProcessInfo.processInfo.systemUptime)
+        ReceiverAdaptiveState.shared.noteFrame(now: StreamDiagnosticsClock.nowSeconds())
         #if DEBUG
         debugFramesReceivedWindow += 1
         let arrivalNow = Date()
@@ -4822,7 +4822,7 @@ final class StreamReceiver: ObservableObject {
             statsReportCounter += 1
             // Every 5 windows, or every 2 while the Mac announces adaptive
             // mode (#123, `AdaptiveTelemetryCadence`).
-            let adaptiveNow = ProcessInfo.processInfo.systemUptime
+            let adaptiveNow = StreamDiagnosticsClock.nowSeconds()
             if statsReportCounter >= ReceiverAdaptiveState.shared.statsEveryWindows(now: adaptiveNow) {
                 statsReportCounter = 0
                 var statsMessage: [String: Any] = [
@@ -6089,7 +6089,7 @@ final class StreamReceiver: ObservableObject {
                             maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
                             advertisesAddresses: advertises)
                     }
-                    if adaptiveState.checkSuggestion(now: ProcessInfo.processInfo.systemUptime) {
+                    if adaptiveState.checkSuggestion(now: StreamDiagnosticsClock.nowSeconds()) {
                         DispatchQueue.main.async {
                             NotificationCenter.default.post(name: ReceiverAdaptiveState.suggestionNotification, object: nil)
                         }

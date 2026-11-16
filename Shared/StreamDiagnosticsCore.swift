@@ -87,6 +87,14 @@ enum StreamDiagnosticsClock {
     static func nowMs() -> Double {
         Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000
     }
+
+    /// The same clock in seconds: the time base of the adaptive receiver
+    /// state. Shared code compiled into iOS uses this rather than
+    /// `ProcessInfo.systemUptime`, a required-reason API (system boot time)
+    /// that the iOS privacy manifest does not declare.
+    static func nowSeconds() -> TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+    }
 }
 
 // MARK: - Histogram
