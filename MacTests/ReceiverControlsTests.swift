@@ -184,6 +184,32 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(state.request(.mirror))
     }
 
+    /// Window view never replaces the confirmed Mirror/Extend (the Mac's "window" state isn't a
+    /// `ReceiverDisplayMode`): leaving it for that same mode is a real switch and is sent.
+    func testLeavingWindowViewCanRequestTheModeConfirmedBeforeIt() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        XCTAssertTrue(state.request(.mirror, leavingWindow: true))
+        XCTAssertEqual(state.pendingMode, .mirror)
+        XCTAssertTrue(state.confirm(.mirror), "the Mac's Mirror answers this request")
+        XCTAssertNil(state.pendingMode)
+
+        var extend = DisplayModeRequestState()
+        _ = extend.confirm(.extend)
+        XCTAssertTrue(extend.request(.extend, leavingWindow: true))
+        XCTAssertFalse(extend.request(.mirror, leavingWindow: true), "still one request at a time")
+    }
+
+    /// Outside Window view nothing changes: the mode already confirmed is not asked for again.
+    func testWithoutLeavingWindowViewTheConfirmedModeIsStillRefused() {
+        var state = DisplayModeRequestState()
+        _ = state.confirm(.mirror)
+        XCTAssertFalse(state.request(.mirror))
+        XCTAssertFalse(state.request(.mirror, leavingWindow: false))
+        XCTAssertNil(state.pendingMode)
+        XCTAssertTrue(state.request(.extend, leavingWindow: false))
+    }
+
     func testMacOriginatedModeStateUpdatesWithoutReceiverConfirmation() {
         var state = DisplayModeRequestState()
         XCTAssertFalse(state.confirm(.mirror))
