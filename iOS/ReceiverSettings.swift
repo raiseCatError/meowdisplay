@@ -645,7 +645,7 @@ private struct DisplaySettingsPage: View {
                 }
             }
         } footer: {
-            Text("Automatic saves data in Low Data Mode, and on mobile data once you agree. Saving data lowers resolution, bitrate and frame rate for this device only. The stream never stops. Applies while the Mac's Streaming Mode is Automatic.")
+            Text("Automatic saves data in Low Data Mode (on this device or the Mac), and on mobile data if you choose Save Data. Full Quality on mobile data still saves in Low Data Mode. Off always streams at full quality, even in Low Data Mode. Saving data lowers resolution, bitrate and frame rate for this device only. The stream never stops. Applies while the Mac's Streaming Mode is Automatic.")
         }
     }
 
