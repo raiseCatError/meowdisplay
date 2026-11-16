@@ -355,7 +355,7 @@ private fun SettingsPageContent(
             Caption(
                 "Lowers resolution, bitrate and frame rate on this device only, while your Mac's Streaming Mode is Automatic. " +
                     "Automatic saves data when Android's Data Saver is on for a metered connection. On always saves data; Off never does. " +
-                    "A change applies right away while connected."
+                    "A change is sent at once; your Mac may take a few seconds to apply it."
             )
         }
         SettingsPage.Audio -> {

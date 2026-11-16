@@ -18,8 +18,9 @@ import com.raisecaterror.meowdisplay.core.remote.RouteClassifier
 import com.raisecaterror.meowdisplay.core.remote.RouteInfo
 import com.raisecaterror.meowdisplay.core.remote.Transport
 import com.raisecaterror.meowdisplay.core.session.NetworkCostHint
-import com.raisecaterror.meowdisplay.core.session.NetworkCostMapper
 import com.raisecaterror.meowdisplay.core.session.PathCostFlags
+import com.raisecaterror.meowdisplay.core.session.PathCostTable
+import com.raisecaterror.meowdisplay.core.session.TrackedPath
 import java.net.InetAddress
 
 /**
@@ -38,7 +39,14 @@ class RouteMonitor(context: Context) {
     private var started = false
     private var quietUntil = 0L
 
-    private class Known(val transport: Transport, val addresses: List<ByteArray>, val routes: List<IpPrefix>?, val cost: PathCostFlags)
+    private class Known(val transport: Transport, val addresses: List<ByteArray>, val routes: List<IpPrefix>?)
+
+    /**
+     * What the cost hint is read from. Unlike [known] it survives [stop] (the Activity going to the
+     * background), so a hello sent while monitoring is paused keeps the last known hint; the first
+     * callback after [start] replaces it. Guarded by [lock].
+     */
+    private val costTable = PathCostTable<Network>()
 
     /** The default network appeared or its link properties changed (debounced: one call per change). */
     @Volatile var onDefaultNetworkChanged: (() -> Unit)? = null
@@ -55,6 +63,12 @@ class RouteMonitor(context: Context) {
     private val announce = Runnable { onDefaultNetworkChanged?.invoke() }
     private val announceCost = Runnable { onPathCostMayHaveChanged?.invoke() }
 
+    /** Shortly after a restart: networks kept from before the pause that no callback confirmed are gone. */
+    private val expireStaleCost = Runnable {
+        synchronized(lock) { costTable.expireStale() }
+        costChanged()
+    }
+
     private val dataSaverChanged = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             readDataSaver()
@@ -70,7 +84,10 @@ class RouteMonitor(context: Context) {
             if (network == defaultNetwork) changed()
         }
         override fun onLost(network: Network) {
-            synchronized(lock) { known.remove(network) }
+            synchronized(lock) {
+                known.remove(network)
+                costTable.remove(network)
+            }
             costChanged()
         }
     }
@@ -79,13 +96,19 @@ class RouteMonitor(context: Context) {
     private val vpns = Watcher()
     private val defaults = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            synchronized(lock) { defaultNetwork = network }
+            synchronized(lock) {
+                defaultNetwork = network
+                costTable.setDefault(network)
+            }
             refresh(network)
             changed()
             costChanged()
         }
         override fun onLost(network: Network) {
-            synchronized(lock) { if (defaultNetwork == network) defaultNetwork = null }
+            synchronized(lock) {
+                if (defaultNetwork == network) defaultNetwork = null
+                costTable.clearDefault(network)
+            }
             costChanged()
         }
     }
@@ -107,6 +130,7 @@ class RouteMonitor(context: Context) {
             connectivity.registerDefaultNetworkCallback(defaults)
         }.onFailure { started = false }
         if (!started) return
+        main.postDelayed(expireStaleCost, SETTLE_MS)
         // Data Saver is switched in system settings; the system tells apps with this protected broadcast.
         readDataSaver()
         runCatching {
@@ -126,11 +150,14 @@ class RouteMonitor(context: Context) {
         started = false
         main.removeCallbacks(announce)
         main.removeCallbacks(announceCost)
+        main.removeCallbacks(expireStaleCost)
         runCatching { appContext.unregisterReceiver(dataSaverChanged) }
         for (callback in listOf(others, vpns, defaults)) runCatching { connectivity.unregisterNetworkCallback(callback) }
         synchronized(lock) {
             known.clear()
             defaultNetwork = null
+            // Paused is not unknown: the last cost hint stays until fresh callbacks replace it.
+            costTable.pause()
         }
     }
 
@@ -161,7 +188,10 @@ class RouteMonitor(context: Context) {
             vpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
             notMetered = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
         )
-        synchronized(lock) { known[network] = Known(transport, addresses, routes, cost) }
+        synchronized(lock) {
+            known[network] = Known(transport, addresses, routes)
+            costTable.update(network, TrackedPath(addresses, cost))
+        }
         costChanged()
     }
 
@@ -178,21 +208,14 @@ class RouteMonitor(context: Context) {
 
     /**
      * The cost hint (PROTOCOL.md 6.20) for a connection whose socket has [local] as this device's address:
-     * the network that owns that address (high confidence for a plain network), else the system's default
-     * network (capped at medium), else null: nothing known, nothing sent. Only capability flags are read;
-     * no SSID, address, interface name or carrier ever leaves here.
+     * the network that owns that address (high confidence for a plain network); the system's default
+     * network (capped at medium) only when [local] is unknown; else null: nothing known, nothing sent
+     * (an address that matches no tracked network, such as our own hotspot, is not the default network).
+     * Still answers from the last known networks while monitoring is stopped. Only capability flags are
+     * read; no SSID, address, interface name or carrier ever leaves here.
      */
-    fun costHint(local: InetAddress?): NetworkCostHint? {
-        val mine = local?.address
-        val (facts, own) = synchronized(lock) {
-            val byAddress = mine?.let { address -> known.values.firstOrNull { k -> k.addresses.any { it.contentEquals(address) } } }
-            when {
-                byAddress != null -> byAddress to true
-                else -> defaultNetwork?.let { known[it] }?.let { it to false }
-            }
-        } ?: return null
-        return NetworkCostMapper.hint(facts.cost, dataSaver, ownPath = own)
-    }
+    fun costHint(local: InetAddress?): NetworkCostHint? =
+        synchronized(lock) { costTable.hint(local?.address, dataSaver) }
 
     /** The system's networks right now, the default one marked. */
     fun snapshot(): List<NetworkFacts> = synchronized(lock) {

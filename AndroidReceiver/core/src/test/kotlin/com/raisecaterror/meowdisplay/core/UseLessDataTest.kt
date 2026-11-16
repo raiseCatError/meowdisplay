@@ -10,7 +10,9 @@ import com.raisecaterror.meowdisplay.core.session.PathCost
 import com.raisecaterror.meowdisplay.core.session.PathCostFlags
 import com.raisecaterror.meowdisplay.core.session.PathInterface
 import com.raisecaterror.meowdisplay.core.session.ReceiverMessages
+import com.raisecaterror.meowdisplay.core.session.PathCostTable
 import com.raisecaterror.meowdisplay.core.session.ReceiverSession
+import com.raisecaterror.meowdisplay.core.session.TrackedPath
 import com.raisecaterror.meowdisplay.core.session.UseLessData
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -110,6 +112,121 @@ class UseLessDataTest {
     @Test
     fun cellularWinsOverWifiWhenBothAreReported() {
         assertEquals(PathInterface.Cellular, hint(PathCostFlags(cellular = true, wifi = true))?.iface)
+    }
+
+    // MARK: - Which network a connection runs over, and pausing the monitor
+
+    private val wifiAddress = byteArrayOf(10, 0, 0, 5)
+    private val cellularAddress = byteArrayOf(100, 64, 1, 2)
+    private val hotspotAddress = byteArrayOf(192.toByte(), 168.toByte(), 43, 1)
+    private val wifiPath = TrackedPath(listOf(wifiAddress), PathCostFlags(wifi = true, notMetered = true))
+    private val cellularPath = TrackedPath(listOf(cellularAddress), PathCostFlags(cellular = true))
+    private val wifiHint = expect(PathCost.Unmetered, PathConfidence.High, PathInterface.WiFi)
+
+    private fun tableWithWifiAndCellular() = PathCostTable<String>().apply {
+        update("wifi", wifiPath)
+        update("cell", cellularPath)
+        setDefault("cell")
+    }
+
+    @Test
+    fun theNetworkThatOwnsTheLocalAddressIsTheConnectionsOwnPath() {
+        val table = tableWithWifiAndCellular()
+        assertEquals(wifiHint, table.hint(wifiAddress, dataSaver = false))
+        assertEquals(expect(PathCost.Expensive, PathConfidence.High, PathInterface.Cellular), table.hint(cellularAddress, dataSaver = false))
+    }
+
+    @Test
+    fun anUnknownLocalAddressFallsBackToTheDefaultNetworkAtMediumConfidence() {
+        assertEquals(
+            expect(PathCost.Expensive, PathConfidence.Medium, PathInterface.Cellular),
+            tableWithWifiAndCellular().hint(null, dataSaver = false),
+        )
+    }
+
+    @Test
+    fun aKnownLocalAddressThatMatchesNoNetworkIsUnknownNotTheDefaultNetwork() {
+        // The phone's own hotspot, a USB tether or Wi-Fi Direct is no tracked network: never call it cellular.
+        val table = tableWithWifiAndCellular()
+        assertNull(table.hint(hotspotAddress, dataSaver = false))
+        assertNull(table.hint(hotspotAddress, dataSaver = true))
+        assertNull(
+            NetworkCostMapper.hintFor(hotspotAddress, mapOf("cell" to cellularPath), defaultNetwork = "cell", dataSaver = true),
+        )
+    }
+
+    @Test
+    fun noDefaultNetworkAndNoLocalAddressIsUnknown() {
+        assertNull(PathCostTable<String>().hint(null, dataSaver = false))
+        assertNull(PathCostTable<String>().apply { update("wifi", wifiPath) }.hint(null, dataSaver = false))
+    }
+
+    @Test
+    fun pausingTheMonitorKeepsTheLastKnownHint() {
+        val table = tableWithWifiAndCellular()
+        table.pause()
+        assertEquals("paused is not unknown", wifiHint, table.hint(wifiAddress, dataSaver = false))
+        assertEquals(
+            expect(PathCost.Expensive, PathConfidence.Medium, PathInterface.Cellular),
+            table.hint(null, dataSaver = false),
+        )
+    }
+
+    @Test
+    fun theFirstFreshCallbackAfterARestartReplacesEverythingKept() {
+        val table = tableWithWifiAndCellular()
+        table.pause()
+        // The restart replays only the networks that still exist: Wi-Fi is gone, a new one appeared.
+        val newWifiAddress = byteArrayOf(172.toByte(), 16, 0, 9)
+        table.update("wifi2", TrackedPath(listOf(newWifiAddress), PathCostFlags(wifi = true, notMetered = true)))
+        assertNull("the old Wi-Fi must not survive a real network change", table.hint(wifiAddress, dataSaver = false))
+        assertNull("nor the old default", table.hint(null, dataSaver = false))
+        assertEquals(wifiHint, table.hint(newWifiAddress, dataSaver = false))
+        table.setDefault("wifi2")
+        assertEquals(
+            expect(PathCost.Unmetered, PathConfidence.Medium, PathInterface.WiFi),
+            table.hint(null, dataSaver = false),
+        )
+    }
+
+    @Test
+    fun aNetworkLostOrDefaultClearedAfterARestartAlsoStartsFromScratch() {
+        val table = tableWithWifiAndCellular()
+        table.pause()
+        table.remove("cell")
+        assertNull(table.hint(wifiAddress, dataSaver = false))
+
+        val second = tableWithWifiAndCellular()
+        second.pause()
+        second.clearDefault("cell")
+        assertNull(second.hint(cellularAddress, dataSaver = false))
+        assertNull(second.hint(null, dataSaver = false))
+    }
+
+    @Test
+    fun staleNetworksNoCallbackConfirmedAreDroppedWhenTheRestartSettles() {
+        val table = tableWithWifiAndCellular()
+        table.pause()
+        table.expireStale()
+        assertNull(table.hint(wifiAddress, dataSaver = false))
+        assertNull(table.hint(null, dataSaver = false))
+    }
+
+    @Test
+    fun expiringWithoutAPauseKeepsLiveNetworks() {
+        val table = tableWithWifiAndCellular()
+        table.expireStale()
+        assertEquals(wifiHint, table.hint(wifiAddress, dataSaver = false))
+    }
+
+    @Test
+    fun aPausedTableStillAnswersWithTheCurrentDataSaverSetting() {
+        val table = tableWithWifiAndCellular()
+        table.pause()
+        assertEquals(
+            expect(PathCost.Constrained, PathConfidence.High, PathInterface.Cellular),
+            table.hint(cellularAddress, dataSaver = true),
+        )
     }
 
     // MARK: - Wire names (Shared/NetworkCost.swift raw values)
