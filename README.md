@@ -421,6 +421,10 @@ More on [Devices](https://meowdisplay.app/features.html#devices).
   reliable path with no network setup.
 - **Local Wi-Fi** — receivers are discovered over Bonjour on your network,
   including nearby peer-to-peer Wi-Fi.
+- **Mac to Mac by cable** — with a Thunderbolt/USB4 cable between two Macs, a
+  Wi-Fi session moves onto the cable once it is found. The route then reads
+  **Direct Cable**, but only when the Mac can confirm a Thunderbolt link; any
+  other wired path, such as Ethernet through a switch, reads **LAN**.
 - **Remote Access** — reach a paired Mac through a private network you
   control, such as Tailscale. The address only routes the connection; pairing
   still authenticates it.
