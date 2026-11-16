@@ -2785,6 +2785,9 @@ final class ReceiverModel: ObservableObject {
         }
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
+        // A one-tap step due while the app resigns active stops at once, before SwiftUI's
+        // scenePhase closes the input surface (`StreamReceiver.applicationIsActive`).
+        receiver.applicationIsActive = { UIApplication.shared.applicationState == .active }
         // Announce the native panel size to the Mac.
         let native = ActiveScene.screen.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
@@ -2811,9 +2814,6 @@ final class ReceiverModel: ObservableObject {
         }
         workspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
         workspace.clipboard.platform = IOSClipboardPlatform.shared
-        // A one-tap step due while the app resigns active stops at once, before SwiftUI's
-        // scenePhase closes the input surface (`StreamReceiver.applicationIsActive`).
-        receiver.applicationIsActive = { UIApplication.shared.applicationState == .active }
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
         workspace.requestDisplayMode = { [weak receiver] mode in receiver?.requestDisplayMode(mode) ?? false }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
