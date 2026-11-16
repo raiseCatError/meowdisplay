@@ -424,6 +424,7 @@ targets:
       - Shared/StreamDiagnosticsClassifier.swift
       - Shared/StreamDiagnosticsExport.swift
       - Shared/StreamDiagnosticsPresentation.swift
+      - Shared/StreamDiagnosticsColour.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same

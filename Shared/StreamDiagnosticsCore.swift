@@ -255,6 +255,8 @@ struct StreamDiagnosticsSnapshot: Codable, Equatable, Sendable {
     /// What the other end last reported (optional wire keys), if anything.
     var peer: StreamDiagnosticsPeerSummary?
     var resources: StreamDiagnosticsResourceSample?
+    /// Colour metadata sampled in the pipeline (#241); nil until sampled.
+    var colour: StreamDiagnosticsColourSection?
 
     func stage(_ stage: DiagnosticsStage) -> StreamDiagnosticsStageSummary? {
         stages.first { $0.id == stage.definition.id }
@@ -360,6 +362,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private var resources: StreamDiagnosticsResourceSample?
     private var generation: UInt64?
     private var presenterInFlight = 0
+    /// Colour metadata per pipeline stage (#241). Own lock; see StreamDiagnosticsColour.swift.
+    let colourStore = DiagnosticsColourStore()
 
     init(side: StreamDiagnosticsSide,
          windowSeconds: Double = 5,
@@ -601,6 +605,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         resources = nil
         generation = nil
         context = StreamDiagnosticsContext()
+        colourStore.clear()
     }
 
     /// The last completed window, or the in-progress one before any completed.
@@ -649,7 +654,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         return StreamDiagnosticsSnapshot(
             side: side, windowSeconds: seconds, windowIsPartial: partial, stages: stages,
             counters: counters, sessionCounters: sessionCounters, gauges: gauges,
-            rttJitterMs: rttJitter, context: context, peer: peer, resources: resources)
+            rttJitterMs: rttJitter, context: context, peer: peer, resources: resources,
+            colour: colourStore.section())
     }
 
     // MARK: Locked helpers
