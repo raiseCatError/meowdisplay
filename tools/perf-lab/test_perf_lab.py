@@ -360,6 +360,69 @@ class MalformedBundleTests(BundleFixture):
         with self.assertRaisesRegex(perf_lab.BundleError, "outside the bundle"):
             perf_lab.load_bundle(path)
 
+    def test_fifo_symlink_loop_and_folder_are_refused_without_hanging(self):
+        trials = [make_trial(i, 300) for i in (1, 2, 3)]
+        path = self.write_bundle("fifo", trials)
+        os.remove(os.path.join(path, "manifest.json"))
+        os.mkfifo(os.path.join(path, "manifest.json"))  # open() without O_NONBLOCK would block forever
+        with self.assertRaisesRegex(perf_lab.BundleError, "not a regular file"):
+            perf_lab.load_bundle(path)
+        self.assert_exit_2(path)
+        path = self.write_bundle("loop", trials)
+        loop = os.path.join(path, "trial-02.json")
+        os.remove(loop)
+        os.symlink(loop, loop)  # ELOOP
+        self.assert_exit_2(path)
+        path = self.write_bundle("dir", trials)
+        os.remove(os.path.join(path, "trial-03.json"))
+        os.mkdir(os.path.join(path, "trial-03.json"))
+        self.assert_exit_2(path)
+
+    def test_out_path_in_a_missing_folder_is_exit_2(self):
+        trials = [make_trial(i, 300) for i in (1, 2, 3)]
+        path = self.write_bundle("run", trials)
+        out = os.path.join(self.tmp, "no-such-folder", "report.md")
+        self.assert_exit_2(path, "--out", out)
+        self.assertFalse(os.path.exists(os.path.dirname(out)))
+
+    def test_bundle_total_size_is_bounded(self):
+        trials = [make_trial(i, 300) for i in (1, 2, 3)]
+        path = self.write_bundle("total", trials)
+        sizes = [os.path.getsize(os.path.join(path, n)) for n in sorted(os.listdir(path))]
+        old = perf_lab.MAX_BUNDLE_BYTES
+        # Every file is under the per-file limit; together they are over.
+        perf_lab.MAX_BUNDLE_BYTES = sum(sizes) - 1
+        try:
+            with self.assertRaisesRegex(perf_lab.BundleError, "in total"):
+                perf_lab.load_bundle(path)
+            self.assert_exit_2(path)
+            perf_lab.MAX_BUNDLE_BYTES = sum(sizes)
+            self.assertEqual(len(perf_lab.load_bundle(path).trials), 3)
+        finally:
+            perf_lab.MAX_BUNDLE_BYTES = old
+        self.assertGreaterEqual(perf_lab.MAX_BUNDLE_BYTES, 2 * perf_lab.MAX_FILE_BYTES)
+
+    def test_complete_label_is_checked_against_the_trial(self):
+        """The minimum-trials gate counts complete trials: a label the
+        contents contradict cannot pass it."""
+        def broken(change):
+            trials = [make_trial(i, 300) for i in (1, 2, 3)]
+            change(trials[1])
+            return trials
+        cases = {
+            "lists issues": lambda t: t.update(issues=["windowGap"]),
+            "fewer windows": lambda t: t.update(requestedWindows=3),
+            "measured no time": lambda t: t.update(measuredSeconds=0),
+        }
+        for message, change in cases.items():
+            trials = broken(change)
+            path = self.write_bundle(message.replace(" ", "-"), trials)
+            with self.assertRaisesRegex(perf_lab.BundleError, message):
+                perf_lab.load_bundle(path)
+            self.assert_exit_2(path, "--allow-partial")
+        no_windows = broken(lambda t: t.update(windows=[]))
+        self.assert_exit_2(self.write_bundle("no-windows", no_windows))
+
     def test_start_commit_auto_failure_is_exit_2(self):
         def fail(*args, **kwargs):
             raise perf_lab.subprocess.CalledProcessError(128, args[0])
