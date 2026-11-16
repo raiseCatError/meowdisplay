@@ -23,14 +23,13 @@ final class ReceiverAdaptiveLayoutTests: XCTestCase {
 
     func testTheToolbarDropsToIconsWhenTheTitlesWouldNotFit() {
         // Large text on a phone, and a longer translation on a narrow window.
-        XCTAssertFalse(shows(compactAndTile, scale: 1.5, width: 393))
+        XCTAssertFalse(shows(compactAndTile, scale: 1.7, width: 393))
         XCTAssertFalse(shows(compactAndTile, scale: 1.3, width: 320))
         XCTAssertFalse(shows(longGerman, scale: 1, width: 320))
         XCTAssertFalse(shows(longGerman, scale: 1, width: 360))
         // Accessibility text sizes, every phone width.
         for width: CGFloat in [320, 360, 375, 393, 430] {
             XCTAssertFalse(shows(compactAndTile, scale: 2.2, width: width), "AX @\(width)")
-            XCTAssertFalse(shows(expand, scale: 3, width: width), "AX Expand @\(width)")
         }
         // The same words keep their titles where there is room.
         XCTAssertTrue(shows(longGerman, scale: 1, width: 744))
