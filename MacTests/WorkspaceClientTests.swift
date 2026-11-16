@@ -371,7 +371,7 @@ final class WorkspaceClientTests: XCTestCase {
         m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
         m.apply(catalogWithDisplay([(10, 5, "dev.zed.Zed")]))
         var requested = false
-        m.requestWindowMode = { requested = true }
+        m.requestWindowMode = { requested = true; return true }
         m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
         m.cancelZoneGlobal = CGRect(x: 120, y: 700, width: 160, height: 44)
         let w = m.catalog!.windows[0]
@@ -463,7 +463,7 @@ final class WorkspaceClientTests: XCTestCase {
         m.apply(catalog([(10, 5, "dev.zed.Zed"), (11, 6, "com.apple.Safari")]))
         m.updateSpace(WorkspaceSize(width: 844, height: 390), hinge: nil)
         var requested = false
-        m.requestWindowMode = { requested = true }
+        m.requestWindowMode = { requested = true; return true }
         m.choose(m.catalog!.windows[0], asNewTile: false)
         XCTAssertFalse(requested, "already in Window mode")
         XCTAssertEqual(m.layout.tiles.count, 1)

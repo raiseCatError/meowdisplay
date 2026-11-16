@@ -207,6 +207,12 @@ final class WorkspaceAppFirstModelTests: XCTestCase {
     private var modeRequests: [ReceiverDisplayMode] = []
     private var mirroring = false
     private var extending = false
+    /// Work the model put off to its next turn (`nextTurn`), run by hand.
+    private var turns: [@MainActor () -> Void] = []
+
+    private func runTurns() {
+        while !turns.isEmpty { turns.removeFirst()() }
+    }
 
     private let zedApp = MacAppItem(bundleID: "dev.zed.Zed", name: "Zed", running: true, windowCount: 1, lastUsed: nil)
     private let notes = MacAppItem(bundleID: "com.apple.Notes", name: "Notes", running: false, windowCount: 0, lastUsed: nil)
@@ -237,11 +243,12 @@ final class WorkspaceAppFirstModelTests: XCTestCase {
         m.inputAllowed = { true }
         m.controlState = { [unowned self] in self.control }
         m.requestControl = { [unowned self] in self.controlRequests += 1 }
-        m.requestWindowMode = { [unowned self] in self.windowModeRequests += 1 }
+        m.requestWindowMode = { [unowned self] in self.windowModeRequests += 1; return true }
         m.requestDisplayMode = { [unowned self] in self.modeRequests.append($0); return true }
         m.mirroring = { [unowned self] in self.mirroring }
         m.extending = { [unowned self] in self.extending }
         m.clock = { [unowned self] in self.now }
+        m.nextTurn = { [unowned self] in self.turns.append($0) }
     }
 
     /// The layout this device saved for `host`, by window.
@@ -615,6 +622,211 @@ final class WorkspaceAppFirstModelTests: XCTestCase {
         m.exitLocalFullscreen()
         XCTAssertNil(m.appFirst)
         XCTAssertEqual(modeRequests, [])
+    }
+
+    // MARK: Exit before Window view is confirmed, and the request's deadline (#287 review C2, C3)
+
+    /// Exit before the Mac confirmed Window view, and its switch lands anyway (reconnect, then
+    /// "window"): Mirror is asked for once, after the receiver has noted Window view, and never
+    /// again for that request.
+    func testExitBeforeWindowViewConfirmedReturnsToThePreviousModeOnceItStarts() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        XCTAssertEqual(windowModeRequests, 1)
+        m.exitLocalFullscreen()
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(modeRequests, [], "nothing at Exit: Mirror is still what shows")
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        XCTAssertEqual(modeRequests, [], "not while the event is still being handled")
+        runTurns()
+        XCTAssertEqual(modeRequests, [.mirror])
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(shown(m), before, "the earlier panes, not the app alone")
+        // A repeated "window" (or one after the Mirror request) asks for nothing more: no loop.
+        m.apply(.mode(window: true))
+        runTurns()
+        m.apply(.mode(window: false))
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertEqual(modeRequests, [.mirror])
+        XCTAssertEqual(windowModeRequests, 1, "nothing asks for Window view again")
+    }
+
+    /// Exit before the answer, and the Mac refuses Window view: nothing to go back from, so no
+    /// mode is asked for, then or on a later, unrelated "window".
+    func testExitBeforeWindowViewConfirmedAndTheMacRefusesAsksForNothing() {
+        mirroring = true
+        let m = model(windowMode: false)
+        m.openAppFullscreen(zedApp)
+        m.exitLocalFullscreen()
+        m.apply(.mode(window: false))
+        runTurns()
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// Exit before the answer, and the Mac never answers in time: a "window" after the deadline
+    /// asks for nothing (it isn't this request's answer any more).
+    func testExitBeforeWindowViewConfirmedThenNoAnswerInTimeAsksForNothing() {
+        mirroring = true
+        let m = model(windowMode: false)
+        m.openAppFullscreen(zedApp)
+        m.exitLocalFullscreen()
+        now += WorkspaceAppFirstWindowRequest.timeout
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// Exit before the answer, then the person steps into Window view another way (a pick):
+    /// that's where they want to be, so the late "window" doesn't send them back to Mirror.
+    func testAnotherStepIntoWindowViewAfterAnEarlyExitDropsTheReturn() {
+        mirroring = true
+        let m = model(windowMode: false)
+        m.openAppFullscreen(zedApp)
+        m.exitLocalFullscreen()
+        m.choose(m.catalog!.windows.first { $0.id == 11 }!, asNewTile: false)
+        XCTAssertEqual(windowModeRequests, 2)
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// Exit before the answer, then another Mac: the return belongs to the first Mac only.
+    func testAnotherMacDropsTheReturn() {
+        mirroring = true
+        let m = model(windowMode: false)
+        m.openAppFullscreen(zedApp)
+        m.exitLocalFullscreen()
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-b"))
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// The Mac refuses Open Fullscreen's request for Window view: it ends quietly with the
+    /// earlier panes back, and no mode is asked for.
+    func testTheMacRefusingWindowViewEndsItQuietly() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        m.apply(.mode(window: false))
+        runTurns()
+        XCTAssertNil(m.appFirst)
+        XCTAssertNil(m.localFullscreen)
+        XCTAssertEqual(shown(m), before)
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// Nothing went out (not connected, an older Mac): there's no switch to wait for, so a real
+    /// disconnect ends Open Fullscreen at once.
+    func testUnsentWindowRequestDoesNotShieldARealDisconnect() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.requestWindowMode = { [unowned self] in self.windowModeRequests += 1; return false }
+        m.openAppFullscreen(zedApp)
+        XCTAssertNotNil(m.appFirst)
+        m.apply(.disconnected)
+        XCTAssertNil(m.appFirst, "the disconnect wasn't its own switch")
+        XCTAssertNil(m.localFullscreen)
+        XCTAssertEqual(shown(m), before)
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.mode(window: true))
+        runTurns()
+        XCTAssertNil(m.appFirst)
+        XCTAssertEqual(modeRequests, [])
+    }
+
+    /// The Mac never answers: past the deadline a real disconnect ends Open Fullscreen.
+    func testAwaitingWindowModeExpiresSoALaterDisconnectEndsIt() {
+        mirroring = true
+        let m = model(windowMode: false)
+        let before = shown(m)
+        m.openAppFullscreen(zedApp)
+        now += WorkspaceAppFirstWindowRequest.timeout - 1
+        m.apply(.disconnected)
+        XCTAssertNotNil(m.appFirst, "still within the deadline: this may be its own switch")
+        m.apply(.connected(peerID: "mac-a"))
+        now += 1
+        m.apply(.disconnected)
+        XCTAssertNil(m.appFirst, "past the deadline: a real disconnect")
+        XCTAssertEqual(shown(m), before)
+        XCTAssertEqual(modeRequests, [])
+    }
+}
+
+/// Open Fullscreen's request for Window view (Shared/WorkspaceAppOpening.swift), pure.
+final class WorkspaceAppFirstWindowRequestTests: XCTestCase {
+    func testNothingSentIsNothingAwaited() {
+        var r = WorkspaceAppFirstWindowRequest()
+        r.asked(host: "mac-a", sent: false, now: 0)
+        XCTAssertFalse(r.inFlight(now: 0))
+        r.exitedBeforeConfirm(previousMode: .mirror, now: 0)
+        XCTAssertNil(r.answered(window: true, now: 1))
+    }
+
+    func testInFlightUntilTheDeadline() {
+        var r = WorkspaceAppFirstWindowRequest()
+        r.asked(host: "mac-a", sent: true, now: 10)
+        XCTAssertTrue(r.inFlight(now: 10))
+        XCTAssertTrue(r.inFlight(now: 10 + WorkspaceAppFirstWindowRequest.timeout - 0.001))
+        XCTAssertFalse(r.inFlight(now: 10 + WorkspaceAppFirstWindowRequest.timeout))
+    }
+
+    func testTheReturnIsGivenOnceAndOnlyForWindowView() {
+        for mode in ReceiverDisplayMode.allCases {
+            var r = WorkspaceAppFirstWindowRequest()
+            r.asked(host: "mac-a", sent: true, now: 0)
+            r.exitedBeforeConfirm(previousMode: mode, now: 1)
+            XCTAssertEqual(r.answered(window: true, now: 2), mode)
+            XCTAssertNil(r.answered(window: true, now: 3), "once")
+            XCTAssertFalse(r.inFlight(now: 3))
+
+            var refused = WorkspaceAppFirstWindowRequest()
+            refused.asked(host: "mac-a", sent: true, now: 0)
+            refused.exitedBeforeConfirm(previousMode: mode, now: 1)
+            XCTAssertNil(refused.answered(window: false, now: 2))
+            XCTAssertNil(refused.answered(window: true, now: 3))
+        }
+    }
+
+    func testNoReturnWithoutAPreviousModeOrAfterTheDeadline() {
+        var r = WorkspaceAppFirstWindowRequest()
+        r.asked(host: "mac-a", sent: true, now: 0)
+        r.exitedBeforeConfirm(previousMode: nil, now: 1)
+        XCTAssertNil(r.answered(window: true, now: 2))
+
+        var late = WorkspaceAppFirstWindowRequest()
+        late.asked(host: "mac-a", sent: true, now: 0)
+        late.exitedBeforeConfirm(previousMode: .extend, now: WorkspaceAppFirstWindowRequest.timeout)
+        XCTAssertNil(late.answered(window: true, now: WorkspaceAppFirstWindowRequest.timeout))
+    }
+
+    func testSupersededOrAnotherMacDropsTheReturn() {
+        var r = WorkspaceAppFirstWindowRequest()
+        r.asked(host: "mac-a", sent: true, now: 0)
+        r.exitedBeforeConfirm(previousMode: .mirror, now: 1)
+        r.superseded()
+        XCTAssertTrue(r.inFlight(now: 1), "still shields its own reconnect")
+        XCTAssertNil(r.answered(window: true, now: 2))
+
+        var other = WorkspaceAppFirstWindowRequest()
+        other.asked(host: "mac-a", sent: true, now: 0)
+        other.exitedBeforeConfirm(previousMode: .mirror, now: 1)
+        other.connected(to: "mac-a")
+        XCTAssertTrue(other.inFlight(now: 1), "its own reconnect keeps it")
+        other.connected(to: "mac-b")
+        XCTAssertFalse(other.inFlight(now: 1))
+        XCTAssertNil(other.answered(window: true, now: 2))
     }
 }
 
