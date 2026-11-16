@@ -3710,7 +3710,9 @@ final class SenderController: ObservableObject {
                 id: session.id, deviceID: session.deviceID, intendedPeerID: session.intendedPeerID,
                 authenticated: session.applicationAuthenticated, admitted: session.invitationAdmitted,
                 failed: session.failed, status: session.status,
-                automatic: session.invitation.initiator == .sender && session.invitation.intent == .automatic)
+                automatic: PendingConnectPolicy.SessionSnapshot.replacedByExplicitConnect(
+                    failed: session.failed, admitted: session.invitationAdmitted, invitation: session.invitation,
+                    isContinuation: session.isContinuation))
         }
         return TrustStore.shared.pinnedPeers().map { peer in
             let connection = PendingConnectPolicy.connection(forPeerID: peer.peerID, sessions: snapshots)
