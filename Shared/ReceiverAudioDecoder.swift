@@ -105,6 +105,9 @@ final class ReceiverAudioDecoder: @unchecked Sendable {
     /// .pcmEngine`) and, DEBUG-only, as an independent validation pass
     /// regardless of which playback path is active.
     func decode(_ payload: Data, formatDescription: CMAudioFormatDescription) -> AVAudioPCMBuffer? {
+        // An empty access unit has nothing to decode (and no base address to
+        // copy from, and `maximumPacketSize` 0 is invalid).
+        guard !payload.isEmpty else { return nil }
         if converterFormatDescription == nil
             || !CMFormatDescriptionEqual(converterFormatDescription!, otherFormatDescription: formatDescription) {
             let compressedFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
