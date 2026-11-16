@@ -355,8 +355,10 @@ fun ReceiverScreen(
             LaunchedEffect(frame, folds, transform) {
                 if (!frame.isEmpty) workspace.updateSpace(WSize(minOf(frame.width, widthDp), minOf(frame.height, heightDp)), hingeFor(folds, transform))
             }
+            // The picture as drawn (`shown`), not where it is easing to: while it follows the text
+            // caret, outlines, pills and dividers stay on their panes (issue #92, iOS #161).
             WorkspaceChrome(
-                workspace, transform, state.inputAllowed, avoid = occupied + workspace.hostChrome.value, onSettings = onOpenSettings,
+                workspace, shown, state.inputAllowed, avoid = occupied + workspace.hostChrome.value, onSettings = onOpenSettings,
                 onViewFullScreen = { onMode(workspace.fullDisplayMode) },
                 promptKind = state.prompt.takeIf { wsUi.windowMode && wsUi.active != null },
                 onPromptTap = controller::requestInputTapped,
