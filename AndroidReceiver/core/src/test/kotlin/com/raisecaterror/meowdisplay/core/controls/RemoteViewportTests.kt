@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -1183,5 +1184,56 @@ class HighMagnificationViewportTests {
             )
             assertEquals(scale, state.scale, 0.0)
         }
+    }
+
+    // MARK: - Presented transform while the picture eases (issue #92)
+
+    private val easeEnd = RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), CGRect(0.0, 0.0, 1000.0, 600.0), 0.0)
+
+    @Test
+    fun testWithoutAnEaseThePresentedTransformIsTheEndState() {
+        assertSame(easeEnd, PresentedViewport.transform(easeEnd, null))
+    }
+
+    @Test
+    fun testMidEaseTheDrawnFrameIsPresentedWithTheEndStateCropAndRotation() {
+        val rotated = RemoteViewportTransform(CGRect(0.0, 0.0, 0.5, 0.5), easeEnd.displayedRect, 0.25)
+        val drawn = CGRect(0.0, -60.0, 1000.0, 600.0)
+        val presented = PresentedViewport.transform(rotated, EasedPictureFrame(rotated.displayedRect, drawn))
+        assertEquals(drawn, presented.displayedRect)
+        assertEquals(rotated.remoteCrop, presented.remoteCrop)
+        assertEquals(rotated.rotationRadians, presented.rotationRadians, 0.0)
+    }
+
+    @Test
+    fun testMidEaseAPointMapsThroughTheDrawnFrameAndThroughTheEndStateOnceItArrives() {
+        val drawn = CGRect(0.0, -150.0, 1000.0, 600.0)
+        val mid = PresentedViewport.transform(easeEnd, EasedPictureFrame(easeEnd.displayedRect, drawn))
+        val point = CGPoint(500.0, 300.0)
+        assertEquals(0.75, mid.remotePoint(point)!!.y, 1e-9)
+        assertEquals(0.5, easeEnd.remotePoint(point)!!.y, 1e-9)
+
+        // The ease completes: the drawn frame is the end frame, so nothing differs.
+        val done = PresentedViewport.transform(easeEnd, EasedPictureFrame(easeEnd.displayedRect, easeEnd.displayedRect))
+        assertSame(easeEnd, done)
+        assertEquals(easeEnd.remotePoint(point), done.remotePoint(point))
+    }
+
+    @Test
+    fun testPresentedTransformAgreesWithWhereTheChromeIsDrawn() {
+        val drawn = CGRect(0.0, -90.0, 1000.0, 600.0)
+        val presented = PresentedViewport.transform(easeEnd, EasedPictureFrame(easeEnd.displayedRect, drawn))
+        val remote = CGPoint(0.3, 0.7)
+        val view = presented.viewPoint(remote)
+        val back = presented.remotePoint(view)!!
+        assertEquals(remote.x, back.x, 1e-9)
+        assertEquals(remote.y, back.y, 1e-9)
+        assertEquals(drawn.minY + 0.7 * 600.0, view.y, 1e-9)
+    }
+
+    @Test
+    fun testAnEaseTowardAnotherEndStateIsIgnored() {
+        val stale = EasedPictureFrame(CGRect(0.0, 40.0, 1000.0, 600.0), CGRect(0.0, 10.0, 1000.0, 600.0))
+        assertSame(easeEnd, PresentedViewport.transform(easeEnd, stale))
     }
 }

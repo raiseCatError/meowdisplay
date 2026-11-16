@@ -101,9 +101,19 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         private set
     private var manualZoomMemory: ManualViewportState? = null
 
-    /** The transform every touch, the picture and the cursor use. */
+    /** The end-state transform the picture settles on (what the screen eases toward); see [presentedTransform]. */
     val currentTransform: RemoteViewportTransform
         get() = VideoInteractionPolicy.viewportTransform(baseTransform, manualZoom, config.videoEnabled)
+
+    /**
+     * The picture's drawn frame while it eases to follow the Mac's text caret; null otherwise. Set
+     * by the screen from the same animation the chrome draws from.
+     */
+    var easedPictureFrame: EasedPictureFrame? = null
+
+    /** What is presented right now: the transform the chrome is drawn on and every touch maps through. */
+    val presentedTransform: RemoteViewportTransform
+        get() = PresentedViewport.transform(currentTransform, easedPictureFrame)
 
     private val engine = PointerGestureEngine()
     private val admission = SurfaceTouchAdmission<Int>()
@@ -279,7 +289,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
             return
         }
         if (phase == SurfaceTouchPhase.Began && fingers.isEmpty()) {
-            val base = baseTransform.displayedRect
+            val base = PresentedViewport.transform(baseTransform, easedPictureFrame).displayedRect
             val first = changed.firstOrNull()
             sequenceSelectedPane = first != null && base.width > 0 && base.height > 0 &&
                 effects.workspaceTouch(CGPoint((first.point.x - base.minX) / base.width, (first.point.y - base.minY) / base.height))
@@ -317,11 +327,11 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
 
     /** Stylus hover (no contact): `pencil hover` plus proximity enter/leave. */
     /** A view point (dp) on the Mac's picture, normalized; null outside it. */
-    fun remotePoint(view: CGPoint): CGPoint? = currentTransform.remotePoint(view)?.takeIf { it.x in 0.0..1.0 && it.y in 0.0..1.0 }
+    fun remotePoint(view: CGPoint): CGPoint? = presentedTransform.remotePoint(view)?.takeIf { it.x in 0.0..1.0 && it.y in 0.0..1.0 }
 
     fun hover(entering: Boolean?, point: CGPoint) {
         if (!config.allowsInput || config.senderPV < PENCIL_PV) return
-        val norm = currentTransform.remotePoint(point) ?: return
+        val norm = presentedTransform.remotePoint(point) ?: return
         when (entering) {
             true -> input.proximity(true, norm.x, norm.y)
             false -> input.proximity(false, norm.x, norm.y)
@@ -332,7 +342,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     // MARK: - Admission and blocked attempts
 
     private fun admits(point: CGPoint): Boolean =
-        (config.videoEnabled && config.inputMode != PointerInputMode.Direct) || currentTransform.containsViewPoint(point)
+        (config.videoEnabled && config.inputMode != PointerInputMode.Direct) || presentedTransform.containsViewPoint(point)
 
     private fun trackBlockedSequence(phase: SurfaceTouchPhase, changed: List<SurfaceTouch>) {
         if (phase == SurfaceTouchPhase.Began) {
@@ -362,7 +372,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         }
         if (time > 0) lastTime = time
         for (touch in touches) {
-            val norm = currentTransform.remotePoint(touch.point)
+            val norm = presentedTransform.remotePoint(touch.point)
             dispatch(engine.handle(PointerTouchSample(touch.id, samplePhase, touch.point, norm, time)))
         }
     }
@@ -514,7 +524,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
     }
 
     private fun workspacePinch(state: TwoFingerState, began: Boolean, ended: Boolean): Boolean {
-        val t = currentTransform
+        val t = presentedTransform
         val a = t.remotePoint(state.initialMidpoint) ?: return false
         val b = t.remotePoint(state.midpoint) ?: return state.workspace
         val pinch = state.session.intent == TwoFingerGestureIntent.ViewportZoomPan
@@ -569,7 +579,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
         lastPan = CGPoint.zero
         // Direct Touch places the Mac cursor over the scroll target once; Trackpad never moves it.
         if (config.inputMode.seedsAbsoluteScrollTarget) {
-            currentTransform.remotePoint(state.initialMidpoint)?.let { input.touch("moved", it.x, it.y) }
+            presentedTransform.remotePoint(state.initialMidpoint)?.let { input.touch("moved", it.x, it.y) }
         }
     }
 
@@ -703,7 +713,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
                     if (!systemOwned && config.videoEnabled) {
                         if (config.workspaceZoom) {
                             dropHeldRightTaps(time)
-                            currentTransform.remotePoint(center)?.let(effects::workspaceViewReset)
+                            presentedTransform.remotePoint(center)?.let(effects::workspaceViewReset)
                         } else if (config.localNavigationAllowed) {
                             toggleViewportResetRestore()
                         }
@@ -798,7 +808,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
 
     private fun handlePen(phase: SurfaceTouchPhase, touch: SurfaceTouch) {
         if (config.senderPV < PENCIL_PV) return
-        val norm = currentTransform.remotePoint(touch.point) ?: return
+        val norm = presentedTransform.remotePoint(touch.point) ?: return
         val wirePhase = when (phase) {
             SurfaceTouchPhase.Began -> "down".also { penDown = touch.id }
             SurfaceTouchPhase.Moved -> if (penDown == touch.id) "move" else return
@@ -811,7 +821,7 @@ class ReceiverSurfaceInput(private val input: ReceiverInputSender, private val e
 
     /** View points per Mac pixel under the current zoom (rotation excluded, like iOS). */
     fun pointsPerRemotePixel(): Double? {
-        val t = currentTransform
+        val t = presentedTransform
         if (!t.isValid || videoSize.width <= 0.0 || t.remoteCrop.width <= 0.0) return null
         return t.displayedRect.width / (t.remoteCrop.width * videoSize.width)
     }

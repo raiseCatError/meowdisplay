@@ -3,6 +3,8 @@ package com.raisecaterror.meowdisplay.android.receiver
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
+import com.raisecaterror.meowdisplay.core.controls.EasedPictureFrame
+import com.raisecaterror.meowdisplay.core.controls.PresentedViewport
 import com.raisecaterror.meowdisplay.core.controls.RemoteViewportTransform
 import com.raisecaterror.meowdisplay.core.workspace.WAxis
 import com.raisecaterror.meowdisplay.core.workspace.WRect
@@ -54,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -254,7 +257,12 @@ fun ReceiverScreen(
         val shownWidth by animateFloatAsState(frame.width.toFloat(), easing, label = "pictureWidth")
         val shownHeight by animateFloatAsState(frame.height.toFloat(), easing, label = "pictureHeight")
         val shownFrame = if (frame.isEmpty) frame else CGRect(shownX.toDouble(), shownY.toDouble(), shownWidth.toDouble(), shownHeight.toDouble())
-        val shown = if (shownFrame == frame) transform else RemoteViewportTransform(transform.remoteCrop, shownFrame, transform.rotationRadians)
+        // One presented transform for the chrome, the cursor and touch mapping: the surface keeps the
+        // eased frame, so a tap lands on the picture as drawn (issue #92).
+        val easedFrame = if (shownFrame == frame) null else EasedPictureFrame(frame, shownFrame)
+        SideEffect { controller.surface.easedPictureFrame = easedFrame }
+        DisposableEffect(controller) { onDispose { controller.surface.easedPictureFrame = null } }
+        val shown = PresentedViewport.transform(transform, easedFrame)
         // The picture. The SurfaceView is always composed: the decoder needs its surface to produce the
         // first frame that sizes it, and recreating it mid-session is avoided. Until a size is known it
         // fills the window. It can't rotate, so it is sized and placed to the zoomed frame (viewport
