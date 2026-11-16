@@ -686,3 +686,39 @@ enum StagePeekLegibility {
         return 1.05 / (relativeLuminance(gray: composite) + 0.05)
     }
 }
+
+/// Stage Peek's bottom buttons (Expand / Compact, Add as Tile, Close) at large text sizes and in
+/// narrow windows (#121). They are one fixed-size row, centred, so at an accessibility text size,
+/// in a 320 point Split View or Slide Over, or with a longer translation the row ran wider than
+/// the window. The titles go (the icons stay, and VoiceOver still reads each name) when the row
+/// with them would not fit; icons alone are no wider than three buttons. The widths are
+/// estimates from the footnote semibold face the buttons use, scaled with the text size. Pure,
+/// tested.
+enum StagePeekToolbarLayout {
+    /// Space between buttons, and the room kept at each side of the window.
+    static let spacing: CGFloat = 6
+    static let margin: CGFloat = 16
+    /// A button's capsule padding (both sides), its icon, the gap to its title, and one title
+    /// character, at the default text size.
+    static let padding: CGFloat = 24
+    static let icon: CGFloat = 16
+    static let titleGap: CGFloat = 6
+    static let character: CGFloat = 6.8
+
+    /// The row's width: `titles` is the character count of each button that has a title (Close
+    /// never does), `closeButton` whether it shows. `textScale` is 1 at the default text size.
+    static func width(titles: [Int], closeButton: Bool = true, showsTitles: Bool, textScale: CGFloat) -> CGFloat {
+        let s = max(textScale, 1)
+        var buttons = titles.map { characters -> CGFloat in
+            padding + icon * s + (showsTitles ? titleGap + CGFloat(characters) * character * s : 0)
+        }
+        if closeButton { buttons.append(padding + icon * s) }
+        guard !buttons.isEmpty else { return 0 }
+        return buttons.reduce(0, +) + CGFloat(buttons.count - 1) * spacing
+    }
+
+    /// Whether the buttons keep their titles in a window `available` points wide.
+    static func showsTitles(titles: [Int], closeButton: Bool = true, textScale: CGFloat, available: CGFloat) -> Bool {
+        width(titles: titles, closeButton: closeButton, showsTitles: true, textScale: textScale) <= available - 2 * margin
+    }
+}

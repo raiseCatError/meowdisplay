@@ -236,6 +236,24 @@ extension View {
     func settingsAnchor(_ id: String) -> some View { modifier(SettingsAnchor(id: id)) }
 }
 
+extension View {
+    /// A segmented picker, until the text is large enough that its segments would clip or
+    /// truncate (the accessibility sizes): then a menu, whose row shows the whole title and value.
+    func adaptivePickerStyle() -> some View { modifier(AdaptivePickerStyle()) }
+}
+
+private struct AdaptivePickerStyle: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if typeSize.isAccessibilitySize {
+            content.pickerStyle(.menu)
+        } else {
+            content.pickerStyle(.segmented)
+        }
+    }
+}
+
 /// Settings' sidebar is its navigation, so it never collapses away.
 private struct HidesSidebarToggle: ViewModifier {
     func body(content: Content) -> some View {
@@ -556,7 +574,7 @@ private struct DisplaySettingsPage: View {
                         Text(priority.label).tag(priority)
                     }
                 }
-                .pickerStyle(.segmented)
+                .adaptivePickerStyle()
                 .labelsHidden()
             }
             .disabled(macAutomatic)
@@ -690,7 +708,7 @@ private struct InputSettingsPage: View {
                 Picker("Input Mode", selection: preferenceBinding(controlStore, \.inputMode)) {
                     ForEach(PointerInputMode.allCases) { Text($0.title).tag($0) }
                 }
-                .pickerStyle(.segmented)
+                .adaptivePickerStyle()
                 .settingsAnchor("inputMode")
                 Text(controlStore.preferences.inputMode.explanation)
                     .font(.footnote)
@@ -699,7 +717,7 @@ private struct InputSettingsPage: View {
                     Picker("Touch Style", selection: preferenceBinding(controlStore, \.touchStyle)) {
                         ForEach(DirectTouchStyle.allCases) { Text($0.title).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .settingsAnchor("touchStyle")
                     .accessibilityIdentifier("touchStylePicker")
                     Text(controlStore.preferences.touchStyle == .natural
@@ -854,7 +872,7 @@ private struct GestureSettingsPage: View {
             Picker(title, selection: preferenceBinding(controlStore, keyPath)) {
                 ForEach(ReceiverGestureTarget.allCases) { Text($0.title).tag($0) }
             }
-            .pickerStyle(.segmented)
+            .adaptivePickerStyle()
             .labelsHidden()
             if controlStore.preferences[keyPath: keyPath] == .app {
                 SettingNote("Experimental app command mode")
@@ -906,7 +924,7 @@ private struct ControlSettingsPage: View {
                     Picker("Hold Response", selection: preferenceBinding(controlStore, \.modifierHoldResponse)) {
                         ForEach(ModifierHoldResponse.allCases) { Text($0.title).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     SettingNote("How long to touch ⌘ ⌥ ⌃ ⇧ before their shortcuts appear. A quick tap still latches the key; sliding opens the shortcuts at once. Standard is the default.")
                 }
                 .settingsAnchor("holdResponse")
@@ -944,7 +962,7 @@ private struct ControlSettingsPage: View {
                 Picker("Window Switcher", selection: preferenceBinding(controlStore, \.windowSwitcher)) {
                     ForEach(WindowSwitcherStyle.allCases) { Text($0.title).tag($0) }
                 }
-                .pickerStyle(.segmented)
+                .adaptivePickerStyle()
                 .settingsAnchor("windowSwitcher")
                 .accessibilityIdentifier("windowSwitcherPicker")
                 if controlStore.preferences.windowSwitcher == .stagePeek {
@@ -1024,7 +1042,7 @@ private struct ControlSettingsPage: View {
                     Picker("Function Tray Position", selection: preferenceBinding(controlStore, \.functionTrayPosition)) {
                         ForEach(FunctionTrayPosition.allCases) { Text($0.title).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                 }
                 Picker("Function Profile", selection: Binding(
                     get: { controlStore.preferences.activeFunctionTrayProfile },
