@@ -95,6 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Use This Mac as a Display comes back only if the user left it on.
         controller.applyLaunchRole()
         EncoderWarmUp.start()
+        // Performance Lab (#123): listens for tools/perf-lab `start`; inert unless diagnostics are on.
+        PerformanceLabRemoteStart.install()
     }
 
     // Quitting while this Mac is a display: tell the sending Mac we're
