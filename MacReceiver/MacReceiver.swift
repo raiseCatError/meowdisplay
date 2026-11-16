@@ -181,7 +181,7 @@ final class ReceiverController: ObservableObject {
             receiver?.noteWorkspaceEvent(event)
         }
         windowWorkspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
-        windowWorkspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
+        windowWorkspace.requestWindowMode = { [weak receiver] in receiver?.requestWindowMode() ?? false }
         windowWorkspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
         windowWorkspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
         windowWorkspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
