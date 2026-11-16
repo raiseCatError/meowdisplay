@@ -172,7 +172,7 @@ struct SettingsView: View {
         case .permissions:
             PermissionsSettingsPage()
         case .diagnostics:
-            DiagnosticsSettingsPage()
+            DiagnosticsSettingsPage(receiver: receiver)
         case .about:
             AboutSettingsPage(defaults: DemoSession.preferenceDefaults(demoActive: demo != nil))
         case .developer:
@@ -1494,8 +1494,10 @@ private struct PermissionsSettingsPage: View {
 // MARK: - Diagnostics
 
 private struct DiagnosticsSettingsPage: View {
+    let receiver: StreamReceiver
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
+    @AppStorage(StreamDiagnosticsSwitch.defaultsKey) private var streamDiagnostics = false
 
     var body: some View {
         SettingsForm {
@@ -1528,7 +1530,21 @@ private struct DiagnosticsSettingsPage: View {
             } footer: {
                 Text("The overlay shows FPS, bitrate, frame timing, stalls, and latency graphs at the bottom of the screen while streaming. The experimental Metal renderer decodes and presents frames manually — it adds decode and true on-glass latency metrics to the overlay, but in our measurements the system video layer displays frames faster. Leave it off unless you're debugging.")
             }
+            Section {
+                Toggle("Streaming Diagnostics", isOn: $streamDiagnostics)
+                    .onChange(of: streamDiagnostics) { on in StreamDiagnosticsSwitch.shared.set(on) }
+                if streamDiagnostics {
+                    NavigationLink {
+                        StreamDiagnosticsDetailView(receiver: receiver)
+                    } label: {
+                        Label("Stages and Verdict", systemImage: "gauge.with.dots.needle.33percent")
+                    }
+                }
+            } footer: {
+                Text("Measures each stage of the stream on this \(deviceKind) and names the stage that limits it when the evidence is clear. Off by default. Exports hold aggregate numbers only and are shared only when you choose to.")
+            }
         }
+        .onAppear { StreamDiagnosticsSwitch.shared.set(streamDiagnostics) }
         .navigationTitle(MobileSettingsCategory.diagnostics.title)
     }
 }
