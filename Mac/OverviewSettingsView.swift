@@ -71,7 +71,7 @@ struct OverviewSettingsView: View {
                         }
                         LabeledContent("Video Bitrate", value: "\(entry.bitrateBps / 1_000_000) Mbps")
 
-                        LabeledContent("Connection", value: entry.route?.rawValue ?? String(localized: "Connecting…"))
+                        LabeledContent("Connection", value: entry.routeLabel ?? String(localized: "Connecting…"))
                         LabeledContent("Status", value: String(localized: "Authenticated"))
 
                         HStack {
@@ -169,7 +169,7 @@ struct OverviewSettingsView: View {
     }
 
     private func headline(for entry: SenderController.ActiveDisplayEntry) -> String {
-        var text = CanonicalRuntimeStatus.entryStatusText(mode: entry.mode, route: entry.route, phase: entry.phase)
+        var text = CanonicalRuntimeStatus.entryStatusText(mode: entry.mode, routeLabel: entry.routeLabel, phase: entry.phase)
         if entry.videoWidth > 0, entry.videoHeight > 0 {
             text += "\n\(entry.videoWidth) × \(entry.videoHeight)"
         }

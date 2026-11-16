@@ -342,6 +342,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         get { statusSink.onTransportPath }
         set { statusSink.onTransportPath = newValue }
     }
+    // The user-facing wording of that path ("Direct Cable" for a verified
+    // Mac-to-Mac Thunderbolt link, else the route); fired right after
+    // `onTransportPath`, also when the route itself did not change.
+    @MainActor var onTransportPathDescription: ((ConnectionPathDescription?) -> Void)? {
+        get { statusSink.onTransportPathDescription }
+        set { statusSink.onTransportPathDescription = newValue }
+    }
     // The secure network protocol (TCP/QUIC) the established connection
     // rides; nil while disconnected and on USB (a route, not a protocol).
     @MainActor var onNetworkProtocol: ((NetworkTransportProtocol?) -> Void)? {
@@ -6070,6 +6077,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let conn = transportController.currentConnection {
                     transportController.refreshDirectLinkClassification(
                         for: conn, transport: transport, peerDevice: lastHello?.device)
+                    // The path's wording also depends on the peer kind.
+                    transportController.republishPathDescription(for: conn)
                 }
                 let helloSelfBox = self.selfBox
                 Task { @MainActor in

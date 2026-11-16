@@ -17,11 +17,13 @@ struct PerfOverlay: View {
             // portrait iPhone is ~390pt, far less than one full row.
             MetricsRow {
                 // Transport badge — the question "is this cable or WiFi?"
-                Text(stats.transport)
+                Text(stats.transportLabel)
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(stats.transport == "USB" ? Color.green.opacity(0.35)
+                    .background(stats.transport == "USB"
+                                || stats.transportLabel == ConnectionPathDescription.directCableLabel
+                                ? Color.green.opacity(0.35)
                                 : stats.transport == "WiFi" ? Color.blue.opacity(0.4)
                                 : Color.gray.opacity(0.3),
                                 in: Capsule())
