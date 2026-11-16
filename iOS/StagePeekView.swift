@@ -221,7 +221,8 @@ struct StagePeekOverlay: View {
             return Double(w.width) / Double(w.height)
         }
         return StagePeekLayout.cards(aspects: aspects, position: machine.position, expansion: machine.expansion,
-                                     edge: edge, safe: safe, isPad: roomy, reduceMotion: reduceMotion, region: dockRegion)
+                                     edge: edge, safe: safe, isPad: roomy, reduceMotion: reduceMotion, region: dockRegion,
+                                     fitsRegion: true)
     }
 
     /// The Compact Dock's band: under the search and app carousel, above the buttons.
@@ -235,6 +236,8 @@ struct StagePeekOverlay: View {
 
     /// Hit testing for the compact stack: only inside the Compact Dock's band.
     private var hitRegion: CGRect? { machine.expansion < 0.5 ? dockRegion : nil }
+    /// The band's drawn fade, so a card the mask shows is a card a touch finds (#130).
+    private var hitFade: CGFloat { dockRegion.map { StagePeekCompactBand.fade(bandHeight: $0.height) } ?? StagePeekConfig.dockFade }
 
     private static let topControlsBottom: CGFloat = 12 + 42 + 10 + 64
     private static let toolbarHalfHeight: CGFloat = 20
@@ -246,7 +249,7 @@ struct StagePeekOverlay: View {
             // Expanding releases the band smoothly.
             let top = r.minY * (1 - e), bottom = r.maxY + (frame.height - r.maxY) * e
             let height = max(bottom - top, 1)
-            let f = min(StagePeekConfig.dockFade / height, 0.4) * (1 - e)
+            let f = min(StagePeekCompactBand.fade(bandHeight: r.height) / height, 0.4) * (1 - e)
             LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: f),
                                    .init(color: .black, location: 1 - f), .init(color: .clear, location: 1)],
                            startPoint: .top, endPoint: .bottom)
@@ -823,7 +826,7 @@ struct StagePeekOverlay: View {
     /// The compact card under `p` when it's a Mac window this Mac can close (not a display).
     private func closableCard(at p: CGPoint, cards: [StagePeekCard]) -> Int? {
         guard model.canCloseWindows, machine.expansion < 0.5,
-              let i = StagePeekLayout.hit(p, cards: cards, region: hitRegion), machine.ids.indices.contains(i),
+              let i = StagePeekLayout.hit(p, cards: cards, region: hitRegion, fade: hitFade), machine.ids.indices.contains(i),
               StagePeekIDs.displayIndex(machine.ids[i]) == nil else { return nil }
         return i
     }
@@ -832,7 +835,7 @@ struct StagePeekOverlay: View {
     /// over the panes (or the desktop), and lifting drops it. Scrubbing or a tap never lifts.
     private func armCardHold(at p: CGPoint, cards: [StagePeekCard]) {
         holdTask?.cancel()
-        guard let index = StagePeekLayout.hit(p, cards: cards, region: hitRegion), machine.ids.indices.contains(index) else { return }
+        guard let index = StagePeekLayout.hit(p, cards: cards, region: hitRegion, fade: hitFade), machine.ids.indices.contains(index) else { return }
         let id = machine.ids[index]
         let item: CatalogWindowItem? = {
             if let d = StagePeekIDs.displayIndex(id) {
@@ -869,7 +872,7 @@ struct StagePeekOverlay: View {
     private func end(_ id: String, _ p: CGPoint, _ t: TimeInterval, cards: [StagePeekCard]) {
         pollTask?.cancel()
         var effects: [StagePeekEffect] = []
-        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion) }) }
+        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion, fade: hitFade) }) }
         finish(effects)
     }
 
