@@ -95,10 +95,12 @@ final class StreamDiagnosticsTests: XCTestCase {
         XCTAssertEqual(completed.windowSeconds, 5.1, accuracy: 0.001)
         XCTAssertEqual(completed.rate(.arrivedFrames), 180 / 5.1, accuracy: 0.01)
 
-        // A long quiet spell: the last window really was empty.
+        // A long quiet spell: the window completes with its real length.
+        // Changed with the B5 fix: it used to be reported as a fresh empty
+        // 5 s window, hiding how long the silence lasted.
         let quiet = r.snapshot(at: 30_000)
         XCTAssertEqual(quiet.count(.arrivedFrames), 0)
-        XCTAssertEqual(quiet.windowSeconds, 5, accuracy: 0.001)
+        XCTAssertEqual(quiet.windowSeconds, 24.9, accuracy: 0.001)
         XCTAssertEqual(quiet.sessionCounters[DiagnosticsCounter.arrivedFrames.definition.id], 180)
     }
 
@@ -283,7 +285,9 @@ final class StreamDiagnosticsTests: XCTestCase {
         r.presenterCommandProcessed(stamp: b)
         r.presenterCommandProcessed(stamp: d)
         let s = r.snapshot()
-        // Depth samples: 1, 2 (a, b), then 2 again for d (b still queued).
+        // Depth samples: 1, 2 (a, b); switching back on restarts the window
+        // (B5), so this window holds 2 for d (b still queued).
+        XCTAssertEqual(s.gauge(.presenterQueueDepth)?.samples, 1)
         XCTAssertEqual(s.gauge(.presenterQueueDepth)?.max, 2)
         XCTAssertEqual(s.gauge(.presenterQueueDepth)?.last, 2)
         XCTAssertEqual(s.stage(.presenterQueueAge)?.count, 2, "ages recorded only while on")

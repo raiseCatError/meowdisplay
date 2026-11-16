@@ -15,21 +15,24 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     static let wireVersion = 1
 
     var side: StreamDiagnosticsSide
+    // Both: which completed window this is (absent while it is partial)
+    var windowSequence: Double?
     // Sender-reported
     var targetFPS: Double?
     var captureCompleteFPS: Double?
     var captureIdleShare: Double?
     var sourceRefreshHz: Double?
     var submitFPS: Double?
-    var duplicateSubmitFPS: Double?
-    var encodeP50Ms: Double?
     var encodeP95Ms: Double?
-    var sourceAgeP95Ms: Double?
     var sendP95Ms: Double?
     var encoderBusyShare: Double?
     var sendBackpressureShare: Double?
     var composeP95Ms: Double?
     var composeFPS: Double?
+    // Receiver-reported: the window's series (recorder session) and the
+    // sender's window sequence the receiver had when this window began
+    var windowSeriesID: Double?
+    var peerWindowSequenceAtStart: Double?
     // Receiver-reported
     var arrivalFPS: Double?
     var arrivalP50Ms: Double?
@@ -37,17 +40,18 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     var arrivalGapsOver250ms: Double?
     var enqueueFPS: Double?
     var presenterQueueAgeP95Ms: Double?
-    var presenterQueueDepthMax: Double?
     var decodeP95Ms: Double?
     var decodeSamples: Double?
     var rttMs: Double?
     var rttJitterMs: Double?
-    // Receiver-reported, Performance Lab frame-ID reader (only while it read a strip)
-    var frameIDReadCount: Double?
+    // Receiver-reported, Performance Lab frame-ID reader (only while it
+    // followed or searched for a strip; unique/duplicate/missing/interval
+    // only when it read one)
     var frameIDUniqueFPS: Double?
     var frameIDDuplicates: Double?
     var frameIDMissing: Double?
     var frameIDUnreadable: Double?
+    var frameIDUnexamined: Double?
     var frameIDIntervalP95Ms: Double?
 
     init(side: StreamDiagnosticsSide) {
@@ -57,19 +61,20 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     // Computed: key paths are not Sendable, so no stored static table.
     // Built once per message (every 2-5 s), never per frame.
     private static var senderKeys: [(String, WritableKeyPath<StreamDiagnosticsPeerSummary, Double?>)] { [
+        ("wseq", \.windowSequence),
         ("tgt", \.targetFPS), ("capU", \.captureCompleteFPS), ("idle", \.captureIdleShare),
-        ("hz", \.sourceRefreshHz), ("sub", \.submitFPS), ("dup", \.duplicateSubmitFPS),
-        ("enc50", \.encodeP50Ms), ("enc95", \.encodeP95Ms), ("age95", \.sourceAgeP95Ms),
+        ("hz", \.sourceRefreshHz), ("sub", \.submitFPS), ("enc95", \.encodeP95Ms),
         ("snd95", \.sendP95Ms), ("busy", \.encoderBusyShare), ("bp", \.sendBackpressureShare),
         ("cmp95", \.composeP95Ms), ("cmpFps", \.composeFPS),
     ] }
     private static var receiverKeys: [(String, WritableKeyPath<StreamDiagnosticsPeerSummary, Double?>)] { [
+        ("wid", \.windowSeriesID), ("wseq", \.windowSequence), ("wps", \.peerWindowSequenceAtStart),
         ("arrFps", \.arrivalFPS), ("arr50", \.arrivalP50Ms), ("arr95", \.arrivalP95Ms),
         ("gap250", \.arrivalGapsOver250ms), ("enqFps", \.enqueueFPS), ("qAge95", \.presenterQueueAgeP95Ms),
-        ("qMax", \.presenterQueueDepthMax), ("dec95", \.decodeP95Ms), ("decN", \.decodeSamples),
+        ("dec95", \.decodeP95Ms), ("decN", \.decodeSamples),
         ("rtt", \.rttMs), ("jit", \.rttJitterMs),
-        ("fidN", \.frameIDReadCount), ("fidU", \.frameIDUniqueFPS), ("fidDup", \.frameIDDuplicates),
-        ("fidSkip", \.frameIDMissing), ("fidBad", \.frameIDUnreadable), ("fid95", \.frameIDIntervalP95Ms),
+        ("fidU", \.frameIDUniqueFPS), ("fidDup", \.frameIDDuplicates), ("fidSkip", \.frameIDMissing),
+        ("fidBad", \.frameIDUnreadable), ("fidUnx", \.frameIDUnexamined), ("fid95", \.frameIDIntervalP95Ms),
     ] }
 
     /// Largest value accepted from the wire for any field.
@@ -114,6 +119,7 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     /// Builds what this end reports from its own snapshot.
     static func from(_ snapshot: StreamDiagnosticsSnapshot) -> StreamDiagnosticsPeerSummary {
         var s = StreamDiagnosticsPeerSummary(side: snapshot.side)
+        s.windowSequence = snapshot.windowSequence.map { Double(Swift.min($0, UInt64(wireValueCeiling))) }
         func p(_ stage: DiagnosticsStage, _ q: KeyPath<StreamDiagnosticsStageSummary, Double>) -> Double? {
             guard let st = snapshot.stage(stage), st.count > 0 else { return nil }
             return st[keyPath: q]
@@ -125,40 +131,45 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
             let offered = Double(snapshot.count(.admittedLive))
             let callbacks = Double(snapshot.count(.captureComplete) + snapshot.count(.captureIdle) + snapshot.count(.captureOtherStatus))
             s.targetFPS = snapshot.context.targetFPS > 0 ? Double(snapshot.context.targetFPS) : nil
-            s.captureCompleteFPS = snapshot.rate(.captureComplete)
+            // Capture keys only when there was display capture (none in Window view).
+            s.captureCompleteFPS = callbacks > 0 ? snapshot.rate(.captureComplete) : nil
             s.captureIdleShare = callbacks > 0 ? Double(snapshot.count(.captureIdle)) / callbacks : nil
             s.sourceRefreshHz = snapshot.context.sourceRefreshHz
             s.submitFPS = snapshot.stage(.submitInterval)?.ratePerSecond
-            s.duplicateSubmitFPS = snapshot.rate(.submitDuplicate)
-            s.encodeP50Ms = p(.encode, \.p50)
             s.encodeP95Ms = p(.encode, \.p95)
-            s.sourceAgeP95Ms = p(.sourceAgeAtSubmit, \.p95)
             s.sendP95Ms = p(.send, \.p95)
             s.encoderBusyShare = offered > 0 ? Double(snapshot.count(.heldEncoderBusy)) / offered : nil
             s.sendBackpressureShare = offered > 0 ? Double(snapshot.count(.droppedPendingSends)) / offered : nil
             s.composeP95Ms = p(.compose, \.p95)
             s.composeFPS = snapshot.count(.composeFrames) > 0 ? snapshot.rate(.composeFrames) : nil
         case .receiver:
+            s.windowSeriesID = snapshot.windowSeriesID.map { Double($0) }
+            s.peerWindowSequenceAtStart = snapshot.peerWindowSequenceAtStart.map { Double(Swift.min($0, UInt64(wireValueCeiling))) }
             s.arrivalFPS = snapshot.rate(.arrivedFrames)
             s.arrivalP50Ms = p(.arrivalInterval, \.p50)
             s.arrivalP95Ms = p(.arrivalInterval, \.p95)
             s.arrivalGapsOver250ms = snapshot.stage(.arrivalInterval)?.gapsOver250ms.map(Double.init)
             s.enqueueFPS = snapshot.rate(.enqueuedForPresentation)
             s.presenterQueueAgeP95Ms = p(.presenterQueueAge, \.p95)
-            s.presenterQueueDepthMax = snapshot.gauge(.presenterQueueDepth).flatMap { $0.samples > 0 ? $0.max : nil }
             s.decodeP95Ms = p(.decode, \.p95)
             s.decodeSamples = snapshot.stage(.decode).map { Double($0.count) }
             s.rttMs = p(.rtt, \.p50)
             s.rttJitterMs = snapshot.rttJitterMs
             // Performance Lab: only when the frame-ID reader saw the fixture.
+            // Unique, duplicate and missing need a read strip: without one
+            // they are "not measured" (absent), never 0.
             let read = snapshot.count(.frameIDRead)
-            if read > 0 || snapshot.count(.frameIDUnreadable) > 0 {
-                s.frameIDReadCount = Double(read)
+            let unreadable = snapshot.count(.frameIDUnreadable)
+            let unexamined = snapshot.count(.frameIDUnexamined)
+            if read > 0 {
                 s.frameIDUniqueFPS = snapshot.rate(.frameIDUnique)
                 s.frameIDDuplicates = Double(snapshot.count(.frameIDDuplicate))
                 s.frameIDMissing = Double(snapshot.count(.frameIDSkipped))
-                s.frameIDUnreadable = Double(snapshot.count(.frameIDUnreadable))
                 s.frameIDIntervalP95Ms = p(.frameIDUniqueInterval, \.p95)
+            }
+            if read > 0 || unreadable > 0 || unexamined > 0 {
+                s.frameIDUnreadable = Double(unreadable)
+                s.frameIDUnexamined = Double(unexamined)
             }
         }
         return s
