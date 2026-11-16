@@ -271,8 +271,9 @@ final class RemoteFileTransfers: @unchecked Sendable {
         while true {
             let candidate = ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)"
             if !fm.fileExists(atPath: folder.appendingPathComponent(candidate).path) { return candidate }
+            // Checked before counting up: `n` can start at Int.max.
+            if n >= 10_000 { return "\(stem) \(UUID().uuidString.prefix(8))" + (ext.isEmpty ? "" : ".\(ext)") }
             n += 1
-            if n > 10_000 { return "\(stem) \(UUID().uuidString.prefix(8))" + (ext.isEmpty ? "" : ".\(ext)") }
         }
     }
 }
