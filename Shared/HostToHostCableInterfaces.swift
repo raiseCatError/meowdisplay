@@ -27,7 +27,10 @@ enum HostToHostCableInterfaces {
 /// as SystemConfiguration's preferences list them, are all such ports. Anything else, and any lookup that fails, is false:
 /// the caller then keeps the plain route label rather than guessing.
 /// A bridge that also holds an ordinary Ethernet port is false, since it can
-/// join a switched LAN.
+/// join a switched LAN. The member list is the configured one: a member added
+/// to the live bridge at run time (`ifconfig addm`, a virtualisation tool) is
+/// not seen, so this means "the configured Thunderbolt Bridge", not a proof
+/// about every frame on it.
 struct ThunderboltIPInterfaces: HostToHostCableInterfaceChecking {
     func isHostToHostCableInterface(_ name: String) -> Bool {
         if Self.isThunderboltIPPort(name) { return true }
