@@ -3345,9 +3345,9 @@ final class StreamReceiver: ObservableObject {
     /// peer-to-peer interfaces (awdl/llw/utun) never carry this traffic and
     /// are skipped.
     private static func reachableAddresses() -> [String] {
-        var result: [String] = []
+        var candidates: [CableCandidateSelection.AdvertisedAddress] = []
         var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0, let first = list else { return result }
+        guard getifaddrs(&list) == 0, let first = list else { return [] }
         defer { freeifaddrs(list) }
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
             let ifa = ptr.pointee
@@ -3374,10 +3374,11 @@ final class StreamReceiver: ObservableObject {
             // getnameinfo appends %scope to link-local IPv6 — strip it, the
             // receiver-side zone id is meaningless to the sender.
             if let percent = addr.firstIndex(of: "%") { addr = String(addr[..<percent]) }
-            if !result.contains(addr) { result.append(addr) }
-            if result.count >= 12 { break }
+            candidates.append(.init(interface: name, address: addr))
         }
-        return result
+        // Deduplicated and capped at 12 there: unchanged under the cap; over
+        // it a cable's addresses are not the ones dropped.
+        return CableCandidateSelection.advertisedAddresses(candidates)
     }
 
     /// Touch events: x/y normalized [0,1] in video space, origin top-left.
