@@ -307,6 +307,8 @@ targets:
       # Mac-side input revocation end to end (MacSenderInputRevocationTests):
       # the real MacSender and InputInjector, plus what MacSender links.
       - Mac/MacSender.swift
+      # Bounds for the display a receiver's hello describes (MacSender's hello handler).
+      - Mac/PeerDisplayBounds.swift
       - Mac/MacLockPrivacy.swift
       - Shared/MacLockWire.swift
       - Shared/LockScreenFlow.swift

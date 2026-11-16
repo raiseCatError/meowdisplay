@@ -780,7 +780,7 @@ final class InputInjector {
         ev.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
         ev.setIntegerValueField(.tabletEventDeviceID, value: deviceID)
         ev.setDoubleValueField(.mouseEventPressure, value: pressure)
-        ev.setIntegerValueField(.tabletEventPointPressure, value: Int64((pressure * 65535.0).rounded()))
+        ev.setIntegerValueField(.tabletEventPointPressure, value: TabletPressure.pointPressure(pressure))
         ev.setDoubleValueField(.tabletEventTiltX, value: tiltX)
         ev.setDoubleValueField(.tabletEventTiltY, value: tiltY)
         ev.setDoubleValueField(.tabletEventRotation, value: rotation)

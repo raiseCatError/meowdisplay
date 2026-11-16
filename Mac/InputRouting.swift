@@ -526,16 +526,39 @@ struct ScrollRemainder {
     private(set) var y = 0.0
 
     mutating func take(dxPoints: Double, dyPoints: Double) -> (dx: Int32, dy: Int32) {
-        let totalX = x + dxPoints, totalY = y + dyPoints
+        // The delta is a receiver's number: finite (JSON has no NaN or
+        // infinity) but possibly huge. Each total is clamped to what a scroll
+        // event can carry BEFORE it is converted, so the conversion can never
+        // trap and the carried remainder stays finite. Real deltas are far
+        // inside the bound and come out exactly as before.
+        let totalX = Self.postable(x + dxPoints), totalY = Self.postable(y + dyPoints)
         let wholeX = totalX.rounded(), wholeY = totalY.rounded()
         x = totalX - wholeX
         y = totalY - wholeY
-        return (Int32(clamping: Int(wholeX)), Int32(clamping: Int(wholeY)))
+        return (Int32(wholeX), Int32(wholeY))
     }
 
     mutating func reset() {
         x = 0
         y = 0
+    }
+
+    /// `value` inside `Int32`'s range (NaN reads as 0).
+    private static func postable(_ value: Double) -> Double {
+        guard !value.isNaN else { return 0 }
+        return min(max(value, Double(Int32.min)), Double(Int32.max))
+    }
+}
+
+/// A Pencil's pressure as the tablet event's integer field, which takes
+/// 0...65535. The receiver's `pressure` is normalized (0...1); a value
+/// outside that (a hostile `1e300`, which used to trap the Mac in the
+/// `Int64` conversion, or a stylus reporting slightly above 1) is clamped
+/// first. 0...1 comes out exactly as before.
+enum TabletPressure {
+    static func pointPressure(_ pressure: Double) -> Int64 {
+        guard !pressure.isNaN else { return 0 }
+        return Int64((min(max(pressure, 0), 1) * 65535.0).rounded())
     }
 }
 

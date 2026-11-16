@@ -648,10 +648,18 @@ sample. Magnify and rotate lifecycles MAY overlap. A sender MUST ignore a
 `changed`/terminal phase without an active matching `began`.
 
 * `pixelsWide`, `pixelsHigh` (int): the panel size in **physical pixels**,
-  in the panel's **current orientation** (portrait swaps them).
+  in the panel's **current orientation** (portrait swaps them). Each MUST
+  be in 0...32768 (0: not measured yet; the sender then uses its fallback
+  size).
 * `scale` (number): the device's UI scale factor (2 or 3 on Apple
   hardware). The sender uses it to pick a sensible point-size for the
-  virtual display.
+  virtual display. It MUST be in 0.25...16.
+* A sender refuses a `hello` whose `pixelsWide`, `pixelsHigh` or `scale` is
+  outside those ranges and ends the session (no device has such a panel),
+  and ignores a `hello` that doesn't parse (a field of the wrong JSON type,
+  or a fractional or out-of-range integer) as if it was never sent. The
+  other numeric fields are optional hints the sender bounds where it uses
+  them.
 * `device` (string, optional): device kind for UI text: `"iPhone"` or
   `"iPad"` from the iOS receiver, `"Mac"` from the Mac receiver,
   `"Android"` from the Android receiver. Free-form; a sender MUST NOT gate
@@ -2105,7 +2113,9 @@ authenticated install id, or the Mac's) and that origin's own sequence number
 * `lc` is a Lamport counter and `vv` the causal context: the newest event the
   origin had seen from every other origin when it copied. `ch` hashes the
   content, so copying what is already the shared clipboard makes no event.
-  `at` is informational and never used for ordering.
+  `at` is informational and never used for ordering. `s`, `lc` and every `vv`
+  value are at most 2^53; an event with a larger one is dropped (the Apple
+  apps; the same bound applies to `seen` in `join`).
 * `items` are the copied items, each with up to 6 representations: `t` one of
   `text`, `url`, `html`, `rtf`, `png`, `jpeg` (unknown kinds are skipped),
   `n` its size, `h` the first 16 hex digits of its SHA-256, and either the

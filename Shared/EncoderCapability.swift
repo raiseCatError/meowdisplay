@@ -31,12 +31,16 @@ enum EncoderCapability {
     static let supportedFPSTiers = [1, 5, 10, 24, 30, 60, 120]
 
     /// Number of 16x16 macroblocks in a frame of this size, per the H.264
-    /// spec (`ceil(width/16) * ceil(height/16)`).
+    /// spec (`ceil(width/16) * ceil(height/16)`). Total for any `Int`: the
+    /// rounding up can't overflow, and a product too large for `Int`
+    /// saturates to `Int.max` (so `codecSafeFPS` fails safe to 1) instead of
+    /// trapping. Every real frame size gives exactly the spec's count.
     static func macroblockCount(width: Int, height: Int) -> Int {
         guard width > 0, height > 0 else { return 0 }
-        let mbWide = (width + 15) / 16
-        let mbHigh = (height + 15) / 16
-        return mbWide * mbHigh
+        let mbWide = width / 16 + (width % 16 == 0 ? 0 : 1)
+        let mbHigh = height / 16 + (height % 16 == 0 ? 0 : 1)
+        let (count, overflow) = mbWide.multipliedReportingOverflow(by: mbHigh)
+        return overflow ? Int.max : count
     }
 
     /// The INTERNAL codec-safe ceiling for `width x height`: an arbitrary
