@@ -281,6 +281,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Extend Shape, Use Full Display | Yes | Yes | Yes | Yes |
 | Video on / off | Yes | Yes | Yes | Yes |
 | Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | Yes (Display) | Yes (Streaming) |
+| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | No setting: always Automatic |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
@@ -294,6 +295,21 @@ the pickers stay editable as before. The Mac declines a request it can't
 apply, without restarting any stream. No
 receiver can change the Mac's Streaming Mode (Automatic/Custom); that is set
 on the Mac only.
+
+**Use Less Data** (Settings ▸ Display, also found by searching "mobile data" or
+"Low Data Mode") lowers resolution, bitrate and frame rate on this device's
+stream only, while the Mac's Streaming Mode is Automatic. It never stops a
+stream, and Custom on the Mac is never overridden.
+- **Automatic** (default): saves data when the connection is in Low Data Mode,
+  or on mobile data once you agree. The first time the connection reliably
+  looks like mobile data while video plays, the app asks once: "This
+  connection may use mobile data. Save data automatically?" The answer is
+  remembered and can be changed under **On Mobile Data** (Ask / Save Data /
+  Full Quality). A VPN such as Tailscale is not treated as mobile data.
+- **On**: always saves data. **Off**: never does.
+The Mac Receiver sends Automatic with no prompt (Low Data Mode is honoured).
+What the Mac does is in PROTOCOL.md 6.20. Thresholds and the real data saved
+are not measured yet (PENDING HARDWARE).
 
 ## Audio and connection
 
@@ -367,6 +383,7 @@ key down.
 - The ⌘ key needs **Control Key Types ⌘** because Android keeps Meta for itself.
 - Hardware keyboard, mouse and stylus input are written but not verified on a physical device (iOS keyboard and mouse are also unverified).
 - No settings search; Haptics sits under Scrolling on the Input page.
+- No **Use Less Data** setting or suggestion, and no effective-refresh, cost or adaptive telemetry keys (PROTOCOL.md 6.20): the Mac keeps today's fixed Automatic policy for Android receivers.
 
 **Mac Receiver compared with the mobile apps**
 - No Stage Peek, Rail, Full Desktop card or **Switch to Window view?** prompt. Windows opens the overview.

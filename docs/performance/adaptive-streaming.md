@@ -1,8 +1,11 @@
-# Adaptive Automatic streaming (issue #123): design and phase 1 logic
+# Adaptive Automatic streaming (issue #123): design, phase 1 logic and phase 2 wiring
 
-**Status: phase 1. Pure logic and tests only. Nothing in the app calls this code yet.** Nothing here has
-been measured on hardware. The simulation in `MacTests/AdaptiveStreamingSimulation.swift` is a model
-for exercising the controller, not evidence of real-world gains.
+**Status: phase 2. The controller is wired into the pipeline behind a Mac setting, "Adaptive
+Automatic (Beta)", which is off by default.** Off means today's fixed Automatic policy, byte for
+byte. "Use less data" works with the switch off too. Nothing here has been measured on hardware:
+every threshold, and any real-world benefit, is **PENDING HARDWARE**. The simulation in
+`MacTests/AdaptiveStreamingSimulation.swift` is a model for exercising the controller, not
+evidence of real-world gains. Section 9 describes the wiring.
 
 Today, Automatic is a fixed policy (`StreamingModePolicy`): Performance profile, Balanced priority,
 Auto codec, Best quality (native raster, 18 Mbps), and the frame rate from `StreamingFPSPolicy`. Phase 1
@@ -101,7 +104,7 @@ The codec is never changed: it stays as negotiated.
 | Dimension | Steps | Start (= today's Best) | Saver top | Change cost in the real pipeline |
 |---|---|---|---|---|
 | Raster scale (of native, post-`DecodeCeiling`) | 0.5, 0.625, 0.75, 0.875, 1.0 | 1.0 | max(floor, 0.75) | **capture restart** (rate-limited) |
-| Bitrate | 2, 3, 4, 6, 8, 10, 12, 15, 18, 24 Mbps | 18 Mbps | 6 Mbps | encoder reconfigure (VT session recreate + keyframe) |
+| Bitrate | 2, 3, 4, 6, 8, 10, 12, 15, 18 Mbps (capped at `AdaptiveStreamingLadder.bitrateCeiling` = today's Best) | 18 Mbps | 6 Mbps | encoder reconfigure (VT session recreate + keyframe) |
 | FPS | negotiation `allowedTargets` (20, 30, 60, [90], [120]) | `initialTargetFPS` (≤ 60) | 60 | live capture update (`applyEffectiveFPSChange`) |
 
 **Readability floor.** The floor is the smallest raster step that gives at least *p* encoded pixels
@@ -202,7 +205,7 @@ back-off doubles each time, up to 600 s.
 | Comparison with today's fixed policy | **SIMULATION only** (`$C/reports/123-adaptive-simulation.md`), using an assumed plant |
 | The thresholds suit real Macs, receivers and networks | **PENDING HARDWARE**: none of them is tuned |
 | Real cost of a bitrate change (VT session recreate) vs a raster change (capture restart) | known from the code (`MacSenderVideoEncoder` recreates the session for any change). The latency cost is **unmeasured**. |
-| Effective-refresh, cost and telemetry inputs exist on the wire | **not yet**: phase 2 (optional keys, no welcome feature) |
+| Effective-refresh, cost and telemetry inputs exist on the wire | phase 2: optional keys, no welcome feature (PROTOCOL.md 6.20); encode/decode unit-tested, never run against a real device |
 
 ## 7. Phase 2 (wiring) outline
 
@@ -220,13 +223,108 @@ the campaign report. Summary:
 
 ## 8. Open questions found in phase 1
 
-- **The bitrate top is above today's.** The 24 Mbps step is the brief's "then raise quality" on
-  healthy, unmetered paths. Each step is a probe that needs network headroom. In the simulation, healthy
-  paths therefore send about 32 % more payload than the fixed 18 Mbps policy. If the owner prefers not to
-  exceed today's bitrate without measured quality evidence, set `bitrateSteps.last` to 18 Mbps.
+- **The bitrate top was above today's.** Resolved in phase 2 (lead decision): the ladder stops at
+  `AdaptiveStreamingLadder.bitrateCeiling`, today's Best target of 18 Mbps, and the phase 2 planner
+  clamps to it again. A step above it needs measured quality evidence first.
 - **The thermal response depends on the model.** The simulated thermal penalty is mild, so the fixed
   policy shows no stalls there. The adaptive controller trades raster and FPS for heat. Whether that
   trade is right needs hardware thermal traces.
 - **Legacy peers can't use the FPS ladder.** A peer with telemetry but without the effective-refresh
   key has a single allowed rate, today's. So FPS clamps (thermal, saver) cannot lower it. Phase 2
   should send both keys together.
+
+## 9. Phase 2: what is wired
+
+Files: `Shared/AdaptiveStreamingWiring.swift` (wire keys, receiver state, path-to-cost mapping,
+the receiver data policy rule, the diagnostics decision record), `Mac/AdaptiveStreamingSession.swift`
+(settings key, planner, per-receiver coordinator, usage monitor). Tests:
+`MacTests/AdaptiveStreamingWiringTests.swift`. Wire keys: PROTOCOL.md 6.20.
+
+**The Beta switch.** Settings ▸ Streaming ▸ Adaptive Automatic (Beta) (`adaptiveAutomaticBeta`,
+off by default, shown only in Automatic). Changing it rebuilds the streams, like a Streaming Mode
+change. It is also the owner's hardware A/B switch. Custom never runs the controller.
+
+**One coordinator per receiver.** Each `MacSender` (one per receiver) owns an
+`AdaptiveStreamingCoordinator`. Its plan (`AdaptiveStreamingPlan`: raster scale, bitrate, FPS cap)
+is nil unless the controller manages this receiver or "Use less data" is active, and nil always
+means today's values. A decision can only reach the pipeline that owns the coordinator.
+
+**Inputs.**
+
+| Input | Source |
+|---|---|
+| Effective refresh, telemetry flag, cost hint, "Use less data", answer | receiver `hello` (re-sent on change) |
+| Delivered FPS, decode p95, RTT, RTT jitter, thermal, Low Power | receiver `stats`, every ~2 s while the Mac announces (`ping` key `adaptive`) |
+| Captured frames (≈ source unique frames: ScreenCaptureKit only delivers changed frames), encoder/network drops | the sender's ~2 s ping window |
+| Sent video frames and bytes | video send completions |
+| Send backpressure | network drops ÷ (network drops + sent frames) in the window (an approximation of "share of the window at the pending cap") |
+| Sender thermal, Low Power | `ProcessInfo` |
+| Sender path cost, route epoch | `MacSenderTransportController.reportRoute` (the live media connection's `NWPath`); the epoch bumps on a route or cost change |
+| Source cadence | Mirror: the mirrored display's mode refresh (screen maximum when the mode says 0); Extend: the virtual display's refresh; Window view: the composition budget. Also set as the diagnostics `sourceRefreshHz`, so the "source refresh limited" verdict can fire |
+| Generation | the connection generation: a reconnect resets the controller and drops telemetry from the old connection |
+
+The controller does not depend on the diagnostics switch.
+
+**Applying a plan change** (`AdaptiveStreamingPlanner.applyPath`, the cheapest path that covers it):
+
+| Change | Path |
+|---|---|
+| FPS only | live capture update: `applyEffectiveFPSChange()` (`SCStream.updateConfiguration`, then an encoder recreate at the new rate) |
+| Bitrate (with or without FPS) | encoder recreate with a keyframe: `applyEffectiveFPSChange(rebuildEncoder: true)` |
+| Raster | capture restart for this receiver only (release, stop, start at the new size; the cached frame is discarded). Rate-limited by the controller. Not used in Window view, whose canvas is fixed: its ladder has no raster steps |
+
+There is no live `VTSessionSetProperty` bitrate path: that needs hardware validation first
+(follow-up). While the lock screen view is shown nothing is applied; the plan applies at the next
+restart. Frame generations, lock-screen frame validation, ordered control/media, the
+`StreamingRestartLedger` (#142) and the H.264 macroblock guard are unchanged: the plan can only
+lower today's FPS (`min`), and the H.264 guard is still applied first.
+
+**The source cadence.** With the switch on, the Mac never captures above the source's own refresh
+(for example a 60 Hz display mirrored to a 120 Hz iPad runs at 60). The Extend virtual display and
+the Window view compositor are still created at today's rate, so the controller can step back up.
+
+**Fallbacks.**
+
+| Situation | Behaviour |
+|---|---|
+| Switch off | today's fixed policy (tested over modes × hellos × source rates × FPS results) |
+| Custom | bypass: never managed, never data-saving |
+| Receiver without `effHz` + `adaptiveTelemetry` (old iOS/Mac builds, Android) | today's fixed policy, capped at the source cadence while the switch is on |
+| Telemetry stops | the controller holds (stale telemetry), then discards its streaks |
+| Older or equal route epoch | ignored |
+| Newer connection generation | controller reset to the initial point |
+
+**"Use less data"** (works with the switch off). The receiver sends its setting and answer in
+`hello`; the Mac combines both endpoints' cost evidence (`NetworkCost.combine`) and applies
+`NetworkCost.receiverDataPolicy`: saver when the setting is On; in Automatic, saver on clear Low
+Data Mode, or on a clearly metered path once the user accepted the one-time suggestion (until
+answered, a metered path stays normal and the receiver asks). A receiver that sends no setting
+(older builds) is never data-saving. Saver with the switch off is a static point that reuses an
+existing quality level: Balanced raster and bitrate (75 %, 10 Mbps), at most 60 FPS. With the switch
+on, the controller's saver clamp applies instead (raster ≤ max(floor, 0.75), 6 Mbps, 60 FPS).
+The iOS suggestion uses `NetworkCostSuggestionTracker`: high-confidence `expensive` evidence on
+live media only, once per episode, never on Low Data Mode or a tunnel, answer remembered and
+changeable in Settings ▸ Display ▸ Use Less Data (Ask / Save Data / Full Quality). The Mac Receiver
+sends Automatic and never asks. Android: not implemented (parity gap).
+
+**Explainability.** Every controller decision with a new reason, and every change, goes to the
+diagnostics recorder (`StreamDiagnosticsSnapshot.adaptiveDecisions`, last 32, also in the export:
+codes and numbers only) while diagnostics are on. Each plan change writes one log line
+(`adaptive: <old> → <new> path=… decision=… data=…`); nothing is logged per frame.
+
+**Data accounting.** Settings ▸ Streaming ▸ Current Stream shows, per device, the video payload
+sent since the stream started and its average rate, labelled as app payload (not what a carrier
+bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-saving point.
+
+**Known gaps (phase 2).**
+- The receiver sends `deliveredFps`, `dec95` (Metal path only), `jit`, `thermal`, `lowPower`;
+  `decodedFps`, `enqFps`, `presAge` and `late` are defined but not sent yet, so the decoder cause
+  rarely fires on the default display-layer path.
+- Window view pane counts are not fed (the pane clamp never fires); its FPS ceiling is the
+  composition budget.
+- The native raster is the started capture size divided by the applied scale, so a stream clamped
+  by the receiver's decode ceiling looks larger to the readability floor than it is.
+- The first ~2 s of a session run today's FPS until the controller's first tick (60-first then
+  applies as a live FPS update).
+- Everything in "PENDING HARDWARE" in section 6, plus: the cost of a live FPS update and of a
+  per-receiver capture restart on real Macs, and whether 2 s `stats` change anything measurable.
