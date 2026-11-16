@@ -172,32 +172,33 @@ final class AdaptiveStreamingHardeningTests: XCTestCase {
         XCTAssertLessThanOrEqual(restartTimes.count, Int(60 / interval) + 1)
     }
 
-    /// #123 F6 (deliberate change): the policy itself applies at once; only
-    /// the raster part of its plan waits for the restart limit (latest wins).
+    /// #123 F6, then #123 churn (deliberate change): saving applies at once;
+    /// leaving it waits until saving has been in effect for the dwell, and
+    /// then the latest request applies whole (one restart, no FPS-only step
+    /// first). Before the churn fix, "off" at 3 s returned today's FPS at
+    /// once and every later flip was one more FPS update.
     func testPolicyRasterLatestWinsAndAppliesWhenTheIntervalElapses() {
         let (coordinator, fake) = liveCoordinator(enabled: false)
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
         XCTAssertEqual(fake.paths, [.captureRestart])
         XCTAssertEqual(coordinator.plan?.origin, .dataSaver)
-        // Off inside the limit: the raster stays, today's FPS returns at once.
+        let saving = coordinator.plan
+        // Off inside the dwell: nothing changes yet, the evidence is reported at once.
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 3)
-        XCTAssertEqual(coordinator.appliedDataPolicy, .normal)
+        XCTAssertEqual(coordinator.appliedDataPolicy, .saver)
         XCTAssertEqual(coordinator.dataPolicy.policy, .normal, "the evidence is reported at once")
-        XCTAssertEqual(coordinator.plan?.rasterScale, StreamQuality.balanced.scale)
-        XCTAssertNil(coordinator.plan?.fpsCap)
-        XCTAssertEqual(fake.paths.filter { $0 == .captureRestart }, [.captureRestart])
-        // On again: back to the saver plan, nothing restarted.
+        XCTAssertEqual(coordinator.plan, saving)
+        // On again, off once more: still nothing applied.
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 5)
-        XCTAssertEqual(coordinator.desiredPlan, coordinator.plan)
-        // Off once more: the raster waits until the interval has passed, then a tick applies it.
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 6)
         coordinator.tick(generation: 1, inputs: inputs(), window: window(16, 18), now: 18)
-        XCTAssertEqual(coordinator.plan?.rasterScale, StreamQuality.balanced.scale)
-        XCTAssertEqual(coordinator.plan?.bitrate, AdaptiveStreamingLadder.fixedPolicyBitrate, "bitrate not held by the raster")
-        XCTAssertEqual(fake.paths.filter { $0 == .captureRestart }, [.captureRestart])
+        XCTAssertEqual(coordinator.plan, saving)
+        XCTAssertEqual(fake.paths, [.captureRestart])
+        // The dwell has passed: the next tick applies the latest request whole.
         coordinator.tick(generation: 1, inputs: inputs(), window: window(18, 20), now: 20)
         XCTAssertNil(coordinator.plan)
-        XCTAssertEqual(fake.paths.filter { $0 == .captureRestart }, [.captureRestart, .captureRestart])
+        XCTAssertEqual(coordinator.appliedDataPolicy, .normal)
+        XCTAssertEqual(fake.paths, [.captureRestart, .captureRestart])
     }
 
     func testPolicyBeforeTheFirstCaptureIsNeverDeferred() {
@@ -220,18 +221,26 @@ final class AdaptiveStreamingHardeningTests: XCTestCase {
         XCTAssertEqual(coordinator.lastDecision?.reason, .dataSaverClamp)
         XCTAssertEqual(coordinator.plan?.origin, .controller)
         XCTAssertEqual(fake.paths.filter { $0 == .captureRestart }.count, 1)
-        // Off right away: the lifted tops need no restart, so it applies at
-        // once and the point stays where the controller has it.
+        // Off right away (#123 churn, deliberate change): leaving saving
+        // waits for the dwell, so the tops stay; the point stays where the
+        // controller has it either way.
         let clamped = coordinator.plan
         coordinator.helloAccepted(AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true, saveData: .off), now: 4)
-        XCTAssertEqual(coordinator.appliedDataPolicy, .normal)
+        XCTAssertEqual(coordinator.appliedDataPolicy, .saver)
+        XCTAssertEqual(coordinator.dataPolicy.policy, .normal)
         XCTAssertNotEqual(coordinator.lastDecision?.action, .initial, "history kept: no fresh controller")
         XCTAssertEqual(coordinator.plan, clamped)
-        // Saver again inside the restart limit: the clamp would restart, so it waits.
+        // Saver again: the pending return is simply dropped.
         coordinator.helloAccepted(AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true, saveData: .on), now: 5)
         XCTAssertEqual(coordinator.appliedDataPolicy, .saver)
         XCTAssertEqual(fake.paths.filter { $0 == .captureRestart }.count, 1,
                        "already at or below the saver tops: no restart needed")
+        // Off after the dwell: the tops lift, the controller keeps its point and history.
+        coordinator.helloAccepted(AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true, saveData: .off),
+                                  now: 3 + AdaptiveStreamingCoordinator.saverMinimumDwellSeconds)
+        XCTAssertEqual(coordinator.appliedDataPolicy, .normal)
+        XCTAssertNotEqual(coordinator.lastDecision?.action, .initial)
+        XCTAssertEqual(coordinator.plan, clamped)
     }
 
     // MARK: - F3: user geometry always wins
