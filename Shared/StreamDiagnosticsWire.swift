@@ -75,12 +75,15 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     /// Largest value accepted from the wire for any field.
     static let wireValueCeiling = 1_000_000.0
 
-    /// The wire object: `{"v":1, ...}` with values rounded to 0.1.
+    /// The wire object: `{"v":1, ...}` with values rounded to 0.1. Each
+    /// value is clamped to ±`wireValueCeiling` BEFORE it is scaled, so a
+    /// huge local value can never become infinity (JSONSerialization raises
+    /// an Objective-C exception on one, which would crash the app).
     var wireFields: [String: Any] {
         var out: [String: Any] = ["v": Self.wireVersion]
         for (key, path) in side == .sender ? Self.senderKeys : Self.receiverKeys {
-            if let value = self[keyPath: path], value.isFinite {
-                out[key] = (value * 10).rounded() / 10
+            if let value = self[keyPath: path], let rounded = PeerNumber.roundedTenths(value, limit: Self.wireValueCeiling) {
+                out[key] = rounded
             }
         }
         return out
@@ -95,13 +98,13 @@ struct StreamDiagnosticsPeerSummary: Codable, Equatable, Sendable {
     /// Parses the `diag` object a peer on `side` sent; nil when absent,
     /// malformed or of an unknown version.
     static func fromWire(_ object: Any?, side: StreamDiagnosticsSide) -> StreamDiagnosticsPeerSummary? {
-        guard let dict = object as? [String: Any], (dict["v"] as? NSNumber)?.intValue == wireVersion else { return nil }
+        guard let dict = object as? [String: Any],
+              PeerNumber.int(dict["v"], in: 0...1_000_000) == wireVersion else { return nil }
         var summary = StreamDiagnosticsPeerSummary(side: side)
         var any = false
         for (key, path) in side == .sender ? senderKeys : receiverKeys {
-            guard let number = dict[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { continue }
-            let value = number.doubleValue
-            guard value.isFinite else { continue }
+            // Finite non-bool numbers only; clamped, never converted to Int.
+            guard let value = PeerNumber.double(dict[key]) else { continue }
             summary[keyPath: path] = Swift.min(Swift.max(value, 0), wireValueCeiling)
             any = true
         }

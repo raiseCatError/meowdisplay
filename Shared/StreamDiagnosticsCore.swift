@@ -1,8 +1,8 @@
 // Streaming diagnostics (#123): the recorder.
 //
 // Opt-in, off by default. When the switch is off every recording entry point
-// returns after one lock-protected flag read: no clock read, no allocation,
-// no counter touched. When on, each hook is O(1): a binary search over a
+// returns after one flag read under an os_unfair_lock (no NSLock, no clock
+// read, no allocation, no counter touched). When on, each hook is O(1): a binary search over a
 // fixed bucket table and a few integer adds under one uncontended lock. All
 // storage is allocated once, at init; a window rotation (every 5 s) copies
 // the fixed-size arrays once.
@@ -13,30 +13,71 @@
 // Pure Foundation (no UIKit/AppKit). Compiled into every app target and MacTests.
 
 import Foundation
+import os
 
 // MARK: - Switch and clock
 
+/// A value behind an `os_unfair_lock`. `OSAllocatedUnfairLock` needs macOS 13
+/// and the Mac Receiver deploys to macOS 12, so this is the small portable
+/// equivalent: the lock lives in its own stable allocation (never inside a
+/// Swift property, which may move), and the state is only touched under it.
+final class StreamDiagnosticsUnfairLock<State>: @unchecked Sendable {
+    private let lockPointer: UnsafeMutablePointer<os_unfair_lock>
+    private var state: State
+
+    init(_ initial: State) {
+        state = initial
+        lockPointer = .allocate(capacity: 1)
+        lockPointer.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        lockPointer.deinitialize(count: 1)
+        lockPointer.deallocate()
+    }
+
+    func withLock<R>(_ body: (inout State) throws -> R) rethrows -> R {
+        os_unfair_lock_lock(lockPointer)
+        defer { os_unfair_lock_unlock(lockPointer) }
+        return try body(&state)
+    }
+}
+
 /// The process-wide opt-in. Persisted so a QA build can be switched on with
 /// one command (`defaults write <bundle id> streamDiagnosticsEnabled -bool YES`).
+/// Read on every frame: an unfair lock around two words, never an NSLock.
 final class StreamDiagnosticsSwitch: @unchecked Sendable {
     static let defaultsKey = "streamDiagnosticsEnabled"
     static let shared = StreamDiagnosticsSwitch(enabled: UserDefaults.standard.bool(forKey: defaultsKey))
 
-    private let lock = NSLock()
-    private var enabled: Bool
+    private struct State {
+        var enabled: Bool
+        /// Bumped on every off → on change, so a recorder can tell that the
+        /// time since its last event includes an off period.
+        var enableEpoch: UInt64 = 0
+    }
+
+    private let state: StreamDiagnosticsUnfairLock<State>
 
     init(enabled: Bool = false) {
-        self.enabled = enabled
+        state = StreamDiagnosticsUnfairLock(State(enabled: enabled))
     }
 
     var isEnabled: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return enabled
+        state.withLock { $0.enabled }
+    }
+
+    /// Changes on every off → on transition.
+    var enableEpoch: UInt64 {
+        state.withLock { $0.enableEpoch }
     }
 
     /// `persist`: also writes the preference (the shared switch only).
     func set(_ on: Bool, persist: Bool = false) {
-        lock.lock(); enabled = on; lock.unlock()
+        state.withLock { s in
+            if on, !s.enabled { s.enableEpoch &+= 1 }
+            s.enabled = on
+        }
         if persist { UserDefaults.standard.set(on, forKey: Self.defaultsKey) }
     }
 }
@@ -45,6 +86,14 @@ enum StreamDiagnosticsClock {
     /// Monotonic milliseconds on this device (mach uptime; stops in sleep).
     static func nowMs() -> Double {
         Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000
+    }
+
+    /// The same clock in seconds: the time base of the adaptive receiver
+    /// state. Shared code compiled into iOS uses this rather than
+    /// `ProcessInfo.systemUptime`, a required-reason API (system boot time)
+    /// that the iOS privacy manifest does not declare.
+    static func nowSeconds() -> TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 }
 
@@ -375,7 +424,16 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private var rttJitter: Double?
     private var context = StreamDiagnosticsContext()
     private var peer: StreamDiagnosticsPeerSummary?
+    /// When `peer` last arrived (this device's clock); it expires after
+    /// `peerExpiryWindows` windows without an update.
+    private var peerUpdatedMs: Double?
     private var resources: StreamDiagnosticsResourceSample?
+    /// A window completed under the lock: the resource sample is taken
+    /// after the lock is released (`unlockAndSampleResources`).
+    private var needsResourceSample = false
+    /// The switch's `enableEpoch` this recorder last saw: a change means
+    /// diagnostics were off in between.
+    private var seenEnableEpoch: UInt64
     private var generation: UInt64?
     private var presenterInFlight = 0
     private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = []
@@ -396,7 +454,12 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         current = DiagnosticsWindow(startMs: nowMs)
         session = [Int64](repeating: 0, count: DiagnosticsCounter.allCases.count)
         lastMarkMs = [Double?](repeating: nil, count: DiagnosticsStage.allCases.count)
+        seenEnableEpoch = diagnosticsSwitch.enableEpoch
     }
+
+    /// A peer summary older than this many windows is dropped (the peer
+    /// stopped reporting: diagnostics off there, or an old build).
+    static let peerExpiryWindows = 2.0
 
     var isEnabled: Bool { diagnosticsSwitch.isEnabled }
 
@@ -404,7 +467,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordDuration(_ stage: DiagnosticsStage, ms: Double, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         current.histograms[stage.rawValue].record(ms)
     }
@@ -412,21 +475,21 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     /// An event on an interval stage: records the time since the previous one.
     func markInterval(_ stage: DiagnosticsStage, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         markLocked(stage, nowMs)
     }
 
     func increment(_ counter: DiagnosticsCounter, by amount: Int64 = 1, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         addLocked(counter, amount)
     }
 
     func observeGauge(_ gauge: DiagnosticsGauge, _ value: Double, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         current.gauges[gauge.rawValue].observe(value)
     }
@@ -435,7 +498,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordCapture(_ status: DiagnosticsCaptureStatus, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         switch status {
         case .complete:
@@ -454,7 +517,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     func recordSubmit(origin: DiagnosticsSubmitOrigin, sourceKey: Int64?, sourceAgeMs: Double?,
                       pendingEncodes: Int, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         addLocked(origin.counter, 1)
         if let sourceKey {
@@ -470,7 +533,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordEncodeOutput(durationMs: Double?, bytes: Int, keyframe: Bool, outcome: EncodeOutcome, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         if let durationMs { current.histograms[DiagnosticsStage.encode.rawValue].record(durationMs) }
         switch outcome {
@@ -490,7 +553,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordSendCompletion(durationMs: Double, bytes: Int, error: Bool, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         current.histograms[DiagnosticsStage.send.rawValue].record(durationMs)
         if error {
@@ -504,7 +567,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     func recordCompose(durationMs: Double, staticResend: Bool, tiles: Int, floats: Int, dimmed: Int,
                        withFrame: Int, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         current.histograms[DiagnosticsStage.compose.rawValue].record(durationMs)
         addLocked(.composeFrames, 1)
@@ -520,7 +583,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordArrival(bytes: Int, wireSubmitToSendMs: Double?, mappedSubmitToReceiveMs: Double?, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         addLocked(.arrivedFrames, 1)
         addLocked(.arrivedBytes, Int64(bytes))
@@ -547,7 +610,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         guard stamp != 0 else { return }
         let now = DispatchTime.now().uptimeNanoseconds
         let enabled = isEnabled
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         presenterInFlight = Swift.max(0, presenterInFlight - 1)
         guard enabled else { return }
         let nowMs = Double(now) / 1_000_000
@@ -557,7 +620,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordPresentationEnqueue(at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         addLocked(.enqueuedForPresentation, 1)
         markLocked(.presentationEnqueueInterval, nowMs)
@@ -565,7 +628,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     func recordRTT(_ ms: Double, at nowMs: Double) {
         guard isEnabled, ms.isFinite else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
         rotateIfNeeded(nowMs)
         current.histograms[DiagnosticsStage.rtt.rawValue].record(ms)
         if let last = lastRTTMs {
@@ -613,10 +676,11 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         }
     }
 
-    func updatePeer(_ summary: StreamDiagnosticsPeerSummary) {
+    func updatePeer(_ summary: StreamDiagnosticsPeerSummary, at nowMs: Double = StreamDiagnosticsClock.nowMs()) {
         guard isEnabled else { return }
         lock.lock(); defer { lock.unlock() }
         peer = summary
+        peerUpdatedMs = nowMs
     }
 
     /// Clears everything (a new session).
@@ -631,6 +695,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         lastRTTMs = nil
         rttJitter = nil
         peer = nil
+        peerUpdatedMs = nil
         resources = nil
         generation = nil
         context = StreamDiagnosticsContext()
@@ -640,8 +705,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
 
     /// The last completed window, or the in-progress one before any completed.
     func snapshot(at nowMs: Double = StreamDiagnosticsClock.nowMs()) -> StreamDiagnosticsSnapshot {
-        lock.lock(); defer { lock.unlock() }
-        rotateIfNeeded(nowMs)
+        lockRotatedAndSampled(nowMs)
+        defer { lock.unlock() }
         return snapshotLocked(nowMs)
     }
 
@@ -651,8 +716,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     /// built from it. nil before the first window completes. Rotates exactly
     /// like `snapshot(at:)` and records nothing.
     func completedWindowForLab(at nowMs: Double = StreamDiagnosticsClock.nowMs()) -> StreamDiagnosticsCompletedWindow? {
-        lock.lock(); defer { lock.unlock() }
-        rotateIfNeeded(nowMs)
+        lockRotatedAndSampled(nowMs)
+        defer { lock.unlock() }
         guard let completed else { return nil }
         return StreamDiagnosticsCompletedWindow(
             sequence: completedSequence, startMs: completed.startMs, durationMs: completedDurationMs,
@@ -725,10 +790,53 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         lastMarkMs[stage.rawValue] = nowMs
     }
 
+    /// Releases the lock, then takes a pending resource sample with the
+    /// recorder lock NOT held (the sampler reads task info and battery
+    /// state), and stores it under the lock again.
+    private func unlockAndSampleResources() {
+        let sample = needsResourceSample
+        needsResourceSample = false
+        lock.unlock()
+        guard sample, let resourceSampler else { return }
+        let value = resourceSampler.sample()
+        lock.lock()
+        resources = value
+        lock.unlock()
+    }
+
+    /// Takes the lock, rotates, and (if a window just completed) takes the
+    /// resource sample outside the lock before re-locking, so the returned
+    /// view includes it. Returns with the lock held.
+    private func lockRotatedAndSampled(_ nowMs: Double) {
+        lock.lock()
+        rotateIfNeeded(nowMs)
+        guard needsResourceSample else { return }
+        unlockAndSampleResources()
+        lock.lock()
+    }
+
+    private func clearIntervalBaselines() {
+        for i in lastMarkMs.indices { lastMarkMs[i] = nil }
+    }
+
     /// Completes the window once it is `windowMs` old. After a long quiet
     /// spell (two windows or more) the completed window is an empty one: the
     /// last window really had nothing in it.
+    ///
+    /// Interval baselines restart when diagnostics were switched off and on
+    /// again, or after two or more windows with nothing recorded, so the off
+    /// (or idle) period is never recorded as one long freeze. A peer summary
+    /// with no update for `peerExpiryWindows` windows is dropped.
     private func rotateIfNeeded(_ nowMs: Double) {
+        let epoch = diagnosticsSwitch.enableEpoch
+        if epoch != seenEnableEpoch {
+            seenEnableEpoch = epoch
+            clearIntervalBaselines()
+        }
+        if let updated = peerUpdatedMs, nowMs - updated > Self.peerExpiryWindows * windowMs {
+            peer = nil
+            peerUpdatedMs = nil
+        }
         let age = nowMs - current.startMs
         guard age >= windowMs else { return }
         completedSequence &+= 1
@@ -737,13 +845,12 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
             empty.clear(startMs: nowMs - windowMs)
             completed = empty
             completedDurationMs = windowMs
+            clearIntervalBaselines()
         } else {
             completed = current
             completedDurationMs = age
         }
         current.clear(startMs: nowMs)
-        if let resourceSampler {
-            resources = resourceSampler.sample()
-        }
+        if resourceSampler != nil { needsResourceSample = true }
     }
 }

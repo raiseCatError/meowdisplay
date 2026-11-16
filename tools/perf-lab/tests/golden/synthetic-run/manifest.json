@@ -461,6 +461,13 @@
       "unit" : "events"
     },
     {
+      "caveat" : "Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found.",
+      "id" : "session.colour_samples",
+      "source" : "A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
       "caveat" : "",
       "id" : "receiver.arrival.frames",
       "side" : "receiver",

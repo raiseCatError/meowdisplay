@@ -2701,8 +2701,11 @@ Older Macs never send the field; older receivers ignore it and see paused panes 
 
 Optional and additive: no `pv` bump, no welcome feature, no new message type. Every key below
 rides on a message that already exists. A peer that does not know a key ignores it; absence means
-today's behaviour. Garbage or out-of-range values read as absent. Numbers are JSON numbers; a JSON
-bool is never accepted where a number is expected (and the reverse). Thresholds and the real-world
+today's behaviour. Garbage or out-of-range values read as absent: every number is range-checked as
+a double before the Mac converts it, so `1e300`, `-1e300`, NaN, infinities, a string, a bool or an
+object in a number's place is simply absent, never a crash. The hello's existing `scale` is used for
+the readability floor only inside 0.5…8. Numbers are JSON numbers; a JSON bool is never accepted
+where a number is expected (and the reverse). Thresholds and the real-world
 effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md).
 
 **Receiver `hello`** (re-sent whenever any of these change; the official receivers check every
@@ -2712,7 +2715,7 @@ effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md)
   `maximumFramesPerSecond`, at most 60 while Low Power Mode is on. Mac Receiver: the main
   `NSScreen.maximumFramesPerSecond`. Absent: the Mac negotiates FPS exactly as before
   (`maxFPS` only).
-- `adaptiveTelemetry` (int, `1`): the receiver adds the telemetry keys below to `stats` while the
+- `adaptiveTelemetry` (int, `1`; a later version up to 10000 also counts): the receiver adds the telemetry keys below to `stats` while the
   Mac announces adaptive mode. Only honoured together with a valid `effHz`; the official receivers
   always send both or neither. Absent: the Mac keeps its fixed Automatic policy for this receiver.
 - `cost` (object): a cost hint for the receiver's own media connection path,
@@ -2722,7 +2725,9 @@ effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md)
   through a tunnel "not expensive" is `unknown`. Class and flags only: never an SSID, address,
   interface name or carrier. Missing or invalid `cost`/`conf`: the hint is ignored; an invalid
   `iface` reads as `unknown`.
-- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting.
+- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting. Only a receiver
+  that has the setting sends it (iOS). The Mac Receiver has none and sends neither this key nor
+  `saveDataAnswer`: absent = today's behaviour (never data-saving).
 - `saveDataAnswer` (`"saveData"` or `"keepQuality"`): the remembered answer to the one-time
   suggestion, or the explicit full-quality choice in Settings. Absent: not answered.
 
@@ -2748,10 +2753,24 @@ the old `stats` content.
 **What the Mac does with them.** Old receivers (no keys) and Custom mode: exactly today's
 behaviour. With the Beta switch on, a receiver that sends `effHz` + `adaptiveTelemetry` gets a
 per-receiver controller: FPS changes take the live capture update, bitrate changes recreate the
-encoder session (with a keyframe), and raster changes restart that receiver's capture (rate
-limited). The bitrate never goes above the Best target (18 Mbps). With the switch on, the Mac also
-never captures above the source's own refresh. "Use less data" works with the switch off too: in
-Automatic, the Mac uses a conservative point (Balanced raster and bitrate, at most 60 FPS) for that
-receiver when `saveData` is `on`, or `auto` with clear Low Data Mode evidence, or `auto` with clear
-metered evidence and `saveDataAnswer:"saveData"`. `keepQuality` keeps full quality. Saving data
-never stops or refuses a stream. Android sends none of these keys yet (parity gap).
+encoder session (with a keyframe), and raster changes restart that receiver's capture (the
+controller allows one raster change per 20 s, except a severe protective step). The bitrate never
+goes above the Best target (18 Mbps). With the switch on, the Mac also never captures above the
+source's own refresh in Mirror (the mirrored display's refresh) and Extend (the virtual display's);
+a reading below 24 Hz counts as unknown (no cap). Window view has no source cap.
+
+"Use less data" works with the switch off too: in Automatic, the Mac uses a conservative point
+(Balanced raster and bitrate, at most 60 FPS) for that receiver when `saveData` is `on`, or `auto`
+with clear Low Data Mode evidence, or `auto` with clear metered evidence and
+`saveDataAnswer:"saveData"`. Evidence from both ends counts, with one limit on the Mac's side: Low
+Data Mode set on the Mac (its media connection's `isConstrained`) counts like the receiver's own;
+a metered Mac path (`isExpensive`) alone never changes quality. The Mac reads its own path before
+the first capture is configured whenever the path is already known. `saveData:"off"` is full
+quality always, Low Data Mode included (a deliberate, reversible override). `keepQuality` (the "No"
+answer, or Full Quality under On Mobile Data) only means "don't save on mobile data": with
+`saveData:"auto"`, Low Data Mode at either end still saves. A capture restart caused by a data-policy
+change (not by the controller) happens at most once per 20 s per receiver; a policy that changes
+again inside that time waits, and the latest one applies when the 20 s have passed, so a flapping
+path or hint cannot restart capture repeatedly. A change that needs no restart (FPS, bitrate)
+applies at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
+(parity gap).

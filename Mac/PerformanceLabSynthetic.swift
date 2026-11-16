@@ -81,7 +81,7 @@ enum PerformanceLabSyntheticRun {
                 emitFrame(frame, trial: trial, recorder: recorder, clock: clock, lastKey: &lastKey)
             }
             frame += 1
-            if frame % 300 == 0 { recorder.updatePeer(receiverSummary(trial: trial, update: frame / 300)) }
+            if frame % 300 == 0 { recorder.updatePeer(receiverSummary(trial: trial, update: frame / 300), at: clock) }
             if frame % 30 == 0 { controller.tick() }
         }
         guard case .finished(let folder) = controller.phase else { throw SyntheticError.didNotFinish }
