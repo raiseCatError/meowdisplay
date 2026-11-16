@@ -440,6 +440,7 @@ targets:
       - Shared/PerformanceLabRun.swift
       - Mac/PerformanceLabRunController.swift
       - Mac/PerformanceLabSynthetic.swift
+      - Shared/StreamDiagnosticsColour.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same

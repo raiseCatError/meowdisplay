@@ -6063,6 +6063,7 @@ final class StreamReceiver: ObservableObject {
         let presenter = presenter
         let videoDecoderRef = videoDecoderRef
         let uiSink = uiSink
+        let diagnostics = self.diagnostics
         return .init(
             controlMessage: { data in
                 queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
@@ -6072,6 +6073,7 @@ final class StreamReceiver: ObservableObject {
             },
             codecConfigurationChanged: { box, videoSize in
                 queue.async {
+                    diagnostics.sampleColourReceiverFormat(box.value)   // colour metadata (#241), read-only
                     // Retires the previous session's/format's currently-
                     // displayed frame — see `handleAnnexB`'s old inline
                     // comment (now `ReceiverFramePipeline.handleAnnexB`)

@@ -210,6 +210,7 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
     // Both
     case routeChanges
     case generationResets
+    case colourSamples
     // Receiver
     case arrivedFrames
     case arrivedBytes
@@ -303,6 +304,10 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
             return .init(id: "session.route_changes", unit: "events", side: nil, source: "Route class changed between samples", timebase: .none, caveat: "Sampled about every 2 s.")
         case .generationResets:
             return .init(id: "session.generation_resets", unit: "events", side: nil, source: "Capture or presentation generation changed; interval baselines restart", timebase: .none, caveat: "")
+        case .colourSamples:
+            return .init(id: "session.colour_samples", unit: "events", side: nil,
+                         source: "A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change",
+                         timebase: .none, caveat: "Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found.")
         case .arrivedFrames:
             return .init(id: "receiver.arrival.frames", unit: "frames", side: r, source: "Complete video frames at presentDecodedSample", timebase: .none, caveat: "")
         case .arrivedBytes:
