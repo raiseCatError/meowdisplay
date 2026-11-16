@@ -119,7 +119,103 @@ protocol AdaptiveStreamingApplying: AnyObject {
     func adaptiveApply(_ path: AdaptiveApplyPath)
 }
 
+/// How the running capture's size was derived (#123 A4/A5): the source size
+/// at scale 1.0, today's quality scale and the receiver's decode ceiling.
+/// `captureSize(scale:)` is the sender's own formula, so the coordinator can
+/// tell what any raster would really capture: a step whose size equals the
+/// current one is a no-op and never restarts capture, and the controller's
+/// native size is the true size before the ceiling.
+struct AdaptiveCaptureSizing: Equatable, Sendable {
+    /// Pixels at scale 1.0 (Extend: points × 2; Mirror: the display mode's
+    /// pixels; Window view: the canvas).
+    var sourceWidth: Double
+    var sourceHeight: Double
+    /// The quality's own scale (1.0 in Automatic): the controller's raster 1.0.
+    var todayScale: Double
+    var maxWide: Int?
+    var maxHigh: Int?
+
+    /// Larger sizes (a hostile hello) are unknown here, never a trap.
+    static let maximumDimension = 1_000_000.0
+
+    /// `Int(source × scale) & ~1`, then the decode ceiling: exactly how the
+    /// sender sizes a capture. nil when out of range.
+    func captureSize(scale: Double) -> AdaptivePixelSize? {
+        guard let raw = unclampedSize(scale: scale) else { return nil }
+        let clamped = DecodeCeiling.clamp(width: raw.width, height: raw.height, maxWide: maxWide, maxHigh: maxHigh)
+        return AdaptivePixelSize(width: clamped.width, height: clamped.height)
+    }
+
+    /// Today's raster before the decode ceiling: the controller's native size.
+    var nativeSize: AdaptivePixelSize? { unclampedSize(scale: todayScale) }
+
+    /// True when the decode ceiling shrinks the capture at `scale`.
+    func isClampedByCeiling(scale: Double) -> Bool {
+        guard let raw = unclampedSize(scale: scale) else { return false }
+        if let maxWide, maxWide > 0, raw.width > maxWide { return true }
+        if let maxHigh, maxHigh > 0, raw.height > maxHigh { return true }
+        return false
+    }
+
+    /// The two scales capture the same picture: the same size, or both
+    /// shrunk to the decode ceiling (the same size up to rounding).
+    func capturesTheSame(_ a: Double, _ b: Double) -> Bool {
+        if abs(a - b) <= 1e-9 { return true }
+        if isClampedByCeiling(scale: a), isClampedByCeiling(scale: b) { return true }
+        guard let sizeA = captureSize(scale: a), let sizeB = captureSize(scale: b) else { return false }
+        return sizeA == sizeB
+    }
+
+    /// `size` is what the capture at `scale` produces (rounding to the
+    /// decode ceiling's edge allowed when that scale is clamped).
+    func matches(_ size: AdaptivePixelSize, scale: Double) -> Bool {
+        guard let expected = captureSize(scale: scale) else { return false }
+        if expected == size { return true }
+        guard isClampedByCeiling(scale: scale) else { return false }
+        return abs(expected.width - size.width) <= 2 && abs(expected.height - size.height) <= 2
+    }
+
+    private func unclampedSize(scale: Double) -> AdaptivePixelSize? {
+        let width = sourceWidth * scale, height = sourceHeight * scale
+        guard scale.isFinite, scale > 0, width.isFinite, height.isFinite, width >= 2, height >= 2,
+              width < Self.maximumDimension, height < Self.maximumDimension else { return nil }
+        return AdaptivePixelSize(width: Int(width) & ~1, height: Int(height) & ~1)
+    }
+}
+
+struct AdaptivePixelSize: Equatable, Sendable {
+    var width: Int
+    var height: Int
+}
+
+/// Adaptive changes that waited while the lock screen view was shown (#123
+/// A7): the costliest one is applied when the view ends, instead of being
+/// dropped until some unrelated rebuild. Pure; the sender keeps one on `queue`.
+struct AdaptiveApplyDeferral: Equatable, Sendable {
+    private(set) var pending: AdaptiveApplyPath = .none
+
+    private static func rank(_ path: AdaptiveApplyPath) -> Int {
+        switch path {
+        case .none: return 0
+        case .liveFPSUpdate: return 1
+        case .encoderRebuild: return 2
+        case .captureRestart: return 3
+        }
+    }
+
+    mutating func record(_ path: AdaptiveApplyPath) {
+        if Self.rank(path) > Self.rank(pending) { pending = path }
+    }
+
+    /// What to apply now; clears it.
+    mutating func take() -> AdaptiveApplyPath {
+        defer { pending = .none }
+        return pending
+    }
+}
+
 /// Thread-safe read side for the UI: app payload sent and the current plan.
+/// Written at most once per sender tick (never per frame, #123).
 final class AdaptiveStreamingMonitor: @unchecked Sendable {
     struct Snapshot: Equatable, Sendable {
         /// Encoded video payload handed to the network (app payload, not
@@ -138,16 +234,30 @@ final class AdaptiveStreamingMonitor: @unchecked Sendable {
     private var plan: AdaptiveStreamingPlan?
     private var dataPolicy: NetworkCost.DataPolicy = .normal
     private var lastReason: AdaptiveStreamingDecision.Reason?
+    private var writes = 0
+
+    /// Lock-taking writes so far (tests: the off state must not write per frame).
+    var writeCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return writes
+    }
 
     func noteVideoPayload(bytes count: Int, now: TimeInterval) {
+        addPayload(bytes: Int64(max(count, 0)), firstSendAt: now)
+    }
+
+    /// Adds payload counted on the sender's queue since the last publish.
+    func addPayload(bytes count: Int64, firstSendAt first: TimeInterval) {
         lock.lock(); defer { lock.unlock() }
-        if firstSendAt == nil { firstSendAt = now }
-        bytes &+= Int64(max(count, 0))
+        writes &+= 1
+        if firstSendAt == nil { firstSendAt = first }
+        bytes &+= max(count, 0)
     }
 
     func update(plan: AdaptiveStreamingPlan?, dataPolicy: NetworkCost.DataPolicy,
                 lastReason: AdaptiveStreamingDecision.Reason?) {
         lock.lock(); defer { lock.unlock() }
+        writes &+= 1
         self.plan = plan
         self.dataPolicy = dataPolicy
         if let lastReason { self.lastReason = lastReason }
@@ -165,11 +275,12 @@ final class AdaptiveStreamingMonitor: @unchecked Sendable {
 }
 
 /// Per-receiver glue between the sender and the phase 1 controller. Every
-/// mutating call happens on the sender's queue; the plan and source refresh
-/// are also read from capture-start code off the queue, so those two are
+/// mutating call happens on the sender's queue; the plan and the capture
+/// sizing are also read from capture-start code off the queue, so those are
 /// lock-protected.
 final class AdaptiveStreamingCoordinator: @unchecked Sendable {
-    /// What configures the controller, rebuilt by the sender on every tick.
+    /// What configures the controller, rebuilt by the sender on every tick
+    /// while the controller runs (never while it is off).
     struct Inputs: Equatable, Sendable {
         var mode: RefreshNegotiation.DisplayMode
         var profile: StreamingProfile
@@ -190,6 +301,19 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         var networkDrops: Int
         var thermal: AdaptiveThermalLevel
         var lowPower: Bool
+        /// Mean submit → compressed-output time of the window's encodes
+        /// (`MacSenderPipelineState`); nil when nothing was encoded.
+        var encodeLatencyMs: Double? = nil
+    }
+
+    /// Work done so far (tests: with the switch off and no data saving, the
+    /// coordinator must stay idle).
+    struct WorkCounters: Equatable, Sendable {
+        var activeTicks = 0
+        var inputsBuilt = 0
+        var samplesBuilt = 0
+        var replans = 0
+        var telemetryParsed = 0
     }
 
     let enabled: Bool
@@ -206,17 +330,28 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// A source refresh below this is treated as unknown (no source cap):
     /// no real display refreshes that slowly, so a lower reading is noise.
     static let minimumSourceRefreshHz = 24
-    /// A restart-class plan change caused by a data-policy change (not by
-    /// the controller) is applied at most once per this interval, latest
-    /// policy wins: a flapping path or a hostile `saveData`/cost hint can't
-    /// cause a capture-restart storm. The controller's own restart limit.
-    static let policyRestartIntervalSeconds = AdaptiveStreamingThresholds.standard.minRestartIntervalSeconds
+    /// At most one capture restart per this interval per receiver, whatever
+    /// asked for it: the controller, a data-policy change, a clamp, a reset
+    /// on reconnect or a managed/unmanaged flip (#123 A3). A restart asked
+    /// for inside it waits (latest plan wins) while its bitrate/FPS part
+    /// applies at once.
+    static let restartIntervalSeconds = AdaptiveStreamingThresholds.standard.minRestartIntervalSeconds
+    /// The data-policy deferral uses the same interval (kept name).
+    static let policyRestartIntervalSeconds = restartIntervalSeconds
+    /// A bitrate change rebuilds the VideoToolbox session and sends a
+    /// keyframe: at most one bitrate change per this interval (#123 A8),
+    /// latest wins. FPS-only changes are not held.
+    static let encoderRebuildIntervalSeconds = 4.0
 
     private let lock = NSLock()
+    /// The plan the pipeline runs (what the sender reads).
     private var planValue: AdaptiveStreamingPlan?
     private var sourceRefreshValue: Int?
-    private var nativeSize: (width: Int, height: Int)?
-    /// The capture scale the running capture was started with.
+    private var sizing: AdaptiveCaptureSizing?
+    /// The size the running capture was started at.
+    private var startedSize: AdaptivePixelSize?
+    /// The capture scale that size matches; nil when it matched no plan at
+    /// the time it was noted (a plan changed while the capture started).
     private var startedScale: Double?
 
     private(set) var hello: AdaptiveHelloFields?
@@ -227,16 +362,26 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     private(set) var appliedDataPolicy: NetworkCost.DataPolicy = .normal
     /// A policy waiting for the restart limit (latest wins); nil = none.
     private(set) var pendingDataPolicy: NetworkCost.DataPolicy?
-    /// When this coordinator last asked for a capture restart (any origin).
+    /// The plan the controller and policy ask for. Differs from `plan`
+    /// only while a rate limit holds part of it.
+    private(set) var desiredPlan: AdaptiveStreamingPlan?
+    /// When this coordinator last applied a capture restart (any origin).
     private(set) var lastRestartAt: TimeInterval?
+    /// When it last applied any change (every path rebuilds the encoder).
+    private(set) var lastEncoderRebuildAt: TimeInterval?
     private(set) var routeEpoch: UInt64 = 0
     private(set) var generation: UInt64 = 0
     private(set) var lastDecision: AdaptiveStreamingDecision?
+    private(set) var work = WorkCounters()
+    /// The running controller's configuration (diagnostics and tests).
+    var controllerConfiguration: AdaptiveStreamingController.Configuration? { controller?.configuration }
     private var senderCost: NetworkCost.EndpointReport?
     private var controller: AdaptiveStreamingController?
     private var pendingTelemetry: AdaptiveReceiverTelemetry?
     private var sentFrames = 0
     private var sentBytes = 0
+    private var unpublishedPayload: Int64 = 0
+    private var firstPayloadAt: TimeInterval?
     private var lastRecordedReason: AdaptiveStreamingDecision.Reason?
 
     init(enabled: Bool, streamingMode: StreamingMode?, displayMode: RefreshNegotiation.DisplayMode,
@@ -263,9 +408,11 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     }
 
     /// True while this pipeline runs the controller: the Mac adds the
-    /// announce key to its ping.
+    /// announce key to its ping. Fixed for the coordinator's life.
     var announcesAdaptive: Bool { enabled && streamingMode == .automatic }
 
+    /// The Mirror/Extend source cap applies with the switch on, to every
+    /// receiver this coordinator serves, old ones included (PROTOCOL.md 6.20).
     func resolveFPS(_ today: StreamingFPSPolicy.Result) -> StreamingFPSPolicy.Result {
         lock.lock()
         let plan = planValue
@@ -290,35 +437,88 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         sourceRefreshValue = hz.flatMap { $0 >= Self.minimumSourceRefreshHz ? $0 : nil }
     }
 
-    /// A capture (re)started at `width`×`height` with `scale` applied: the
-    /// controller's scale-1.0 raster is that size divided by the scale.
+    /// A capture (re)started at `width`×`height`, sized by `sizing` (#123
+    /// A4/A5). The scale is not taken on trust: the capture matches the
+    /// current plan only if the plan's size is exactly what started, so a
+    /// plan that changed while the capture was being set up is still seen as
+    /// unapplied (`captureNeedsRasterRestart`).
+    func noteCaptureStarted(sizing newSizing: AdaptiveCaptureSizing, width: Int, height: Int) {
+        guard width > 0, height > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        let started = AdaptivePixelSize(width: width, height: height)
+        let planned = newSizing.todayScale * (planValue?.rasterScale ?? 1)
+        sizing = newSizing
+        startedSize = started
+        startedScale = newSizing.matches(started, scale: planned) ? planned : nil
+    }
+
+    /// A capture started at `width`×`height` with `scale` applied and no
+    /// decode ceiling (Window view's canvas, tests): its scale-1.0 raster is
+    /// that size divided by the scale.
     func noteCaptureStarted(width: Int, height: Int, scale: Double) {
         guard width > 0, height > 0, scale > 0, scale.isFinite else { return }
         lock.lock(); defer { lock.unlock() }
-        nativeSize = (Int((Double(width) / scale).rounded()) & ~1, Int((Double(height) / scale).rounded()) & ~1)
+        sizing = AdaptiveCaptureSizing(sourceWidth: Double(width) / scale, sourceHeight: Double(height) / scale,
+                                       todayScale: 1, maxWide: nil, maxHigh: nil)
+        startedSize = AdaptivePixelSize(width: width, height: height)
         startedScale = scale
     }
 
-    /// True when the running capture was started at a different scale than
-    /// the plan now asks for (`today` × plan raster): a deferred adaptive
-    /// raster restart still has work to do.
+    /// True when the running capture does not have the size the plan now
+    /// asks for (`today` × plan raster): a deferred or lost adaptive raster
+    /// restart still has work to do. A raster step whose size equals the
+    /// running one (the decode ceiling) needs no restart.
     func captureNeedsRasterRestart(today: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let startedScale else { return false }
-        return abs(startedScale - today * (planValue?.rasterScale ?? 1)) > 1e-9
+        guard let startedSize, let sizing else { return false }
+        let desired = today * (planValue?.rasterScale ?? 1)
+        if let startedScale { return !sizing.capturesTheSame(startedScale, desired) }
+        guard sizing.captureSize(scale: desired) != nil else { return false }
+        return !sizing.matches(startedSize, scale: desired)
     }
 
     private var captureStarted: Bool {
         lock.lock(); defer { lock.unlock() }
-        return nativeSize != nil
+        return startedSize != nil
+    }
+
+    /// Whether going from raster `old` to `new` changes the captured size.
+    private func rasterChangeRestarts(from old: Double, to new: Double) -> Bool {
+        guard abs(old - new) > 1e-9 else { return false }
+        lock.lock()
+        let sizing = self.sizing
+        lock.unlock()
+        guard let sizing else { return true }
+        return !sizing.capturesTheSame(sizing.todayScale * old, sizing.todayScale * new)
+    }
+
+    /// The pipeline path from `old` to `new`, where a raster change that
+    /// keeps the captured size (decode ceiling) is not a capture restart.
+    func applyPath(from old: AdaptiveStreamingPlan?, to new: AdaptiveStreamingPlan?) -> AdaptiveApplyPath {
+        let path = AdaptiveStreamingPlanner.applyPath(from: old, to: new)
+        guard path == .captureRestart,
+              !rasterChangeRestarts(from: old?.rasterScale ?? 1, to: new?.rasterScale ?? 1) else { return path }
+        var sameRaster = old ?? AdaptiveStreamingPlan(rasterScale: 1, bitrate: AdaptiveStreamingLadder.fixedPolicyBitrate,
+                                                      fpsCap: nil, origin: new?.origin ?? .controller)
+        sameRaster.rasterScale = new?.rasterScale ?? 1
+        return AdaptiveStreamingPlanner.applyPath(from: sameRaster, to: new)
     }
 
     // MARK: Inputs (sender queue)
+
+    /// Nothing to do: the switch is off (or Custom), no data saving is in
+    /// effect or pending, and the plan is today's. Every input then returns
+    /// at once: no input building, no replanning, no per-frame lock.
+    private var isIdle: Bool {
+        !announcesAdaptive && appliedDataPolicy == .normal && pendingDataPolicy == nil
+            && desiredPlan == nil && plan == nil
+    }
 
     /// An accepted hello (first or re-sent).
     func helloAccepted(_ fields: AdaptiveHelloFields, now: TimeInterval) {
         hello = fields
         updateDataPolicy(now: now)
+        guard !isIdle else { return }
         replan(now: now)
     }
 
@@ -335,8 +535,17 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
             note(decision, now: now)
         }
         updateDataPolicy(now: now)
+        guard !isIdle else { return true }
         replan(now: now)
         return true
+    }
+
+    /// A receiver `stats` message. Parsed only while the controller runs:
+    /// with the switch off its telemetry is never used.
+    func receiverStats(json object: [String: Any]) {
+        guard announcesAdaptive else { return }
+        work.telemetryParsed += 1
+        receiverStats(AdaptiveReceiverTelemetry.parse(object))
     }
 
     func receiverStats(_ telemetry: AdaptiveReceiverTelemetry?) {
@@ -344,19 +553,38 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         pendingTelemetry = telemetry
     }
 
+    /// Every video send completion (sender queue): plain counters, no lock.
     func noteVideoSent(bytes: Int, now: TimeInterval) {
+        let count = max(bytes, 0)
+        if firstPayloadAt == nil { firstPayloadAt = now }
+        unpublishedPayload &+= Int64(count)
+        guard announcesAdaptive else { return }
         sentFrames += 1
-        sentBytes += max(bytes, 0)
-        monitor.noteVideoPayload(bytes: bytes, now: now)
+        sentBytes += count
+    }
+
+    /// Hands the payload counted since the last call to the UI monitor (one
+    /// lock per tick, and none when nothing was sent).
+    func publishUsage() {
+        guard unpublishedPayload > 0, let first = firstPayloadAt else { return }
+        monitor.addPayload(bytes: unpublishedPayload, firstSendAt: first)
+        unpublishedPayload = 0
     }
 
     /// Once per sender ping window. `generation` is the connection
-    /// generation: a newer one (reconnect) resets the controller.
-    func tick(generation newGeneration: UInt64, inputs: Inputs?, window: SenderWindow, now: TimeInterval) {
+    /// generation: a newer one (reconnect) resets the controller. `inputs`
+    /// and `window` are only built while there is work to do.
+    func tick(generation newGeneration: UInt64, mode: RefreshNegotiation.DisplayMode? = nil,
+              inputs makeInputs: @autoclosure () -> Inputs?, window makeWindow: @autoclosure () -> SenderWindow,
+              now: TimeInterval) {
+        publishUsage()
+        if let mode { displayMode = mode }
         defer {
             sentFrames = 0
             sentBytes = 0
         }
+        guard !isIdle else { return }
+        work.activeTicks += 1
         if newGeneration != generation {
             generation = newGeneration
             pendingTelemetry = nil
@@ -366,7 +594,6 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                 note(decision, now: now)
             }
         }
-        if let inputs { displayMode = inputs.mode }
         if let pending = pendingDataPolicy, restartAllowed(now: now) {
             applyDataPolicy(pending, now: now)
         }
@@ -374,6 +601,9 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
             replan(now: now)
             return
         }
+        work.inputsBuilt += 1
+        let inputs = makeInputs()
+        if let inputs { displayMode = inputs.mode }
         if let inputs, let configuration = configuration(for: inputs) {
             if var controller {
                 if controller.configuration != configuration {
@@ -391,8 +621,11 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         if var controller {
             let decision: AdaptiveStreamingDecision
             if let telemetry = pendingTelemetry {
-                decision = controller.ingest(sample(window: window, telemetry: telemetry,
-                                                    mode: controller.configuration.mode, now: now))
+                work.samplesBuilt += 1
+                decision = controller.ingest(Self.makeSample(
+                    generation: generation, routeEpoch: routeEpoch, mode: controller.configuration.mode,
+                    window: makeWindow(), sentFrames: sentFrames, sentBytes: sentBytes, telemetry: telemetry,
+                    dataPolicy: appliedDataPolicy, now: now))
                 pendingTelemetry = nil
             } else {
                 decision = controller.tick(now: now)
@@ -403,34 +636,16 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         replan(now: now)
     }
 
-    // MARK: Internals
+    // MARK: Sample builder (the only one production uses)
 
-    private func configuration(for inputs: Inputs) -> AdaptiveStreamingController.Configuration? {
-        lock.lock()
-        let native = nativeSize
-        let source = sourceRefreshValue
-        lock.unlock()
-        guard let native, native.width > 0, native.height > 0 else { return nil }
-        let negotiation = RefreshNegotiation.negotiate(RefreshNegotiation.Input(
-            mode: inputs.mode, profile: inputs.profile, customFPS: inputs.customFPS, sourceRefreshHz: source,
-            receiverMaxFPS: inputs.receiverMaxFPS, receiverEffectiveRefreshHz: hello?.effectiveRefreshHz,
-            userMaxFPS: inputs.userMaxFPS, encodeWidth: native.width, encodeHeight: native.height,
-            codec: inputs.codec))
-        var ladder = AdaptiveStreamingLadder.standard
-        if inputs.mode == .window {
-            // Window view composes into a fixed canvas: raster is not a
-            // dimension there (bitrate and FPS only).
-            ladder.rasterSteps = [1.0]
-            ladder.saverRasterTop = 1.0
-        }
-        return AdaptiveStreamingController.Configuration(
-            streamingMode: streamingMode, mode: inputs.mode, negotiation: negotiation,
-            nativeEncodeWidth: native.width, nativeEncodeHeight: native.height, receiver: inputs.receiver,
-            receiverTelemetryAvailable: hello?.telemetry == true, ladder: ladder)
-    }
-
-    private func sample(window: SenderWindow, telemetry: AdaptiveReceiverTelemetry,
-                        mode: RefreshNegotiation.DisplayMode, now: TimeInterval) -> AdaptiveStreamingSample {
+    /// One controller sample from the sender's window and the receiver's
+    /// `stats` telemetry: exactly what production feeds the controller. The
+    /// simulation and the tests build their samples here too, so they can't
+    /// feed a field production never sets (#123 A1).
+    static func makeSample(generation: UInt64, routeEpoch: UInt64, mode: RefreshNegotiation.DisplayMode,
+                           window: SenderWindow, sentFrames: Int, sentBytes: Int,
+                           telemetry: AdaptiveReceiverTelemetry, dataPolicy: NetworkCost.DataPolicy,
+                           now: TimeInterval) -> AdaptiveStreamingSample {
         let seconds = max(now - window.start, 0.001)
         var s = AdaptiveStreamingSample(generation: generation, routeEpoch: routeEpoch, mode: mode,
                                         windowStart: window.start, windowEnd: now)
@@ -441,6 +656,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         s.deliveredFPS = telemetry.deliveredFPS
         s.decodedFPS = telemetry.decodedFPS
         s.enqueuedFPS = telemetry.enqueuedFPS
+        s.encodeQueueAgeMs = window.encodeLatencyMs
         s.decodeTimeP95Ms = telemetry.decodeP95Ms
         s.presentationQueueAgeMs = telemetry.presentationAgeMs
         s.drops = AdaptiveStreamingSample.Drops(encoder: window.encoderDrops, network: window.networkDrops,
@@ -453,8 +669,54 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         s.senderThermal = window.thermal
         s.receiverThermal = telemetry.thermal
         s.power = window.lowPower || telemetry.lowPower == true ? .lowPower : .normal
-        s.dataPolicy = appliedDataPolicy
+        s.dataPolicy = dataPolicy
         return s
+    }
+
+    // MARK: Internals
+
+    /// Ladder steps relative to the native size before the decode ceiling;
+    /// steps that would capture the same size as the next higher one are
+    /// dropped, so a step never restarts capture for nothing (#123 A4).
+    static func distinctRasterSteps(_ steps: [Double], sizing: AdaptiveCaptureSizing) -> [Double] {
+        var kept: [Double] = []
+        for step in steps.sorted(by: >) {
+            if let last = kept.last, sizing.capturesTheSame(sizing.todayScale * last, sizing.todayScale * step) {
+                continue
+            }
+            kept.append(step)
+        }
+        return kept.reversed()
+    }
+
+    private func configuration(for inputs: Inputs) -> AdaptiveStreamingController.Configuration? {
+        lock.lock()
+        let sizing = self.sizing
+        let source = sourceRefreshValue
+        lock.unlock()
+        guard let sizing, let native = sizing.nativeSize, native.width > 0, native.height > 0,
+              let top = sizing.captureSize(scale: sizing.todayScale) else { return nil }
+        // FPS capability (H.264's macroblock guard) at the largest raster
+        // that is really encoded: today's size after the decode ceiling.
+        let negotiation = RefreshNegotiation.negotiate(RefreshNegotiation.Input(
+            mode: inputs.mode, profile: inputs.profile, customFPS: inputs.customFPS, sourceRefreshHz: source,
+            receiverMaxFPS: inputs.receiverMaxFPS, receiverEffectiveRefreshHz: hello?.effectiveRefreshHz,
+            userMaxFPS: inputs.userMaxFPS, encodeWidth: top.width, encodeHeight: top.height,
+            codec: inputs.codec))
+        var ladder = AdaptiveStreamingLadder.standard
+        if inputs.mode == .window {
+            // Window view composes into a fixed canvas: raster is not a
+            // dimension there (bitrate and FPS only).
+            ladder.rasterSteps = [1.0]
+            ladder.saverRasterTop = 1.0
+        } else {
+            ladder.rasterSteps = Self.distinctRasterSteps(ladder.rasterSteps, sizing: sizing)
+        }
+        return AdaptiveStreamingController.Configuration(
+            streamingMode: streamingMode, mode: inputs.mode, negotiation: negotiation,
+            nativeEncodeWidth: native.width, nativeEncodeHeight: native.height, receiver: inputs.receiver,
+            receiverTelemetryAvailable: hello?.telemetry == true, ladder: ladder,
+            maxEncodeWidth: sizing.maxWide, maxEncodeHeight: sizing.maxHigh)
     }
 
     private func updateDataPolicy(now: TimeInterval) {
@@ -497,7 +759,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
 
     private func restartAllowed(now: TimeInterval) -> Bool {
         guard let lastRestartAt else { return true }
-        return now - lastRestartAt >= Self.policyRestartIntervalSeconds
+        return now - lastRestartAt >= Self.restartIntervalSeconds
+    }
+
+    private func encoderRebuildAllowed(now: TimeInterval) -> Bool {
+        guard let lastEncoderRebuildAt else { return true }
+        return now - lastEncoderRebuildAt >= Self.encoderRebuildIntervalSeconds
     }
 
     /// Whether running `policy` would change the raster of a live capture.
@@ -510,7 +777,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         let candidate = AdaptiveStreamingPlanner.plan(
             streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: policy,
             decision: decision, mode: displayMode)
-        return AdaptiveStreamingPlanner.applyPath(from: plan, to: candidate) == .captureRestart
+        return applyPath(from: plan, to: candidate) == .captureRestart
     }
 
     private func note(_ decision: AdaptiveStreamingDecision, now: TimeInterval) {
@@ -525,26 +792,58 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         lastRecordedReason = decision.reason
     }
 
+    /// The one rate limiter for this receiver (#123 A3/A8): from the plan
+    /// that runs to the plan wanted, holding back a raster change inside
+    /// `restartIntervalSeconds` of the last capture restart and a bitrate
+    /// change inside `encoderRebuildIntervalSeconds` of the last encoder
+    /// rebuild. FPS always passes. What is held is re-evaluated on every
+    /// tick against the latest wanted plan.
+    private func gated(from applied: AdaptiveStreamingPlan?, to desired: AdaptiveStreamingPlan?,
+                       now: TimeInterval) -> AdaptiveStreamingPlan? {
+        guard desired != applied, captureStarted else { return desired }
+        let fixedBitrate = AdaptiveStreamingLadder.fixedPolicyBitrate
+        let appliedRaster = applied?.rasterScale ?? 1, appliedBitrate = applied?.bitrate ?? fixedBitrate
+        var raster = desired?.rasterScale ?? 1, bitrate = desired?.bitrate ?? fixedBitrate
+        var held = false
+        var restarts = rasterChangeRestarts(from: appliedRaster, to: raster)
+        if restarts, !restartAllowed(now: now) {
+            raster = appliedRaster
+            restarts = false
+            held = true
+        }
+        // A capture restart rebuilds the encoder anyway: no separate limit.
+        if bitrate != appliedBitrate, !restarts, !encoderRebuildAllowed(now: now) {
+            bitrate = appliedBitrate
+            held = true
+        }
+        guard held else { return desired }
+        if desired == nil, abs(raster - 1) <= 1e-9, bitrate == fixedBitrate { return nil }
+        return AdaptiveStreamingPlan(rasterScale: raster, bitrate: bitrate, fpsCap: desired?.fpsCap,
+                                     origin: desired?.origin ?? applied?.origin ?? .controller)
+    }
+
     private func replan(now: TimeInterval) {
+        work.replans += 1
         let managed = controller == nil ? nil : lastDecision
-        let newPlan = AdaptiveStreamingPlanner.plan(
+        let wanted = AdaptiveStreamingPlanner.plan(
             streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: appliedDataPolicy,
             decision: managed, mode: displayMode)
+        desiredPlan = wanted
+        let oldPlan = plan
+        let newPlan = gated(from: oldPlan, to: wanted, now: now)
         monitor.update(plan: newPlan, dataPolicy: appliedDataPolicy, lastReason: lastDecision?.reason)
+        guard newPlan != oldPlan else { return }
+        let path = applyPath(from: oldPlan, to: newPlan)
         lock.lock()
-        let oldPlan = planValue
-        guard newPlan != oldPlan else {
-            lock.unlock()
-            return
-        }
         planValue = newPlan
         lock.unlock()
-        let path = AdaptiveStreamingPlanner.applyPath(from: oldPlan, to: newPlan)
         if path == .captureRestart, captureStarted { lastRestartAt = now }
+        if path != .none { lastEncoderRebuildAt = now }
         let reason = lastDecision.map { "\($0.action.rawValue)/\($0.reason.rawValue) cause=\($0.cause.rawValue)" } ?? "-"
+        let heldNote = newPlan == wanted ? "" : " held=\(wanted.map(String.init(describing:)) ?? "today")"
         log("adaptive: \(oldPlan.map(String.init(describing:)) ?? "today") → \(newPlan.map(String.init(describing:)) ?? "today") "
             + "path=\(path.rawValue) decision=\(reason) data=\(appliedDataPolicy.rawValue) "
-            + "evidence=\(dataPolicy.policy.rawValue)/\(dataPolicy.reason.rawValue)")
+            + "evidence=\(dataPolicy.policy.rawValue)/\(dataPolicy.reason.rawValue)\(heldNote)")
         if path != .none { applier?.adaptiveApply(path) }
     }
 }

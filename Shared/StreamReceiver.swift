@@ -3308,8 +3308,9 @@ final class StreamReceiver: ObservableObject {
         hello.merge(QUICPeerCapability.advertisedFields(quicAvailable: helloState.isQUICAvailable())) { $1 }
         // Additive (#123, PROTOCOL.md 6.20): effective refresh + telemetry
         // flag, cost hint and "Use less data". Old Macs ignore them.
-        hello.merge(ReceiverAdaptiveState.shared.helloFields.wireFields) { $1 }
-        ReceiverAdaptiveState.shared.noteHelloSent()
+        let adaptiveFields = ReceiverAdaptiveState.shared.helloFields
+        hello.merge(adaptiveFields.wireFields) { $1 }
+        ReceiverAdaptiveState.shared.noteHelloSent(adaptiveFields, now: StreamDiagnosticsClock.nowSeconds())
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
@@ -6003,12 +6004,13 @@ final class StreamReceiver: ObservableObject {
                 queue.async {
                     Self.sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000],
                                       sendTargetBox: sendTargetBox)
-                    // Adaptive (#123): a changed effective refresh, path or
-                    // "Use less data" choice re-sends hello; the one-time
+                    // Adaptive (#123): a change the Mac uses (effective
+                    // refresh, cost, "Use less data") re-sends hello, at most
+                    // once per 5 s with the latest values (A9); the one-time
                     // suggestion is evaluated here too.
                     let adaptiveState = ReceiverAdaptiveState.shared
-                    if adaptiveState.consumeHelloResend(),
-                       let connection = sendTargetBox.current()?.connection, connection.state == .ready {
+                    if let connection = sendTargetBox.current()?.connection, connection.state == .ready,
+                       adaptiveState.consumeHelloResend(now: StreamDiagnosticsClock.nowSeconds()) {
                         Self.sendHello(
                             on: connection, helloState: helloState, displayGeometryState: displayGeometryState,
                             avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox,

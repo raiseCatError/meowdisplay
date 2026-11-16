@@ -276,35 +276,45 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         XCTAssertEqual(ReceiverEffectiveRefresh.resolve(maximumFramesPerSecond: 500, lowPowerMode: false), 240)
     }
 
+    /// #123 A9 changed this test: a re-send is now gated on a change the
+    /// Mac uses since the last hello that went out, at most once per
+    /// `AdaptiveHelloResendGate.minimumIntervalSeconds` (latest values win),
+    /// instead of once per raw change.
     func testHelloIsResentWhenEffectiveRefreshPathOrPreferenceChanges() {
         let state = ReceiverAdaptiveState()
-        XCTAssertFalse(state.consumeHelloResend())
+        let gap = AdaptiveHelloResendGate.minimumIntervalSeconds
+        XCTAssertFalse(state.consumeHelloResend(now: 0), "no hello sent yet: the first one carries everything")
         XCTAssertTrue(state.helloFields.wireFields["effHz"] == nil, "no refresh known: legacy hello")
         XCTAssertNil(state.helloFields.wireFields["adaptiveTelemetry"], "the flag never travels alone")
+        state.noteHelloSent(state.helloFields, now: 0)
 
         state.setEffectiveRefresh(120)
-        XCTAssertTrue(state.consumeHelloResend())
-        XCTAssertFalse(state.consumeHelloResend(), "once per change")
+        XCTAssertFalse(state.consumeHelloResend(now: 1), "inside the interval: waits")
+        XCTAssertTrue(state.consumeHelloResend(now: gap))
+        state.noteHelloSent(state.helloFields, now: gap)
+        XCTAssertFalse(state.consumeHelloResend(now: 2 * gap), "sent: nothing changed since")
         state.setEffectiveRefresh(120)
-        XCTAssertFalse(state.consumeHelloResend(), "same value: nothing to send")
+        XCTAssertFalse(state.consumeHelloResend(now: 3 * gap), "same value: nothing to send")
         state.setEffectiveRefresh(60)   // Low Power Mode capped ProMotion
-        XCTAssertTrue(state.consumeHelloResend())
+        XCTAssertTrue(state.consumeHelloResend(now: 3 * gap))
         XCTAssertEqual(state.helloFields.wireFields["effHz"] as? Int, 60)
         XCTAssertEqual(state.helloFields.wireFields["adaptiveTelemetry"] as? Int, 1)
+        state.noteHelloSent(state.helloFields, now: 3 * gap)
 
         let wifi = NetworkCost.endpointReport(NetworkCost.PathFlags(usesWiFi: true), reachability: .local)
         state.setPath(wifi)
-        XCTAssertTrue(state.consumeHelloResend())
+        XCTAssertTrue(state.consumeHelloResend(now: 4 * gap), "the cost class is new")
+        state.noteHelloSent(state.helloFields, now: 4 * gap)
         state.setPath(wifi)
-        XCTAssertFalse(state.consumeHelloResend())
+        XCTAssertFalse(state.consumeHelloResend(now: 5 * gap))
 
         state.setSettings(UseLessDataSettings(preference: .on, answer: .unanswered, dismissals: 0))
-        XCTAssertTrue(state.consumeHelloResend())
+        XCTAssertTrue(state.consumeHelloResend(now: 5 * gap))
         XCTAssertEqual(state.helloFields.wireFields["saveData"] as? String, "on")
 
         state.setEffectiveRefresh(120)
-        state.noteHelloSent()
-        XCTAssertFalse(state.consumeHelloResend(), "a hello that went out anyway carried the change")
+        state.noteHelloSent(state.helloFields, now: 5 * gap)
+        XCTAssertFalse(state.consumeHelloResend(now: 6 * gap), "a hello that went out anyway carried the change")
     }
 
     // MARK: - Path to cost evidence
@@ -595,18 +605,25 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
     }
 
     func testOneReceiversDecisionNeverTouchesAnother() {
+        // #123 A1 changed this test: the healthy 120 Hz receiver now probes
+        // 120 on its own evidence (before the fix it never could), so
+        // isolation is checked against its solo run instead of "no change".
         let (congested, congestedFake) = managedCoordinator()
         let (healthy, healthyFake) = managedCoordinator()
-        let healthyPlan = healthy.plan
+        let (solo, soloFake) = managedCoordinator()
         var end = 4.0
         for _ in 0..<12 {
             feed(congested, end: end, sent: 100, delivered: 50, netDrops: 20)
             feed(healthy, end: end, sent: 120, delivered: 60)
+            feed(solo, end: end, sent: 120, delivered: 60)
             end += 2
         }
         XCTAssertGreaterThan(congestedFake.paths.count, 1)
-        XCTAssertEqual(healthyFake.paths, [.liveFPSUpdate], "only its own start, nothing from the other receiver")
-        XCTAssertEqual(healthy.plan, healthyPlan)
+        XCTAssertEqual(healthyFake.paths, soloFake.paths, "only its own decisions, nothing from the other receiver")
+        XCTAssertEqual(healthy.plan, solo.plan)
+        XCTAssertGreaterThanOrEqual(healthy.plan?.fpsCap ?? 0, 60, "never stepped down")
+        XCTAssertEqual(healthy.plan?.bitrate, 18_000_000)
+        XCTAssertEqual(healthy.plan?.rasterScale, 1)
     }
 
     func testBitrateLadderNeverExceedsTodaysBest() {
@@ -635,6 +652,11 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         coordinator.receiverStats(telemetry(delivered: 10))
         coordinator.tick(generation: 2, inputs: inputs(), window: window(6, 8), now: 8)
         XCTAssertEqual(coordinator.generation, 2)
+        // #123 A8 changed this test: the reset's bitrate change waits for the
+        // 4 s encoder-rebuild limit (the 15 Mbps rebuild ran at 6 s), then applies.
+        XCTAssertEqual(coordinator.desiredPlan?.bitrate, 18_000_000)
+        XCTAssertEqual(coordinator.plan?.bitrate, 15_000_000)
+        coordinator.tick(generation: 2, inputs: inputs(), window: window(8, 10), now: 10)
         XCTAssertEqual(coordinator.plan?.bitrate, 18_000_000)
         XCTAssertEqual(fake.paths.last, .encoderRebuild)
         XCTAssertNotEqual(coordinator.lastDecision?.action, .downshift)
@@ -748,6 +770,9 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
     func testDataAccountingCountsVideoPayloadPerReceiver() {
         let (coordinator, _) = managedCoordinator()
         for _ in 0..<100 { coordinator.noteVideoSent(bytes: 50_000, now: 10) }
+        // #123: sends are counted on the sender queue without a lock and
+        // reach the monitor once per tick (this line was added).
+        coordinator.publishUsage()
         let snapshot = coordinator.monitor.snapshot(now: 14)
         XCTAssertEqual(snapshot.videoPayloadBytes, 5_000_000)
         XCTAssertEqual(snapshot.averageBitsPerSecond ?? 0, 10_000_000, accuracy: 1)

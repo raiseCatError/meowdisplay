@@ -4,9 +4,10 @@
 // are no timers or globals, and each receiver owns its own value-type
 // instance, so controllers can never share mutable state.
 //
-// Phase 1 is logic only. Nothing in the app calls this yet; see
-// docs/performance/adaptive-streaming.md for the ladder, thresholds and the
-// phase 2 wiring plan.
+// Phase 2 wires it per receiver through `AdaptiveStreamingCoordinator`
+// (Mac/AdaptiveStreamingSession.swift), behind the Adaptive Automatic (Beta)
+// switch; see docs/performance/adaptive-streaming.md for the ladder and
+// thresholds.
 
 import Foundation
 
@@ -41,9 +42,15 @@ struct AdaptiveStreamingController: Sendable {
         var streamingMode: StreamingMode
         var mode: RefreshNegotiation.DisplayMode
         var negotiation: RefreshNegotiation.Result
-        /// The raster at scale 1.0 (today's Best, after `DecodeCeiling`).
+        /// The raster at scale 1.0 (today's Best), BEFORE the receiver's
+        /// decode ceiling: ladder steps are fractions of this size (#123 A4).
         var nativeEncodeWidth: Int
         var nativeEncodeHeight: Int
+        /// The receiver's decode ceiling (`hello.maxEncodeWide/High`), if
+        /// any: the encoded raster of a step is clamped to it, like the
+        /// sender's capture size.
+        var maxEncodeWidth: Int?
+        var maxEncodeHeight: Int?
         /// nil = unknown receiver: the conservative fixed floor applies.
         var receiver: AdaptiveReceiverDisplay?
         /// False for a peer that cannot report the windowed receiver
@@ -59,7 +66,8 @@ struct AdaptiveStreamingController: Sendable {
              receiver: AdaptiveReceiverDisplay?, receiverTelemetryAvailable: Bool,
              explicitOverride: AdaptiveOperatingPoint? = nil,
              ladder: AdaptiveStreamingLadder = .standard,
-             thresholds: AdaptiveStreamingThresholds = .standard) {
+             thresholds: AdaptiveStreamingThresholds = .standard,
+             maxEncodeWidth: Int? = nil, maxEncodeHeight: Int? = nil) {
             self.streamingMode = streamingMode
             self.mode = mode
             self.negotiation = negotiation
@@ -70,6 +78,16 @@ struct AdaptiveStreamingController: Sendable {
             self.explicitOverride = explicitOverride
             self.ladder = ladder
             self.thresholds = thresholds
+            self.maxEncodeWidth = maxEncodeWidth
+            self.maxEncodeHeight = maxEncodeHeight
+        }
+
+        /// The encoded raster for `point`: the ladder fraction of the native
+        /// size, then the decode ceiling (as the sender sizes its capture).
+        func encodedRaster(_ point: AdaptiveOperatingPoint) -> (width: Int, height: Int) {
+            let raster = point.raster(nativeWidth: nativeEncodeWidth, nativeHeight: nativeEncodeHeight)
+            return DecodeCeiling.clamp(width: raster.width, height: raster.height,
+                                       maxWide: maxEncodeWidth, maxHigh: maxEncodeHeight)
         }
     }
 
@@ -421,9 +439,12 @@ struct AdaptiveStreamingController: Sendable {
         let reason = priority.first { reasons.contains($0) } ?? .ceilingClamp
         probe = nil
         clearStreaks()
+        // A clamp only ever lowers the point: it counts as a downward move
+        // for the oscillation guard (#123 A3), and a raster clamp records the
+        // restart time in `change`.
         return change(to: clamped, dimensions: Self.changedDimensions(point, clamped), action: .policyClamp,
                       reason: reason, cause: thermal >= .serious ? .thermal : .none, now: now,
-                      evidence: baseEvidence(), direction: nil)
+                      evidence: baseEvidence(), direction: .down)
     }
 
     // MARK: - Classification
@@ -534,7 +555,12 @@ struct AdaptiveStreamingController: Sendable {
     private mutating func handleProbe(_ assessment: Assessment, now: TimeInterval) -> Decision? {
         guard var pending = probe else { return nil }
         switch assessment.cause {
-        case .thermal, .encoder, .decoder, .network:
+        case .thermal, .encoder, .decoder, .network, .none:
+            // `.none` is short delivery with no attributable cause. Before the
+            // probe the windows were healthy, so the probe is the likely
+            // cause: with partial evidence (no decode time on the default
+            // receiver path) this is the only sign an upshift overloaded the
+            // receiver, and holding would keep the bad point forever (#123 A1).
             probe = nil
             clearStreaks()
             startBackoff(pending.dimension, now: now)
@@ -550,7 +576,7 @@ struct AdaptiveStreamingController: Sendable {
             }
             probe = pending
             return hold(.probeConfirming, cause: .healthy, evidence: assessment.evidence)
-        case .sourceLimited, .none, .insufficientData, .stale:
+        case .sourceLimited, .insufficientData, .stale:
             // An idle source can't confirm a probe; keep waiting.
             return hold(.probeConfirming, cause: assessment.cause, evidence: assessment.evidence)
         }
@@ -653,9 +679,8 @@ struct AdaptiveStreamingController: Sendable {
         func bitrateDown(respectBitsPerPixel: Bool, _ reason: Reason) -> Step? {
             guard let lower = ladder.bitrateSteps.last(where: { $0 < point.bitrate }) else { return nil }
             if respectBitsPerPixel {
-                let raster = point.raster(nativeWidth: configuration.nativeEncodeWidth,
-                                          nativeHeight: configuration.nativeEncodeHeight)
-                let pixelRate = Double(raster.width * raster.height) * Double(max(point.fps, 1))
+                let raster = configuration.encodedRaster(point)
+                let pixelRate = Double(raster.width) * Double(raster.height) * Double(max(point.fps, 1))
                 if Double(lower) / pixelRate < t.minBitsPerPixel { return nil }
             }
             var next = point
@@ -699,8 +724,21 @@ struct AdaptiveStreamingController: Sendable {
         return .failure(StepFailure(reason: .noLowerOption))
     }
 
-    /// Strict order: the first dimension that is below its top (and not in a
-    /// probe back-off) is the only one tried; without headroom for it, hold.
+    /// What the pipeline evidence says about a step's extra pixel or frame
+    /// load. `unknown`: part of the evidence is missing (the default
+    /// display-layer receiver path reports no decode time), which is handled
+    /// explicitly rather than read as "no headroom" (#123 A1).
+    private enum PipelineHeadroom {
+        case yes
+        case no
+        case unknown
+    }
+
+    /// Ladder order: raster up to the readability floor, FPS up to 60, raster
+    /// up, bitrate up, then 90/120. The first step that has headroom is
+    /// taken. A raster step that can't rise (no headroom, or the restart
+    /// limit) falls through to the cheaper bitrate step (#123 A1); 90/120 is
+    /// only tried once nothing below it is waiting.
     private func upshiftStep(sample s: AdaptiveStreamingSample, now: TimeInterval) -> Result<Step, StepFailure> {
         let t = configuration.thresholds
         let tops = currentTops()
@@ -712,9 +750,8 @@ struct AdaptiveStreamingController: Sendable {
             dimensionBackoffUntil[dimension].map { now < $0 } ?? false
         }
         func pixels(_ p: AdaptiveOperatingPoint) -> Double {
-            let raster = p.raster(nativeWidth: configuration.nativeEncodeWidth,
-                                  nativeHeight: configuration.nativeEncodeHeight)
-            return Double(raster.width * raster.height)
+            let raster = configuration.encodedRaster(p)
+            return Double(raster.width) * Double(raster.height)
         }
         func networkHeadroom(newFPS: Int) -> Bool {
             guard let backpressure = s.sendBackpressure, backpressure <= t.headroomBackpressure,
@@ -725,11 +762,37 @@ struct AdaptiveStreamingController: Sendable {
             }
             return true
         }
-        func pipelineHeadroom(_ next: AdaptiveOperatingPoint) -> Bool {
-            guard let encodeAge = s.encodeQueueAgeMs, let decode = s.decodeTimeP95Ms else { return false }
+        func pipelineHeadroom(_ next: AdaptiveOperatingPoint) -> PipelineHeadroom {
             let pixelScale = pixels(next) / max(pixels(point), 1)
-            let budget = t.headroomPipelineFraction * 1000 / Double(max(next.fps, 1))
-            return encodeAge * pixelScale <= budget && decode * pixelScale <= budget
+            let intervalMs = 1000 / Double(max(next.fps, 1))
+            var unknown = false
+            if let encodeAge = s.encodeQueueAgeMs {
+                let budget = t.headroomPipelineFraction * t.encodeQueueAgeFrameIntervals * intervalMs
+                if encodeAge * pixelScale > budget { return .no }
+            } else {
+                unknown = true
+            }
+            if let decode = s.decodeTimeP95Ms {
+                if decode * pixelScale > t.headroomPipelineFraction * intervalMs { return .no }
+            } else {
+                unknown = true
+            }
+            return unknown ? .unknown : .yes
+        }
+        /// Full evidence: the pipeline check alone. Partial evidence: the
+        /// network must also show headroom, and the longer dwell applies.
+        func admits(_ next: AdaptiveOperatingPoint) -> Result<Void, StepFailure> {
+            switch pipelineHeadroom(next) {
+            case .yes:
+                return .success(())
+            case .no:
+                return .failure(StepFailure(reason: .noHeadroom))
+            case .unknown:
+                if let last = lastChangeAt, now - last < t.minDwellSecondsWithoutPipelineEvidence {
+                    return .failure(StepFailure(reason: .dwell))
+                }
+                return networkHeadroom(newFPS: next.fps) ? .success(()) : .failure(StepFailure(reason: .noHeadroom))
+            }
         }
         func rasterUp(_ reason: Reason) -> Result<Step, StepFailure>? {
             guard !inBackoff(.raster),
@@ -740,9 +803,8 @@ struct AdaptiveStreamingController: Sendable {
             if let last = lastRestartAt, now - last < t.minRestartIntervalSeconds {
                 return .failure(StepFailure(reason: .restartRateLimited))
             }
-            guard networkHeadroom(newFPS: next.fps), pipelineHeadroom(next) else {
-                return .failure(StepFailure(reason: .noHeadroom))
-            }
+            guard networkHeadroom(newFPS: next.fps) else { return .failure(StepFailure(reason: .noHeadroom)) }
+            if case .failure(let failure) = admits(next) { return .failure(failure) }
             return .success(Step(point: next, dimension: .raster, reason: reason))
         }
         func fpsUp(limit: Int, _ reason: Reason) -> Result<Step, StepFailure>? {
@@ -750,16 +812,23 @@ struct AdaptiveStreamingController: Sendable {
                   higher <= limit else { return nil }
             var next = point
             next.fps = higher
+            // The capture is configured at the current target, so it can
+            // never show more source frames than that: the evidence that
+            // the source has more to give is a saturated capture (#123 A1).
+            // Whether the source can reach the tier at all is already in the
+            // negotiation (`allowedTargets`: 90/120 only from a source whose
+            // refresh supports them).
+            let saturated = { (captured: Double) in captured >= t.highRefreshSourceRatio * Double(point.fps) }
             let sourceSupports: Bool
             if higher > first {
-                sourceSupports = (s.sourceUniqueFPS ?? 0) >= t.highRefreshSourceRatio * Double(higher)
+                sourceSupports = s.sourceUniqueFPS.map(saturated) ?? false
             } else {
-                sourceSupports = s.sourceUniqueFPS.map { $0 > Double(point.fps) } ?? true
+                sourceSupports = s.sourceUniqueFPS.map(saturated) ?? true
             }
-            guard sourceSupports, pipelineHeadroom(next),
-                  higher <= first || networkHeadroom(newFPS: higher) else {
+            guard sourceSupports, higher <= first || networkHeadroom(newFPS: higher) else {
                 return .failure(StepFailure(reason: .noHeadroom))
             }
+            if case .failure(let failure) = admits(next) { return .failure(failure) }
             return .success(Step(point: next, dimension: .fps, reason: reason))
         }
         func bitrateUp() -> Result<Step, StepFailure>? {
@@ -771,16 +840,29 @@ struct AdaptiveStreamingController: Sendable {
             return .success(Step(point: next, dimension: .bitrate, reason: .upshiftBitrate))
         }
 
+        var firstFailure: StepFailure?
+        func take(_ result: Result<Step, StepFailure>?) -> Step? {
+            switch result {
+            case .success(let step)?:
+                return step
+            case .failure(let failure)?:
+                if firstFailure == nil { firstFailure = failure }
+                return nil
+            case nil:
+                return nil
+            }
+        }
+
         // 1. Back up to the readability floor.
-        if point.rasterScale < floor - 1e-9, let step = rasterUp(.upshiftRaster) { return step }
+        if point.rasterScale < floor - 1e-9, let step = take(rasterUp(.upshiftRaster)) { return .success(step) }
         // 2. Sustained 60.
-        if let step = fpsUp(limit: first, .upshiftFPS) { return step }
-        // 3. Sharper raster, 4. more bits.
-        if let step = rasterUp(.upshiftRaster) { return step }
-        if let step = bitrateUp() { return step }
-        // 5. 90/120 last.
-        if let step = fpsUp(limit: tops.fps, .upshiftHighRefresh) { return step }
-        return .failure(StepFailure(reason: .atTop))
+        if let step = take(fpsUp(limit: first, .upshiftFPS)) { return .success(step) }
+        // 3. Sharper raster; 4. more bits (also when the raster can't rise).
+        if let step = take(rasterUp(.upshiftRaster)) { return .success(step) }
+        if let step = take(bitrateUp()) { return .success(step) }
+        // 5. 90/120 last, and only when nothing below it is waiting.
+        if firstFailure == nil, let step = take(fpsUp(limit: tops.fps, .upshiftHighRefresh)) { return .success(step) }
+        return .failure(firstFailure ?? StepFailure(reason: .atTop))
     }
 
     // MARK: - Bookkeeping

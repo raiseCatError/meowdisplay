@@ -21,8 +21,11 @@ import Foundation
 ///   source cadence is known, and the tier divides the source cadence evenly
 ///   (90 from a 120 Hz source would judder).
 /// - A peer that sends no effective-refresh information is a legacy peer: it
-///   gets exactly today's `StreamingFPSPolicy` result, with no source cap
-///   and no 60-first start.
+///   gets exactly today's `StreamingFPSPolicy` result from this negotiation,
+///   with no source cap and no 60-first start. (With the Mac's Adaptive
+///   Automatic (Beta) switch on, the coordinator still caps every receiver,
+///   legacy ones included, at the Mirror/Extend source refresh, outside this
+///   function: PROTOCOL.md 6.20. With the switch off nothing does.)
 /// - Mirror, Extend and Window view each describe their own source: the
 ///   physical display's active mode, the virtual display's supported
 ///   refresh, or the window compositor's frame budget.
