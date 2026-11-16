@@ -38,6 +38,7 @@
     "sender.submit.window_composite" : 0,
     "sender.window.composites" : 0,
     "sender.window.static_resends" : 0,
+    "session.colour_samples" : 0,
     "session.generation_resets" : 0,
     "session.route_changes" : 0
   },
@@ -545,6 +546,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
@@ -656,6 +658,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
@@ -912,6 +915,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
@@ -1023,6 +1027,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
@@ -1279,6 +1284,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
@@ -1390,6 +1396,7 @@
           "sender.submit.window_composite" : 0,
           "sender.window.composites" : 0,
           "sender.window.static_resends" : 0,
+          "session.colour_samples" : 0,
           "session.generation_resets" : 0,
           "session.route_changes" : 0
         },
