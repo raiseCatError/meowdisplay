@@ -177,6 +177,15 @@ struct StreamDiagnosticsPanel: View {
             if let resources = StreamDiagnosticsPresentation.resourceLine(snapshot.resources) {
                 Text(verbatim: resources).font(.caption2).foregroundStyle(.secondary)
             }
+            let colourLines = StreamDiagnosticsColourPresentation.lines(snapshot.colour)
+            if !colourLines.isEmpty {
+                Divider()
+                Text(verbatim: StreamDiagnosticsColourPresentation.heading).font(.callout.weight(.semibold))
+                ForEach(Array(colourLines.enumerated()), id: \.offset) { _, line in
+                    Text(verbatim: line).font(.caption.monospaced()).fixedSize(horizontal: false, vertical: true)
+                }
+                Text(verbatim: StreamDiagnosticsColourPresentation.footnote).font(.caption2).foregroundStyle(.secondary)
+            }
         }
         .textSelection(.enabled)
     }
