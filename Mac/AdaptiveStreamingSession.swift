@@ -350,6 +350,13 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// keyframe: at most one bitrate change per this interval (#123 A8),
     /// latest wins. FPS-only changes are not held.
     static let encoderRebuildIntervalSeconds = 4.0
+    /// Leaving "Use less data" waits until saving has been in effect this
+    /// long; a change toward saving never waits (#123 churn). A receiver
+    /// that flips its preference or cost hint on every hello then gets at
+    /// most one return to full quality per interval instead of an FPS or
+    /// encoder update per hello. The same 20 s as the restart limit, so a
+    /// return normally lands together with its own raster restart.
+    static let saverMinimumDwellSeconds = restartIntervalSeconds
 
     private let lock = NSLock()
     /// The plan the pipeline runs (what the sender reads).
@@ -371,9 +378,16 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// The policy the evidence asks for (diagnostics and the UI read it).
     private(set) var dataPolicy = NetworkCost.PolicyDecision(policy: .normal, reason: .notReported)
     /// The policy the plan and the controller run. Follows `dataPolicy` at
-    /// once; only the raster part of the plan it leads to can be held by the
-    /// restart limit (`gated`), never its bitrate or FPS part (#123 F6).
+    /// once toward saving; only the raster part of the plan it leads to can
+    /// be held by the restart limit (`gated`), never its bitrate or FPS part
+    /// (#123 F6). Away from saving it follows after `saverDwellSeconds`
+    /// (`requestDataPolicy`), latest request wins.
     private(set) var appliedDataPolicy: NetworkCost.DataPolicy = .normal
+    /// When saving began to cost this pipeline something (saver applied
+    /// while a capture runs). nil while saving is not in effect, or when it
+    /// was applied before the first capture (no live change to undo then).
+    private(set) var saverInEffectSince: TimeInterval?
+    private let saverDwellSeconds: TimeInterval
     /// The plan the controller and policy ask for. Differs from `plan`
     /// only while a rate limit holds part of it.
     private(set) var desiredPlan: AdaptiveStreamingPlan?
@@ -403,9 +417,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     private var lastRecordedReason: AdaptiveStreamingDecision.Reason?
 
     init(enabled: Bool, streamingMode: StreamingMode?, displayMode: RefreshNegotiation.DisplayMode,
-         recorder: StreamDiagnosticsRecorder? = nil, log: @escaping (String) -> Void = { _ in }) {
+         recorder: StreamDiagnosticsRecorder? = nil,
+         saverDwellSeconds: TimeInterval = AdaptiveStreamingCoordinator.saverMinimumDwellSeconds,
+         log: @escaping (String) -> Void = { _ in }) {
         self.enabled = enabled
         self.displayMode = displayMode
+        self.saverDwellSeconds = saverDwellSeconds
         // A sender built without a reported mode is a test or a legacy
         // caller: treat it like Custom (never managed).
         self.streamingMode = streamingMode ?? .custom
@@ -638,6 +655,9 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                 note(decision, now: now)
             }
         }
+        // A return from saving that waited for its dwell applies here when
+        // no hello or route change comes after it.
+        requestDataPolicy(dataPolicy.policy, now: now)
         guard announcesAdaptive else {
             replan(now: now)
             return
@@ -783,19 +803,43 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         requestDataPolicy(dataPolicy.policy, now: now)
     }
 
-    /// Applies a policy change at once. Only the raster part of the plan it
-    /// leads to can wait for the restart limit (`gated`, re-evaluated every
-    /// tick, latest wins); its FPS and bitrate parts are not held by it
-    /// (#123 F6, PROTOCOL.md 6.20).
+    /// The one data-policy gate (#123 churn). Toward saving: applies at
+    /// once; only the raster part of the plan it leads to can wait for the
+    /// restart limit (`gated`), never its FPS and bitrate parts (#123 F6,
+    /// PROTOCOL.md 6.20). Away from saving (Automatic only): applies once
+    /// `mayLeaveSaving`. Until then nothing changes and nothing is stored:
+    /// `dataPolicy` keeps the latest request, which every later hello, route
+    /// change and tick re-offers here, so a request back to saving simply
+    /// cancels it and the last one always wins.
     private func requestDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
         guard policy != appliedDataPolicy else { return }
+        if policy == .normal, streamingMode == .automatic, let since = saverInEffectSince,
+           !mayLeaveSaving(since: since, now: now) {
+            return
+        }
         applyDataPolicy(policy, now: now)
+    }
+
+    /// Saving has been in effect for the dwell, and the return lands whole:
+    /// if it restarts capture, the restart limit allows that now, so FPS and
+    /// bitrate never come back ahead of the raster as a separate update.
+    /// After a second dwell the return goes ahead regardless, so it is never
+    /// put off for longer than that.
+    private func mayLeaveSaving(since: TimeInterval, now: TimeInterval) -> Bool {
+        let inEffect = now - since
+        guard inEffect >= saverDwellSeconds else { return false }
+        if inEffect >= 2 * saverDwellSeconds || restartAllowed(now: now) { return true }
+        let returned = AdaptiveStreamingPlanner.plan(
+            streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: .normal,
+            decision: managedDecision, mode: displayMode)
+        return !rasterChangeRestarts(from: plan?.rasterScale ?? 1, to: returned?.rasterScale ?? 1)
     }
 
     /// The controller keeps its history (restart time, backoffs): it is
     /// told the policy, never replaced.
     private func applyDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
         appliedDataPolicy = policy
+        saverInEffectSince = policy == .saver && captureStarted ? now : nil
         guard var controller else { return }
         let decision = controller.setDataPolicy(policy, now: now)
         self.controller = controller
@@ -858,12 +902,16 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                                      origin: desired?.origin ?? applied?.origin ?? .controller)
     }
 
+    /// The controller's decision while it manages this receiver.
+    private var managedDecision: AdaptiveStreamingDecision? {
+        controller == nil || telemetryLost ? nil : lastDecision
+    }
+
     private func replan(now: TimeInterval) {
         work.replans += 1
-        let managed = controller == nil || telemetryLost ? nil : lastDecision
         let wanted = AdaptiveStreamingPlanner.plan(
             streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: appliedDataPolicy,
-            decision: managed, mode: displayMode)
+            decision: managedDecision, mode: displayMode)
         desiredPlan = wanted
         let oldPlan = plan
         let newPlan = gated(from: oldPlan, to: wanted, now: now)
