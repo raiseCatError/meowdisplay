@@ -608,20 +608,27 @@ private fun StreamingSection(media: SessionHost, stream: StreamSettings, live: B
     if (!stream.supportsProfileRequest) {
         Caption("Update MeowDisplay on your Mac to change streaming settings from here.")
     } else {
+        // In Automatic the Mac applies a fixed profile and priority, so these choices couldn't change anything (issue #142).
+        val locked = stream.streamingChoicesLocked
         val profile = stream.profile
-        Choice<StreamingProfile>("Streaming Profile", StreamingProfile.entries, profile, { it.title }) { picked -> media.session.requestStreamingProfile(picked) }
+        Choice<StreamingProfile>("Streaming Profile", StreamingProfile.entries, profile, { it.title }, enabled = !locked) { picked -> media.session.requestStreamingProfile(picked) }
         Caption(profile?.explanation ?: "Waiting for Mac")
         if (profile == StreamingProfile.Custom) {
-            Choice("Frame Rate", CustomFrameRate.entries, stream.customFrameRate, { it.title }) { rate ->
+            Choice("Frame Rate", CustomFrameRate.entries, stream.customFrameRate, { it.title }, enabled = !locked) { rate ->
                 media.session.requestStreamingProfile(StreamingProfile.Custom, rate)
             }
         }
-        Caption("Applies to every device this Mac streams to.")
     }
     if (stream.supportsPriority) {
         val priority = stream.priority
-        Choice<StreamingPriority>("Streaming Priority", StreamingPriority.entries, priority, { it.title }) { picked -> media.session.requestStreamingPriority(picked) }
+        Choice<StreamingPriority>("Streaming Priority", StreamingPriority.entries, priority, { it.title }, enabled = !stream.streamingChoicesLocked) { picked ->
+            media.session.requestStreamingPriority(picked)
+        }
         Caption(priority?.explanation ?: "Waiting for Mac")
+    }
+    if (stream.supportsProfileRequest) {
+        // A Mac that doesn't report its mode gets the old note.
+        Caption(stream.streamingModeNote ?: "Applies to every device this Mac streams to.")
     }
     if (stream.supportsMaxFPS) {
         val current = stream.shownMaxFPS
@@ -643,12 +650,15 @@ private fun StreamingSection(media: SessionHost, stream: StreamSettings, live: B
 }
 
 @Composable
-internal fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T) -> String, onSelect: (T) -> Unit) {
+internal fun <T> Choice(title: String, options: List<T>, selected: T?, label: (T) -> String, enabled: Boolean = true, onSelect: (T) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             options.forEachIndexed { index, option ->
-                SegmentedButton(selected = option == selected, onClick = { onSelect(option) }, shape = SegmentedButtonDefaults.itemShape(index, options.size)) {
+                SegmentedButton(
+                    selected = option == selected, onClick = { onSelect(option) },
+                    shape = SegmentedButtonDefaults.itemShape(index, options.size), enabled = enabled,
+                ) {
                     // Two lines, so a large font size wraps the label instead of cutting it off.
                     Text(label(option), maxLines = 2)
                 }

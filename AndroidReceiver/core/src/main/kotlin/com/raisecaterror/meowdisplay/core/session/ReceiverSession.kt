@@ -496,9 +496,15 @@ class ReceiverSession(
         return send(ReceiverMessages.videoRequest(enabled))
     }
 
+    /**
+     * Null [customFrameRate]: keep the current one. Resolved here, under the lock: a default
+     * argument is evaluated before the lock is taken and could send a rate the Mac just replaced.
+     */
     @Synchronized
-    fun requestStreamingProfile(profile: StreamingProfile, customFrameRate: CustomFrameRate = streamModel.state.customFrameRate): Boolean =
-        sendSetting(WireProtocol.STREAMING_PROFILE_REQUEST) { streamModel.requestProfile(profile, customFrameRate) }
+    fun requestStreamingProfile(profile: StreamingProfile, customFrameRate: CustomFrameRate? = null): Boolean =
+        sendSetting(WireProtocol.STREAMING_PROFILE_REQUEST) {
+            streamModel.requestProfile(profile, customFrameRate ?: streamModel.state.customFrameRate)
+        }
 
     @Synchronized
     fun requestStreamingPriority(priority: StreamingPriority): Boolean =
