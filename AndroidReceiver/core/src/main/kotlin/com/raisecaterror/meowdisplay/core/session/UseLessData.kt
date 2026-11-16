@@ -55,6 +55,59 @@ data class PathCostFlags(
     val notMetered: Boolean = false,
 )
 
+/** One tracked network: the addresses it owns on this device and its capability flags. */
+class TrackedPath(val addresses: List<ByteArray>, val flags: PathCostFlags)
+
+/**
+ * The networks the cost hint is read from. While monitoring is paused ([pause], e.g. the Activity is
+ * stopped) the last known networks are kept, so a hello sent then still carries the last known hint
+ * instead of reading as "unknown"; once monitoring restarts, the first fresh callback replaces them
+ * all ([expireStale] does the same if no callback ever comes). Not thread-safe: guard it externally.
+ */
+class PathCostTable<N : Any> {
+    private val paths = LinkedHashMap<N, TrackedPath>()
+    private var defaultNetwork: N? = null
+    private var stale = false
+
+    /** Monitoring stopped: keep what is known, but any later callback starts from scratch. */
+    fun pause() {
+        stale = true
+    }
+
+    /** Whatever was kept across a pause and not replaced by a callback is dropped. */
+    fun expireStale() = dropStaleData()
+
+    fun update(network: N, path: TrackedPath) {
+        dropStaleData()
+        paths[network] = path
+    }
+
+    fun remove(network: N) {
+        dropStaleData()
+        paths.remove(network)
+    }
+
+    fun setDefault(network: N) {
+        dropStaleData()
+        defaultNetwork = network
+    }
+
+    fun clearDefault(network: N) {
+        dropStaleData()
+        if (defaultNetwork == network) defaultNetwork = null
+    }
+
+    fun hint(local: ByteArray?, dataSaver: Boolean): NetworkCostHint? =
+        NetworkCostMapper.hintFor(local, paths, defaultNetwork, dataSaver)
+
+    private fun dropStaleData() {
+        if (!stale) return
+        stale = false
+        paths.clear()
+        defaultNetwork = null
+    }
+}
+
 /**
  * Maps a network to the hello cost hint, following `NetworkCost.endpointReport` (Swift):
  *  - A VPN is a tunnel first, even when it also reports the transport it rides on (a VPN over
@@ -74,6 +127,26 @@ data class PathCostFlags(
  * (`NetworkCost.Confidence`: "medium: the process-wide default path").
  */
 object NetworkCostMapper {
+    /**
+     * Picks the network a connection runs over and maps it. The network that owns [local] is the
+     * connection's own path (high confidence for a plain network). The system's default network
+     * stands in only when the local address is unknown (null); an address that is known but matches
+     * no tracked network (the phone's own hotspot, a USB tether, Wi-Fi Direct) is unknown, never the default.
+     */
+    fun <N : Any> hintFor(
+        local: ByteArray?,
+        networks: Map<N, TrackedPath>,
+        defaultNetwork: N?,
+        dataSaver: Boolean,
+    ): NetworkCostHint? {
+        val own = local?.let { address -> networks.values.firstOrNull { path -> path.addresses.any { it.contentEquals(address) } } }
+        return when {
+            own != null -> hint(own.flags, dataSaver, ownPath = true)
+            local == null -> defaultNetwork?.let { networks[it] }?.let { hint(it.flags, dataSaver, ownPath = false) }
+            else -> null
+        }
+    }
+
     fun hint(flags: PathCostFlags, dataSaver: Boolean, ownPath: Boolean = true): NetworkCostHint? {
         val iface = when {
             flags.vpn -> PathInterface.Tunnel
