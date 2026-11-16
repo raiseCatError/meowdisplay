@@ -719,6 +719,20 @@ final class RemoteViewportTests: XCTestCase {
         XCTAssertEqual(restored.current.rotationRadians, .pi / 2, accuracy: 0.0001)
         XCTAssertEqual(restored.current.scale, transformed.scale, accuracy: 0.0001)
     }
+
+    /// Window view draws its pane chrome on the un-zoomed picture, so Move View's
+    /// whole-picture zoom would pull outlines off where clicks land (#92).
+    func testMoveViewIsUnavailableInWindowViewOnly() {
+        XCTAssertFalse(LocalViewNavigationPolicy.allowsMoveView(windowViewActive: true))
+        XCTAssertTrue(LocalViewNavigationPolicy.allowsMoveView(windowViewActive: false))
+        XCTAssertFalse(LocalViewNavigationPolicy.showsMoveView(
+            controlVisible: true, localNavigationAllowed: true, videoEnabled: true, windowViewActive: true))
+        XCTAssertTrue(LocalViewNavigationPolicy.showsMoveView(
+            controlVisible: true, localNavigationAllowed: true, videoEnabled: true, windowViewActive: false))
+        XCTAssertTrue(LocalViewNavigationPolicy.showsMoveView(
+            controlVisible: true, localNavigationAllowed: true, videoEnabled: true),
+                      "outside Window view the default is unchanged")
+    }
 }
 
 /// Local pinch-to-zoom up to 8×: geometry stays finite, the content under
