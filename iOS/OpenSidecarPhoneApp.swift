@@ -1150,6 +1150,11 @@ struct ReceiverScreen: View {
         .onChange(of: controlStore.preferences.allowLocalViewNavigation) { allowed in
             if !allowed { controlStore.setMoveViewActive(false) }
         }
+        // Window view and Move View are exclusive: Move View's zoom would pull the pane chrome off the picture (#92).
+        .onChange(of: model.workspace.windowMode) { active in
+            controlStore.setWindowViewActive(active)
+        }
+        .onAppear { controlStore.setWindowViewActive(model.workspace.windowMode) }
         #if DEBUG
         .onAppear {
             Log.info("inputTrace: ReceiverScreen onAppear allowInput=\(controlStore.preferences.allowInput) "
