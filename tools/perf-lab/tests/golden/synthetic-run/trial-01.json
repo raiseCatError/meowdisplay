@@ -6,6 +6,7 @@
     "receiver.frame_id.duplicate" : 0,
     "receiver.frame_id.read" : 0,
     "receiver.frame_id.skipped" : 0,
+    "receiver.frame_id.unexamined" : 0,
     "receiver.frame_id.unique" : 0,
     "receiver.frame_id.unreadable" : 0,
     "receiver.presentation.enqueued" : 0,
@@ -44,21 +45,6 @@
   },
   "format" : "meowdisplay-performance-lab-trial",
   "gaps" : {
-    "receiver.arrival_interval_ms" : [
-      0,
-      0,
-      0
-    ],
-    "receiver.frame_id.unique_interval_ms" : [
-      0,
-      0,
-      0
-    ],
-    "receiver.presentation.enqueue_interval_ms" : [
-      0,
-      0,
-      0
-    ],
     "sender.capture.complete_interval_ms" : [
       0,
       0,
@@ -79,30 +65,11 @@
 
   ],
   "measuredSeconds" : 15.015666666631704,
+  "receiverAlignment" : "aligned",
+  "receiverCounting" : "perWindow",
   "receiverSummaries" : [
     {
-      "offsetSeconds" : 5.492499999987194,
-      "summary" : {
-        "arrivalFPS" : 59.39999999999999,
-        "arrivalGapsOver250ms" : 0,
-        "arrivalP50Ms" : 17,
-        "arrivalP95Ms" : 19,
-        "enqueueFPS" : 59.599999999999994,
-        "frameIDDuplicates" : 2,
-        "frameIDIntervalP95Ms" : 18,
-        "frameIDMissing" : 1,
-        "frameIDReadCount" : 298,
-        "frameIDUniqueFPS" : 57.5,
-        "frameIDUnreadable" : 0,
-        "presenterQueueAgeP95Ms" : 2.5,
-        "presenterQueueDepthMax" : 2,
-        "rttJitterMs" : 0.75,
-        "rttMs" : 4,
-        "side" : "receiver"
-      }
-    },
-    {
-      "offsetSeconds" : 9.992499999976717,
+      "offsetSeconds" : 10.992499999974388,
       "summary" : {
         "arrivalFPS" : 59.599999999999994,
         "arrivalGapsOver250ms" : 0,
@@ -112,14 +79,16 @@
         "frameIDDuplicates" : 2,
         "frameIDIntervalP95Ms" : 18,
         "frameIDMissing" : 1,
-        "frameIDReadCount" : 298,
+        "frameIDUnexamined" : 0,
         "frameIDUniqueFPS" : 57.5,
         "frameIDUnreadable" : 0,
+        "peerWindowSequenceAtStart" : 2,
         "presenterQueueAgeP95Ms" : 2.5,
-        "presenterQueueDepthMax" : 2,
-        "rttJitterMs" : 0.75,
+        "rttJitterMs" : 0.85,
         "rttMs" : 4,
-        "side" : "receiver"
+        "side" : "receiver",
+        "windowSequence" : 3,
+        "windowSeriesID" : 4242
       }
     },
     {
@@ -133,17 +102,43 @@
         "frameIDDuplicates" : 2,
         "frameIDIntervalP95Ms" : 18,
         "frameIDMissing" : 1,
-        "frameIDReadCount" : 298,
+        "frameIDUnexamined" : 0,
         "frameIDUniqueFPS" : 57.5,
         "frameIDUnreadable" : 0,
+        "peerWindowSequenceAtStart" : 2,
         "presenterQueueAgeP95Ms" : 2.5,
-        "presenterQueueDepthMax" : 2,
-        "rttJitterMs" : 0.75,
+        "rttJitterMs" : 0.8,
         "rttMs" : 4,
-        "side" : "receiver"
+        "side" : "receiver",
+        "windowSequence" : 4,
+        "windowSeriesID" : 4242
+      }
+    },
+    {
+      "offsetSeconds" : 20.992499999951107,
+      "summary" : {
+        "arrivalFPS" : 59.39999999999999,
+        "arrivalGapsOver250ms" : 0,
+        "arrivalP50Ms" : 17,
+        "arrivalP95Ms" : 19,
+        "enqueueFPS" : 59.599999999999994,
+        "frameIDDuplicates" : 2,
+        "frameIDIntervalP95Ms" : 18,
+        "frameIDMissing" : 1,
+        "frameIDUnexamined" : 0,
+        "frameIDUniqueFPS" : 57.5,
+        "frameIDUnreadable" : 0,
+        "peerWindowSequenceAtStart" : 3,
+        "presenterQueueAgeP95Ms" : 2.5,
+        "rttJitterMs" : 0.8,
+        "rttMs" : 4,
+        "side" : "receiver",
+        "windowSequence" : 5,
+        "windowSeriesID" : 4242
       }
     }
   ],
+  "receiverWindowsMissed" : 0,
   "requestedWindows" : 3,
   "scenarioID" : "synthetic.self-test",
   "schemaVersion" : 1,
@@ -514,6 +509,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -610,14 +606,15 @@
           "frameIDDuplicates" : 2,
           "frameIDIntervalP95Ms" : 18,
           "frameIDMissing" : 1,
-          "frameIDReadCount" : 298,
+          "frameIDUnexamined" : 0,
           "frameIDUniqueFPS" : 57.5,
           "frameIDUnreadable" : 0,
           "presenterQueueAgeP95Ms" : 2.5,
-          "presenterQueueDepthMax" : 2,
-          "rttJitterMs" : 0.75,
+          "rttJitterMs" : 0.85,
           "rttMs" : 4,
-          "side" : "receiver"
+          "side" : "receiver",
+          "windowSequence" : 2,
+          "windowSeriesID" : 4242
         },
         "sessionCounters" : {
           "receiver.arrival.bytes" : 0,
@@ -626,6 +623,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -745,6 +743,16 @@
           },
           {
             "count" : 0,
+            "id" : "sender.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -831,6 +839,16 @@
           },
           {
             "count" : 0,
+            "id" : "receiver.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -844,7 +862,9 @@
           }
         ],
         "windowIsPartial" : false,
-        "windowSeconds" : 5.001499999988359
+        "windowSeconds" : 5.001499999988359,
+        "windowSequence" : 2,
+        "windowSeriesID" : 4141
       },
       "verdict" : {
         "alternatives" : [
@@ -883,6 +903,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -971,7 +992,7 @@
           }
         ],
         "peer" : {
-          "arrivalFPS" : 59.599999999999994,
+          "arrivalFPS" : 59.39999999999999,
           "arrivalGapsOver250ms" : 0,
           "arrivalP50Ms" : 17,
           "arrivalP95Ms" : 19,
@@ -979,15 +1000,17 @@
           "frameIDDuplicates" : 2,
           "frameIDIntervalP95Ms" : 18,
           "frameIDMissing" : 1,
-          "frameIDReadCount" : 298,
+          "frameIDUnexamined" : 0,
           "frameIDUniqueFPS" : 57.5,
           "frameIDUnreadable" : 0,
           "presenterQueueAgeP95Ms" : 2.5,
-          "presenterQueueDepthMax" : 2,
-          "rttJitterMs" : 0.75,
+          "rttJitterMs" : 0.8,
           "rttMs" : 4,
-          "side" : "receiver"
+          "side" : "receiver",
+          "windowSequence" : 2,
+          "windowSeriesID" : 4242
         },
+        "peerWindowSequenceAtStart" : 1,
         "sessionCounters" : {
           "receiver.arrival.bytes" : 0,
           "receiver.arrival.frames" : 0,
@@ -995,6 +1018,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -1114,6 +1138,16 @@
           },
           {
             "count" : 0,
+            "id" : "sender.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -1200,6 +1234,16 @@
           },
           {
             "count" : 0,
+            "id" : "receiver.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -1213,7 +1257,9 @@
           }
         ],
         "windowIsPartial" : false,
-        "windowSeconds" : 5.007666666654987
+        "windowSeconds" : 5.007666666654987,
+        "windowSequence" : 3,
+        "windowSeriesID" : 4141
       },
       "verdict" : {
         "alternatives" : [
@@ -1252,6 +1298,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -1348,15 +1395,18 @@
           "frameIDDuplicates" : 2,
           "frameIDIntervalP95Ms" : 18,
           "frameIDMissing" : 1,
-          "frameIDReadCount" : 298,
+          "frameIDUnexamined" : 0,
           "frameIDUniqueFPS" : 57.5,
           "frameIDUnreadable" : 0,
+          "peerWindowSequenceAtStart" : 2,
           "presenterQueueAgeP95Ms" : 2.5,
-          "presenterQueueDepthMax" : 2,
-          "rttJitterMs" : 0.75,
+          "rttJitterMs" : 0.8,
           "rttMs" : 4,
-          "side" : "receiver"
+          "side" : "receiver",
+          "windowSequence" : 4,
+          "windowSeriesID" : 4242
         },
+        "peerWindowSequenceAtStart" : 2,
         "sessionCounters" : {
           "receiver.arrival.bytes" : 0,
           "receiver.arrival.frames" : 0,
@@ -1364,6 +1414,7 @@
           "receiver.frame_id.duplicate" : 0,
           "receiver.frame_id.read" : 0,
           "receiver.frame_id.skipped" : 0,
+          "receiver.frame_id.unexamined" : 0,
           "receiver.frame_id.unique" : 0,
           "receiver.frame_id.unreadable" : 0,
           "receiver.presentation.enqueued" : 0,
@@ -1483,6 +1534,16 @@
           },
           {
             "count" : 0,
+            "id" : "sender.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -1569,6 +1630,16 @@
           },
           {
             "count" : 0,
+            "id" : "receiver.restart.frame_gap_ms",
+            "max" : 0,
+            "mean" : 0,
+            "p50" : 0,
+            "p95" : 0,
+            "p99" : 0,
+            "ratePerSecond" : 0
+          },
+          {
+            "count" : 0,
             "gapsOver100ms" : 0,
             "gapsOver250ms" : 0,
             "gapsOver500ms" : 0,
@@ -1582,7 +1653,9 @@
           }
         ],
         "windowIsPartial" : false,
-        "windowSeconds" : 5.006499999988359
+        "windowSeconds" : 5.006499999988359,
+        "windowSequence" : 4,
+        "windowSeriesID" : 4141
       },
       "verdict" : {
         "alternatives" : [
