@@ -75,7 +75,7 @@ struct AdaptiveStreamingLadder: Equatable, Sendable {
     static let standard = AdaptiveStreamingLadder(
         rasterSteps: [0.5, 0.625, 0.75, 0.875, 1.0],
         bitrateSteps: [2_000_000, 3_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000,
-                       12_000_000, 15_000_000, 18_000_000, 24_000_000],
+                       12_000_000, 15_000_000, 18_000_000].filter { $0 <= bitrateCeiling },
         startRaster: 1.0,
         startBitrate: 18_000_000,
         saverRasterTop: 0.75,
@@ -84,6 +84,9 @@ struct AdaptiveStreamingLadder: Equatable, Sendable {
 
     /// Today's fixed Automatic bitrate (`StreamQuality.best.bitrate`).
     static let fixedPolicyBitrate = 18_000_000
+    /// The ladder never goes above today's Best target (lead decision,
+    /// phase 2): no step above it until measured quality evidence exists.
+    static let bitrateCeiling = fixedPolicyBitrate
     static let fixedPolicyRaster = 1.0
 }
 
@@ -240,7 +243,7 @@ struct AdaptiveStreamingSample: Equatable, Sendable {
 }
 
 /// The numbers a decision used, for the diagnostics view and export.
-struct AdaptiveStreamingEvidence: Equatable, Sendable {
+struct AdaptiveStreamingEvidence: Equatable, Sendable, Codable {
     var windowSeconds: Double?
     var expectedFPS: Double?
     var deliveredUniqueFPS: Double?

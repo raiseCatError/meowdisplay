@@ -2789,6 +2789,8 @@ final class StreamReceiver: ObservableObject {
             cableInterfaces: hostToHostCableInterfaces)
         transportState.set(route.rawValue, label: description.label)
         transportState.setPathCost(expensive: path.isExpensive, constrained: path.isConstrained)
+        ReceiverAdaptiveState.shared.setPath(NetworkCost.endpointReport(
+            NetworkCost.PathFlags(path: path), reachability: route == .remote ? .remote : .local))
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
         Log.info("connection path from \(peer): \(names) route=\(route.rawValue) label=\(description.label)")
     }
@@ -2866,8 +2868,11 @@ final class StreamReceiver: ObservableObject {
                 presentationTiming.clockOffsetMs = best.offset
             }
             lastRttMs = rtt
+            ReceiverAdaptiveState.shared.noteRTT(rtt)
             if diagnostics.isEnabled { diagnostics.recordRTT(rtt, at: StreamDiagnosticsClock.nowMs()) }
         case "ping":
+            // Adaptive (#123): `adaptive: 1` asks for 2 s `stats` with telemetry.
+            ReceiverAdaptiveState.shared.observeMacPing(obj, now: ProcessInfo.processInfo.systemUptime)
             // The Mac piggybacks its send-side health on liveness pings.
             if let enc = obj["encDrops"] as? Int {
                 macEncDrops = enc
@@ -3203,6 +3208,7 @@ final class StreamReceiver: ObservableObject {
         presentationTiming.resetPhotonWindow()
         // A new session: diagnostics start over too.
         diagnostics.reset()
+        ReceiverAdaptiveState.shared.resetSession()
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
         // negative offset from the superseded connection). Shadow bump
@@ -3330,6 +3336,10 @@ final class StreamReceiver: ObservableObject {
         // only while this receiver's QUIC listener is bound; a sender treats
         // absence as TCP-only and never infers QUIC from `pv`.
         hello.merge(QUICPeerCapability.advertisedFields(quicAvailable: helloState.isQUICAvailable())) { $1 }
+        // Additive (#123, PROTOCOL.md 6.20): effective refresh + telemetry
+        // flag, cost hint and "Use less data". Old Macs ignore them.
+        hello.merge(ReceiverAdaptiveState.shared.helloFields.wireFields) { $1 }
+        ReceiverAdaptiveState.shared.noteHelloSent()
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
@@ -4641,6 +4651,7 @@ final class StreamReceiver: ObservableObject {
         // and is more precise than counting raw TCP chunks (which could
         // span multiple frames or arrive as a fraction of one).
         bytesThisWindow += CMSampleBufferGetTotalSampleSize(sample)
+        ReceiverAdaptiveState.shared.noteFrame(now: ProcessInfo.processInfo.systemUptime)
         #if DEBUG
         debugFramesReceivedWindow += 1
         let arrivalNow = Date()
@@ -4809,7 +4820,10 @@ final class StreamReceiver: ObservableObject {
             // Every 5s, report the aggregate to the Mac so its log holds the
             // full pipeline picture for offline analysis.
             statsReportCounter += 1
-            if statsReportCounter >= 5 {
+            // Every 5 windows, or every 2 while the Mac announces adaptive
+            // mode (#123, `AdaptiveTelemetryCadence`).
+            let adaptiveNow = ProcessInfo.processInfo.systemUptime
+            if statsReportCounter >= ReceiverAdaptiveState.shared.statsEveryWindows(now: adaptiveNow) {
                 statsReportCounter = 0
                 var statsMessage: [String: Any] = [
                     "type": "stats",
@@ -4845,6 +4859,11 @@ final class StreamReceiver: ObservableObject {
                     }
                     statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
                 }
+                // Adaptive (#123): windowed telemetry, only while announced.
+                let decodeDurations = videoTelemetry.snapshotDecodeDurationsMs()
+                statsMessage.merge(ReceiverAdaptiveState.shared.drainTelemetryFields(
+                    now: adaptiveNow,
+                    decodeP95Ms: decodeDurations.isEmpty ? nil : percentile(decodeDurations, 0.95))) { current, _ in current }
                 sendControl(statsMessage)
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
@@ -6057,6 +6076,24 @@ final class StreamReceiver: ObservableObject {
                 queue.async {
                     Self.sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000],
                                       sendTargetBox: sendTargetBox)
+                    // Adaptive (#123): a changed effective refresh, path or
+                    // "Use less data" choice re-sends hello; the one-time
+                    // suggestion is evaluated here too.
+                    let adaptiveState = ReceiverAdaptiveState.shared
+                    if adaptiveState.consumeHelloResend(),
+                       let connection = sendTargetBox.current()?.connection, connection.state == .ready {
+                        Self.sendHello(
+                            on: connection, helloState: helloState, displayGeometryState: displayGeometryState,
+                            avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox,
+                            deviceKind: deviceKind, maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh,
+                            maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
+                            advertisesAddresses: advertises)
+                    }
+                    if adaptiveState.checkSuggestion(now: ProcessInfo.processInfo.systemUptime) {
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(name: ReceiverAdaptiveState.suggestionNotification, object: nil)
+                        }
+                    }
                 }
             },
             checkAddressChangeAndSendHello: { conn in
