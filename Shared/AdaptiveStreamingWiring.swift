@@ -523,6 +523,32 @@ struct UseLessDataSettings: Equatable, Sendable {
     }
 }
 
+/// What a receiver reports about "Use less data" in `hello` (#123). Pure:
+/// the one place that decides which of the two keys go out.
+enum UseLessDataReporting: Equatable, Sendable {
+    /// A build without the setting (or before it was read): neither key.
+    /// Absent means today's behaviour on the Mac (never data-saving).
+    case none
+    /// The Mac Receiver: `saveData` only. It has no mobile-data suggestion,
+    /// so it never sends `saveDataAnswer`, and Automatic saves only on clear
+    /// Low Data Mode (at either end).
+    case preferenceOnly
+    /// iOS: `saveData` and, once answered, `saveDataAnswer`.
+    case preferenceAndAnswer
+
+    func helloValues(_ settings: UseLessDataSettings)
+        -> (saveData: NetworkCost.DataPreference?, answer: NetworkCost.MeteredAnswer?) {
+        switch self {
+        case .none:
+            return (nil, nil)
+        case .preferenceOnly:
+            return (settings.preference, nil)
+        case .preferenceAndAnswer:
+            return (settings.preference, settings.answer == .unanswered ? nil : settings.answer)
+        }
+    }
+}
+
 /// The receiver's adaptive state for the live session: what its hello
 /// reports, the telemetry window, the Mac's announce and the one-time
 /// suggestion. Thread-safe; one per process (`shared`), since effective
@@ -543,10 +569,10 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
     private var lastFrameAt: TimeInterval?
     /// Only receivers with a prompt UI ask (iOS).
     private var suggestionsEnabled = false
-    /// Only a receiver with a "Use less data" setting reports it (iOS, which
-    /// calls `setSettings`). Until then hello carries no `saveData` and no
-    /// answer: absent = today's behaviour (the Mac Receiver has no setting).
-    private var preferenceReported = false
+    /// What hello carries about "Use less data": nothing until the app
+    /// reports its setting (`setSettings`): iOS the preference and answer,
+    /// the Mac Receiver the preference only.
+    private var reporting = UseLessDataReporting.none
 
     init() {}
 
@@ -562,12 +588,13 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         pathReport = report
     }
 
-    func setSettings(_ newSettings: UseLessDataSettings, suggestionsEnabled: Bool? = nil) {
+    func setSettings(_ newSettings: UseLessDataSettings, suggestionsEnabled: Bool? = nil,
+                     reporting newReporting: UseLessDataReporting = .preferenceAndAnswer) {
         lock.lock(); defer { lock.unlock() }
         if let suggestionsEnabled { self.suggestionsEnabled = suggestionsEnabled }
         if newSettings.answer != tracker.answer { tracker.record(answer: newSettings.answer) }
         while tracker.dismissals < newSettings.dismissals { tracker.recordDismissal() }
-        preferenceReported = true
+        reporting = newReporting
         settings = newSettings
     }
 
@@ -582,10 +609,10 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
     }
 
     private func currentFieldsLocked() -> AdaptiveHelloFields {
-        AdaptiveHelloFields(
+        let useLessData = reporting.helloValues(settings)
+        return AdaptiveHelloFields(
             effectiveRefreshHz: effectiveRefreshHz, telemetry: effectiveRefreshHz != nil,
-            cost: pathReport, saveData: preferenceReported ? settings.preference : nil,
-            saveDataAnswer: preferenceReported && settings.answer != .unanswered ? settings.answer : nil)
+            cost: pathReport, saveData: useLessData.saveData, saveDataAnswer: useLessData.answer)
     }
 
     /// True when the caller should re-send hello now

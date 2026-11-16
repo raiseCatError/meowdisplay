@@ -317,6 +317,64 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         XCTAssertFalse(state.consumeHelloResend(now: 6 * gap), "a hello that went out anyway carried the change")
     }
 
+    // MARK: - "Use less data" on each receiver
+
+    func testUseLessDataReportingDecidesWhatHelloCarries() {
+        for preference in NetworkCost.DataPreference.allCases {
+            for answer in NetworkCost.MeteredAnswer.allCases {
+                let settings = UseLessDataSettings(preference: preference, answer: answer, dismissals: 0)
+                let none = UseLessDataReporting.none.helloValues(settings)
+                XCTAssertNil(none.saveData)
+                XCTAssertNil(none.answer)
+                let mac = UseLessDataReporting.preferenceOnly.helloValues(settings)
+                XCTAssertEqual(mac.saveData, preference)
+                XCTAssertNil(mac.answer, "the Mac Receiver has no suggestion: never an answer")
+                let ios = UseLessDataReporting.preferenceAndAnswer.helloValues(settings)
+                XCTAssertEqual(ios.saveData, preference)
+                XCTAssertEqual(ios.answer, answer == .unanswered ? nil : answer)
+            }
+        }
+    }
+
+    /// The Mac Receiver's hello with each preference (and a stale answer in
+    /// its defaults, which it must never send), the Mac's resulting policy,
+    /// and the debounced re-hello on a change.
+    func testMacReceiverHelloCarriesItsUseLessDataPreferenceOnly() throws {
+        let lowDataMode = NetworkCost.endpointReport(.init(usesWiFi: true, isConstrained: true), reachability: .local)
+        let meteredWiFi = NetworkCost.endpointReport(.init(usesWiFi: true, isExpensive: true), reachability: .local)
+        let expected: [NetworkCost.DataPreference: (lowData: NetworkCost.DataPolicy, metered: NetworkCost.DataPolicy)] = [
+            .auto: (.saver, .normal), .on: (.saver, .saver), .off: (.normal, .normal),
+        ]
+        for preference in NetworkCost.DataPreference.allCases {
+            let state = ReceiverAdaptiveState()
+            state.setEffectiveRefresh(60)
+            state.setSettings(UseLessDataSettings(preference: preference, answer: .saveData, dismissals: 0),
+                              suggestionsEnabled: false, reporting: .preferenceOnly)
+            for (path, policy) in [(lowDataMode, expected[preference]?.lowData), (meteredWiFi, expected[preference]?.metered)] {
+                state.setPath(path)
+                let object = try wire(state.helloFields.wireFields)
+                XCTAssertEqual(object["saveData"] as? String, preference.rawValue)
+                XCTAssertNil(object["saveDataAnswer"], "\(preference)")
+                XCTAssertNotNil(object["cost"], "the shared path evidence rides along")
+                let coordinator = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
+                coordinator.helloAccepted(AdaptiveHelloFields.parse(object), now: 0)
+                XCTAssertEqual(coordinator.dataPolicy.policy, policy, "\(preference) \(path.cost.cost)")
+            }
+        }
+
+        // The setting never opened: Automatic, like iOS.
+        let fresh = ReceiverAdaptiveState()
+        fresh.setSettings(UseLessDataSettings.load(UserDefaults(suiteName: "adaptive2.\(UUID().uuidString)")!),
+                          suggestionsEnabled: false, reporting: .preferenceOnly)
+        XCTAssertEqual(fresh.helloFields.saveData, .auto)
+
+        // A change re-sends hello through the debounced gate.
+        fresh.noteHelloSent(fresh.helloFields, now: 0)
+        fresh.setSettings(UseLessDataSettings(preference: .off), suggestionsEnabled: false, reporting: .preferenceOnly)
+        XCTAssertFalse(fresh.consumeHelloResend(now: 1), "inside the interval")
+        XCTAssertTrue(fresh.consumeHelloResend(now: AdaptiveHelloResendGate.minimumIntervalSeconds))
+    }
+
     // MARK: - Path to cost evidence
 
     func testPathFlagsMapToCostEvidence() {

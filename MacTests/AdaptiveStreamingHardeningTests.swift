@@ -291,7 +291,10 @@ final class AdaptiveStreamingHardeningTests: XCTestCase {
 
     // MARK: - F4/F5: "Use less data" semantics
 
-    func testMacReceiverSendsNoSaveDataUntilItHasASetting() {
+    /// A receiver build that predates the setting (or before the app has
+    /// read it) sends no `saveData`. The Mac Receiver now has the setting
+    /// (see `AdaptiveStreamingWiringTests.testMacReceiverHelloCarriesItsUseLessDataPreferenceOnly`).
+    func testReceiverWithoutTheSettingSendsNoSaveData() {
         let mac = ReceiverAdaptiveState()
         mac.setEffectiveRefresh(60)
         mac.setPath(NetworkCost.endpointReport(.init(usesWiFi: true, isConstrained: true), reachability: .local))

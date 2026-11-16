@@ -282,7 +282,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Extend Shape, Use Full Display | Yes | Yes | Yes | Yes |
 | Video on / off | Yes | Yes | Yes | Yes |
 | Streaming Profile, Priority, Maximum FPS | Yes (Display) | Yes | Yes (Display) | Yes (Streaming) |
-| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | No setting: not sent, never data-saving |
+| Use Less Data (Automatic / On / Off) | Yes (Display) | Yes | No | Yes (Streaming ▸ Data). No mobile-data prompt |
 | Picture in Picture | Yes | Yes | Yes | n/a |
 | Viewport reset | Double-tap with two fingers | Same | **Reset View** button and the same gesture | n/a |
 | Open in Full Screen | n/a | n/a | n/a | Yes. Displays → Video Window |
@@ -309,8 +309,11 @@ stream, and Custom on the Mac is never overridden.
   Full Quality). Full Quality covers mobile data only: Low Data Mode still
   saves data. A VPN such as Tailscale is not treated as mobile data.
 - **On**: always saves data. **Off**: never does, not even in Low Data Mode.
-The Mac Receiver has no setting and sends none: the Mac streams to it as
-before (no data saving).
+The Mac Receiver has the same setting under Streaming ▸ Data, without the
+mobile-data prompt or **On Mobile Data**: Automatic (default) saves data only
+when this Mac or the other Mac is in Low Data Mode; On always saves; Off never
+does. Before this setting existed a Mac Receiver was never data-saving; now,
+in Low Data Mode, Automatic lowers quality (Off keeps full quality).
 What the Mac does is in PROTOCOL.md 6.20. Thresholds and the real data saved
 are not measured yet (PENDING HARDWARE).
 
