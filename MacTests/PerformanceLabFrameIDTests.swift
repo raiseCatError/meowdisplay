@@ -174,6 +174,24 @@ final class PerformanceLabFrameIDTests: XCTestCase {
         XCTAssertEqual(t.tally, PerformanceLabFrameIDTally(read: 4, unique: 3, duplicate: 1, skipped: 2, unreadable: 1, discontinuities: 0))
     }
 
+    /// B6: a frame that arrived but could not be read may have carried one
+    /// of the missing IDs, so it is never also counted as skipped.
+    func testUnreadableFramesBetweenReadsAreNotCountedAsSkipped() {
+        var t = PerformanceLabFrameIDTracker()
+        func r(_ c: UInt32) -> PerformanceLabFrameIDReading { .init(counter: c, segment: 0) }
+        XCTAssertEqual(t.observe(r(10), atMs: 0), .baseline)
+        XCTAssertEqual(t.observe(nil, atMs: 16), .unreadable)
+        XCTAssertEqual(t.observe(nil, atMs: 33), .unreadable)
+        XCTAssertEqual(t.observe(r(13), atMs: 50), .unique(skipped: 0, intervalMs: 50), "IDs 11 and 12 may be the two unread frames")
+        XCTAssertEqual(t.observe(nil, atMs: 66), .unreadable)
+        XCTAssertEqual(t.observe(r(17), atMs: 83), .unique(skipped: 2, intervalMs: 33), "3 missing IDs, 1 unread frame: 2 provably missing")
+        XCTAssertEqual(t.tally, PerformanceLabFrameIDTally(read: 3, unique: 3, duplicate: 0, skipped: 2, unreadable: 3, discontinuities: 0))
+        // A lost strip re-baselines: the frames in between say nothing.
+        t.rebaseline()
+        XCTAssertEqual(t.observe(r(400), atMs: 500), .baseline)
+        XCTAssertEqual(t.tally.skipped, 2)
+    }
+
     func testTrackerHandlesWrapAndRestart() {
         var t = PerformanceLabFrameIDTracker()
         let max = PerformanceLabFrameIDCodec.counterModulus - 1
@@ -207,13 +225,15 @@ final class PerformanceLabFrameIDTests: XCTestCase {
         XCTAssertEqual(snapshot.stage(.frameIDUniqueInterval)?.count, 2, "intervals between the three unique frames")
 
         let summary = StreamDiagnosticsPeerSummary.from(snapshot)
-        XCTAssertEqual(summary.frameIDReadCount, 4)
         XCTAssertEqual(summary.frameIDMissing, 2)
+        XCTAssertEqual(summary.frameIDUnreadable, 0)
+        XCTAssertEqual(summary.frameIDUnexamined, 0)
         let wire = summary.wireFields
         XCTAssertEqual(wire["fidSkip"] as? Double, 2)
+        XCTAssertNil(wire["fidN"], "removed: nothing read it")
         let back = try XCTUnwrap(StreamDiagnosticsPeerSummary.fromWire(wire, side: .receiver))
         XCTAssertEqual(back.frameIDDuplicates, 1)
-        XCTAssertEqual(back.frameIDReadCount, 4)
+        XCTAssertEqual(back.frameIDMissing, 2)
     }
 
     func testWireSummaryHasNoFrameIDKeysWithoutTheFixture() {
@@ -245,14 +265,21 @@ final class PerformanceLabFrameIDTests: XCTestCase {
         for _ in 0..<PerformanceLabFrameIDProbe.missesBeforeUnlock { ms += 16; probe.observe(blank, recorder: recorder, nowMs: ms) }
         XCTAssertFalse(probe.isLocked)
         XCTAssertEqual(recorder.snapshot(at: ms).count(.frameIDUnreadable), Int64(PerformanceLabFrameIDProbe.missesBeforeUnlock))
+        // It comes back with a much later ID while the reader is searching:
+        // the frames it did not examine are unexamined, never skipped IDs.
+        let later = stripImage(counter: 500, width: 400, height: 80, stripWidth: 378, x: 10, y: 10)
         for _ in 0..<(PerformanceLabFrameIDProbe.probeEveryNthFrame - 1) {
             ms += 16
-            probe.observe(strip, recorder: recorder, nowMs: ms)
+            probe.observe(later, recorder: recorder, nowMs: ms)
             XCTAssertFalse(probe.isLocked, "not probed yet")
         }
         ms += 16
-        probe.observe(strip, recorder: recorder, nowMs: ms)
+        probe.observe(later, recorder: recorder, nowMs: ms)
         XCTAssertTrue(probe.isLocked)
+        let after = recorder.snapshot(at: ms)
+        XCTAssertEqual(after.count(.frameIDUnexamined), Int64(PerformanceLabFrameIDProbe.probeEveryNthFrame - 1))
+        XCTAssertEqual(after.count(.frameIDSkipped), 0, "re-baselined when found again: 495 IDs are not 'skipped'")
+        XCTAssertEqual(probe.tally.skipped, 0)
     }
 
     func testProbeReadsBiPlanarAndBGRAPixelBuffers() throws {
