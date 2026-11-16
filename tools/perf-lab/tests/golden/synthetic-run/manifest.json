@@ -7,6 +7,7 @@
     "encodeBudgetFactor" : 1.5,
     "headroomShare" : 0.02,
     "idleFPS" : 1,
+    "minimumRTTSamples" : 8,
     "minimumSamples" : 30,
     "minimumWindowSeconds" : 2,
     "rateShortfall" : 0.9,
@@ -104,11 +105,11 @@
     "Cross-device spans use a ping\/pong clock offset; error is up to about half the best round trip.",
     "Byte counts are app payload, not bytes billed by a network.",
     "Trials cover whole 5 s diagnostics windows after the warm-up; up to one window at each end is outside the measurement.",
-    "Receiver numbers are the receiver's own 5 s window summaries received during the trial, not aligned with the sender's windows.",
+    "Receiver numbers are the receiver's own 5 s windows, each counted once, that began after the trial's first sender window began; they are not aligned with the sender's windows and the last one may end up to one window after the trial.",
     "Frame-ID counts exist only on the receiver's experimental Metal path, which itself changes presentation timing.",
     "Operator steps are done by hand; their timing varies between trials."
   ],
-  "metricDictionaryVersion" : 1,
+  "metricDictionaryVersion" : 2,
   "metrics" : [
     {
       "caveat" : "ScreenCaptureKit delivers a complete frame only when the screen changed, so long intervals on a static screen are idle, not stalls. Capture runs at about 2x the target rate (DisplayCaptureSettings).",
@@ -119,7 +120,7 @@
       "unit" : "ms"
     },
     {
-      "caveat" : "Includes the rate limiter's trailing-edge hold and any replay delay. Window view frames are stamped at composition, so this is composition-to-submit there.",
+      "caveat" : "Includes the rate limiter's trailing-edge hold and any replay delay. Display capture only: Window view composites have no capture PTS, so nothing is recorded there.",
       "id" : "sender.source_age_at_submit_ms",
       "side" : "sender",
       "source" : "MacSender.encode: host clock now minus the ScreenCaptureKit sample PTS of the pixels being submitted",
@@ -167,6 +168,14 @@
       "unit" : "ms"
     },
     {
+      "caveat" : "One sample per restart (reconnect, retune, mode change). The interval stages restart their baselines at a restart, so this gap is not in them.",
+      "id" : "sender.restart.frame_gap_ms",
+      "side" : "sender",
+      "source" : "Last encoder submission of the previous capture generation to the first submission of the new one (StreamDiagnosticsRecorder.noteGeneration)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
       "caveat" : "A long gap can be an idle source; compare with the sender's capture and submit rates.",
       "id" : "receiver.arrival_interval_ms",
       "side" : "receiver",
@@ -183,7 +192,7 @@
       "unit" : "ms"
     },
     {
-      "caveat" : "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A\/V delay, queueing, decode or display. Offset error is up to about half the best round trip.",
+      "caveat" : "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A\/V delay, queueing, decode or display. Offset error is up to about half the best round trip. Values outside -50 to 5000 ms are dropped (clock mapping not settled), so p99 and max under-report a pathological latency.",
       "id" : "receiver.wire.submit_to_receive_ms",
       "side" : "receiver",
       "source" : "Receiver wall clock (mapped with the ping\/pong offset) minus cap at presentDecodedSample",
@@ -215,7 +224,7 @@
       "unit" : "ms"
     },
     {
-      "caveat" : "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon.",
+      "caveat" : "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. Values outside -50 to 5000 ms are dropped, so p99 and max under-report a pathological latency.",
       "id" : "receiver.presentation.observed_submit_to_glass_ms",
       "side" : "receiver",
       "source" : "Metal drawable presented handler (StreamReceiver.recordPresented) minus cap",
@@ -223,10 +232,18 @@
       "unit" : "ms"
     },
     {
-      "caveat" : "Control-message round trip; it rides behind any queued video on the same connection.",
+      "caveat" : "Control-message round trip; it rides behind any queued video on the same connection. Both ends of the span are this device's wall clock (the ping time also feeds the clock offset), so a clock step during a round trip skews one sample; samples outside 0-2000 ms are dropped.",
       "id" : "receiver.rtt_ms",
       "side" : "receiver",
       "source" : "Receiver ping to sender pong on the control channel",
+      "timebase" : "localWallClock",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "One sample per restart (resync, reconnect). The arrival interval restarts its baseline at a restart, so this gap is not in it.",
+      "id" : "receiver.restart.frame_gap_ms",
+      "side" : "receiver",
+      "source" : "Last frame arrival before a presentation generation change to the first arrival after it (StreamDiagnosticsRecorder.noteGeneration)",
       "timebase" : "localMonotonic",
       "unit" : "ms"
     },
@@ -540,10 +557,10 @@
       "unit" : "frames"
     },
     {
-      "caveat" : "Fixture frames drawn on the Mac that never reached this point: rate limiting at a lower target FPS skips frames by design.",
+      "caveat" : "A lower bound on fixture frames drawn on the Mac that never reached this point (an unread frame may have carried a missing ID). Rate limiting at a lower target FPS skips frames by design. Counted only while the reader follows a strip.",
       "id" : "receiver.frame_id.skipped",
       "side" : "receiver",
-      "source" : "IDs missing between two successive read IDs",
+      "source" : "IDs provably missing between two successive read IDs: the ID difference minus one, minus the frames that arrived in between but could not be read",
       "timebase" : "none",
       "unit" : "frames"
     },
@@ -552,6 +569,14 @@
       "id" : "receiver.frame_id.unreadable",
       "side" : "receiver",
       "source" : "Decoded frames where a located strip failed its guard or checksum",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Not counted as skipped: the reader re-baselines when it finds the strip again.",
+      "id" : "receiver.frame_id.unexamined",
+      "side" : "receiver",
+      "source" : "Decoded frames the reader did not read while it searched for a lost strip again (it probes one frame in 30)",
       "timebase" : "none",
       "unit" : "frames"
     },
@@ -620,11 +645,11 @@
       "unit" : "panes"
     },
     {
-      "caveat" : "Control-channel jitter, not video arrival jitter.",
+      "caveat" : "Control-channel jitter, not video arrival jitter. A session value, not a window value; reported only after 8 RTT samples (one per receiver ping, about every 2 s).",
       "id" : "receiver.rtt_jitter_ms",
       "side" : "receiver",
-      "source" : "Smoothed absolute difference of successive RTT samples (RFC 3550 style, gain 1\/16)",
-      "timebase" : "localMonotonic",
+      "source" : "Smoothed absolute difference of successive RTT samples (RFC 3550: starts at 0, gain 1\/16), over the session",
+      "timebase" : "localWallClock",
       "unit" : "ms"
     },
     {
@@ -687,7 +712,7 @@
           "timing" : "beforeRun"
         },
         {
-          "atSecond" : 5,
+          "atSecond" : 11,
           "instruction" : "SYNTHETIC: a scripted 300 ms stall happens in trial 3.",
           "timing" : "duringTrial"
         }
