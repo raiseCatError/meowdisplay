@@ -57,12 +57,17 @@ enum AdaptiveStreamingWire {
     static let fpsRange = 0.0...1000.0
     static let msRange = 0.0...60_000.0
     static let countRange = 0...100_000
+    static let thermalRange = 0...3
 
-    /// A finite JSON number that is not a JSON bool.
+    /// Highest `adaptiveTelemetry` version read as "telemetry" (a later
+    /// version still means telemetry; an absurd one reads as absent).
+    static let telemetryVersionRange = telemetryVersion...10_000
+    /// Wire values are clamped to this before they are rounded and scaled.
+    static let wireValueLimit = 1_000_000.0
+
+    /// A finite JSON number that is not a JSON bool (`PeerNumber.double`).
     static func number(_ value: Any?) -> Double? {
-        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
-        let d = n.doubleValue
-        return d.isFinite ? d : nil
+        PeerNumber.double(value)
     }
 
     /// A JSON bool (never a number).
@@ -72,7 +77,7 @@ enum AdaptiveStreamingWire {
     }
 
     static func number(_ value: Any?, in range: ClosedRange<Double>) -> Double? {
-        number(value).flatMap { range.contains($0) ? $0 : nil }
+        PeerNumber.double(value, in: range)
     }
 
     /// True only for `"adaptive": 1` on a Mac ping.
@@ -85,7 +90,11 @@ enum AdaptiveStreamingWire {
         announcing ? ",\"\(announceKey)\":1" : ""
     }
 
-    fileprivate static func rounded(_ value: Double) -> Double { (value * 10).rounded() / 10 }
+    /// Rounded to 0.1 after clamping (never infinity on the wire); nil for
+    /// a non-finite value, which is then left out.
+    fileprivate static func rounded(_ value: Double) -> Double? {
+        PeerNumber.roundedTenths(value, limit: wireValueLimit)
+    }
 }
 
 extension NetworkCost.Confidence {
@@ -140,13 +149,12 @@ struct AdaptiveHelloFields: Equatable, Sendable {
     /// Garbage or out-of-range values read as absent (old behaviour).
     static func parse(_ object: [String: Any]) -> AdaptiveHelloFields {
         var fields = AdaptiveHelloFields()
-        if let hz = AdaptiveStreamingWire.number(object[AdaptiveStreamingWire.effectiveRefreshKey]),
-           hz == hz.rounded(), AdaptiveStreamingWire.refreshRangeHz.contains(Int(hz)) {
-            fields.effectiveRefreshHz = Int(hz)
-        }
+        // Range-checked on the Double before any conversion (#123 F1).
+        fields.effectiveRefreshHz = PeerNumber.int(object[AdaptiveStreamingWire.effectiveRefreshKey],
+                                                   in: AdaptiveStreamingWire.refreshRangeHz)
         if fields.effectiveRefreshHz != nil,
-           let version = AdaptiveStreamingWire.number(object[AdaptiveStreamingWire.telemetryKey]),
-           version >= Double(AdaptiveStreamingWire.telemetryVersion) {
+           PeerNumber.int(object[AdaptiveStreamingWire.telemetryKey],
+                          in: AdaptiveStreamingWire.telemetryVersionRange) != nil {
             fields.telemetry = true
         }
         if let dict = object[AdaptiveStreamingWire.costKey] as? [String: Any],
@@ -189,14 +197,15 @@ struct AdaptiveReceiverTelemetry: Equatable, Sendable {
     /// The new keys only (`rtt` already rides on `stats`).
     var wireFields: [String: Any] {
         typealias W = AdaptiveStreamingWire
-        var fields: [String: Any] = [W.windowKey: W.rounded(windowSeconds)]
-        if let deliveredFPS { fields[W.deliveredFPSKey] = W.rounded(deliveredFPS) }
-        if let decodedFPS { fields[W.decodedFPSKey] = W.rounded(decodedFPS) }
-        if let enqueuedFPS { fields[W.enqueuedFPSKey] = W.rounded(enqueuedFPS) }
-        if let decodeP95Ms { fields[W.decodeP95Key] = W.rounded(decodeP95Ms) }
-        if let presentationAgeMs { fields[W.presentationAgeKey] = W.rounded(presentationAgeMs) }
+        var fields: [String: Any] = [:]
+        if let window = W.rounded(windowSeconds) { fields[W.windowKey] = window }
+        if let deliveredFPS, let v = W.rounded(deliveredFPS) { fields[W.deliveredFPSKey] = v }
+        if let decodedFPS, let v = W.rounded(decodedFPS) { fields[W.decodedFPSKey] = v }
+        if let enqueuedFPS, let v = W.rounded(enqueuedFPS) { fields[W.enqueuedFPSKey] = v }
+        if let decodeP95Ms, let v = W.rounded(decodeP95Ms) { fields[W.decodeP95Key] = v }
+        if let presentationAgeMs, let v = W.rounded(presentationAgeMs) { fields[W.presentationAgeKey] = v }
         if let lateDrops { fields[W.lateKey] = lateDrops }
-        if let jitterMs { fields[W.jitterKey] = W.rounded(jitterMs) }
+        if let jitterMs, let v = W.rounded(jitterMs) { fields[W.jitterKey] = v }
         if let thermal { fields[W.thermalKey] = thermal.rawValue }
         if let lowPower { fields[W.lowPowerKey] = lowPower }
         return fields
@@ -214,14 +223,11 @@ struct AdaptiveReceiverTelemetry: Equatable, Sendable {
         t.enqueuedFPS = W.number(object[W.enqueuedFPSKey], in: W.fpsRange)
         t.decodeP95Ms = W.number(object[W.decodeP95Key], in: W.msRange)
         t.presentationAgeMs = W.number(object[W.presentationAgeKey], in: W.msRange)
-        t.lateDrops = W.number(object[W.lateKey]).flatMap { value in
-            value == value.rounded() && W.countRange.contains(Int(value)) ? Int(value) : nil
-        }
+        // Range-checked on the Double before any conversion (#123 F1).
+        t.lateDrops = PeerNumber.int(object[W.lateKey], in: W.countRange)
         t.rttMs = W.number(object[W.rttKey], in: W.msRange)
         t.jitterMs = W.number(object[W.jitterKey], in: W.msRange)
-        t.thermal = W.number(object[W.thermalKey]).flatMap { value in
-            value == value.rounded() ? AdaptiveThermalLevel(rawValue: Int(value)) : nil
-        }
+        t.thermal = PeerNumber.int(object[W.thermalKey], in: W.thermalRange).flatMap(AdaptiveThermalLevel.init(rawValue:))
         t.lowPower = W.bool(object[W.lowPowerKey])
         return t
     }
@@ -388,21 +394,46 @@ extension NetworkCost {
         }
     }
 
-    /// The data policy the Mac applies for one receiver (lead decision,
+    /// The data policy the Mac applies for one receiver (lead decisions,
     /// phase 2): saver when the receiver's preference is On; in Automatic,
-    /// saver on clear Low Data Mode, or on a clearly metered path once the
-    /// user accepted the one-time suggestion. A clearly metered path that is
-    /// not answered yet stays normal (the receiver asks). A receiver that
-    /// sends no preference is an older receiver: normal, as today.
+    /// saver on clear Low Data Mode (at either end), or on a clearly metered
+    /// path once the user accepted the one-time suggestion. A clearly metered
+    /// path that is not answered yet stays normal (the receiver asks). A
+    /// receiver that sends no preference is an older receiver (or the Mac
+    /// Receiver, which has no setting): normal, as today.
+    ///
+    /// "Use less data: Off" is full quality always, Low Data Mode included
+    /// (a deliberate, reversible override). Answering "No" to the mobile-data
+    /// suggestion (`keepQuality`) only means "don't save on mobile data": the
+    /// preference stays Automatic, so Low Data Mode still saves.
     static func receiverDataPolicy(path: PathAssessment, preference: DataPreference?,
                                    answer: MeteredAnswer?) -> PolicyDecision {
         guard let preference else { return PolicyDecision(policy: .normal, reason: .notReported) }
-        let answer = answer ?? .unanswered
+        var answer = answer ?? .unanswered
+        if preference == .auto, answer == .keepQuality, path.cost.cost == .constrained,
+           path.cost.confidence >= clearEvidenceConfidence {
+            // The mobile-data answer does not cover Low Data Mode.
+            answer = .unanswered
+        }
         let decision = dataPolicy(path: path, preference: preference, answer: answer)
         if preference == .auto, answer == .unanswered, decision.reason == .meteredPath {
             return PolicyDecision(policy: .normal, reason: .awaitingAnswer)
         }
         return decision
+    }
+}
+
+extension NetworkCost {
+    /// What the Mac's own path contributes to a receiver's data policy (lead
+    /// decision, phase 2): only Low Data Mode set by the Mac's user
+    /// (`constrained`) counts. A metered Mac path (`expensive`) alone never
+    /// changes quality, so it is dropped to unknown here; unmetered and
+    /// unknown pass through unchanged (they never select saver).
+    static func macSidePolicyEvidence(_ report: EndpointReport) -> EndpointReport {
+        guard report.cost.cost == .expensive else { return report }
+        var filtered = report
+        filtered.cost = .unknown
+        return filtered
     }
 }
 
@@ -468,6 +499,10 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
     private var lastFrameAt: TimeInterval?
     /// Only receivers with a prompt UI ask (iOS).
     private var suggestionsEnabled = false
+    /// Only a receiver with a "Use less data" setting reports it (iOS, which
+    /// calls `setSettings`). Until then hello carries no `saveData` and no
+    /// answer: absent = today's behaviour (the Mac Receiver has no setting).
+    private var preferenceReported = false
 
     init() {}
 
@@ -492,7 +527,9 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         if let suggestionsEnabled { self.suggestionsEnabled = suggestionsEnabled }
         if newSettings.answer != tracker.answer { tracker.record(answer: newSettings.answer) }
         while tracker.dismissals < newSettings.dismissals { tracker.recordDismissal() }
-        guard newSettings.preference != settings.preference || newSettings.answer != settings.answer else {
+        let firstReport = !preferenceReported
+        preferenceReported = true
+        guard firstReport || newSettings.preference != settings.preference || newSettings.answer != settings.answer else {
             settings = newSettings
             return
         }
@@ -509,8 +546,8 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return AdaptiveHelloFields(
             effectiveRefreshHz: effectiveRefreshHz, telemetry: effectiveRefreshHz != nil,
-            cost: pathReport, saveData: settings.preference,
-            saveDataAnswer: settings.answer == .unanswered ? nil : settings.answer)
+            cost: pathReport, saveData: preferenceReported ? settings.preference : nil,
+            saveDataAnswer: preferenceReported && settings.answer != .unanswered ? settings.answer : nil)
     }
 
     /// True once per change since the last hello: the caller re-sends hello.

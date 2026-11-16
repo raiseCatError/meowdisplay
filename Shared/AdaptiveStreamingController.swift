@@ -309,6 +309,18 @@ struct AdaptiveStreamingController: Sendable {
                         reason: .generationReset, cause: .none, evidence: baseEvidence())
     }
 
+    /// A data-policy change from outside the samples ("Use less data", Low
+    /// Data Mode). Keeps every bit of history (restart time, backoffs,
+    /// streaks); turning saver on clamps the point to the saver tops at
+    /// once, turning it off lifts the tops and leaves the point where it is
+    /// (upshifts then follow the usual rules).
+    mutating func setDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) -> Decision {
+        dataPolicy = policy
+        if let decision = unmanagedDecision() { return decision }
+        if let clamp = clampToTops(now: now) { return clamp }
+        return hold(.healthy, cause: .none)
+    }
+
     /// New configuration (negotiation, Custom/Automatic, override, receiver).
     /// Going from unmanaged to managed starts again from the initial point;
     /// otherwise the current point is clamped to the new ladder top.

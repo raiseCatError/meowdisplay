@@ -203,13 +203,32 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     var recorder: StreamDiagnosticsRecorder?
     private let log: (String) -> Void
 
+    /// A source refresh below this is treated as unknown (no source cap):
+    /// no real display refreshes that slowly, so a lower reading is noise.
+    static let minimumSourceRefreshHz = 24
+    /// A restart-class plan change caused by a data-policy change (not by
+    /// the controller) is applied at most once per this interval, latest
+    /// policy wins: a flapping path or a hostile `saveData`/cost hint can't
+    /// cause a capture-restart storm. The controller's own restart limit.
+    static let policyRestartIntervalSeconds = AdaptiveStreamingThresholds.standard.minRestartIntervalSeconds
+
     private let lock = NSLock()
     private var planValue: AdaptiveStreamingPlan?
     private var sourceRefreshValue: Int?
     private var nativeSize: (width: Int, height: Int)?
+    /// The capture scale the running capture was started with.
+    private var startedScale: Double?
 
     private(set) var hello: AdaptiveHelloFields?
+    /// The policy the evidence asks for (diagnostics and the UI read it).
     private(set) var dataPolicy = NetworkCost.PolicyDecision(policy: .normal, reason: .notReported)
+    /// The policy the plan and the controller run. Lags `dataPolicy` only
+    /// while a restart-class change waits out the restart limit.
+    private(set) var appliedDataPolicy: NetworkCost.DataPolicy = .normal
+    /// A policy waiting for the restart limit (latest wins); nil = none.
+    private(set) var pendingDataPolicy: NetworkCost.DataPolicy?
+    /// When this coordinator last asked for a capture restart (any origin).
+    private(set) var lastRestartAt: TimeInterval?
     private(set) var routeEpoch: UInt64 = 0
     private(set) var generation: UInt64 = 0
     private(set) var lastDecision: AdaptiveStreamingDecision?
@@ -264,18 +283,34 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     }
 
     /// The source's distinct-frame cadence (any thread). Kept for the
-    /// diagnostics context even while the controller is off.
+    /// diagnostics context even while the controller is off. Below
+    /// `minimumSourceRefreshHz` it is unknown (no cap).
     func setSourceRefresh(_ hz: Int?) {
         lock.lock(); defer { lock.unlock() }
-        sourceRefreshValue = hz.flatMap { $0 > 0 ? $0 : nil }
+        sourceRefreshValue = hz.flatMap { $0 >= Self.minimumSourceRefreshHz ? $0 : nil }
     }
 
     /// A capture (re)started at `width`×`height` with `scale` applied: the
     /// controller's scale-1.0 raster is that size divided by the scale.
     func noteCaptureStarted(width: Int, height: Int, scale: Double) {
-        guard width > 0, height > 0, scale > 0 else { return }
+        guard width > 0, height > 0, scale > 0, scale.isFinite else { return }
         lock.lock(); defer { lock.unlock() }
         nativeSize = (Int((Double(width) / scale).rounded()) & ~1, Int((Double(height) / scale).rounded()) & ~1)
+        startedScale = scale
+    }
+
+    /// True when the running capture was started at a different scale than
+    /// the plan now asks for (`today` × plan raster): a deferred adaptive
+    /// raster restart still has work to do.
+    func captureNeedsRasterRestart(today: Double) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let startedScale else { return false }
+        return abs(startedScale - today * (planValue?.rasterScale ?? 1)) > 1e-9
+    }
+
+    private var captureStarted: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return nativeSize != nil
     }
 
     // MARK: Inputs (sender queue)
@@ -332,6 +367,9 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
             }
         }
         if let inputs { displayMode = inputs.mode }
+        if let pending = pendingDataPolicy, restartAllowed(now: now) {
+            applyDataPolicy(pending, now: now)
+        }
         guard announcesAdaptive else {
             replan(now: now)
             return
@@ -345,7 +383,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                 }
             } else {
                 let created = AdaptiveStreamingController(configuration: configuration, generation: generation,
-                                                          routeEpoch: routeEpoch, dataPolicy: dataPolicy.policy)
+                                                          routeEpoch: routeEpoch, dataPolicy: appliedDataPolicy)
                 controller = created
                 note(created.initialDecision(), now: now)
             }
@@ -415,24 +453,64 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         s.senderThermal = window.thermal
         s.receiverThermal = telemetry.thermal
         s.power = window.lowPower || telemetry.lowPower == true ? .lowPower : .normal
-        s.dataPolicy = dataPolicy.policy
+        s.dataPolicy = appliedDataPolicy
         return s
     }
 
     private func updateDataPolicy(now: TimeInterval) {
-        let path = NetworkCost.combine(sender: senderCost ?? .unknown, receiver: hello?.cost ?? .unknown)
-        let decision = NetworkCost.receiverDataPolicy(path: path, preference: hello?.saveData,
-                                                      answer: hello?.saveDataAnswer)
-        guard decision != dataPolicy else { return }
-        let previous = dataPolicy.policy
-        dataPolicy = decision
-        guard decision.policy != previous, let existing = controller else { return }
-        // The controller reads the policy from samples; restart it at the new
-        // policy so the saver clamp applies at once.
-        let created = AdaptiveStreamingController(configuration: existing.configuration, generation: generation,
-                                                  routeEpoch: routeEpoch, dataPolicy: decision.policy)
-        controller = created
-        note(created.initialDecision(), now: now)
+        // Mac-side evidence: only the Mac's own Low Data Mode counts.
+        let sender = senderCost.map(NetworkCost.macSidePolicyEvidence) ?? .unknown
+        let path = NetworkCost.combine(sender: sender, receiver: hello?.cost ?? .unknown)
+        dataPolicy = NetworkCost.receiverDataPolicy(path: path, preference: hello?.saveData,
+                                                    answer: hello?.saveDataAnswer)
+        requestDataPolicy(dataPolicy.policy, now: now)
+    }
+
+    /// Applies a policy change now, or (restart-class and inside the
+    /// restart limit) keeps it pending until `tick` finds the limit elapsed.
+    private func requestDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
+        guard policy != appliedDataPolicy else {
+            if pendingDataPolicy != nil { log("adaptive: pending data policy cancelled (back to \(policy.rawValue))") }
+            pendingDataPolicy = nil
+            return
+        }
+        if policyChangeRestartsCapture(to: policy, now: now), !restartAllowed(now: now) {
+            if pendingDataPolicy != policy {
+                log("adaptive: data policy \(policy.rawValue) deferred by the restart limit")
+            }
+            pendingDataPolicy = policy
+            return
+        }
+        applyDataPolicy(policy, now: now)
+    }
+
+    /// The controller keeps its history (restart time, backoffs): it is
+    /// told the policy, never replaced.
+    private func applyDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
+        pendingDataPolicy = nil
+        appliedDataPolicy = policy
+        guard var controller else { return }
+        let decision = controller.setDataPolicy(policy, now: now)
+        self.controller = controller
+        note(decision, now: now)
+    }
+
+    private func restartAllowed(now: TimeInterval) -> Bool {
+        guard let lastRestartAt else { return true }
+        return now - lastRestartAt >= Self.policyRestartIntervalSeconds
+    }
+
+    /// Whether running `policy` would change the raster of a live capture.
+    private func policyChangeRestartsCapture(to policy: NetworkCost.DataPolicy, now: TimeInterval) -> Bool {
+        guard captureStarted else { return false }
+        var decision: AdaptiveStreamingDecision?
+        if var copy = controller {
+            decision = copy.setDataPolicy(policy, now: now)
+        }
+        let candidate = AdaptiveStreamingPlanner.plan(
+            streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: policy,
+            decision: decision, mode: displayMode)
+        return AdaptiveStreamingPlanner.applyPath(from: plan, to: candidate) == .captureRestart
     }
 
     private func note(_ decision: AdaptiveStreamingDecision, now: TimeInterval) {
@@ -450,9 +528,9 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     private func replan(now: TimeInterval) {
         let managed = controller == nil ? nil : lastDecision
         let newPlan = AdaptiveStreamingPlanner.plan(
-            streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: dataPolicy.policy,
+            streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: appliedDataPolicy,
             decision: managed, mode: displayMode)
-        monitor.update(plan: newPlan, dataPolicy: dataPolicy.policy, lastReason: lastDecision?.reason)
+        monitor.update(plan: newPlan, dataPolicy: appliedDataPolicy, lastReason: lastDecision?.reason)
         lock.lock()
         let oldPlan = planValue
         guard newPlan != oldPlan else {
@@ -462,10 +540,108 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         planValue = newPlan
         lock.unlock()
         let path = AdaptiveStreamingPlanner.applyPath(from: oldPlan, to: newPlan)
+        if path == .captureRestart, captureStarted { lastRestartAt = now }
         let reason = lastDecision.map { "\($0.action.rawValue)/\($0.reason.rawValue) cause=\($0.cause.rawValue)" } ?? "-"
         log("adaptive: \(oldPlan.map(String.init(describing:)) ?? "today") → \(newPlan.map(String.init(describing:)) ?? "today") "
-            + "path=\(path.rawValue) decision=\(reason) data=\(dataPolicy.policy.rawValue)/\(dataPolicy.reason.rawValue)")
+            + "path=\(path.rawValue) decision=\(reason) data=\(appliedDataPolicy.rawValue) "
+            + "evidence=\(dataPolicy.policy.rawValue)/\(dataPolicy.reason.rawValue)")
         if path != .none { applier?.adaptiveApply(path) }
+    }
+}
+
+/// Who may tear down and rebuild a sender's capture (one at a time), and
+/// what runs next (#123 F3). User-driven geometry (an Extend rotation or
+/// shape change, a recovery rebuild) always wins over adaptive tuning: a
+/// geometry request that arrives while an adaptive raster restart holds the
+/// pipeline is queued and runs as soon as it finishes, never dropped; an
+/// adaptive restart that arrives while anything holds it waits, and runs
+/// only after every queued geometry rebuild. Pure value type: the sender
+/// keeps one on `queue`.
+struct CaptureRebuildArbiter: Equatable, Sendable {
+    enum Owner: Equatable, Sendable {
+        case geometry
+        case adaptiveRaster
+    }
+
+    enum Next: Equatable, Sendable {
+        case none
+        /// Run the geometry reconfigure for the latest hello.
+        case geometry
+        /// Run the deferred adaptive raster restart (if still needed).
+        case adaptiveRaster
+    }
+
+    private(set) var owner: Owner?
+    private(set) var pendingGeometry = false
+    private(set) var pendingAdaptiveRaster = false
+    /// `finish` handed the pipeline to the queued owner, which has not
+    /// started yet: its own request takes it (nothing can jump in between),
+    /// except that geometry may still take an adaptive turn.
+    private(set) var reserved = false
+
+    var isBusy: Bool { owner != nil }
+
+    /// A user-driven geometry rebuild wants the pipeline. True: it owns it
+    /// now. False: a geometry rebuild is already running (it loops on the
+    /// latest hello itself), or it was queued behind an adaptive restart.
+    mutating func requestGeometry() -> Bool {
+        switch owner {
+        case nil:
+            owner = .geometry
+            pendingGeometry = false
+            return true
+        case .geometry:
+            guard reserved else { return false }
+            reserved = false
+            return true
+        case .adaptiveRaster:
+            if reserved {
+                // The adaptive restart has not started: geometry goes first,
+                // the adaptive restart waits behind it.
+                owner = .geometry
+                reserved = false
+                pendingAdaptiveRaster = true
+                return true
+            }
+            pendingGeometry = true
+            return false
+        }
+    }
+
+    /// An adaptive raster restart wants the pipeline. True: it owns it now.
+    /// False: deferred until the pipeline is free and no geometry waits.
+    mutating func requestAdaptiveRaster() -> Bool {
+        if owner == .adaptiveRaster, reserved {
+            reserved = false
+            return true
+        }
+        guard owner == nil, !pendingGeometry else {
+            pendingAdaptiveRaster = true
+            return false
+        }
+        owner = .adaptiveRaster
+        pendingAdaptiveRaster = false
+        return true
+    }
+
+    /// The owner finished or gave up (also: a reserved turn that will not
+    /// run). Hands the pipeline to what waits, geometry first, and returns it.
+    mutating func finish() -> Next {
+        owner = nil
+        reserved = false
+        if pendingGeometry {
+            pendingGeometry = false
+            owner = .geometry
+            reserved = true
+            return .geometry
+        }
+        if pendingAdaptiveRaster {
+            pendingAdaptiveRaster = false
+            owner = .adaptiveRaster
+            reserved = true
+            return .adaptiveRaster
+        }
+        return .none
     }
 }
 

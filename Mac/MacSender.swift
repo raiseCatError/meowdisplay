@@ -2940,17 +2940,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// until the built display matches the latest hello, so rotations that
     /// arrive mid-rebuild aren't lost (and rapid flip-flops settle once).
     /// `queue` only, like the capture lifecycle it guards: one rebuild at a
-    /// time.
-    private var reconfiguring = false
+    /// time. A request that arrives while an adaptive raster restart holds
+    /// the pipeline is queued and runs right after it (#123 F3): user-driven
+    /// geometry always wins over adaptive tuning.
+    private var captureRebuild = CaptureRebuildArbiter()
     private func reconfigure(_ info: PhoneInfo) async {
         let began = (try? await onQueue { sender -> Bool in
-            guard !sender.reconfiguring, !sender.stopped else { return false }
-            sender.reconfiguring = true
-            return true
+            guard !sender.stopped else { return false }
+            return sender.captureRebuild.requestGeometry()
         }) ?? false
         guard began else { return }
         let selfBox = self.selfBox
-        defer { queue.async { selfBox.currentOnQueue()?.reconfiguring = false } }
+        defer { queue.async { selfBox.currentOnQueue()?.finishCaptureRebuild() } }
         var target = info
         while !stopped {
             Log.info("reconfiguring for \(target.pixelsWide)x\(target.pixelsHigh)")
@@ -6153,7 +6154,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let previous = lastHello
                 lastHello = info
                 // Optional adaptive keys (#123); absent = today's behaviour.
-                adaptive.helloAccepted(AdaptiveHelloFields.parse(obj), now: ProcessInfo.processInfo.systemUptime)
+                // The Mac's own path first, so a first capture already runs
+                // the right data policy (no restart ~2 s later).
+                let adaptiveNow = ProcessInfo.processInfo.systemUptime
+                adaptiveRefreshSenderPath(now: adaptiveNow)
+                adaptive.helloAccepted(AdaptiveHelloFields.parse(obj), now: adaptiveNow)
                 // Receiver-enforced max FPS (PART 3): load this peer's own
                 // stored preference the first time it's known, same
                 // convention as Extend shape — a live `maxFPSRequest` (or
@@ -9076,7 +9081,10 @@ extension MacSender: AdaptiveStreamingApplying {
     /// The physical display's active mode refresh; ProMotion and some
     /// panels report 0 there, so the screen's maximum is the fallback.
     static func physicalRefreshHz(_ displayID: CGDirectDisplayID, mode: CGDisplayMode?) -> Int? {
-        if let rate = mode?.refreshRate, rate >= 1 { return Int(rate.rounded()) }
+        if let rate = mode?.refreshRate,
+           let hz = PeerNumber.int(rate.rounded(), in: AdaptiveStreamingCoordinator.minimumSourceRefreshHz...1000) {
+            return hz
+        }
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
         }
@@ -9085,8 +9093,19 @@ extension MacSender: AdaptiveStreamingApplying {
     }
 
     /// What the receiver shows the stream on, for the readability floor.
+    /// Peer-supplied: the scale is range-checked before it divides anything,
+    /// and the point sizes go through `PeerNumber` (#123 F1), so a hello with
+    /// `"scale":1e-300` (or NaN, or a huge size) reads as absent, never traps.
+    static let adaptiveReceiverScaleRange = 0.5...8.0
+    static let adaptiveReceiverPointsRange = 1...100_000
+
     static func adaptiveReceiverDisplay(_ info: PhoneInfo) -> AdaptiveReceiverDisplay? {
-        guard info.scale > 0, info.pixelsWide > 0, info.pixelsHigh > 0 else { return nil }
+        guard info.scale.isFinite, adaptiveReceiverScaleRange.contains(info.scale),
+              info.pixelsWide > 0, info.pixelsHigh > 0,
+              let pointsWide = PeerNumber.int(Double(info.pixelsWide) / info.scale, in: adaptiveReceiverPointsRange,
+                                              integral: false),
+              let pointsHigh = PeerNumber.int(Double(info.pixelsHigh) / info.scale, in: adaptiveReceiverPointsRange,
+                                              integral: false) else { return nil }
         let sizeClass: AdaptiveReceiverDisplay.SizeClass
         switch info.device {
         case "iPhone": sizeClass = .phone
@@ -9094,18 +9113,24 @@ extension MacSender: AdaptiveStreamingApplying {
         case "Mac": sizeClass = .desktop
         default: return nil
         }
-        return AdaptiveReceiverDisplay(pointsWide: Int(Double(info.pixelsWide) / info.scale),
-                                       pointsHigh: Int(Double(info.pixelsHigh) / info.scale),
+        return AdaptiveReceiverDisplay(pointsWide: pointsWide, pointsHigh: pointsHigh,
                                        scale: info.scale, sizeClass: sizeClass)
+    }
+
+    /// `queue` only: the live media connection's own cost evidence (the
+    /// coordinator ignores an epoch it has seen). Also called on hello, so
+    /// the Mac's Low Data Mode is known before the first capture is
+    /// configured whenever the path already is.
+    fileprivate func adaptiveRefreshSenderPath(now: TimeInterval) {
+        guard let report = transportController.pathCostReport else { return }
+        adaptive.senderPathChanged(report, epoch: transportController.routeEpoch, now: now)
     }
 
     /// `queue` only, once per ping window.
     fileprivate func adaptiveTick(capturedFrames: Int, drops: (enc: Int, net: Int)) {
         dispatchPrecondition(condition: .onQueue(queue))
         let now = ProcessInfo.processInfo.systemUptime
-        if let report = transportController.pathCostReport {
-            adaptive.senderPathChanged(report, epoch: transportController.routeEpoch, now: now)
-        }
+        adaptiveRefreshSenderPath(now: now)
         let inputs = lastHello.map { info in
             AdaptiveStreamingCoordinator.Inputs(
                 mode: Self.adaptiveMode(mode), profile: streamingProfile, customFPS: customFPS,
@@ -9154,15 +9179,21 @@ extension MacSender: AdaptiveStreamingApplying {
     /// virtual display, the mirrored display choice or the connection.
     private func restartCaptureForAdaptiveRaster() async {
         let began = (try? await onQueue { sender -> Bool in
-            guard !sender.reconfiguring, !sender.stopped, !sender.lockScreenActive,
+            guard !sender.stopped, !sender.lockScreenActive,
                   sender.captureOwnership.liveStream != nil,
-                  sender.captureStateSnapshot().phase == .running else { return false }
-            sender.reconfiguring = true
-            return true
+                  sender.captureStateSnapshot().phase == .running else {
+                // A turn handed over by `finish` that will not run is released.
+                if sender.captureRebuild.owner == .adaptiveRaster, sender.captureRebuild.reserved {
+                    sender.finishCaptureRebuild()
+                }
+                return false
+            }
+            // Deferred (not lost) while a rotation or another rebuild runs.
+            return sender.captureRebuild.requestAdaptiveRaster()
         }) ?? false
         guard began else { return }
         let selfBox = self.selfBox
-        defer { queue.async { selfBox.currentOnQueue()?.reconfiguring = false } }
+        defer { queue.async { selfBox.currentOnQueue()?.finishCaptureRebuild() } }
         // The cached frame is the old size: never replay it into the new encoder.
         invalidateCapturePipeline(discardingLastFrame: true)
         if let retired = try? await onQueue({ sender in sender.releaseCaptureStream() }) {
@@ -9182,6 +9213,31 @@ extension MacSender: AdaptiveStreamingApplying {
             guard updateCaptureState({ $0.unexpectedStop() }) else { return }
             Log.info("adaptive: raster restart failed: \(error) — entering capture recovery")
             scheduleCaptureRecovery()
+        }
+    }
+
+    /// `queue` only: the current capture rebuild ended; run whatever waited
+    /// for it (#123 F3). Geometry first, for the latest hello; a deferred
+    /// adaptive restart only if the running capture still has the old raster.
+    fileprivate func finishCaptureRebuild() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let next = captureRebuild.finish()
+        guard !stopped else { return }
+        let selfBox = self.selfBox
+        switch next {
+        case .none:
+            return
+        case .geometry:
+            // The turn is reserved for this rebuild; give it back if it can't run.
+            guard let hello = lastHello else { return finishCaptureRebuild() }
+            Log.info("reconfigure: running the rotation queued behind an adaptive restart")
+            Task { await selfBox.resolve()?.reconfigure(hello) }
+        case .adaptiveRaster:
+            guard mode != .window, adaptive.captureNeedsRasterRestart(today: quality.scale) else {
+                return finishCaptureRebuild()
+            }
+            Log.info("adaptive: running the raster restart deferred by a capture rebuild")
+            Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
         }
     }
 }

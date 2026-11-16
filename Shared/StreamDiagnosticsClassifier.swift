@@ -109,7 +109,10 @@ extension StreamClassifierInputs {
         func pct(_ s: DiagnosticsStage, _ k: KeyPath<StreamDiagnosticsStageSummary, Double>) -> Double? {
             st(s).flatMap { $0.count > 0 ? $0[keyPath: k] : nil }
         }
-        func peerCount(_ fps: Double?) -> Int { Int(((fps ?? 0) * w).rounded()) }
+        // Peer values: bounded before any Int conversion (#123 F1).
+        func peerCount(_ fps: Double?) -> Int {
+            PeerNumber.int(((fps ?? 0) * w).rounded(), in: 0...1_000_000_000) ?? 0
+        }
 
         if snapshot.side == .sender {
             i.targetFPS = Double(snapshot.context.targetFPS)
@@ -140,7 +143,7 @@ extension StreamClassifierInputs {
                 i.presenterQueueAgeP95Ms = peer.presenterQueueAgeP95Ms
                 i.presenterQueueSamples = peerCount(peer.enqueueFPS)
                 i.decodeP95Ms = peer.decodeP95Ms
-                i.decodeSamples = Int(peer.decodeSamples ?? 0)
+                i.decodeSamples = PeerNumber.int(peer.decodeSamples ?? 0, in: 0...1_000_000_000, integral: false) ?? 0
                 i.rttJitterMs = peer.rttJitterMs
             }
         } else {

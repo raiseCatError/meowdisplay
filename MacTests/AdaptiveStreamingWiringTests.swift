@@ -350,7 +350,10 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
             (path(.expensive), .auto, nil, .normal, .awaitingAnswer),         // the suggestion asks first
             (path(.expensive), .auto, .saveData, .saver, .meteredPath),
             (path(.expensive), .auto, .keepQuality, .normal, .higherQualityOverride),
-            (path(.constrained), .auto, .keepQuality, .normal, .higherQualityOverride),
+            // Lead decision: "No" / Full Quality covers mobile data only; Low Data Mode still saves.
+            (path(.constrained), .auto, .keepQuality, .saver, .lowDataMode),
+            (path(.constrained, .medium), .auto, .keepQuality, .saver, .lowDataMode),
+            (path(.constrained, .low), .auto, .keepQuality, .normal, .higherQualityOverride),
             (path(.expensive, .low), .auto, .saveData, .normal, .notClearlyMetered),
             (path(.unknown), .auto, .saveData, .normal, .notClearlyMetered),
         ]
@@ -414,16 +417,23 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         XCTAssertNil(custom.plan, "Custom bypasses saving too")
     }
 
-    func testSenderMeteredPathNeedsTheReceiversAnswer() {
+    func testSenderMeteredPathAloneNeverChangesQuality() {
+        // Lead decision (#123 F4): a metered Mac path (`isExpensive`) alone
+        // never changes quality, answered or not.
         let coordinator = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .mirror)
         let metered = NetworkCost.endpointReport(.init(usesWiFi: true, isExpensive: true), reachability: .local)
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .auto), now: 0)
         coordinator.senderPathChanged(metered, epoch: 1, now: 0)
-        XCTAssertEqual(coordinator.dataPolicy.reason, .awaitingAnswer)
+        XCTAssertEqual(coordinator.dataPolicy.reason, .notClearlyMetered)
         XCTAssertNil(coordinator.plan)
         coordinator.helloAccepted(AdaptiveHelloFields(saveData: .auto, saveDataAnswer: .saveData), now: 1)
+        XCTAssertNil(coordinator.plan)
+        // The receiver's own metered path with its answer still saves, and
+        // the full-quality choice is reversible and respected.
+        let cellular = NetworkCost.endpointReport(.init(usesCellular: true, isExpensive: true), reachability: .local)
+        coordinator.helloAccepted(AdaptiveHelloFields(cost: cellular, saveData: .auto, saveDataAnswer: .saveData), now: 2)
         XCTAssertEqual(coordinator.plan?.origin, .dataSaver)
-        coordinator.helloAccepted(AdaptiveHelloFields(saveData: .auto, saveDataAnswer: .keepQuality), now: 2)
+        coordinator.helloAccepted(AdaptiveHelloFields(cost: cellular, saveData: .auto, saveDataAnswer: .keepQuality), now: 3)
         XCTAssertNil(coordinator.plan, "the full-quality choice is reversible and respected")
     }
 
@@ -633,7 +643,9 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
     func testStaleRouteEpochIsIgnored() {
         let (coordinator, _) = managedCoordinator()
         let wifi = NetworkCost.endpointReport(.init(usesWiFi: true), reachability: .local)
-        let cellular = NetworkCost.endpointReport(.init(usesCellular: true, isExpensive: true), reachability: .remote)
+        // The Mac's own Low Data Mode (the only Mac-side evidence that counts, #123 F4).
+        let cellular = NetworkCost.endpointReport(.init(usesCellular: true, isExpensive: true, isConstrained: true),
+                                                  reachability: .remote)
         XCTAssertTrue(coordinator.senderPathChanged(wifi, epoch: 2, now: 3))
         XCTAssertEqual(coordinator.lastDecision?.reason, .routeChangeSettling)
         XCTAssertFalse(coordinator.senderPathChanged(cellular, epoch: 1, now: 3.5), "older epoch: stale callback")
@@ -641,7 +653,7 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         XCTAssertEqual(coordinator.routeEpoch, 2)
         XCTAssertEqual(coordinator.dataPolicy.reason, .notClearlyMetered, "the stale cellular report changed nothing")
         XCTAssertTrue(coordinator.senderPathChanged(cellular, epoch: 3, now: 4))
-        XCTAssertEqual(coordinator.dataPolicy.reason, .awaitingAnswer)
+        XCTAssertEqual(coordinator.dataPolicy.reason, .lowDataMode)
     }
 
     // MARK: - One-time suggestion

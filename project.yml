@@ -449,6 +449,8 @@ targets:
       - Shared/AdaptiveStreamingWiring.swift
       - Mac/AdaptiveStreamingSession.swift
       - Shared/StreamDiagnosticsColour.swift
+      # Bounded numbers from a peer (#123): the wiring and diagnostics parsers.
+      - Shared/PeerNumber.swift
       # Performance Lab (#123): model, fixture schedule, frame-ID reader,
       # run controller and the synthetic self-test.
       - Shared/PerformanceLabFrameID.swift
