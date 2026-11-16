@@ -442,6 +442,7 @@ targets:
       - Shared/StreamDiagnosticsExport.swift
       - Shared/StreamDiagnosticsPresentation.swift
       - Shared/RefreshNegotiation.swift
+      - Shared/NetworkCost.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same
