@@ -776,6 +776,9 @@ final class WorkspaceModel: ObservableObject {
     var send: ([String: Any]) -> Bool = { _ in false }
     /// Asks the Mac for Window mode (displayModeRequest "window").
     var requestWindowMode: () -> Void = {}
+    /// Asks the Mac for Mirror or Extend (the existing `displayModeRequest`): Exit Fullscreen
+    /// after Open Fullscreen started Window view from there.
+    var requestDisplayMode: (ReceiverDisplayMode) -> Void = { _ in }
     /// Whether this session may change the Mac (launch apps, close windows).
     var inputAllowed: () -> Bool = { false }
     /// Whether this device shows the Mac in Mirror now (outside Window view), as the Mac confirmed.
@@ -1111,6 +1114,8 @@ final class WorkspaceModel: ObservableObject {
         staleThumbnails = []; unavailableThumbnails = []; planner.reset()
         apps = []; appRevision = nil; launching = []; inventory.reset()
         dismissAppOpening()
+        // Open Fullscreen's "before" belongs to that Mac's layout only.
+        if appFirst?.host != peer { appFirst = nil; appFirstLeftExtend = false }
         generations = [:]; closedOnMac = [:]; listedThisConnection = []
         publish()
     }
@@ -1120,6 +1125,7 @@ final class WorkspaceModel: ObservableObject {
         if c.starting { return }
         catalog = c
         if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
+        if !c.unavailable, var s = appFirst, s.listed(running: c.apps) { appFirst = s }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         if let host { listedThisConnection.formUnion(c.windows.map { WorkspaceSource(host: host, windowID: $0.id).tabKey }) }
         var missing = Set<String>()
@@ -2213,6 +2219,8 @@ final class WorkspaceModel: ObservableObject {
 
     func exitLocalFullscreen() {
         guard localFullscreen != nil else { return }
+        // Open Fullscreen's pane: what showed before comes back (panes, floats, Mirror/Extend).
+        if appFirst?.isCurrent(fullscreen: localFullscreen) == true { exitAppFirst(); return }
         localFullscreen = nil
         publish(); scheduleSend(immediately: true)
     }
@@ -2455,6 +2463,15 @@ final class WorkspaceModel: ObservableObject {
     private(set) var appOpeningRound = 0
     private var appOpeningTask: Task<Void, Never>?
 
+    /// Open Fullscreen (Stage Peek, #287): the app shown alone, fullscreen on this device, and
+    /// what showed before it, for Exit Fullscreen (nil: none).
+    @Published private(set) var appFirst: WorkspaceAppFirst?
+    /// The one-time note that touch reaches the Mac as mouse and trackpad input (not multitouch).
+    @Published private(set) var appFirstInputNote = false
+    /// The person already confirmed leaving Extend for this Open Fullscreen: its window, placed
+    /// once the app has opened, doesn't ask again.
+    private var appFirstLeftExtend = false
+
     /// The session's control as the opening needs it (live session and the Mac's grant).
     private var appOpeningControl: WorkspaceAppOpening.Control {
         WorkspaceAppOpening.Control(live: inputAllowed(), state: controlState())
@@ -2475,6 +2492,103 @@ final class WorkspaceModel: ObservableObject {
         guard overviewOpen, !app.bundleID.isEmpty else { return }
         beginAppOpening(bundleID: app.bundleID, name: app.name, tile: replacingTile, drop: nil, requestingControl: requestingControl)
     }
+
+    // MARK: Open Fullscreen (Stage Peek, #287; WorkspaceAppFirst)
+
+    /// Stage Peek offers Open Fullscreen for `app`: Window view is available here, and the app has
+    /// a window to show (which needs no control) or control is granted to open it on the Mac.
+    func canOpenFullscreen(_ app: MacAppItem) -> Bool {
+        guard available, !macLocked, !app.bundleID.isEmpty, let c = catalog, !c.unavailable else { return false }
+        return c.windows.contains { $0.bundleID == app.bundleID && !WorkspaceSource.isDisplayKey($0.id) } || canControlMac
+    }
+
+    /// Open Fullscreen: `app`'s window alone, fullscreen on this device. A window it has is used
+    /// (several: the person picks); with none it opens on the Mac as from the picker, then its
+    /// window is placed. Progress, the choice and failures show over the layout, so Stage Peek
+    /// closes. From Extend it asks first, as any step into Window view.
+    func openAppFullscreen(_ app: MacAppItem) {
+        guard canOpenFullscreen(app) else { return }
+        if holdForLeavingExtend({ [weak self] in self?.openAppFullscreen(app) }) { return }
+        appFirstLeftExtend = leavingExtendConfirmed
+        beginAppFullscreen(bundleID: app.bundleID, name: app.name, reveal: false)
+        stagePeekCloseRequest += 1
+    }
+
+    private func beginAppFullscreen(bundleID: String, name: String, reveal: Bool) {
+        dismissAppOpening()
+        let control = appOpeningControl
+        let (o, step) = WorkspaceAppOpening.startFullscreen(bundleID: bundleID, name: name, reveal: reveal, control: control,
+                                                            windows: catalog?.windows ?? [], now: clock())
+        Log.info("appFirst: requested bundle=\(bundleID) control=\(control) reveal=\(reveal)")
+        appOpening = o
+        appOpeningSlow = false
+        appOpeningRound += 1
+        performAppOpening(step)
+        if appOpening?.isFinished == false { runAppOpeningTimer() }
+    }
+
+    /// The app's window alone in one pane, fullscreen on this device; what showed before is kept
+    /// (`WorkspaceAppFirst.previous`) for Exit Fullscreen. Outside Window view it starts it (from
+    /// Extend once the person confirms). One undo step, as any layout change.
+    private func presentAppFullscreen(_ w: CatalogWindowItem, bundleID: String, name: String) {
+        guard let host, let source = source(for: w) else { return }
+        if !appFirstLeftExtend,
+           holdForLeavingExtend({ [weak self] in self?.presentAppFullscreen(w, bundleID: bundleID, name: name) }) { return }
+        appFirstLeftExtend = false
+        let previous = WorkspaceAppFirst.Previous.current(layout: saved, fullscreen: localFullscreen, windowMode: windowMode,
+                                                          extending: extending(), mirroring: mirroring())
+        let id = "w\(nextTile)"
+        nextTile += 1
+        let session = WorkspaceAppFirst.begin(host: host, bundleID: bundleID, name: name, tile: id, continuing: appFirst,
+                                              fullscreen: localFullscreen, previous: previous)
+        if overviewOpen { closeOverview() }
+        history.record(saved)
+        saved = WorkspaceLayout(preset: .single, tiles: [WorkspaceTile(id: id, source: source)]).compacted()
+        localFullscreen = nil
+        refreshMissing(); persist(); publish()
+        if !windowMode { requestWindowMode() }
+        appFirst = session
+        Log.info("appFirst: fullscreen bundle=\(bundleID) window=\(w.id) tile=\(id) previousMode=\(session.previous.mode?.rawValue ?? "window")")
+        enterLocalFullscreen(id)
+        stagePeekCloseRequest += 1
+        if WorkspaceAppFirst.takeInputNote(defaults) {
+            appFirstInputNote = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.appFirstInputNote = false }
+        }
+    }
+
+    /// Exit Fullscreen from Open Fullscreen (or Exit once its window closed): what showed before
+    /// comes back, the panes and floats, the pane that was fullscreen, and Mirror or Extend when
+    /// Open Fullscreen is what left them.
+    func exitAppFirst() {
+        guard let s = appFirst else { return }
+        appFirst = nil
+        appFirstInputNote = false
+        if appOpening?.fullscreenOnPlace == true { dismissAppOpening() }
+        let p = s.previous
+        Log.info("appFirst: exit bundle=\(s.bundleID) ended=\(String(describing: s.ended)) mode=\(p.mode?.rawValue ?? "window")")
+        history.record(saved)
+        saved = removingClosed(from: p.layout).compacted()
+        localFullscreen = p.fullscreen
+        refreshMissing(); persist(); publish()
+        if let mode = p.mode { requestDisplayMode(mode) } else { scheduleSend(immediately: true) }
+    }
+
+    /// Its window closed: open the app fullscreen again (Exit still goes back to the same view).
+    func reopenAppFirst() {
+        guard let s = appFirst, s.ended != nil else { return }
+        appFirstLeftExtend = false
+        beginAppFullscreen(bundleID: s.bundleID, name: s.name, reveal: false)
+    }
+
+    /// Its window closed: choose another window for its pane, in Window view as it is now.
+    func chooseAnotherAfterAppFirst() {
+        guard let s = appFirst, s.ended != nil else { return }
+        appFirst = nil
+        openOverview(replacing: arranged.tiles[s.tile] != nil ? s.tile : nil)
+    }
+
+    func dismissAppFirstInputNote() { appFirstInputNote = false }
 
     private func beginAppOpening(bundleID: String, name: String, tile: String?, drop: WorkspaceAppOpening.Drop?, requestingControl: Bool,
                                  reveal: Bool = false) {
@@ -2509,6 +2623,11 @@ final class WorkspaceModel: ObservableObject {
     func retryAppOpening(reveal: Bool = false) {
         guard let o = appOpening, case .failed(let f) = o.phase, f.retryable else { return }
         Log.info("pickerOpen: retry bundle=\(o.bundleID) after=\(f.rawValue) reveal=\(reveal)")
+        if o.fullscreenOnPlace {
+            guard o.offersRetry else { return }
+            beginAppFullscreen(bundleID: o.bundleID, name: o.name, reveal: reveal)
+            return
+        }
         if let drop = o.drop {
             beginAppOpening(bundleID: o.bundleID, name: o.name, tile: o.tile, drop: drop, requestingControl: false, reveal: reveal)
             return
@@ -2566,6 +2685,10 @@ final class WorkspaceModel: ObservableObject {
             appOpeningTask?.cancel(); appOpeningTask = nil
             appOpening = nil
             appOpeningSlow = false
+            if o.fullscreenOnPlace {
+                presentAppFullscreen(w, bundleID: o.bundleID, name: o.name)
+                return
+            }
             if let drop = o.drop {
                 // Exactly as if this window had been dropped there.
                 if let at = drop.floatAt { openFloating(w, at: at) } else { _ = place(w, on: drop.target) }
@@ -2895,6 +3018,16 @@ final class WorkspaceModel: ObservableObject {
         if let z = zoomGesture, touched.contains(z.tile) { zoomGesture = nil; zoomPreview = nil }
         for id in result.removed { backdrops[id] = nil; liftedFloats.remove(id); liftWanted.remove(id) }
         saved = result.layout
+        // Open Fullscreen's window closed (or its app quit): never an empty pane left fullscreen.
+        // The fullscreen ends and says so (`appFirst.ended`); the layout under it stays as is.
+        let appFirstRunning = appFirst.map { s in catalog?.apps.contains { $0.bundleID == s.bundleID } ?? false } ?? false
+        if var s = appFirst, s.windowsClosed(emptied: result.emptied, removed: result.removed, fullscreen: localFullscreen,
+                                             appRunning: appFirstRunning) {
+            Log.info("appFirst: window closed bundle=\(s.bundleID) ended=\(String(describing: s.ended))")
+            appFirst = s
+            localFullscreen = nil
+            requestCatalog()
+        }
         refreshMissing()
         persist(); publish(); scheduleSend(immediately: true)
         advanceAppOpening()
