@@ -695,6 +695,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // shared cross-thread invariant is exactly `MacSenderPipelineState`'s
     // single responsibility; see its header comment.
     private let pipelineState: MacSenderPipelineState
+    /// Opt-in streaming diagnostics for this receiver's session (#123,
+    /// `StreamDiagnosticsRecorder`). Measurement only: nothing reads it back
+    /// to make a pipeline decision. Thread-safe; every hook checks
+    /// `isEnabled` first and does nothing else when diagnostics are off.
+    let diagnostics = StreamDiagnosticsRecorder(side: .sender)
+    /// `queue` only, written only while diagnostics are on: the capture PTS
+    /// (seconds, host clock) of `lastPixelBuffer`, so a replay of those
+    /// pixels can be told apart from a new frame.
+    private var diagnosticsLastCapturePTS: Double?
     // HUD-only per-ping-interval drop counters (~2s, reset in `schedulePing`)
     // — separate from the this-window counters, which are reset on the
     // phone's own independent "stats" cadence for the PHONE-STATS debug log.
@@ -5500,10 +5509,50 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // session-lifetime total for anything relying on that legacy
                 // meaning.
                 let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)}")
+                // Diagnostics (#123): optional `diag` summary, only while on.
+                let diagnosticsSuffix = self.diagnosticsPingSuffix()
+                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)}")
             }
             self.schedulePing()
         }
+    }
+
+    /// `queue` only. Refreshes the diagnostics context and returns the
+    /// optional `,"diag":{...}` ping suffix (PROTOCOL.md 6.2); empty when off.
+    private func diagnosticsPingSuffix() -> String {
+        guard diagnostics.isEnabled else { return "" }
+        let route = transportController.route
+        let cost = transportController.pathCostFlags
+        let networkProtocol: DiagnosticsNetworkProtocol
+        switch transportController.activeNetworkProtocol {
+        case .tcp: networkProtocol = .tcp
+        case .quic: networkProtocol = .quic
+        case nil: networkProtocol = .unknown
+        }
+        let displayMode: DiagnosticsDisplayMode
+        switch mode {
+        case .mirror: displayMode = .mirror
+        case .extend: displayMode = .extend
+        case .window: displayMode = .window
+        }
+        let codec: DiagnosticsCodec = activeCodec == .hevc ? .hevc : .h264
+        let width = capturePixelsWide, height = capturePixelsHigh, fps = captureTargetFPS
+        let inFlight = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
+        diagnostics.updateContext { context in
+            context.displayMode = displayMode
+            context.codec = codec
+            context.rasterWidth = width
+            context.rasterHeight = height
+            context.targetFPS = fps
+            context.encoderInFlightLimit = inFlight
+            context.route = DiagnosticsRouteClass(route)
+            context.networkProtocol = networkProtocol
+            context.pathExpensive = cost?.expensive
+            context.pathConstrained = cost?.constrained
+        }
+        let summary = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot())
+        guard let json = summary.wireJSON else { return "" }
+        return ",\"\(StreamDiagnosticsPeerSummary.wireKey)\":\(json)"
     }
 
     private func scheduleWatchdog() {
@@ -5577,7 +5626,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let pixelBuffer = self.lastPixelBuffer {
                 Log.info("static screen after reconnect to \(self.endpointName) — replaying last frame as keyframe")
                 self.encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
-                            generation: self.captureGenerationNow, connectionGeneration: self.activeConnectionGeneration)
+                            generation: self.captureGenerationNow, connectionGeneration: self.activeConnectionGeneration,
+                            origin: .reconnectReplay)
             }
             self.scheduleWatchdog()
         }
@@ -5985,6 +6035,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let json = try? JSONSerialization.data(withJSONObject: obj),
                let line = String(data: json, encoding: .utf8) {
                 let thisWindowDrops = pipelineState.drainThisWindowDrops()
+                if let peer = StreamDiagnosticsPeerSummary.fromWire(obj[StreamDiagnosticsPeerSummary.wireKey], side: .receiver) {
+                    diagnostics.updatePeer(peer)
+                }
                 Log.info("PHONE-STATS \(line) | mac enc↓=\(thisWindowDrops.enc) net↓=\(thisWindowDrops.net) pending=\(pipelineState.pendingSendsNow)")
             }
         case "hello":
@@ -7150,6 +7203,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         switch type {
         case .screen:
+            if mode != .window, diagnostics.isEnabled { recordCaptureDiagnostics(sampleBuffer) }
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
                 if wakeCaptureAwaitingFirstFrameGeneration != nil {
                     Log.info("wakeCapture: frameMissingSurface")
@@ -7176,6 +7230,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastPixelBuffer = pixelBuffer
             lastCaptureAt = Date()
             capFrames += 1
+            if diagnostics.isEnabled {
+                diagnosticsLastCapturePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            }
             #if DEBUG
             debugSCKWindow += 1
             #endif
@@ -7283,17 +7340,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// enc↓/net↓ backpressure drop (that mislabels normal rate limiting as a
     /// stalled pipeline) or arm the drop-replay timer. It is held instead,
     /// and goes out if nothing newer does (see `FrameAdmission`).
-    private func offerLatestFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, source: FrameSource) {
+    private func offerLatestFrame(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, source: FrameSource,
+                                  origin: DiagnosticsSubmitOrigin = .live) {
         let now = ProcessInfo.processInfo.systemUptime
         let held = HeldFrame(pts: pts, generation: generation, source: source)
         if case .hold(let retryAt) = frameAdmission.offer(now: now) {
+            noteAdmissionDiagnostics(.heldByRateLimit)
             return holdLatestFrame(held, retryAt: retryAt, now: now)
         }
+        noteAdmissionDiagnostics(.admittedLive)
         cancelHeldFrame()
         #if DEBUG
         debugAdmittedWindow += 1
         #endif
         if shouldDropFrame(reason: "pending_encode") {  // encoder busy
+            noteAdmissionDiagnostics(.heldEncoderBusy)
             // The next captured frame would take its place, but there may be
             // none: this one may be the last change on screen.
             if case .hold(let retryAt) = frameAdmission.encoderBusy(now: now) {
@@ -7301,8 +7362,53 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return
         }
-        if shouldDropFrame(reason: "pending_sends") { return }  // TCP send queue full; the drop replay retries
-        encode(pixelBuffer, pts: pts, generation: generation, connectionGeneration: activeConnectionGeneration)
+        if shouldDropFrame(reason: "pending_sends") {  // TCP send queue full; the drop replay retries
+            noteAdmissionDiagnostics(.droppedPendingSends)
+            return
+        }
+        encode(pixelBuffer, pts: pts, generation: generation, connectionGeneration: activeConnectionGeneration,
+               origin: source == .workspace && origin == .live ? .workspace : origin)
+    }
+
+    /// `queue` only. Diagnostics: one admission outcome.
+    private func noteAdmissionDiagnostics(_ counter: DiagnosticsCounter) {
+        guard diagnostics.isEnabled else { return }
+        diagnostics.increment(counter, at: StreamDiagnosticsClock.nowMs())
+    }
+
+    /// `queue` only, diagnostics on, display capture: one ScreenCaptureKit
+    /// callback's status (idle frames carry no pixels, so this runs first).
+    private func recordCaptureDiagnostics(_ sampleBuffer: CMSampleBuffer) {
+        var status = DiagnosticsCaptureStatus.other
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+            as? [[SCStreamFrameInfo: Any]],
+           let raw = attachments.first?[.status] as? Int, let frameStatus = SCFrameStatus(rawValue: raw) {
+            switch frameStatus {
+            case .complete: status = CMSampleBufferGetImageBuffer(sampleBuffer) != nil ? .complete : .other
+            case .idle: status = .idle
+            default: status = .other
+            }
+        }
+        diagnostics.recordCapture(status, at: StreamDiagnosticsClock.nowMs())
+    }
+
+    /// `queue` only, diagnostics on: one encoder submission.
+    private func recordSubmitDiagnostics(pts: CMTime, origin: DiagnosticsSubmitOrigin, generation: UInt64, at nowMs: Double) {
+        diagnostics.noteGeneration(generation, at: nowMs)
+        let sourcePTS: Double?
+        switch origin {
+        case .workspace: sourcePTS = nil   // stamped at composition; see the compose counters
+        case .dropReplay, .reconnectReplay: sourcePTS = diagnosticsLastCapturePTS
+        case .live, .heldRetry: sourcePTS = mode == .window ? nil : pts.seconds
+        }
+        let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        let validPTS = sourcePTS.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        diagnostics.recordSubmit(
+            origin: origin,
+            sourceKey: validPTS.map { Int64(($0 * 1_000_000).rounded()) },
+            sourceAgeMs: validPTS.map { (hostNow - $0) * 1000 },
+            pendingEncodes: pipelineState.pendingEncodesNow,
+            at: nowMs)
     }
 
     /// `queue` only. Keeps `frame` as the one to send if nothing newer goes
@@ -7333,7 +7439,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
                   captureStateSnapshot().phase == .running else { return }
         }
-        offerLatestFrame(pixelBuffer, pts: held.pts, generation: held.generation, source: held.source)
+        noteAdmissionDiagnostics(.heldRetryFired)
+        offerLatestFrame(pixelBuffer, pts: held.pts, generation: held.generation, source: held.source, origin: .heldRetry)
     }
 
     /// `queue` only. The latest frame went out, or nothing may go out any
@@ -7376,7 +7483,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
-               generation: captureGenerationNow, connectionGeneration: activeConnectionGeneration)
+               generation: captureGenerationNow, connectionGeneration: activeConnectionGeneration, origin: .dropReplay)
     }
 
     /// Drop when encode or send pipeline is busy.
@@ -7403,12 +7510,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
-    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64) {
+    private func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, generation: UInt64, connectionGeneration: UInt64,
+                        origin: DiagnosticsSubmitOrigin = .live) {
         // Every video path (capture, drop replay, the reconnect replay)
         // funnels through here: nothing is encoded for a connection that is
         // not admitted, and a pending keyframe request stays pending for it.
         guard generation == captureGenerationNow, videoEncoder.isActive,
               sessionAuthorization.mayEmitMedia(on: connectionGeneration) else { return }
+        // Diagnostics (#123): measured here, locally; the wire `cap` below is
+        // untouched. Note `cap` is stamped now, at submission — not at capture.
+        let diagnostics = self.diagnostics
+        let diagnosticsOn = diagnostics.isEnabled
+        let diagnosticsSubmitMs = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
+        if diagnosticsOn {
+            recordSubmitDiagnostics(pts: pts, origin: origin, generation: generation, at: diagnosticsSubmitMs)
+        }
+        let encodeSignpost = StreamDiagnosticsSignposts.begin("Encode", enabled: diagnosticsOn)
         pipelineState.incrementPendingEncodes()
         let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
         // Latched here, on `queue`, and handed to the encoder as an immutable
@@ -7439,7 +7556,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
         ) { status, buffer, sessionCodec in
             defer { pipelineState.decrementPendingEncodes() }
+            defer { StreamDiagnosticsSignposts.end("Encode", encodeSignpost) }
+            func noteOutput(_ outcome: StreamDiagnosticsRecorder.EncodeOutcome, bytes: Int = 0, keyframe: Bool = false) {
+                guard diagnosticsOn else { return }
+                let now = StreamDiagnosticsClock.nowMs()
+                diagnostics.recordEncodeOutput(durationMs: now - diagnosticsSubmitMs, bytes: bytes, keyframe: keyframe,
+                                               outcome: outcome, at: now)
+            }
             guard status == noErr, let buffer else {
+                noteOutput(.failed)
                 // A session rejecting every frame looks healthy in all other
                 // counters — the receiver just stays black. Don't be silent.
                 let (logAction, shouldAttemptRecovery) = pipelineState.recordEncodeOutputFailure(
@@ -7459,7 +7584,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             #if DEBUG
             pipelineState.incrementDebugVTCompletedWindow()
             #endif
-            guard generation == pipelineState.captureGenerationNow else { return }
+            guard generation == pipelineState.captureGenerationNow else { return noteOutput(.stale) }
             if pipelineState.wakeCaptureAwaitingEncodedFrameGeneration == generation {
                 pipelineState.wakeCaptureAwaitingEncodedFrameGeneration = nil
                 Log.info("wakeCapture: firstEncodedFrame")
@@ -7489,9 +7614,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // (`CodecSelectionPolicy` can flip H.264/HEVC on an FPS change
             // alone). It is a genuine encode success — counted above — but
             // it must never be published as if the current session made it.
-            guard let sessionCodec else { return }
+            guard let sessionCodec else { return noteOutput(.stale) }
             let keyframe = MacSender.isKeyframe(buffer)
-            guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return }
+            guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return noteOutput(.failed) }
+            noteOutput(.sent, bytes: data.count, keyframe: keyframe)
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
@@ -7528,6 +7654,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // an unthrottled line here is ~60/sec for as long as the problem
             // lasts. Report at most once a second and carry the count: the
             // status code is the diagnosis, the rate is just a number.
+            if diagnosticsOn {
+                let now = StreamDiagnosticsClock.nowMs()
+                diagnostics.recordEncodeOutput(durationMs: nil, bytes: 0, keyframe: false, outcome: .failed, at: now)
+            }
             let (logAction, shouldAttemptRecovery) = pipelineState.recordEncodeSubmitFailure(
                 submitStatus, at: ProcessInfo.processInfo.systemUptime, generation: generation
             )
@@ -7999,6 +8129,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let frame = QUICFrameAssembler.frame(payload)
         let frameByteCount = frame.count
         let (pendingSendsAfterIncrement, sendEpoch) = pipelineState.beginMediaSend(channel: channel)
+        let diagnostics = self.diagnostics
+        let diagnosticsOn = channel == .video && diagnostics.isEnabled
+        let diagnosticsSendStartMs = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
+        if diagnosticsOn {
+            diagnostics.observeGauge(.pendingSends, Double(pendingSendsAfterIncrement), at: diagnosticsSendStartMs)
+        }
+        let sendSignpost = StreamDiagnosticsSignposts.begin("Send", enabled: diagnosticsOn)
         #if DEBUG
         let queuedAt = Date()
         let queuedByteCount = frame.count
@@ -8015,6 +8152,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self = selfBox.currentOnQueue() else { return }
             // A retired transport's late completion is ignored wholesale.
             guard self.pipelineState.completeMediaSend(channel: channel, epoch: sendEpoch) else { return }
+            StreamDiagnosticsSignposts.end("Send", sendSignpost)
+            if diagnosticsOn {
+                let now = StreamDiagnosticsClock.nowMs()
+                diagnostics.recordSendCompletion(durationMs: now - diagnosticsSendStartMs, bytes: frameByteCount,
+                                                 error: error != nil, at: now)
+            }
             self.lastSendCompletionAt = Date()
             self.sendStallReported = false
             if let error {
@@ -8464,7 +8607,8 @@ extension MacSender {
     private func installWorkspaceEngine(hostID: String, canvas: CGSize, fps: Int) {
         stopWorkspaceEngine()
         let engine = WindowWorkspaceEngine(hostID: hostID, canvas: canvas, fps: fps, browser: ensureWindowBrowser(),
-                                           allowFloats: lastHello?.supportsWindowFloats == true)
+                                           allowFloats: lastHello?.supportsWindowFloats == true,
+                                           diagnostics: diagnostics)
         let selfBox = self.selfBox
         let queue = self.queue
         // Only the CURRENT engine may reach this session: a stopped one's late

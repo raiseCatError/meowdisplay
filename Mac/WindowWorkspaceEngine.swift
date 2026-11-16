@@ -601,9 +601,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// The receiver speaks floating panes (`hello.ws` >= 2) and this Mac offers them: a tile
     /// with `layer: "float"` may overlap. Fixed for the session.
     let allowFloats: Bool
+    /// The session's streaming diagnostics (#123); measurement only.
+    private let diagnostics: StreamDiagnosticsRecorder?
 
     init(hostID: String, canvas: CGSize, fps: Int, browser: WindowBrowserService, allowFloats: Bool = false,
-         stageManager: any StageManagerCoordinating = StageManagerController.shared) {
+         stageManager: any StageManagerCoordinating = StageManagerController.shared,
+         diagnostics: StreamDiagnosticsRecorder? = nil) {
+        self.diagnostics = diagnostics
         self.hostID = hostID
         self.browser = browser
         self.stageManager = stageManager
@@ -745,6 +749,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         // Static windows produce no frames; resend ~1/s so a lost frame heals.
         guard dirty || now - lastComposeAt >= 1 else { return }
+        let staticResend = !dirty
+        let diagnosticsOn = diagnostics?.isEnabled == true
+        let composeStartMs = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
+        let composeSignpost = StreamDiagnosticsSignposts.begin("Compose", enabled: diagnosticsOn)
+        defer { StreamDiagnosticsSignposts.end("Compose", composeSignpost) }
         dirty = false
         lastComposeAt = now
         updateCaptureExtents(now: now)
@@ -777,6 +786,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         for (tile, sheet) in inTree { dropSheetInTree(tile: tile, sheet: sheet) }
         if let buffer = compositor.compose(items) {
+            if diagnosticsOn, let diagnostics {
+                let now = StreamDiagnosticsClock.nowMs()
+                let floats = assignments.filter { $0.isOnCanvas && $0.isFloat }.count
+                diagnostics.recordCompose(durationMs: now - composeStartMs, staticResend: staticResend, tiles: items.count,
+                                          floats: floats, dimmed: items.filter(\.dimmed).count,
+                                          withFrame: items.filter { $0.frame != nil }.count, at: now)
+            }
             deliverFrame?(buffer)
             // The receiver holds its instant local zoom until a frame with its latest view is out.
             let changed = drawn.filter { echoedViews[$0.key] != $0.value }

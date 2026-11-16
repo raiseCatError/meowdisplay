@@ -52,6 +52,7 @@ final class MacSenderTransportController: @unchecked Sendable {
     private var currentPathDirectLink = false
     private var currentPathUsesWiFi = false
     private var currentRoute: ConnectionRoute?
+    private var currentPathCost: (expensive: Bool, constrained: Bool)?
     private var upgradeTimer: DispatchSourceTimer?
     private var upgradeProbes: [NWConnection] = []
     private var probeRoundGeneration = 0
@@ -98,6 +99,14 @@ final class MacSenderTransportController: @unchecked Sendable {
     var route: ConnectionRoute? {
         dispatchPrecondition(condition: .onQueue(queue))
         return currentRoute
+    }
+
+    /// The live path's cost flags (`NWPath.isExpensive` / `isConstrained`),
+    /// as last reported for the current connection; nil before a path.
+    /// Read by diagnostics only (#123): no media policy uses them.
+    var pathCostFlags: (expensive: Bool, constrained: Bool)? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return currentPathCost
     }
 
     var currentDialGeneration: Int {
@@ -307,6 +316,7 @@ final class MacSenderTransportController: @unchecked Sendable {
             + " expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
             + (gatewayHost ? " receiverHostsNetwork=true" : ""))
         currentRoute = route
+        currentPathCost = (path.isExpensive, path.isConstrained)
         let sink = statusSink
         Task { @MainActor in sink.publishTransportPath(route, description: description) }
     }
