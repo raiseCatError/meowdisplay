@@ -282,7 +282,7 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
     /// Every key in the export, at any depth, must be one of these (or a
     /// metric id / threshold name). A new field fails here until reviewed
     /// for privacy and added deliberately.
-    private static let allowedKeys: Set<String> = [
+    static let allowedKeys: Set<String> = [
         // StreamDiagnosticsExport / build / session
         "schemaVersion", "metricDictionaryVersion", "generatedAt", "build", "sessions", "classifierThresholds",
         "limitations", "appVersion", "osMajor", "osMinor", "osPatch", "platform", "deviceClass", "snapshot", "verdict",
@@ -309,7 +309,7 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
 
     /// Kinds of field that must never appear, even if someone adds them to
     /// the allowlist by mistake.
-    private static let forbiddenKeyFragments = [
+    static let forbiddenKeyFragments = [
         "title", "name", "path", "file", "ssid", "host", "address", "addr", "ip", "endpoint", "serial", "pair",
         "spki", "key", "token", "secret", "screenshot", "image", "pixel", "input", "text", "url", "user", "bundle",
     ]
