@@ -143,6 +143,12 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         /// inside its argument list; `StreamReceiver` wires it to a no-op
         /// outside DEBUG.
         var debugFramePresented: @Sendable () -> Void
+        /// A still-compressed frame of a superseded generation was dropped
+        /// before it reached any decoder (a delayed A/V-sync present that
+        /// landed after `resync()`/reset). The decoder's reference chain is
+        /// now broken until the next IDR, so the host asks the Mac for a
+        /// keyframe. Fired at most once per presentation generation.
+        var compressedFrameDiscardedBeforeDecode: @Sendable () -> Void = {}
     }
 
     /// Same object `StreamReceiver.displayLayer` holds — injected once at
@@ -164,6 +170,10 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// presentationGeneration` is a synchronized shadow, never the other
     /// way around.
     private var videoGeneration: UInt64 = 0
+
+    /// The generation for which `compressedFrameDiscardedBeforeDecode`
+    /// already fired, so a burst of discarded delayed frames asks once.
+    private var keyframeRequestedForGeneration: UInt64?
 
     /// The ordering primitive — see the file header. `.unbounded`:
     /// commands are cheap value types (a boxed buffer reference plus a few
@@ -297,10 +307,21 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// `generation` (a resync/reset already advanced past it, processed
     /// earlier in this same ordered stream) discards the frame instead of
     /// presenting or decoding it — see "Stale-generation safety" above.
+    /// That discard happens BEFORE decode on both paths (the display layer
+    /// decodes what it is given; the Metal path decodes in
+    /// `ReceiverVideoDecoder`), so later P-frames lose their references:
+    /// the first such discard per generation asks for a keyframe.
     private func presentSample(
         _ box: FrameMediaBox<CMSampleBuffer>, generation: UInt64, viaMetalPath: Bool, captureMs: Double?
     ) {
-        guard generation == videoGeneration else { return noteStaleDiscard() }
+        guard generation == videoGeneration else {
+            noteStaleDiscard()
+            if keyframeRequestedForGeneration != videoGeneration {
+                keyframeRequestedForGeneration = videoGeneration
+                outputEffects.compressedFrameDiscardedBeforeDecode()
+            }
+            return
+        }
         if viaMetalPath {
             outputEffects.decodeViaVideoDecoder(box, generation, captureMs)
             return
