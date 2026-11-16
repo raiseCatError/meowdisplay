@@ -99,6 +99,7 @@ receiver clock mapped onto the sender's with the ping/pong offset;
 | `receiver.presentation.enqueue_interval_ms` | ms | receiver | localMonotonic | Successive AVSampleBufferDisplayLayer.enqueue calls in ReceiverVideoPresenter | Enqueued for presentation, not presented: the layer decides when a frame reaches the screen. |
 | `receiver.presentation.observed_submit_to_glass_ms` | ms | receiver | wallClockMapped | Metal drawable presented handler (StreamReceiver.recordPresented) minus cap | Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. |
 | `receiver.rtt_ms` | ms | receiver | localMonotonic | Receiver ping to sender pong on the control channel | Control-message round trip; it rides behind any queued video on the same connection. |
+| `receiver.frame_id.unique_interval_ms` | ms | receiver | localMonotonic | PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID | Lab fixture on screen and experimental Metal path only (which itself changes timing). At the decoded-frame handoff, not on glass. |
 | `sender.capture.complete` | frames | sender | none | SCK callback, status complete with pixels | Display capture only (Mirror, Extend). The closest available proxy for source-unique frames: ScreenCaptureKit sends a complete frame when content changed. |
 | `sender.capture.idle` | frames | sender | none | SCK callback, status idle | The source did not change; not a drop. |
 | `sender.capture.other_status` | frames | sender | none | SCK callback, status blank/suspended/started/stopped or no pixels |  |
@@ -134,6 +135,12 @@ receiver clock mapped onto the sender's with the ping/pong offset;
 | `receiver.presentation.stale_discarded` | frames | receiver | none | Presenter generation check discarded a frame |  |
 | `receiver.presentation.observed` | frames | receiver | none | Metal drawable presented handler | Experimental Metal path only. The only presentation this app can observe. |
 | `receiver.presentation.layer_flushes` | events | receiver | none | Display layer failed and was flushed |  |
+| `receiver.frame_id.read` | frames | receiver | none | Decoded frames whose Performance Lab frame-ID strip was read | Metal path only; only while the lab fixture is visible. |
+| `receiver.frame_id.unique` | frames | receiver | none | Read frame IDs that differ from the previous read ID | Source-unique fixture frames that reached the decoded-frame handoff. |
+| `receiver.frame_id.duplicate` | frames | receiver | none | Read frame IDs equal to the previous read ID | The same source frame handed over again. |
+| `receiver.frame_id.skipped` | frames | receiver | none | IDs missing between two successive read IDs | Rate limiting at a lower target FPS skips fixture frames by design. |
+| `receiver.frame_id.unreadable` | frames | receiver | none | Decoded frames where a located strip failed its guard or checksum | Blended or heavily compressed frames, or the fixture leaving the screen. |
+| `receiver.frame_id.discontinuity` | events | receiver | none | Read ID went backwards or jumped by more than half the counter range | Fixture restarted. |
 | `sender.encode.pending` | frames | sender | none | Frames in flight in the encoder, sampled at each submission |  |
 | `sender.send.pending` | frames | sender | none | Video frames awaiting send completion, sampled at each send |  |
 | `receiver.presenter.queue_depth` | commands | receiver | none | ReceiverVideoPresenter commands yielded but not yet processed, sampled at each yield | Counts only commands yielded while diagnostics were on. |
@@ -431,3 +438,14 @@ Not measured:
   build, so `sourceRefreshLimited` cannot fire on live data until a hook
   supplies it (the classifier and its tests are ready for it).
 - Android receivers: no diagnostics yet; they ignore the `diag` keys.
+
+## Performance Lab frame-ID reader
+
+The `receiver.frame_id.*` metrics come from the Performance Lab
+(`docs/performance/performance-lab.md`). They are recorded only while the
+lab fixture's frame-ID strip is found in decoded frames, which exist only on
+the experimental Metal path (`ReceiverVideoPresenter.presentDecoded`). On
+the default display-layer path the system layer decodes internally, no
+pixel buffer is reachable without changing rendering, and these metrics
+stay at zero. The reader probes one decoded frame in 30 for the strip and
+reads every frame only while the strip is found.

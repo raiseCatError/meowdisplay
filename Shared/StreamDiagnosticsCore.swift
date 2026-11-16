@@ -258,7 +258,7 @@ struct StreamDiagnosticsSnapshot: Codable, Equatable, Sendable {
     var resources: StreamDiagnosticsResourceSample?
     /// Adaptive Automatic controller decisions (phase 2), newest last; nil
     /// when none were recorded (the controller is off, or diagnostics were).
-    var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision]? = ni,
+    var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision]? = nil
     /// Colour metadata sampled in the pipeline (#241); nil until sampled.
     var colour: StreamDiagnosticsColourSection?
 
@@ -277,6 +277,18 @@ struct StreamDiagnosticsSnapshot: Codable, Equatable, Sendable {
     func gauge(_ gauge: DiagnosticsGauge) -> StreamDiagnosticsGaugeSummary? {
         gauges.first { $0.id == gauge.definition.id }
     }
+}
+
+/// One completed recorder window as the Performance Lab reads it: whole
+/// windows only, so a lab trial covers exactly the windows it lists.
+struct StreamDiagnosticsCompletedWindow: Equatable, Sendable {
+    var sequence: UInt64
+    /// Window start on the recording device's monotonic clock (ms).
+    var startMs: Double
+    var durationMs: Double
+    /// Indexed by `DiagnosticsStage.rawValue`.
+    var histograms: [DiagnosticsHistogram]
+    var snapshot: StreamDiagnosticsSnapshot
 }
 
 /// The narrow, numbers-only view a streaming policy may read. Values are nil
@@ -366,9 +378,11 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private var resources: StreamDiagnosticsResourceSample?
     private var generation: UInt64?
     private var presenterInFlight = 0
-    private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = [,
+    private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = []
     /// Colour metadata per pipeline stage (#241). Own lock; see StreamDiagnosticsColour.swift.
     let colourStore = DiagnosticsColourStore()
+    /// Counts completed windows (Performance Lab reads it; nothing else does).
+    private var completedSequence: UInt64 = 0
 
     init(side: StreamDiagnosticsSide,
          windowSeconds: Double = 5,
@@ -628,6 +642,24 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     func snapshot(at nowMs: Double = StreamDiagnosticsClock.nowMs()) -> StreamDiagnosticsSnapshot {
         lock.lock(); defer { lock.unlock() }
         rotateIfNeeded(nowMs)
+        return snapshotLocked(nowMs)
+    }
+
+    /// Performance Lab (read-only): the last completed window with its
+    /// sequence number (1, 2, … for this recorder, never reused), its start
+    /// on this device's monotonic clock, its raw histograms and the snapshot
+    /// built from it. nil before the first window completes. Rotates exactly
+    /// like `snapshot(at:)` and records nothing.
+    func completedWindowForLab(at nowMs: Double = StreamDiagnosticsClock.nowMs()) -> StreamDiagnosticsCompletedWindow? {
+        lock.lock(); defer { lock.unlock() }
+        rotateIfNeeded(nowMs)
+        guard let completed else { return nil }
+        return StreamDiagnosticsCompletedWindow(
+            sequence: completedSequence, startMs: completed.startMs, durationMs: completedDurationMs,
+            histograms: completed.histograms, snapshot: snapshotLocked(nowMs))
+    }
+
+    private func snapshotLocked(_ nowMs: Double) -> StreamDiagnosticsSnapshot {
         let window: DiagnosticsWindow
         let durationMs: Double
         let partial: Bool
@@ -699,6 +731,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private func rotateIfNeeded(_ nowMs: Double) {
         let age = nowMs - current.startMs
         guard age >= windowMs else { return }
+        completedSequence &+= 1
         if age >= 2 * windowMs {
             var empty = current
             empty.clear(startMs: nowMs - windowMs)
