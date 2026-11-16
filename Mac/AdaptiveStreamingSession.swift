@@ -368,10 +368,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// The capture scale that size matches; nil when it matched no plan at
     /// the time it was noted (a plan changed while the capture started).
     private var startedScale: Double?
-    /// Some plan has asked for a raster other than today's. Until then every
-    /// capture was sized exactly as before adaptive streaming existed, so no
+    /// Some plan has asked for a raster other than today's, and no capture
+    /// has since been verified at today's size with no plan. Otherwise every
+    /// capture is sized exactly as before adaptive streaming existed, so no
     /// raster re-check may restart it (#123 F1: with the switch off and no
-    /// data saving this stays false for the sender's whole life).
+    /// data saving this stays false for the sender's whole life; after a
+    /// data-saving episode it clears at the first start back at today's size).
     private var rasterManaged = false
 
     private(set) var hello: AdaptiveHelloFields?
@@ -485,6 +487,13 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         sizing = newSizing
         startedSize = started
         startedScale = newSizing.matches(started, scale: planned) ? planned : nil
+        // No plan, and this capture really has today's size: nothing
+        // adaptive is left to fix, so every later start is again sized and
+        // checked exactly as before adaptive streaming, until a plan asks
+        // for another raster again (`replan`). Without this, a "Use less
+        // data" episode with the switch off kept the re-check armed for the
+        // sender's life (#123 churn, part 3).
+        if planValue == nil, startedScale != nil { rasterManaged = false }
     }
 
     /// A capture started at `width`×`height` with `scale` applied and no
@@ -503,7 +512,8 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// asks for (`today` × plan raster): a deferred or lost adaptive raster
     /// restart still has work to do. A raster step whose size equals the
     /// running one (the decode ceiling) needs no restart.
-    /// Never true before any plan asked for a non-today raster (#123 F1): the
+    /// Never true before any plan asked for a non-today raster, or after a
+    /// capture with no plan was verified at today's size (#123 F1): the
     /// sizing here is re-read at preparation time, so a display-mode change
     /// or a missing mode between sizing and preparation could otherwise read
     /// as a raster to fix and restart capture with the switch off.
@@ -516,7 +526,8 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         return !sizing.matches(startedSize, scale: desired)
     }
 
-    /// Whether any plan so far asked for a raster other than today's (any thread).
+    /// Whether a plan asked for a raster other than today's and the capture
+    /// has not been verified back at today's size since (any thread).
     var hasManagedRaster: Bool {
         lock.lock(); defer { lock.unlock() }
         return rasterManaged
