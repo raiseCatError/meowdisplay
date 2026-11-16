@@ -217,3 +217,16 @@ the campaign report. Summary:
   - bitrate through the encoder-session recreate;
   - FPS through `applyEffectiveFPSChange`;
   - raster through the existing `reconfigure` path.
+
+## 8. Open questions found in phase 1
+
+- **The bitrate top is above today's.** The 24 Mbps step is the brief's "then raise quality" on
+  healthy, unmetered paths. Each step is a probe that needs network headroom. In the simulation, healthy
+  paths therefore send about 32 % more payload than the fixed 18 Mbps policy. If the owner prefers not to
+  exceed today's bitrate without measured quality evidence, set `bitrateSteps.last` to 18 Mbps.
+- **The thermal response depends on the model.** The simulated thermal penalty is mild, so the fixed
+  policy shows no stalls there. The adaptive controller trades raster and FPS for heat. Whether that
+  trade is right needs hardware thermal traces.
+- **Legacy peers can't use the FPS ladder.** A peer with telemetry but without the effective-refresh
+  key has a single allowed rate, today's. So FPS clamps (thermal, saver) cannot lower it. Phase 2
+  should send both keys together.
