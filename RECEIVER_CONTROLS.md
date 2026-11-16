@@ -232,6 +232,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Stage Peek (default quick switch) | Yes. Hold the left or right edge | Yes | Yes | No |
 | Rail (optional quick switch) | Yes. Controls → Window Switcher | Yes | Yes. Display → Window Switcher | No |
 | Stage Peek edge (Left / Right) | Yes | Yes | Yes | n/a |
+| Stage Peek **Dock** (Normal / Compact). **Normal** is the default for new installs; a saved choice, Compact included, is kept. On a short screen such as a phone in landscape, Compact's band is short, so its fade and its cards shrink with it: the highlighted card stays clear of the fade and a neighbour shows on each side, and a card is tappable exactly where it is drawn at least half shown. Android: Normal is the default; its Compact band is unchanged | Yes. Settings → Controls → Window Switcher → Dock | Yes | Normal default only | n/a |
 | Stage Peek **Expand** and **Add as Tile** | Yes | Yes | Yes | n/a |
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |
