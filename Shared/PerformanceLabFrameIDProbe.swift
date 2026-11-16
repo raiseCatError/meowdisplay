@@ -15,6 +15,10 @@
 // two or three rows per frame; after `missesBeforeUnlock` failed frames in a
 // row it goes back to probing. Nothing here touches the pixels or the
 // presentation path.
+//
+// Counting: a lost strip re-baselines the tracker, so frames that went by
+// unread while it searched again are counted as `frame_id.unexamined`,
+// never as skipped IDs.
 
 import CoreVideo
 import Foundation
@@ -30,6 +34,9 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
     private var rowHint: Int?
     private var framesUntilProbe = 0
     private var misses = 0
+    /// The strip was followed and then lost: frames until it is found
+    /// again are counted as unexamined.
+    private var searchingAgain = false
     private var buffer: [UInt8] = []
     /// The receiver session (its recorder) and stream generation the last
     /// frame belonged to. A new one re-baselines the counter, so a
@@ -61,6 +68,7 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
         rowHint = nil
         framesUntilProbe = 0
         misses = 0
+        searchingAgain = false
         stream = nil
     }
 
@@ -69,7 +77,7 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
     func observe(_ pixelBuffer: CVPixelBuffer, recorder: StreamDiagnosticsRecorder, generation: UInt64? = nil,
                  nowMs: Double = StreamDiagnosticsClock.nowMs()) {
         noteStream(recorder: recorder, generation: generation)
-        guard shouldRead() else { return }
+        guard shouldRead() else { return noteUnexamined(recorder: recorder, nowMs: nowMs) }
         guard let plane = PerformanceLabPixelBufferLuma(pixelBuffer) else { return }
         plane.withLockedRows { source in
             self.read(source, recorder: recorder, nowMs: nowMs)
@@ -80,8 +88,18 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
     func observe(_ source: PerformanceLabLumaSource, recorder: StreamDiagnosticsRecorder, generation: UInt64? = nil,
                  nowMs: Double) {
         noteStream(recorder: recorder, generation: generation)
-        guard shouldRead() else { return }
+        guard shouldRead() else { return noteUnexamined(recorder: recorder, nowMs: nowMs) }
         read(source, recorder: recorder, nowMs: nowMs)
+    }
+
+    /// A frame the reader skipped while probing: counted only while it
+    /// searches for a strip it had found before (otherwise there is no
+    /// fixture to speak of).
+    private func noteUnexamined(recorder: StreamDiagnosticsRecorder, nowMs: Double) {
+        lock.lock()
+        let searching = searchingAgain
+        lock.unlock()
+        if searching { recorder.increment(.frameIDUnexamined, at: nowMs) }
     }
 
     /// A different receiver session (recorder) or stream generation than
@@ -92,6 +110,7 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard key != stream else { return }
         if stream != nil { tracker.rebaseline() }
+        searchingAgain = false
         stream = key
     }
 
@@ -125,24 +144,33 @@ final class PerformanceLabFrameIDProbe: @unchecked Sendable {
         lock.lock()
         buffer = scratch
         let event: PerformanceLabFrameIDTracker.Event?
+        var unexamined = false
         if let hit {
             rowHint = hit.row
             misses = 0
+            searchingAgain = false
             event = tracker.observe(hit.reading, atMs: nowMs)
         } else if rowHint != nil {
             misses += 1
+            event = tracker.observe(nil, atMs: nowMs)
             if misses >= Self.missesBeforeUnlock {
+                // Lost: the next read is a new baseline, so the frames that
+                // go by unread meanwhile are never counted as skipped IDs.
                 rowHint = nil
                 misses = 0
                 framesUntilProbe = Self.probeEveryNthFrame - 1
+                tracker.rebaseline()
+                searchingAgain = true
             }
-            event = tracker.observe(nil, atMs: nowMs)
         } else {
-            // Probing and nothing on screen: not a lab frame, nothing to count.
+            // Probing: a lost strip not found again yet is an unexamined
+            // frame; never having had one, nothing to count.
+            unexamined = searchingAgain
             event = nil
         }
         lock.unlock()
 
+        if unexamined { recorder.increment(.frameIDUnexamined, at: nowMs) }
         guard let event else { return }
         switch event {
         case .baseline:

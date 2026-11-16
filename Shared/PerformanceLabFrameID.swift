@@ -279,6 +279,9 @@ enum PerformanceLabFrameIDLocator {
 }
 
 /// Unique / duplicate / skipped accounting over successive read IDs.
+/// `skipped` counts only IDs provably missing; frames that arrived but
+/// were not read are `unreadable` (strip found, guard or checksum failed)
+/// or `unexamined` (counted by the probe while it searches again).
 struct PerformanceLabFrameIDTally: Codable, Equatable, Sendable {
     var read = 0
     var unique = 0
@@ -290,7 +293,8 @@ struct PerformanceLabFrameIDTally: Codable, Equatable, Sendable {
 
 struct PerformanceLabFrameIDTracker: Sendable {
     enum Event: Equatable, Sendable {
-        /// A new source frame; `skipped` IDs never seen in between.
+        /// A new source frame; `skipped` IDs provably missing in between
+        /// (the ID gap minus the unread frames that may have carried them).
         case unique(skipped: Int, intervalMs: Double?)
         case duplicate
         case unreadable
@@ -303,20 +307,27 @@ struct PerformanceLabFrameIDTracker: Sendable {
     private(set) var tally = PerformanceLabFrameIDTally()
     private var lastCounter: UInt32?
     private var lastUniqueMs: Double?
+    /// Frames since the last read ID that arrived but could not be read.
+    private var unreadSinceLastRead = 0
 
-    /// A new stream (session or generation): forget the last ID so the next
-    /// read is a baseline, never a skip or discontinuity. The tally stays.
+    /// A new stream (session or generation), or the reader lost the strip:
+    /// forget the last ID so the next read is a baseline, never a skip or
+    /// discontinuity. The tally stays.
     mutating func rebaseline() {
         lastCounter = nil
         lastUniqueMs = nil
+        unreadSinceLastRead = 0
     }
 
     mutating func observe(_ reading: PerformanceLabFrameIDReading?, atMs nowMs: Double) -> Event {
         guard let reading else {
             tally.unreadable += 1
+            if lastCounter != nil { unreadSinceLastRead += 1 }
             return .unreadable
         }
         tally.read += 1
+        let unread = unreadSinceLastRead
+        unreadSinceLastRead = 0
         guard let last = lastCounter else {
             lastCounter = reading.counter
             lastUniqueMs = nowMs
@@ -335,7 +346,8 @@ struct PerformanceLabFrameIDTracker: Sendable {
             lastUniqueMs = nowMs
             return .discontinuity
         }
-        let skipped = Int(delta) - 1
+        // An unread frame in between may have carried one of the missing IDs.
+        let skipped = Swift.max(Int(delta) - 1 - unread, 0)
         tally.unique += 1
         tally.skipped += skipped
         let interval = lastUniqueMs.map { nowMs - $0 }

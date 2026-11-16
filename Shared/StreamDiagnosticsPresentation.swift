@@ -30,6 +30,7 @@ enum StreamDiagnosticsPresentation {
         case .send: return "Send (handed to transport to completion)"
         case .compose: return "Window view compose"
         case .composeInterval: return "Window view composites (interval)"
+        case .restartSubmitGap: return "Restart: last to first submission"
         case .arrivalInterval: return "Frame arrivals (interval)"
         case .wireSubmitToSend: return "Submit to send, sender clock (overlay \"encode\")"
         case .mappedSubmitToReceive: return "Submit to receive, mapped clock (overlay \"latency\")"
@@ -37,7 +38,8 @@ enum StreamDiagnosticsPresentation {
         case .presenterQueueAge: return "Presenter command queue age"
         case .presentationEnqueueInterval: return "Enqueued for presentation (interval)"
         case .observedSubmitToGlass: return "Submit to glass, observed (Metal path only)"
-        case .rtt: return "Control round trip"
+        case .rtt: return "Control round trip (wall clock)"
+        case .restartArrivalGap: return "Restart: last to first arrival"
         case .frameIDUniqueInterval: return "Lab fixture, new frame IDs (interval, Metal path only)"
         }
     }
@@ -83,14 +85,28 @@ enum StreamDiagnosticsPresentation {
         case .tooFewSamples: return "Fewer than \(StreamBottleneckClassifier.minimumSamples) samples in the window."
         case .sourceIdle: return "The source is idle: nothing changed on screen, so there is no cadence to judge."
         case .conflictingEvidence: return "More than one cause has equally strong evidence."
+        case .peerMissing: return "Nothing from the other device (diagnostics off there, or an older build): only this end was checked."
+        case .sourceDemandUnknown: return "Capture delivered fewer frames than expected, but nothing shows the content changed faster: the source may simply be slower (a 30 fps video, for example)."
         }
+    }
+
+    /// An evidence value in its own unit: shares as percentages, rates and
+    /// refresh as frames per second, durations as milliseconds. (The
+    /// submit-interval evidence carries the submission rate.)
+    static func evidenceValue(_ value: Double, metric: String) -> String {
+        if metric.hasSuffix("_share") { return String(format: "%.1f%%", value * 100) }
+        let perSecond = metric.hasSuffix("_fps") || metric.hasSuffix("_hz")
+            || metric == DiagnosticsStage.submitInterval.definition.id
+            || DiagnosticsCounter.allCases.contains { $0.definition.id == metric }
+        return perSecond ? String(format: "%.1f/s", value) : ms(value) + " ms"
     }
 
     static func evidenceLine(_ e: StreamVerdictEvidence) -> String {
         let name = e.metric
         let op = e.comparison == .atLeast ? ">=" : "<"
         let mark = e.met ? "met" : "not met"
-        return "\(name) = \(ms(e.value)) (\(op) \(ms(e.threshold)): \(mark))\(e.fromPeer ? " [peer]" : "")"
+        let value = evidenceValue(e.value, metric: name), threshold = evidenceValue(e.threshold, metric: name)
+        return "\(name) = \(value) (\(op) \(threshold): \(mark))\(e.fromPeer ? " [peer]" : "")"
     }
 
     static func verdictLines(_ v: StreamDiagnosticsVerdict) -> [String] {
@@ -109,10 +125,15 @@ enum StreamDiagnosticsPresentation {
         func n(_ c: DiagnosticsCounter) -> Int64 { s.count(c) }
         switch s.side {
         case .sender:
+            // Window view has no display capture and no capture PTS: those
+            // counts are not measured there, so they read "n/a", never 0.
+            let windowView = s.context.displayMode == .window
             var lines = [
-                "Capture: complete \(n(.captureComplete)), idle \(n(.captureIdle)), other \(n(.captureOtherStatus))",
+                windowView ? "Capture: n/a in Window view (see the composites below)"
+                    : "Capture: complete \(n(.captureComplete)), idle \(n(.captureIdle)), other \(n(.captureOtherStatus))",
                 "Admission: admitted \(n(.admittedLive)), held by rate limit \(n(.heldByRateLimit)), encoder busy \(n(.heldEncoderBusy)), send backpressure \(n(.droppedPendingSends)), held released \(n(.heldRetryFired))",
-                "Submitted: source-unique \(n(.submitSourceUnique)), duplicate \(n(.submitDuplicate)), unknown \(n(.submitUniquenessUnknown)); replays \(n(.submitDropReplay) + n(.submitReconnectReplay))",
+                windowView ? "Submitted: source-unique n/a, duplicate n/a (Window view composites carry no capture PTS), unknown \(n(.submitUniquenessUnknown)); replays \(n(.submitDropReplay) + n(.submitReconnectReplay))"
+                    : "Submitted: source-unique \(n(.submitSourceUnique)), duplicate \(n(.submitDuplicate)), unknown \(n(.submitUniquenessUnknown)); replays \(n(.submitDropReplay) + n(.submitReconnectReplay))",
                 "Encoded \(n(.encodeCompleted)) (stale \(n(.encodeStaleDiscarded)), failed \(n(.encodeFailed)), keyframes \(n(.keyframes))); sent \(n(.sendCompleted)), \(String(format: "%.2f", Double(n(.sentBytes)) * 8 / max(s.windowSeconds, 0.001) / 1_000_000)) Mbit/s payload",
             ]
             if n(.composeFrames) > 0 {

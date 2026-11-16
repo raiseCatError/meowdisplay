@@ -77,12 +77,14 @@ enum PerformanceLabAnalysisMetric: String, Codable, CaseIterable, Sendable {
     case frameIDSkipped = "frame_id_skipped"
     case frameIDDuplicates = "frame_id_duplicates"
     case frameIDUnreadable = "frame_id_unreadable"
+    case frameIDUnexamined = "frame_id_unexamined"
     case frameIDIntervalP95 = "frame_id_interval_p95_ms"
     case fixtureDrawnFPS = "fixture_drawn_fps"
     case senderCPUPercentMedian = "sender_cpu_percent_median"
     case senderMemoryMBMax = "sender_memory_mb_max"
     case senderMemoryMBDelta = "sender_memory_mb_delta"
     case generationResets = "generation_resets"
+    case restartFrameGapMax = "restart_frame_gap_max_ms"
     case routeChanges = "route_changes"
 }
 
@@ -207,7 +209,7 @@ enum PerformanceLabScenarioCatalog {
         .init(id: "extend.reconnection", version: 1, caption: "Extend, reconnection",
               purpose: "Recovery after a connection loss the operator causes on purpose, measured as frame gaps and restarts.",
               mode: .extend, panes: .none, workload: .frameCounter, warmUpSeconds: 10, trialWindows: 8,
-              primaryMetrics: [.generationResets, .routeChanges, .submitGapsOver500, .receiverGapsOver250, .frameIDSkipped, .sourceUniqueFPS],
+              primaryMetrics: [.generationResets, .restartFrameGapMax, .routeChanges, .submitGapsOver500, .receiverGapsOver250, .frameIDSkipped, .sourceUniqueFPS],
               steps: common([.init(timing: .beforeRun, atSecond: nil, instruction: "Start an Extend session over the route you are testing. Use only a disconnection you can undo safely (for example unplugging USB, or turning Wi-Fi off on the receiver); never a paid or unattended cellular path."),
                              .init(timing: .duringTrial, atSecond: 10, instruction: "Now: disconnect the route the same way as in every trial."),
                              .init(timing: .duringTrial, atSecond: 15, instruction: "Now: reconnect it.")],
@@ -216,7 +218,7 @@ enum PerformanceLabScenarioCatalog {
         .init(id: "extend.capture-retune", version: 1, caption: "Extend, capture retuning",
               purpose: "Cost of a capture restart: the operator changes the frame-rate cap mid-trial and back.",
               mode: .extend, panes: .none, workload: .frameCounter, warmUpSeconds: 10, trialWindows: 8,
-              primaryMetrics: [.generationResets, .submitGapsOver250, .submitGapsOver500, .frameIDSkipped, .sourceUniqueFPS],
+              primaryMetrics: [.generationResets, .restartFrameGapMax, .submitGapsOver250, .submitGapsOver500, .frameIDSkipped, .sourceUniqueFPS],
               steps: common([.init(timing: .beforeRun, atSecond: nil, instruction: "Start an Extend session at the frame-rate cap you are testing."),
                              .init(timing: .duringTrial, atSecond: 10, instruction: "Now: change the frame-rate cap to another value."),
                              .init(timing: .duringTrial, atSecond: 25, instruction: "Now: change it back.")],
@@ -252,7 +254,7 @@ enum PerformanceLabScenarioCatalog {
         mode: .extend, panes: .none, workload: .frameCounter, warmUpSeconds: 5, trialWindows: 3,
         primaryMetrics: [.sourceUniqueFPS, .submitIntervalP95, .encodeP95, .payloadMbps, .receiverArrivalFPS, .frameIDUniqueFPS, .frameIDSkipped],
         steps: [.init(timing: .beforeRun, atSecond: nil, instruction: "SYNTHETIC: nothing to set up."),
-                .init(timing: .duringTrial, atSecond: 5, instruction: "SYNTHETIC: a scripted 300 ms stall happens in trial 3.")],
+                .init(timing: .duringTrial, atSecond: 11, instruction: "SYNTHETIC: a scripted 300 ms stall happens in trial 3.")],
         expectsRestarts: false)
 
     static func scenario(id: String) -> PerformanceLabScenario? {

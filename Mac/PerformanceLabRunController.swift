@@ -56,6 +56,9 @@ final class PerformanceLabRunController: ObservableObject {
     private var warmUpEndsMs: Double?
     private var collector: PerformanceLabTrialCollector?
     private var fixtureMeasuring = false
+    /// The fixture's record, taken when the last sender window arrived
+    /// (the trial may still wait for receiver windows after that).
+    private var fixtureAtDone: PerformanceLabFixtureRecord??
     private var environmentContext: StreamDiagnosticsContext?
 
     init(dependencies: Dependencies) {
@@ -92,11 +95,30 @@ final class PerformanceLabRunController: ObservableObject {
         }
     }
 
+    /// Every planned trial is written: the current one (measured so far, or
+    /// empty if it was still waiting or warming up) and every later one as
+    /// `notStarted`, all `cancelled`. Nothing is written when the run was
+    /// cancelled before its first trial began.
     func cancel() {
         guard isRunning, let plan else { return }
-        if let collector {
-            completedTrials.append(collector.record(forcedStatus: .cancelled, fixture: endFixture()))
-            completedTrials[completedTrials.count - 1].issues.append(.cancelledByOperator)
+        if trialIndex >= 1 {
+            let current = collector ?? PerformanceLabTrialCollector(scenario: plan.scenario, trialIndex: trialIndex,
+                                                                    synthetic: plan.synthetic, armedAtMs: deps.nowMs())
+            var record = current.record(forcedStatus: .cancelled, fixture: takeFixture())
+            var waiting = false
+            if case .waitingForOperator = phase { waiting = true }
+            record.issues = PerformanceLabTrialIssue.allCases.filter {
+                record.issues.contains($0) || $0 == .cancelledByOperator || ($0 == .notStarted && waiting)
+            }
+            completedTrials.append(record)
+            if trialIndex < plan.trials {
+                for index in (trialIndex + 1)...plan.trials {
+                    var stub = PerformanceLabTrialCollector(scenario: plan.scenario, trialIndex: index, synthetic: plan.synthetic,
+                                                            armedAtMs: deps.nowMs()).record(forcedStatus: .cancelled, fixture: nil)
+                    stub.issues = PerformanceLabTrialIssue.allCases.filter { stub.issues.contains($0) || $0 == .cancelledByOperator || $0 == .notStarted }
+                    completedTrials.append(stub)
+                }
+            }
         }
         collector = nil
         let folder = completedTrials.isEmpty ? nil : try? writeBundle(plan)
@@ -149,12 +171,15 @@ final class PerformanceLabRunController: ObservableObject {
             }
             updatePrompts(collector: collector, plan: plan, nowMs: now)
             self.collector = collector
-            if collector.isDone {
-                finishTrial(collector.record(fixture: endFixture()), plan: plan)
+            if collector.isDone, fixtureAtDone == nil {
+                fixtureAtDone = .some(endFixture())
+            }
+            if collector.isFinished(at: now) {
+                finishTrial(collector.record(fixture: takeFixture()), plan: plan)
             } else if collector.hasStalled(at: now) {
                 var stalled = collector
                 stalled.note(.stalled)
-                finishTrial(stalled.record(fixture: endFixture()), plan: plan)
+                finishTrial(stalled.record(fixture: takeFixture()), plan: plan)
             } else {
                 phase = .measuring(trial: trialIndex, windows: collector.windows.count, of: plan.scenario.trialWindows)
             }
@@ -176,7 +201,7 @@ final class PerformanceLabRunController: ObservableObject {
         var failed = collector ?? PerformanceLabTrialCollector(scenario: plan.scenario, trialIndex: trialIndex,
                                                                synthetic: plan.synthetic, armedAtMs: deps.nowMs())
         failed.note(issue)
-        finishTrial(failed.record(forcedStatus: .failed, fixture: endFixture()), plan: plan)
+        finishTrial(failed.record(forcedStatus: .failed, fixture: takeFixture()), plan: plan)
         return true
     }
 
@@ -190,6 +215,14 @@ final class PerformanceLabRunController: ObservableObject {
         guard fixtureMeasuring else { return nil }
         fixtureMeasuring = false
         return deps.fixture()?.endMeasurement()
+    }
+
+    /// The fixture record of this trial: the one taken when its sender
+    /// windows were done, or now.
+    private func takeFixture() -> PerformanceLabFixtureRecord? {
+        defer { fixtureAtDone = nil }
+        if let taken = fixtureAtDone { return taken }
+        return endFixture()
     }
 
     private func finishTrial(_ record: PerformanceLabTrialRecord, plan: PerformanceLabRunPlan) {

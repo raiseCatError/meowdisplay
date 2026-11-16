@@ -951,33 +951,50 @@ sender's does not.
 Optional and additive: no `pv` bump, no welcome feature. An end with
 streaming diagnostics switched on (docs/performance/diagnostics.md) adds a
 `diag` object to messages it already sends: the sender to its `ping`
-(every ~2 s), the receiver to its `stats` (every ~5 s). A peer that does not
+(every ~2 s), the receiver to its `stats` (every ~5 s, ~2 s under adaptive streaming). A peer that does not
 know it ignores it; absence means "no diagnostics" and changes nothing. It
 never affects trust, input, capture, encoding or presentation; it only feeds
 the other end's diagnostics view and its bottleneck classifier.
 
 `diag` is `{"v":1, ...}` with numbers only (rounded to 0.1), all optional,
-describing the sender's last 5 s window. Unknown `v` or keys are ignored;
-values are clamped to 0…1,000,000 and anything that is not a number is
-dropped.
+describing the sending end's last completed 5 s window (until the first
+window completes, the window so far: then `wseq` is absent). Unknown `v` or
+keys are ignored; values are clamped to 0…1,000,000 and anything that is not
+a number is dropped.
 
+- Both ends: `wseq` (the window's number, 1, 2, … per recorder, never
+  reused; absent while the window is partial). The receiver sends its `stats`
+  every ~5 s, or every ~2 s while the Mac announces adaptive mode (6.20), so
+  the same window is often reported more than once: count it once.
 - In the sender's `ping`: `tgt` (target FPS), `capU` (complete capture
-  frames/s), `idle` (share of capture callbacks reporting idle), `hz`
-  (source refresh, when known), `sub` (encoder submissions/s), `dup`
-  (duplicate submissions/s), `enc50`/`enc95` (encode ms), `age95` (source age
-  at submit, ms), `snd95` (send completion ms), `busy` (encoder-busy share of
-  admitted frames), `bp` (send-backpressure share), `cmp95` (Window view
-  compose ms), `cmpFps` (composites/s).
-- In the receiver's `stats`: `arrFps`, `arr50`/`arr95` (frame arrival
-  interval ms), `gap250` (arrival gaps over 250 ms), `enqFps` (frames
-  enqueued for presentation/s), `qAge95` (presenter queue age ms), `qMax`
-  (presenter queue depth), `dec95`/`decN` (decode ms and samples, Metal path
-  only), `rtt`, `jit` (control round trip and its jitter, ms); and, only
-  while the receiver reads the Performance Lab fixture's frame-ID strip
-  (docs/performance/performance-lab.md), `fidN` (frames read), `fidU`
-  (source-unique fixture frames/s), `fidDup`, `fidSkip`, `fidBad`
-  (duplicate, skipped and unreadable counts in the window) and `fid95`
-  (interval between unique fixture frames, p95 ms).
+  frames/s; absent without display capture, e.g. Window view), `idle` (share
+  of capture callbacks reporting idle), `hz` (source refresh, when known),
+  `sub` (encoder submissions/s), `enc95` (encode ms), `snd95` (send
+  completion ms), `busy` (encoder-busy share of admitted frames), `bp`
+  (send-backpressure share), `cmp95` (Window view compose ms), `cmpFps`
+  (composites/s).
+- In the receiver's `stats`: `wid` (a random number per receiver session:
+  with `wseq` it names one window), `wps` (the sender `wseq` the receiver had
+  last received when this window began; absent if none had arrived: a
+  sender `wseq` the sender completed at or after some moment proves, by
+  causality alone, that the receiver window began after that moment),
+  `arrFps`, `arr50`/`arr95` (frame arrival interval ms), `gap250` (arrival
+  gaps over 250 ms), `enqFps` (frames enqueued for presentation/s), `qAge95`
+  (presenter queue age ms), `dec95`/`decN` (decode ms and samples, Metal path
+  only), `rtt` (control round trip p50, ms) and `jit` (its jitter, ms: a
+  session value, not a window value, sent only after 8 RTT samples); and,
+  only while the receiver reads or searches for the Performance Lab
+  fixture's frame-ID strip (docs/performance/performance-lab.md): `fidU`
+  (source-unique fixture frames/s), `fidDup`, `fidSkip` (duplicate and
+  provably missing IDs; these three only in a window where a strip was read),
+  `fidBad` (unreadable strips), `fidUnx` (frames not examined while the
+  reader searched for a lost strip) and `fid95` (interval between unique
+  fixture frames, p95 ms).
+
+Removed (nothing read them): `dup`, `enc50`, `age95` (sender) and `qMax`,
+`fidN` (receiver). A peer that still sends them is ignored as before; an
+older peer that sends no `wseq`/`wid`/`wps` is still understood (its
+summaries just cannot be counted once per window or tied to a moment).
 
 The frame header fields `cap`/`snd` are unchanged.
 

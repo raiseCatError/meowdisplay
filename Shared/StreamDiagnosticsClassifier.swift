@@ -25,13 +25,22 @@ enum StreamBottleneckCause: String, Codable, Sendable, CaseIterable {
 
 enum StreamVerdictConfidence: String, Codable, Sendable { case none, low, medium, high }
 
-/// Why an `unknownInsufficientData` verdict was returned.
-enum StreamVerdictReason: String, Codable, Sendable {
+/// Why a verdict is `unknownInsufficientData`, or why a verdict's
+/// confidence is lower than its evidence alone would give.
+enum StreamVerdictReason: String, Codable, Sendable, CaseIterable {
     case windowTooShort
     case noTargetFrameRate
     case tooFewSamples
     case sourceIdle
+    /// Two or more causes have equally strong evidence (confidence low).
     case conflictingEvidence
+    /// Nothing from the other device: half the pipeline was not seen, so
+    /// "no bottleneck evident" is only low confidence.
+    case peerMissing
+    /// Capture delivered fewer frames than expected, but nothing shows the
+    /// source wanted to update faster: slow content and slow capture look
+    /// the same from here.
+    case sourceDemandUnknown
 }
 
 struct StreamVerdictEvidence: Codable, Equatable, Sendable {
@@ -63,6 +72,10 @@ struct StreamClassifierInputs: Equatable, Sendable {
     var targetFPS: Double = 0
     var isWindowMode = false
     var sourceRefreshHz: Double?
+    /// How often the source itself changed (frames/s), when something
+    /// independent of capture knows it (the Performance Lab fixture's draw
+    /// rate). nil = unknown, the normal case live.
+    var sourceDemandFPS: Double?
     // Sender
     var captureCompleteFPS: Double?
     var captureSamples = 0
@@ -109,9 +122,15 @@ extension StreamClassifierInputs {
         func pct(_ s: DiagnosticsStage, _ k: KeyPath<StreamDiagnosticsStageSummary, Double>) -> Double? {
             st(s).flatMap { $0.count > 0 ? $0[keyPath: k] : nil }
         }
-        // Peer values: bounded before any Int conversion (#123 F1).
+        // Peer values: bounded before any Int conversion (#123 F1). A
+        // receiver that numbers its windows sends no number while its window
+        // is partial: its rates then count as no samples, never as a whole
+        // window's worth. (An older peer sends no numbers at all and is
+        // trusted as before.)
+        let peerPartial = snapshot.peer.map { $0.windowSeriesID != nil && $0.windowSequence == nil } ?? false
         func peerCount(_ fps: Double?) -> Int {
-            PeerNumber.int(((fps ?? 0) * w).rounded(), in: 0...1_000_000_000) ?? 0
+            guard !peerPartial else { return 0 }
+            return PeerNumber.int(((fps ?? 0) * w).rounded(), in: 0...1_000_000_000) ?? 0
         }
 
         if snapshot.side == .sender {
@@ -143,7 +162,7 @@ extension StreamClassifierInputs {
                 i.presenterQueueAgeP95Ms = peer.presenterQueueAgeP95Ms
                 i.presenterQueueSamples = peerCount(peer.enqueueFPS)
                 i.decodeP95Ms = peer.decodeP95Ms
-                i.decodeSamples = PeerNumber.int(peer.decodeSamples ?? 0, in: 0...1_000_000_000, integral: false) ?? 0
+                i.decodeSamples = peerPartial ? 0 : PeerNumber.int(peer.decodeSamples ?? 0, in: 0...1_000_000_000, integral: false) ?? 0
                 i.rttJitterMs = peer.rttJitterMs
             }
         } else {
@@ -165,7 +184,6 @@ extension StreamClassifierInputs {
                 i.captureSamples = peerCount(peer.captureCompleteFPS)
                 i.captureIdleShare = peer.captureIdleShare
                 i.submitFPS = peer.submitFPS
-                i.encodeP50Ms = peer.encodeP50Ms
                 i.encodeP95Ms = peer.encodeP95Ms
                 i.encodeSamples = peerCount(peer.submitFPS)
                 i.encoderBusyShare = peer.encoderBusyShare
@@ -204,6 +222,10 @@ enum StreamBottleneckClassifier {
     static let captureShortfall = 0.8
     /// Control-channel jitter that disturbs a 60 FPS cadence.
     static let rttJitterMs = 20.0
+    /// RTT samples (one per receiver ping, about every 2 s) before the
+    /// jitter estimate is reported at all, so one early outlier cannot count
+    /// as evidence. Enforced by the recorder: `rttJitterMs` is nil before.
+    static let minimumRTTSamples = 8
     /// Source idle share below which the content counts as changing.
     static let activeSourceIdleShare = 0.1
     /// Below this the source is idle and cadence says nothing.
@@ -215,6 +237,7 @@ enum StreamBottleneckClassifier {
     static let derivedIDs: Set<String> = [
         "derived.encoder_busy_share", "derived.send_backpressure_share", "derived.capture_idle_share",
         "derived.target_fps", "derived.source_refresh_hz", "derived.expected_capture_fps",
+        "derived.source_demand_fps",
     ]
 
     static func classify(_ snapshot: StreamDiagnosticsSnapshot) -> StreamDiagnosticsVerdict {
@@ -275,12 +298,24 @@ enum StreamBottleneckClassifier {
             ])
         }
         // Capture: fewer complete frames than expected while content changes
-        // and every later stage has room.
-        consider(.senderCaptureLimited, [
+        // and every later stage has room. A low capture rate with no idle
+        // callbacks is also what content that changes slower than the target
+        // looks like (a 30 fps video at a 60 FPS target), so the verdict also
+        // needs evidence that the source wanted more frames than capture
+        // delivered. Without it the answer is "unknown", not "capture".
+        let captureSignals = [
             below(DiagnosticsCounter.captureComplete.definition.id, i.captureCompleteFPS, expectedCapture * captureShortfall, samples: i.captureSamples, peer: sp),
             below("derived.capture_idle_share", i.captureIdleShare, activeSourceIdleShare, samples: i.captureSamples, peer: sp),
             downstreamHeadroom,
-        ])
+        ]
+        let demand = atLeast("derived.source_demand_fps", i.sourceDemandFPS, expectedCapture * captureShortfall,
+                             samples: minimumSamples, peer: false)
+        var captureWithoutDemand = false
+        if let demand, demand.met {
+            consider(.senderCaptureLimited, captureSignals + [demand])
+        } else if demand == nil, let primary = captureSignals[0], primary.met, captureSignals.compactMap({ $0 }).filter(\.met).count >= 2 {
+            captureWithoutDemand = true
+        }
         // Window view composition.
         if i.isWindowMode {
             consider(.windowCompositionLimited, [
@@ -333,7 +368,11 @@ enum StreamBottleneckClassifier {
         ])
 
         guard !candidates.isEmpty else {
-            return .init(cause: .noBottleneckEvident, confidence: .medium, reason: nil, evidence: [], alternatives: [], frameBudgetMs: budget)
+            if captureWithoutDemand { return unknown(.sourceDemandUnknown, budget: budget) }
+            // "Nothing found" is only worth medium when both ends were seen.
+            let peerSeen = i.senderFromPeer || i.receiverFromPeer
+            return .init(cause: .noBottleneckEvident, confidence: peerSeen ? .medium : .low,
+                         reason: peerSeen ? nil : .peerMissing, evidence: [], alternatives: [], frameBudgetMs: budget)
         }
         // A decoder verdict explains presenter queueing; prefer it.
         if candidates.contains(where: { $0.0 == .receiverDecoderOverloaded }) {
@@ -370,6 +409,7 @@ enum StreamBottleneckClassifier {
             "rateShortfall": rateShortfall,
             "captureShortfall": captureShortfall,
             "rttJitterMs": rttJitterMs,
+            "minimumRTTSamples": Double(minimumRTTSamples),
             "activeSourceIdleShare": activeSourceIdleShare,
             "idleFPS": idleFPS,
             "refreshMatchTolerance": refreshMatchTolerance,

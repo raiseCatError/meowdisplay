@@ -833,7 +833,8 @@ final class StreamDiagnosticsColourTests: XCTestCase {
         "agreement", "comparisons", "mismatches", "first", "second", "field", "relation",
     ]
 
-    private static var colourStrings: Set<String> {
+    /// Also part of the Performance Lab bundle constants (PerformanceLabGolden).
+    static var colourStrings: Set<String> {
         var s: Set<String> = ["other", "h264", "hevc", "unknown"]
         s.formUnion(ColourPrimaries.named.map(\.kind))
         s.formUnion(ColourTransfer.named.map(\.kind))
@@ -902,7 +903,7 @@ final class StreamDiagnosticsColourTests: XCTestCase {
              "tcp", "quic", "displayLayer", "metal", "nominal", "fair", "serious", "critical", "unplugged", "charging",
              "full", "none", "low", "medium", "high", "atLeast", "below", "macOS", "iOS", "mac", "iPhone", "iPad"]
             + StreamBottleneckCause.allCases.map(\.rawValue)
-            + ["windowTooShort", "noTargetFrameRate", "tooFewSamples", "sourceIdle", "conflictingEvidence"])
+            + StreamVerdictReason.allCases.map(\.rawValue))
         let evidenceIDs = metricIDs.union(StreamBottleneckClassifier.derivedIDs).union(metricIDs.map { $0 + ".p50" })
         let fixed = Set(StreamDiagnosticsExport.limitationsText).union(["2.0 (214)", "2027-01-15T08:02:00Z"])
         for s in strings {
