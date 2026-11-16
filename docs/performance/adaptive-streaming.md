@@ -77,7 +77,7 @@ Data policy (`NetworkCost.dataPolicy`). The "Use less data" preference is checke
 |---|---|---|---|
 | off | any | any | normal |
 | on | any | any | saver |
-| auto | keepQuality (the higher-quality override) | any | normal |
+| auto | keepQuality (the higher-quality override) | any | normal (phase 1 rule; the Mac's phase 2 `receiverDataPolicy` still saves on clear Low Data Mode, see "Use less data" below) |
 | auto | unanswered / saveData | constrained | saver (Low Data Mode) |
 | auto | unanswered / saveData | expensive | saver |
 | auto | unanswered / saveData | unmetered, unknown, or low confidence | normal |
@@ -260,7 +260,7 @@ means today's values. A decision can only reach the pipeline that owns the coord
 | Send backpressure | network drops ÷ (network drops + sent frames) in the window (an approximation of "share of the window at the pending cap") |
 | Sender thermal, Low Power | `ProcessInfo` |
 | Sender path cost, route epoch | `MacSenderTransportController.reportRoute` (the live media connection's `NWPath`); the epoch bumps on a route or cost change |
-| Source cadence | Mirror: the mirrored display's mode refresh (screen maximum when the mode says 0); Extend: the virtual display's refresh; Window view: the composition budget. Also set as the diagnostics `sourceRefreshHz`, so the "source refresh limited" verdict can fire |
+| Source cadence | Mirror: the mirrored display's mode refresh (screen maximum when the mode says 0); Extend: the virtual display's refresh; Window view: none (no source cap). Below 24 Hz the reading counts as unknown (no cap). Also set as the diagnostics `sourceRefreshHz`, so the "source refresh limited" verdict can fire |
 | Generation | the connection generation: a reconnect resets the controller and drops telemetry from the old connection |
 
 The controller does not depend on the diagnostics switch.
@@ -271,7 +271,7 @@ The controller does not depend on the diagnostics switch.
 |---|---|
 | FPS only | live capture update: `applyEffectiveFPSChange()` (`SCStream.updateConfiguration`, then an encoder recreate at the new rate) |
 | Bitrate (with or without FPS) | encoder recreate with a keyframe: `applyEffectiveFPSChange(rebuildEncoder: true)` |
-| Raster | capture restart for this receiver only (release, stop, start at the new size; the cached frame is discarded). Rate-limited by the controller. Not used in Window view, whose canvas is fixed: its ladder has no raster steps |
+| Raster | capture restart for this receiver only (release, stop, start at the new size; the cached frame is discarded). Rate-limited by the controller; a data-policy raster change is rate-limited by the coordinator (below). Not used in Window view, whose canvas is fixed: its ladder has no raster steps. A user-driven rebuild (Extend rotation or shape change, recovery) always wins: one that arrives during an adaptive restart is queued and runs right after it; an adaptive restart that arrives during a rebuild waits and runs afterwards only if the capture still has the old raster (`CaptureRebuildArbiter`) |
 
 There is no live `VTSessionSetProperty` bitrate path: that needs hardware validation first
 (follow-up). While the lock screen view is shown nothing is applied; the plan applies at the next
@@ -282,6 +282,7 @@ lower today's FPS (`min`), and the H.264 guard is still applied first.
 **The source cadence.** With the switch on, the Mac never captures above the source's own refresh
 (for example a 60 Hz display mirrored to a 120 Hz iPad runs at 60). The Extend virtual display and
 the Window view compositor are still created at today's rate, so the controller can step back up.
+Window view sets no source cadence, so it has no source cap.
 
 **Fallbacks.**
 
@@ -299,13 +300,21 @@ the Window view compositor are still created at today's rate, so the controller 
 `NetworkCost.receiverDataPolicy`: saver when the setting is On; in Automatic, saver on clear Low
 Data Mode, or on a clearly metered path once the user accepted the one-time suggestion (until
 answered, a metered path stays normal and the receiver asks). A receiver that sends no setting
-(older builds) is never data-saving. Saver with the switch off is a static point that reuses an
+(older builds, the Mac Receiver) is never data-saving. Mac-side evidence counts only for Low Data
+Mode set on the Mac (`NetworkCost.macSidePolicyEvidence` drops a Mac `expensive` report); the Mac
+reads its own path on hello, before the first capture is configured. Off is full quality always,
+Low Data Mode included. The Full Quality / "No" answer only covers mobile data: in Automatic, clear
+Low Data Mode still saves. A policy change keeps the controller and its history
+(`AdaptiveStreamingController.setDataPolicy`, never a new controller). A policy change that would
+restart capture is applied at most once per `minRestartIntervalSeconds` (20 s) per receiver; a
+later change inside that time is pending (latest wins) and applies on the first tick after the
+interval. A change before the first capture, or one that needs no restart, applies at once. Saver with the switch off is a static point that reuses an
 existing quality level: Balanced raster and bitrate (75 %, 10 Mbps), at most 60 FPS. With the switch
 on, the controller's saver clamp applies instead (raster ≤ max(floor, 0.75), 6 Mbps, 60 FPS).
 The iOS suggestion uses `NetworkCostSuggestionTracker`: high-confidence `expensive` evidence on
 live media only, once per episode, never on Low Data Mode or a tunnel, answer remembered and
 changeable in Settings ▸ Display ▸ Use Less Data (Ask / Save Data / Full Quality). The Mac Receiver
-sends Automatic and never asks. Android: not implemented (parity gap).
+has no setting: it sends no `saveData` and never asks. Android: not implemented (parity gap).
 
 **Explainability.** Every controller decision with a new reason, and every change, goes to the
 diagnostics recorder (`StreamDiagnosticsSnapshot.adaptiveDecisions`, last 32, also in the export:
@@ -320,8 +329,8 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
 - The receiver sends `deliveredFps`, `dec95` (Metal path only), `jit`, `thermal`, `lowPower`;
   `decodedFps`, `enqFps`, `presAge` and `late` are defined but not sent yet, so the decoder cause
   rarely fires on the default display-layer path.
-- Window view pane counts are not fed (the pane clamp never fires); its FPS ceiling is the
-  composition budget.
+- Window view pane counts are not fed (the pane clamp never fires), and Window view has no source
+  cap (no source cadence is set there).
 - The native raster is the started capture size divided by the applied scale, so a stream clamped
   by the receiver's decode ceiling looks larger to the readability floor than it is.
 - The first ~2 s of a session run today's FPS until the controller's first tick (60-first then
