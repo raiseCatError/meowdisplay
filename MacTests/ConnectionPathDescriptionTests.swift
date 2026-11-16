@@ -185,6 +185,31 @@ final class ConnectionPathDescriptionTests: XCTestCase {
         XCTAssertNil(ThunderboltIPInterfaces.bridgeMembers(of: "lo0"), "lo0 is not a bridge")
     }
 
+    func testBridgeMembersParseTheSystemConfigurationShape() {
+        let preferences: [String: Any] = ["Bridge": ["bridge0": [
+            "Interfaces": ["en1", "en2"], "Options": ["__AUTO__": "thunderbolt-bridge"]]]]
+        XCTAssertEqual(ThunderboltIPInterfaces.bridgeMembers(of: "bridge0", virtualNetworkInterfaces: preferences),
+                       ["en1", "en2"])
+    }
+
+    func testBridgeMembersAnySurpriseIsNil() {
+        func members(_ value: Any?) -> [String]? {
+            ThunderboltIPInterfaces.bridgeMembers(of: "bridge0", virtualNetworkInterfaces: value)
+        }
+        XCTAssertNil(members(nil))
+        XCTAssertNil(members("not a dictionary"))
+        XCTAssertNil(members(["Bond": ["bridge0": ["Interfaces": ["en1"]]]]))
+        XCTAssertNil(members(["Bridge": ["bridge1": ["Interfaces": ["en1"]]]]), "another bridge")
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": "en1"]]]))
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": [String]()]]]), "empty")
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": ["en1", 2] as [Any]]]]), "non-string entry")
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": ["en1", ""]]]]))
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": ["en1", "en 2"]]]]))
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": [String(repeating: "e", count: 16)]]]]))
+        let oversized = (0...ThunderboltIPInterfaces.maxBridgeMembers).map { "en\($0)" }
+        XCTAssertNil(members(["Bridge": ["bridge0": ["Interfaces": oversized]]]))
+    }
+
     // MARK: - Receiver display label storage
 
     func testReceiverTransportStateKeepsRouteAndDisplayLabelApart() {
