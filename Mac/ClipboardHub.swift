@@ -274,7 +274,9 @@ final class ClipboardHub: ObservableObject {
                             max: min(max(m["max"] as? Int ?? ClipboardWire.defaultMaxBytes, 0), ClipboardWire.sizeChoices.last!))
             var seen: [String: UInt64] = [:]
             for (k, v) in (m["seen"] as? [String: Any] ?? [:]).prefix(64) where k.count <= ClipboardWire.maxOriginLength {
-                if let n = v as? Int, n >= 0 { seen[k] = UInt64(n) }
+                // Bounded like an event's own counters, so the Mac never relays a context
+                // entry other devices would refuse.
+                if let n = v as? Int, n >= 0, n <= ClipboardWire.maxCounter { seen[k] = UInt64(n) }
             }
             p.seen = seen
             // A reconnect is never a new copy: the device's own events it says it made are seen.
