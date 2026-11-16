@@ -415,6 +415,15 @@ targets:
       - Shared/CodecCapability.swift
       - Shared/ReceiverMaxFPS.swift
       - Shared/FrameRateLimiter.swift
+      # Streaming diagnostics (#123): MacSender, StreamReceiver, the
+      # presenter and the workspace engine above all record into these.
+      - Shared/StreamDiagnosticsMetrics.swift
+      - Shared/StreamDiagnosticsCore.swift
+      - Shared/StreamDiagnosticsResources.swift
+      - Shared/StreamDiagnosticsWire.swift
+      - Shared/StreamDiagnosticsClassifier.swift
+      - Shared/StreamDiagnosticsExport.swift
+      - Shared/StreamDiagnosticsPresentation.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same
