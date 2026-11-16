@@ -51,10 +51,17 @@ content, and find no false positives in random or bar-pattern images.
 
 `PerformanceLabFrameIDProbe` reads the strip from decoded frames and records
 `receiver.frame_id.*` (read, unique, duplicate, skipped, unreadable,
-discontinuity, interval between unique IDs) into the receiver's diagnostics
-recorder. These travel to the Mac in the existing optional `diag` summary
-(`fidN`, `fidU`, `fidDup`, `fidSkip`, `fidBad`, `fid95`; PROTOCOL.md 6.2.1),
-so the Mac's run bundle holds them.
+unexamined, discontinuity, interval between unique IDs) into the receiver's
+diagnostics recorder. These travel to the Mac in the existing optional `diag`
+summary (`fidU`, `fidDup`, `fidSkip`, `fidBad`, `fidUnx`, `fid95`;
+PROTOCOL.md 6.2.1), so the Mac's run bundle holds them.
+
+`skipped` counts only IDs provably missing between two read IDs: a frame that
+arrived but could not be read may have carried a missing ID, so it is
+subtracted. When the reader loses the strip (30 misses) it re-baselines; the
+frames that go by unread while it searches again are `unexamined`, never
+skipped. Unique, duplicate and skipped are reported only for windows in which
+a strip was read ("n/a" otherwise).
 
 Limitation: a decoded pixel buffer exists only on the receiver's
 **experimental Metal path** (`ReceiverVideoPresenter.presentDecoded`). The
@@ -107,10 +114,44 @@ the session if several devices stream. **Start Run**:
    `trialWindows` whole recorder windows that *start after* the warm-up.
    Prompts for during-trial steps appear on schedule; the run does not wait
    for them. Nothing is automated: no synthetic input, no display, mode,
-   network or power change.
-3. Each trial is written whatever happened: `complete`, `incomplete`
-   (missing windows, window gap, unexpected restart, no receiver summary,
-   stalled), `failed` (no session, diagnostics off) or `cancelled`.
+   network or power change. The panel's 0.5 s poll runs in the common
+   run-loop modes, so a held menu or a modal panel does not make it miss a
+   window.
+3. After the last sender window the trial waits up to two windows for
+   receiver windows that began inside it (it stops as soon as the receiver
+   reports a window that began after the trial ended).
+4. Every planned trial is written whatever happened: `complete`,
+   `incomplete` (missing windows, window gap, unexpected restart, no
+   receiver summary, stalled), `failed` (no session, diagnostics off) or
+   `cancelled` (the trial running when the operator cancelled, even during
+   its warm-up, and every later trial with `notStarted`). A run cancelled
+   before its first trial began writes nothing.
+
+**Receiver windows.** The receiver sends its last completed 5 s window in
+every `stats` (every ~5 s, or ~2 s under adaptive streaming), so one window
+usually arrives two or three times. Each window has a number and a series
+(new per receiver session), and the trial keeps each (series, number) once,
+so receiver sums are sums over distinct windows. A receiver window is kept
+only if it provably began inside the trial: the receiver reports the sender
+window number it had last heard when the window began (`wps`); a number at
+least the one the sender had completed when the trial's first window began
+proves it by causality alone, without comparing the two devices' clocks.
+`receiverAlignment` is `aligned` when every kept window was proven this way,
+`partial` when some were kept by arrival time (at least two windows after the
+trial began) because the receiver sent no marker. A receiver that sends no
+window numbers at all (an older build) is merged by equality only;
+`receiverCounting` is then `possiblyDoubleCounted` and the report says so.
+`receiverWindowsMissed` counts window numbers between kept windows that never
+arrived.
+
+**Expected restarts.** In scenarios that expect a restart (reconnection,
+capture retune, transitions) a window that starts later than the previous one
+ended because of a capture or presentation restart is recorded
+(`expectedRestarts`, `restartUnmeasuredSeconds`: time no window covers,
+because the recorder restarts its window at a restart) and does not make the
+trial incomplete; `sender.restart.frame_gap_ms` holds the last frame before
+each restart to the first after it. A restart in any other scenario, or a
+discontinuity without one, is still `windowGap`/`unexpectedRestart`.
 
 Bundle: `perf-lab-<scenario>-<yyyyMMdd-HHmm>[-<variant>][-synthetic]/`
 with `manifest.json` (format `meowdisplay-performance-lab-run`, schema 1:
@@ -119,8 +160,10 @@ environment, histogram edges, the metric dictionary with every caveat,
 classifier thresholds, limitations, trial statuses) and `trial-NN.json`
 (format `meowdisplay-performance-lab-trial`, schema 1: every window's
 snapshot and verdict, sender histograms merged bucket by bucket over the
-trial, summed counters and gaps, the receiver `diag` summaries received during
-the trial, the fixture's own drawn-frame count and draw intervals when the
+trial, summed counters and the gaps of the sender's own interval stages, one
+receiver `diag` summary per receiver window kept (with its arrival time
+relative to the trial's first window), the receiver alignment and counting
+fields above, the fixture's own drawn-frame count and draw intervals when the
 fixture was open in this app).
 
 Environment = sender app version, OS and device class, the git commit when
@@ -152,11 +195,17 @@ python3 tools/perf-lab/perf_lab.py report <bundle> [--allow-partial] [--out repo
 python3 tools/perf-lab/perf_lab.py compare <bundle-A> <bundle-B> [--allow-partial]
 ```
 
-- Validates format and schema version (refuses others), that every listed
-  trial belongs to the run, that each histogram's percentiles match its
-  buckets, and that no key looks like personal data (same fragments as the
-  app's export privacy test). A listed trial whose file is missing stays in
-  the report as `failed` (`missingTrialData`).
+- Validates format and schema version (refuses others), the metric
+  dictionary version, that every listed trial belongs to the run and is
+  listed once and within the plan, that each histogram's percentiles match
+  its buckets, and privacy: no key may look like personal data and every
+  string value, at any depth, must be one the app writes (the allow-list
+  ships with the tool in `scenarios.json`, generated from the app; the app
+  version, variant, commit and date have strict formats). A listed trial
+  whose file is missing, and a planned trial that is not listed, stay in the
+  report as `failed` (`missingTrialData`). A malformed bundle, a file over
+  64 MB or a trial file outside the bundle folder is refused with exit 2 and
+  one line, never a traceback.
 - Per trial: source-unique, capture, submit, encode, send rates; frame time
   at submission p50/p95/p99; capture interval, source age, encode and send
   p50/p95/p99 exact to the bucket; gaps over 100/250/500 ms per interval stage;
@@ -170,8 +219,12 @@ python3 tools/perf-lab/perf_lab.py compare <bundle-A> <bundle-B> [--allow-partia
 - Across trials, complete trials only: median, p95 and p99 (nearest rank, so
   with fewer than 20 trials p95 is the maximum), min, max, spread, CV. Every
   trial, complete or not, is listed with its values. Fewer complete trials
-  than the run's minimum is refused (exit 2) unless `--allow-partial`, which
-  marks the report PARTIAL.
+  than the minimum (3, the tool's own constant; a bundle can raise it, never
+  lower it) is refused (exit 2) unless `--allow-partial`, which marks every
+  output PARTIAL. No complete trial at all is always refused.
+- Receiver sums (gaps, frame-ID counts) are over distinct receiver windows.
+  Counters a display mode cannot produce read "n/a", not 0 (capture and
+  source-unique rates in Window view, composites outside it).
 - `compare`: per metric, A and B median [min–max] (n), B − A and %, and
   "not distinguishable (ranges overlap)" whenever the trial ranges overlap.
   It lists every environment difference and says NOT COMPARABLE for
@@ -237,12 +290,15 @@ Bundles are written only where the operator chooses (default: this Mac's
 Application Support), are never uploaded, and contain aggregate numbers and
 fixed strings only: enum values, metric ids, the metric dictionary, scenario
 text, limitation sentences, the sanitized app version and variant label, the
-hex commit, and minute-rounded dates. No device or user name, window title,
+hex commit, and minute-rounded dates. Numbers include a random receiver
+window series per session, never anything tied to the device; no time since
+boot. No device or user name, window title,
 app name, path, address, SSID, pairing material, input or pixels.
 `PerformanceLabRunTests.testRunBundleContainsOnlyReviewedKeysAndConstantStrings`
 fails on any unreviewed key, any key that looks like a forbidden kind of
 field, or any string that is not a constant from code; the analysis tool
-refuses bundles with such keys too. The session picker shows device names in
+applies the same check to keys and to every string value, with the constants
+from `scenarios.json` (generated by `testScenarioCatalogJSONMatchesTheTool`). The session picker shows device names in
 the panel only.
 
 ## Self-test (software only, SYNTHETIC)
