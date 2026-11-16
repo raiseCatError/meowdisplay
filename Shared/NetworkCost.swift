@@ -217,6 +217,12 @@ enum NetworkCost {
         case lowDataMode
         case meteredPath
         case notClearlyMetered
+        /// Phase 2 (`receiverDataPolicy`): clearly metered, but the user has
+        /// not answered the one-time suggestion yet.
+        case awaitingAnswer
+        /// Phase 2: the receiver sent no "Use less data" preference (an
+        /// older receiver): today's behaviour.
+        case notReported
     }
 
     struct PolicyDecision: Equatable, Sendable {

@@ -199,7 +199,8 @@ struct StreamDiagnosticsContext: Codable, Equatable, Sendable {
     var rasterWidth = 0
     var rasterHeight = 0
     var targetFPS = 0
-    /// Refresh of the captured display when known. Not read by any hook yet.
+    /// Refresh of the source when known: the mirrored display's mode, the
+    /// virtual display's refresh, or the Window view composition budget.
     var sourceRefreshHz: Double?
     /// Encoder in-flight limit (StreamingPriority 1/2/3).
     var encoderInFlightLimit: Int?
@@ -255,6 +256,9 @@ struct StreamDiagnosticsSnapshot: Codable, Equatable, Sendable {
     /// What the other end last reported (optional wire keys), if anything.
     var peer: StreamDiagnosticsPeerSummary?
     var resources: StreamDiagnosticsResourceSample?
+    /// Adaptive Automatic controller decisions (phase 2), newest last; nil
+    /// when none were recorded (the controller is off, or diagnostics were).
+    var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision]? = nil
 
     func stage(_ stage: DiagnosticsStage) -> StreamDiagnosticsStageSummary? {
         stages.first { $0.id == stage.definition.id }
@@ -360,6 +364,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     private var resources: StreamDiagnosticsResourceSample?
     private var generation: UInt64?
     private var presenterInFlight = 0
+    private var adaptiveDecisions: [StreamDiagnosticsAdaptiveDecision] = []
 
     init(side: StreamDiagnosticsSide,
          windowSeconds: Double = 5,
@@ -580,6 +585,16 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         }
     }
 
+    /// One adaptive controller decision (reason code + evidence). Bounded.
+    func recordAdaptiveDecision(_ decision: StreamDiagnosticsAdaptiveDecision) {
+        guard isEnabled else { return }
+        lock.lock(); defer { lock.unlock() }
+        adaptiveDecisions.append(decision)
+        if adaptiveDecisions.count > StreamDiagnosticsAdaptiveDecision.maxRecorded {
+            adaptiveDecisions.removeFirst(adaptiveDecisions.count - StreamDiagnosticsAdaptiveDecision.maxRecorded)
+        }
+    }
+
     func updatePeer(_ summary: StreamDiagnosticsPeerSummary) {
         guard isEnabled else { return }
         lock.lock(); defer { lock.unlock() }
@@ -601,6 +616,7 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         resources = nil
         generation = nil
         context = StreamDiagnosticsContext()
+        adaptiveDecisions = []
     }
 
     /// The last completed window, or the in-progress one before any completed.
@@ -649,7 +665,8 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
         return StreamDiagnosticsSnapshot(
             side: side, windowSeconds: seconds, windowIsPartial: partial, stages: stages,
             counters: counters, sessionCounters: sessionCounters, gauges: gauges,
-            rttJitterMs: rttJitter, context: context, peer: peer, resources: resources)
+            rttJitterMs: rttJitter, context: context, peer: peer, resources: resources,
+            adaptiveDecisions: adaptiveDecisions.isEmpty ? nil : adaptiveDecisions)
     }
 
     // MARK: Locked helpers

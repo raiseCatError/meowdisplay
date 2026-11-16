@@ -1,0 +1,632 @@
+// Compiled into every app target and MacTests (see project.yml `sources`).
+// Phase 2 of adaptive Automatic streaming (issue #123): the wire keys, the
+// receiver-side telemetry window and hello state, path-to-cost mapping and
+// the data-saving policy rule the Mac applies. Every wire key is optional on
+// an existing message (`hello`, `stats`, `ping`): absent means today's
+// behaviour. Documented in PROTOCOL.md 6.20.
+
+import Foundation
+#if canImport(Network)
+import Network
+#endif
+
+// MARK: - Wire keys and parsing
+
+enum AdaptiveStreamingWire {
+    // `hello` (receiver → Mac)
+    /// The receiver screen's current effective refresh in Hz (Low Power Mode
+    /// can hold ProMotion at 60). Sent together with `telemetryKey`.
+    static let effectiveRefreshKey = "effHz"
+    /// The receiver will add the windowed telemetry keys to `stats` while the
+    /// Mac announces adaptive mode.
+    static let telemetryKey = "adaptiveTelemetry"
+    /// Cost hint for the receiver's own media path: class and confidence and
+    /// interface kind only. Never an SSID, address or carrier.
+    static let costKey = "cost"
+    static let costClassKey = "cost"
+    static let costConfidenceKey = "conf"
+    static let costInterfaceKey = "iface"
+    /// "Use less data" preference: "off" / "on" / "auto".
+    static let saveDataKey = "saveData"
+    /// The remembered answer to the one-time suggestion: "saveData" or
+    /// "keepQuality". Absent = not answered.
+    static let saveDataAnswerKey = "saveDataAnswer"
+    static let telemetryVersion = 1
+
+    // `ping` (Mac → receiver)
+    /// `1` while the Mac runs the adaptive controller for this session: the
+    /// receiver then sends `stats` every 2 s instead of every 5 s.
+    static let announceKey = "adaptive"
+
+    // `stats` (receiver → Mac)
+    static let windowKey = "win"
+    static let deliveredFPSKey = "deliveredFps"
+    static let decodedFPSKey = "decodedFps"
+    static let enqueuedFPSKey = "enqFps"
+    static let decodeP95Key = "dec95"
+    static let presentationAgeKey = "presAge"
+    static let lateKey = "late"
+    static let jitterKey = "jit"
+    static let thermalKey = "thermal"
+    static let lowPowerKey = "lowPower"
+    /// Existing `stats` key (round trip in ms), read as part of the telemetry.
+    static let rttKey = "rtt"
+
+    static let refreshRangeHz = 1...240
+    static let windowRangeSeconds = 0.5...30.0
+    static let fpsRange = 0.0...1000.0
+    static let msRange = 0.0...60_000.0
+    static let countRange = 0...100_000
+
+    /// A finite JSON number that is not a JSON bool.
+    static func number(_ value: Any?) -> Double? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        let d = n.doubleValue
+        return d.isFinite ? d : nil
+    }
+
+    /// A JSON bool (never a number).
+    static func bool(_ value: Any?) -> Bool? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+        return n.boolValue
+    }
+
+    static func number(_ value: Any?, in range: ClosedRange<Double>) -> Double? {
+        number(value).flatMap { range.contains($0) ? $0 : nil }
+    }
+
+    /// True only for `"adaptive": 1` on a Mac ping.
+    static func isAnnounced(inPing object: [String: Any]) -> Bool {
+        number(object[announceKey]) == 1
+    }
+
+    /// The ping suffix the Mac adds while it runs the controller.
+    static func pingSuffix(announcing: Bool) -> String {
+        announcing ? ",\"\(announceKey)\":1" : ""
+    }
+
+    fileprivate static func rounded(_ value: Double) -> Double { (value * 10).rounded() / 10 }
+}
+
+extension NetworkCost.Confidence {
+    var wireName: String {
+        switch self {
+        case .low: return "low"
+        case .medium: return "medium"
+        case .high: return "high"
+        }
+    }
+
+    init?(wireName: String) {
+        switch wireName {
+        case "low": self = .low
+        case "medium": self = .medium
+        case "high": self = .high
+        default: return nil
+        }
+    }
+}
+
+/// The optional adaptive keys of a receiver `hello`.
+struct AdaptiveHelloFields: Equatable, Sendable {
+    var effectiveRefreshHz: Int?
+    /// Only true together with `effectiveRefreshHz` (lead decision: the two
+    /// travel together, so a telemetry peer always has a negotiable FPS ladder).
+    var telemetry = false
+    var cost: NetworkCost.EndpointReport?
+    var saveData: NetworkCost.DataPreference?
+    var saveDataAnswer: NetworkCost.MeteredAnswer?
+
+    var wireFields: [String: Any] {
+        var fields: [String: Any] = [:]
+        if let hz = effectiveRefreshHz {
+            fields[AdaptiveStreamingWire.effectiveRefreshKey] = hz
+            if telemetry { fields[AdaptiveStreamingWire.telemetryKey] = AdaptiveStreamingWire.telemetryVersion }
+        }
+        if let cost {
+            fields[AdaptiveStreamingWire.costKey] = [
+                AdaptiveStreamingWire.costClassKey: cost.cost.cost.rawValue,
+                AdaptiveStreamingWire.costConfidenceKey: cost.cost.confidence.wireName,
+                AdaptiveStreamingWire.costInterfaceKey: cost.interface.rawValue,
+            ]
+        }
+        if let saveData { fields[AdaptiveStreamingWire.saveDataKey] = saveData.rawValue }
+        if let answer = saveDataAnswer, answer != .unanswered {
+            fields[AdaptiveStreamingWire.saveDataAnswerKey] = answer.rawValue
+        }
+        return fields
+    }
+
+    /// Garbage or out-of-range values read as absent (old behaviour).
+    static func parse(_ object: [String: Any]) -> AdaptiveHelloFields {
+        var fields = AdaptiveHelloFields()
+        if let hz = AdaptiveStreamingWire.number(object[AdaptiveStreamingWire.effectiveRefreshKey]),
+           hz == hz.rounded(), AdaptiveStreamingWire.refreshRangeHz.contains(Int(hz)) {
+            fields.effectiveRefreshHz = Int(hz)
+        }
+        if fields.effectiveRefreshHz != nil,
+           let version = AdaptiveStreamingWire.number(object[AdaptiveStreamingWire.telemetryKey]),
+           version >= Double(AdaptiveStreamingWire.telemetryVersion) {
+            fields.telemetry = true
+        }
+        if let dict = object[AdaptiveStreamingWire.costKey] as? [String: Any],
+           let costRaw = dict[AdaptiveStreamingWire.costClassKey] as? String,
+           let cost = NetworkCost.Cost(rawValue: costRaw),
+           let confRaw = dict[AdaptiveStreamingWire.costConfidenceKey] as? String,
+           let confidence = NetworkCost.Confidence(wireName: confRaw) {
+            let interface = (dict[AdaptiveStreamingWire.costInterfaceKey] as? String)
+                .flatMap(NetworkCost.Interface.init(rawValue:)) ?? .unknown
+            fields.cost = NetworkCost.EndpointReport(
+                reachability: .unknown, interface: interface,
+                cost: NetworkCost.CostEvidence(cost: cost, confidence: confidence))
+        }
+        fields.saveData = (object[AdaptiveStreamingWire.saveDataKey] as? String)
+            .flatMap(NetworkCost.DataPreference.init(rawValue:))
+        fields.saveDataAnswer = (object[AdaptiveStreamingWire.saveDataAnswerKey] as? String)
+            .flatMap(NetworkCost.MeteredAnswer.init(rawValue:))
+            .flatMap { $0 == .unanswered ? nil : $0 }
+        return fields
+    }
+}
+
+/// The optional windowed keys of a receiver `stats` message.
+struct AdaptiveReceiverTelemetry: Equatable, Sendable {
+    var windowSeconds: Double
+    /// Frames that reached the receiver's presentation hand-off.
+    var deliveredFPS: Double?
+    var decodedFPS: Double?
+    var enqueuedFPS: Double?
+    var decodeP95Ms: Double?
+    var presentationAgeMs: Double?
+    var lateDrops: Int?
+    /// From the existing `rtt` key.
+    var rttMs: Double?
+    /// Mean absolute change between consecutive round trips in the window.
+    var jitterMs: Double?
+    var thermal: AdaptiveThermalLevel?
+    var lowPower: Bool?
+
+    /// The new keys only (`rtt` already rides on `stats`).
+    var wireFields: [String: Any] {
+        typealias W = AdaptiveStreamingWire
+        var fields: [String: Any] = [W.windowKey: W.rounded(windowSeconds)]
+        if let deliveredFPS { fields[W.deliveredFPSKey] = W.rounded(deliveredFPS) }
+        if let decodedFPS { fields[W.decodedFPSKey] = W.rounded(decodedFPS) }
+        if let enqueuedFPS { fields[W.enqueuedFPSKey] = W.rounded(enqueuedFPS) }
+        if let decodeP95Ms { fields[W.decodeP95Key] = W.rounded(decodeP95Ms) }
+        if let presentationAgeMs { fields[W.presentationAgeKey] = W.rounded(presentationAgeMs) }
+        if let lateDrops { fields[W.lateKey] = lateDrops }
+        if let jitterMs { fields[W.jitterKey] = W.rounded(jitterMs) }
+        if let thermal { fields[W.thermalKey] = thermal.rawValue }
+        if let lowPower { fields[W.lowPowerKey] = lowPower }
+        return fields
+    }
+
+    /// nil when the window key is absent or invalid (an old receiver, or a
+    /// stats message sent without the adaptive announce). Other invalid
+    /// values read as absent.
+    static func parse(_ object: [String: Any]) -> AdaptiveReceiverTelemetry? {
+        typealias W = AdaptiveStreamingWire
+        guard let window = W.number(object[W.windowKey], in: W.windowRangeSeconds) else { return nil }
+        var t = AdaptiveReceiverTelemetry(windowSeconds: window)
+        t.deliveredFPS = W.number(object[W.deliveredFPSKey], in: W.fpsRange)
+        t.decodedFPS = W.number(object[W.decodedFPSKey], in: W.fpsRange)
+        t.enqueuedFPS = W.number(object[W.enqueuedFPSKey], in: W.fpsRange)
+        t.decodeP95Ms = W.number(object[W.decodeP95Key], in: W.msRange)
+        t.presentationAgeMs = W.number(object[W.presentationAgeKey], in: W.msRange)
+        t.lateDrops = W.number(object[W.lateKey]).flatMap { value in
+            value == value.rounded() && W.countRange.contains(Int(value)) ? Int(value) : nil
+        }
+        t.rttMs = W.number(object[W.rttKey], in: W.msRange)
+        t.jitterMs = W.number(object[W.jitterKey], in: W.msRange)
+        t.thermal = W.number(object[W.thermalKey]).flatMap { value in
+            value == value.rounded() ? AdaptiveThermalLevel(rawValue: Int(value)) : nil
+        }
+        t.lowPower = W.bool(object[W.lowPowerKey])
+        return t
+    }
+}
+
+// MARK: - Receiver side
+
+enum AdaptiveTelemetryCadence {
+    /// Today's `stats` cadence: every 5 one-second FPS windows.
+    static let legacyStatsWindows = 5
+    /// While the Mac announces adaptive mode: every 2 windows (~2 s).
+    static let adaptiveStatsWindows = 2
+    /// An announce older than this no longer counts (the Mac pings every 2 s).
+    static let announceStaleSeconds: TimeInterval = 6
+
+    static func statsWindows(announced: Bool) -> Int {
+        announced ? adaptiveStatsWindows : legacyStatsWindows
+    }
+}
+
+/// Whether the Mac currently announces adaptive mode. Every Mac ping
+/// carries the key or not; a missing ping for `announceStaleSeconds` ends it.
+struct AdaptiveAnnounceTracker: Equatable, Sendable {
+    private var announcedAt: TimeInterval?
+
+    mutating func observePing(announced: Bool, now: TimeInterval) {
+        announcedAt = announced ? now : nil
+    }
+
+    func isActive(now: TimeInterval) -> Bool {
+        guard let announcedAt else { return false }
+        return now - announcedAt < AdaptiveTelemetryCadence.announceStaleSeconds
+    }
+
+    mutating func reset() { announcedAt = nil }
+}
+
+/// The receiver's own counters for one `stats` window. Independent of the
+/// diagnostics switch.
+struct AdaptiveReceiverTelemetryWindow: Equatable, Sendable {
+    private var start: TimeInterval?
+    private var frames = 0
+    private var lastRTT: Double?
+    private var jitterSum = 0.0
+    private var jitterSamples = 0
+
+    mutating func noteFrame(now: TimeInterval) {
+        if start == nil { start = now }
+        frames += 1
+    }
+
+    mutating func noteRTT(_ ms: Double) {
+        guard ms.isFinite, ms >= 0 else { return }
+        if let lastRTT {
+            jitterSum += abs(ms - lastRTT)
+            jitterSamples += 1
+        }
+        lastRTT = ms
+    }
+
+    /// Ends the window. nil when it is too short to mean anything.
+    mutating func drain(now: TimeInterval, decodeP95Ms: Double?, thermal: AdaptiveThermalLevel?,
+                        lowPower: Bool?) -> AdaptiveReceiverTelemetry? {
+        defer {
+            start = now
+            frames = 0
+            jitterSum = 0
+            jitterSamples = 0
+        }
+        guard let start else { return nil }
+        let seconds = now - start
+        guard AdaptiveStreamingWire.windowRangeSeconds.contains(seconds) else { return nil }
+        var t = AdaptiveReceiverTelemetry(windowSeconds: seconds)
+        t.deliveredFPS = Double(frames) / seconds
+        t.decodeP95Ms = decodeP95Ms.flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
+        t.jitterMs = jitterSamples > 0 ? jitterSum / Double(jitterSamples) : nil
+        t.thermal = thermal
+        t.lowPower = lowPower
+        return t
+    }
+
+    mutating func reset() { self = AdaptiveReceiverTelemetryWindow() }
+}
+
+enum ReceiverEffectiveRefresh {
+    /// Low Power Mode holds ProMotion screens at 60 Hz.
+    static let lowPowerCapHz = 60
+
+    /// The refresh the screen can actually show now. nil for a screen that
+    /// reports nothing usable (the hello then carries no effective refresh).
+    static func resolve(maximumFramesPerSecond: Int, lowPowerMode: Bool) -> Int? {
+        guard maximumFramesPerSecond > 0 else { return nil }
+        let effective = lowPowerMode ? min(maximumFramesPerSecond, lowPowerCapHz) : maximumFramesPerSecond
+        return min(max(effective, AdaptiveStreamingWire.refreshRangeHz.lowerBound),
+                   AdaptiveStreamingWire.refreshRangeHz.upperBound)
+    }
+}
+
+extension AdaptiveThermalLevel {
+    init(_ state: ProcessInfo.ThermalState) {
+        switch state {
+        case .nominal: self = .nominal
+        case .fair: self = .fair
+        case .serious: self = .serious
+        case .critical: self = .critical
+        @unknown default: self = .nominal
+        }
+    }
+}
+
+// MARK: - Path to cost evidence
+
+extension NetworkCost {
+    /// The facts an endpoint can read from its live media connection's path.
+    struct PathFlags: Equatable, Sendable {
+        var usesCellular = false
+        var usesWiFi = false
+        var usesWired = false
+        var usesLoopback = false
+        /// A VPN/tunnel interface (Tailscale is `utun`).
+        var isTunnel = false
+        var isExpensive = false
+        var isConstrained = false
+    }
+
+    /// Interface names that are tunnels (their underlay is invisible here).
+    static func isTunnelInterfaceName(_ name: String) -> Bool {
+        ["utun", "ipsec", "ppp", "tun", "tap"].contains { name.hasPrefix($0) }
+    }
+
+    /// One endpoint's report from its own media connection's path.
+    /// - The connection's own path is high confidence.
+    /// - A tunnel is never cellular: its flags are kept as medium-confidence
+    ///   evidence when set, and "not expensive" through a tunnel stays unknown.
+    /// - USB/loopback is wired and unmetered.
+    static func endpointReport(_ flags: PathFlags, reachability: Reachability) -> EndpointReport {
+        func flagged(_ confidence: Confidence) -> CostEvidence? {
+            if flags.isConstrained { return CostEvidence(cost: .constrained, confidence: confidence) }
+            if flags.isExpensive { return CostEvidence(cost: .expensive, confidence: confidence) }
+            return nil
+        }
+        if flags.usesLoopback {
+            return EndpointReport(reachability: reachability, interface: .wired,
+                                  cost: CostEvidence(cost: .unmetered, confidence: .high))
+        }
+        let interface: Interface
+        if flags.usesCellular {
+            interface = .cellular
+        } else if flags.usesWiFi {
+            interface = .wifi
+        } else if flags.usesWired {
+            interface = .wired
+        } else if flags.isTunnel {
+            interface = .tunnel
+        } else {
+            interface = .unknown
+        }
+        switch interface {
+        case .cellular, .wifi, .wired:
+            return EndpointReport(reachability: reachability, interface: interface,
+                                  cost: flagged(.high) ?? CostEvidence(cost: .unmetered, confidence: .high))
+        case .tunnel, .unknown:
+            return EndpointReport(reachability: reachability, interface: interface, cost: flagged(.medium) ?? .unknown)
+        }
+    }
+
+    /// The data policy the Mac applies for one receiver (lead decision,
+    /// phase 2): saver when the receiver's preference is On; in Automatic,
+    /// saver on clear Low Data Mode, or on a clearly metered path once the
+    /// user accepted the one-time suggestion. A clearly metered path that is
+    /// not answered yet stays normal (the receiver asks). A receiver that
+    /// sends no preference is an older receiver: normal, as today.
+    static func receiverDataPolicy(path: PathAssessment, preference: DataPreference?,
+                                   answer: MeteredAnswer?) -> PolicyDecision {
+        guard let preference else { return PolicyDecision(policy: .normal, reason: .notReported) }
+        let answer = answer ?? .unanswered
+        let decision = dataPolicy(path: path, preference: preference, answer: answer)
+        if preference == .auto, answer == .unanswered, decision.reason == .meteredPath {
+            return PolicyDecision(policy: .normal, reason: .awaitingAnswer)
+        }
+        return decision
+    }
+}
+
+#if canImport(Network)
+extension NetworkCost.PathFlags {
+    init(path: NWPath) {
+        let names = path.availableInterfaces.map(\.name)
+        self.init(usesCellular: path.usesInterfaceType(.cellular),
+                  usesWiFi: path.usesInterfaceType(.wifi),
+                  usesWired: path.usesInterfaceType(.wiredEthernet),
+                  usesLoopback: path.usesInterfaceType(.loopback),
+                  isTunnel: path.usesInterfaceType(.other) && names.contains(where: NetworkCost.isTunnelInterfaceName),
+                  isExpensive: path.isExpensive,
+                  isConstrained: path.isConstrained)
+    }
+}
+#endif
+
+// MARK: - "Use less data" settings (receiver)
+
+/// Persisted "Use less data" choice and the suggestion's answer. Receiver
+/// local; the Mac only sees the hello keys.
+struct UseLessDataSettings: Equatable, Sendable {
+    static let preferenceKey = "useLessData"
+    static let answerKey = "useLessDataAnswer"
+    static let dismissalsKey = "useLessDataDismissals"
+
+    var preference: NetworkCost.DataPreference = .auto
+    var answer: NetworkCost.MeteredAnswer = .unanswered
+    var dismissals = 0
+
+    static func load(_ defaults: UserDefaults = .standard) -> UseLessDataSettings {
+        UseLessDataSettings(
+            preference: defaults.string(forKey: preferenceKey).flatMap(NetworkCost.DataPreference.init(rawValue:)) ?? .auto,
+            answer: defaults.string(forKey: answerKey).flatMap(NetworkCost.MeteredAnswer.init(rawValue:)) ?? .unanswered,
+            dismissals: max(defaults.integer(forKey: dismissalsKey), 0))
+    }
+
+    func save(_ defaults: UserDefaults = .standard) {
+        defaults.set(preference.rawValue, forKey: Self.preferenceKey)
+        defaults.set(answer.rawValue, forKey: Self.answerKey)
+        defaults.set(dismissals, forKey: Self.dismissalsKey)
+    }
+}
+
+/// The receiver's adaptive state for the live session: what its hello
+/// reports, the telemetry window, the Mac's announce and the one-time
+/// suggestion. Thread-safe; one per process (`shared`), since effective
+/// refresh, path and preference describe this device, not one connection.
+final class ReceiverAdaptiveState: @unchecked Sendable {
+    static let shared = ReceiverAdaptiveState()
+    /// Posted on the main queue when the one-time suggestion should show.
+    static let suggestionNotification = Notification.Name("meowAdaptiveDataSuggestion")
+
+    private let lock = NSLock()
+    private var effectiveRefreshHz: Int?
+    private var pathReport: NetworkCost.EndpointReport?
+    private var settings = UseLessDataSettings()
+    private var helloResendNeeded = false
+    private var announce = AdaptiveAnnounceTracker()
+    private var window = AdaptiveReceiverTelemetryWindow()
+    private var tracker = NetworkCostSuggestionTracker()
+    private var lastFrameAt: TimeInterval?
+    /// Only receivers with a prompt UI ask (iOS).
+    private var suggestionsEnabled = false
+
+    init() {}
+
+    // Hello inputs (re-sent on change)
+
+    func setEffectiveRefresh(_ hz: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        guard hz != effectiveRefreshHz else { return }
+        effectiveRefreshHz = hz
+        helloResendNeeded = true
+    }
+
+    func setPath(_ report: NetworkCost.EndpointReport) {
+        lock.lock(); defer { lock.unlock() }
+        guard report != pathReport else { return }
+        pathReport = report
+        helloResendNeeded = true
+    }
+
+    func setSettings(_ newSettings: UseLessDataSettings, suggestionsEnabled: Bool? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        if let suggestionsEnabled { self.suggestionsEnabled = suggestionsEnabled }
+        if newSettings.answer != tracker.answer { tracker.record(answer: newSettings.answer) }
+        while tracker.dismissals < newSettings.dismissals { tracker.recordDismissal() }
+        guard newSettings.preference != settings.preference || newSettings.answer != settings.answer else {
+            settings = newSettings
+            return
+        }
+        settings = newSettings
+        helloResendNeeded = true
+    }
+
+    var currentSettings: UseLessDataSettings {
+        lock.lock(); defer { lock.unlock() }
+        return settings
+    }
+
+    var helloFields: AdaptiveHelloFields {
+        lock.lock(); defer { lock.unlock() }
+        return AdaptiveHelloFields(
+            effectiveRefreshHz: effectiveRefreshHz, telemetry: effectiveRefreshHz != nil,
+            cost: pathReport, saveData: settings.preference,
+            saveDataAnswer: settings.answer == .unanswered ? nil : settings.answer)
+    }
+
+    /// True once per change since the last hello: the caller re-sends hello.
+    func consumeHelloResend() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let needed = helloResendNeeded
+        helloResendNeeded = false
+        return needed
+    }
+
+    /// Called when a hello goes out for any reason: it carries the current values.
+    func noteHelloSent() {
+        lock.lock(); defer { lock.unlock() }
+        helloResendNeeded = false
+    }
+
+    // Mac announce and stats cadence
+
+    func observeMacPing(_ object: [String: Any], now: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        announce.observePing(announced: AdaptiveStreamingWire.isAnnounced(inPing: object), now: now)
+    }
+
+    func statsEveryWindows(now: TimeInterval) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return AdaptiveTelemetryCadence.statsWindows(announced: announce.isActive(now: now))
+    }
+
+    func noteFrame(now: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        window.noteFrame(now: now)
+        lastFrameAt = now
+    }
+
+    func noteRTT(_ ms: Double) {
+        lock.lock(); defer { lock.unlock() }
+        window.noteRTT(ms)
+    }
+
+    /// Ends the telemetry window on every `stats` report; the keys are
+    /// returned only while the Mac announces adaptive mode, so `stats` to
+    /// every other Mac stays exactly as before.
+    func drainTelemetryFields(now: TimeInterval, decodeP95Ms: Double?) -> [String: Any] {
+        let thermal = AdaptiveThermalLevel(ProcessInfo.processInfo.thermalState)
+        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        lock.lock(); defer { lock.unlock() }
+        let telemetry = window.drain(now: now, decodeP95Ms: decodeP95Ms, thermal: thermal, lowPower: lowPower)
+        guard announce.isActive(now: now), let telemetry else { return [:] }
+        return telemetry.wireFields
+    }
+
+    /// A new session: no announce, no window.
+    func resetSession() {
+        lock.lock(); defer { lock.unlock() }
+        announce.reset()
+        window.reset()
+        lastFrameAt = nil
+    }
+
+    // One-time suggestion
+
+    /// Evaluates the suggestion; true exactly once per episode.
+    func checkSuggestion(now: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard suggestionsEnabled else { return false }
+        let live = lastFrameAt.map { now - $0 < 5 } ?? false
+        let path = NetworkCost.combine(sender: .unknown, receiver: pathReport ?? .unknown)
+        if case .ask = tracker.observe(path: path, preference: settings.preference, liveMedia: live, now: now) {
+            return true
+        }
+        return false
+    }
+
+    /// The suggestion's answer (remembered) or a dismissal. Returns the
+    /// settings to persist.
+    func recordSuggestion(answer: NetworkCost.MeteredAnswer?) -> UseLessDataSettings {
+        lock.lock(); defer { lock.unlock() }
+        if let answer {
+            tracker.record(answer: answer)
+            settings.answer = answer
+            helloResendNeeded = true
+        } else {
+            tracker.recordDismissal()
+            settings.dismissals = tracker.dismissals
+        }
+        return settings
+    }
+}
+
+// MARK: - Diagnostics record
+
+/// One controller decision as the diagnostics view and export show it:
+/// enum codes and numbers only.
+struct StreamDiagnosticsAdaptiveDecision: Codable, Equatable, Sendable {
+    static let maxRecorded = 32
+
+    /// Seconds since the recorder's clock origin (`StreamDiagnosticsClock`).
+    var atSeconds: Double
+    var action: AdaptiveStreamingDecision.Action
+    var reason: AdaptiveStreamingDecision.Reason
+    var cause: AdaptiveStreamingDecision.Cause
+    var changed: [AdaptiveStreamingDecision.Dimension]
+    var rasterScale: Double?
+    var bitrateMbps: Double?
+    var fps: Int?
+    var evidence: AdaptiveStreamingEvidence
+
+    init(_ decision: AdaptiveStreamingDecision, atMs: Double) {
+        atSeconds = (atMs / 100).rounded() / 10
+        action = decision.action
+        reason = decision.reason
+        cause = decision.cause
+        changed = decision.changed
+        rasterScale = decision.point?.rasterScale
+        bitrateMbps = decision.point.map { Double($0.bitrate) / 1_000_000 }
+        fps = decision.point?.fps
+        evidence = decision.evidence
+    }
+}

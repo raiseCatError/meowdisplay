@@ -428,6 +428,9 @@ targets:
       - Shared/NetworkCost.swift
       - Shared/AdaptiveStreamingModel.swift
       - Shared/AdaptiveStreamingController.swift
+      # Adaptive Automatic phase 2 wiring (#123): MacSender and StreamReceiver use these.
+      - Shared/AdaptiveStreamingWiring.swift
+      - Mac/AdaptiveStreamingSession.swift
     dependencies:
       # Receiver Swift6-B1: TrustStore.swift (added above for
       # ReceiverUISinkTests' real StreamReceiver) needs the same
