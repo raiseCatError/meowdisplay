@@ -1100,9 +1100,20 @@ enum LocalViewNavigationPolicy {
     }
 
     /// The Move View control shows only when it's wanted and would work.
-    static func showsMoveView(controlVisible: Bool, localNavigationAllowed: Bool, videoEnabled: Bool) -> Bool {
-        controlVisible && allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
-                                                videoEnabled: videoEnabled)
+    /// Window view never offers it: the pane chrome is placed on the
+    /// un-zoomed picture, so a whole-picture zoom would separate the
+    /// outlines from where clicks land (#92). Panes zoom individually there.
+    static func showsMoveView(controlVisible: Bool, localNavigationAllowed: Bool, videoEnabled: Bool,
+                              windowViewActive: Bool = false) -> Bool {
+        controlVisible && allowsMoveView(windowViewActive: windowViewActive)
+            && allowsViewportChanges(localNavigationAllowed: localNavigationAllowed,
+                                     videoEnabled: videoEnabled)
+    }
+
+    /// Whether Move View may be turned on at all, by the control or any
+    /// other path; false while Window view is active.
+    static func allowsMoveView(windowViewActive: Bool) -> Bool {
+        !windowViewActive
     }
 }
 

@@ -31,6 +31,25 @@ object VideoInteractionPolicy {
 }
 
 /**
+ * The picture frame while it eases toward [target] (the Mac's text caret moved while the keyboard is
+ * up): [shown] is where it is drawn right now. [target] names the end state the ease belongs to, so
+ * an ease the viewport has since moved on from is never applied.
+ */
+data class EasedPictureFrame(val target: CGRect, val shown: CGRect)
+
+/**
+ * The transform actually presented at this moment. The chrome (outlines, pills, dividers), the cursor
+ * and every touch map through this one result, so a tap lands on what is drawn under the finger
+ * (issue #92). Outside an ease it is the end-state transform itself.
+ */
+object PresentedViewport {
+    fun transform(end: RemoteViewportTransform, eased: EasedPictureFrame?): RemoteViewportTransform {
+        if (eased == null || eased.target != end.displayedRect || eased.shown == end.displayedRect) return end
+        return RemoteViewportTransform(end.remoteCrop, eased.shown, end.rotationRadians)
+    }
+}
+
+/**
  * Begin-only hit admission: moving outside never cancels an admitted
  * sequence, while an outside begin can never enter the input pipeline later.
  */

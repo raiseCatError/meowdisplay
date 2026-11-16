@@ -85,6 +85,58 @@ class ReceiverSurfaceInputTest {
         surface.touches(SurfaceTouchPhase.Ended, listOf(finger(1, to.first.x, to.first.y), finger(2, to.second.x, to.second.y)), t0 + 0.016 * (steps + 1))
     }
 
+    private fun firstPointerMove(): JsonObject =
+        link.sent.first { it["type"]!!.jsonPrimitive.content == "pointer" && it["action"]!!.jsonPrimitive.content == "move" }
+
+    @Test
+    fun aTapMidEaseMapsThroughThePresentedFrameAndMatchesTheEndStateOnceTheEaseIsDone() {
+        // The keyboard-open picture eases to follow the caret: it ends at y = 0 but is drawn 100 pt higher.
+        val end = CGRect(0.0, 0.0, 1000.0, 600.0)
+        val drawn = CGRect(0.0, -100.0, 1000.0, 600.0)
+        surface.updateBase(RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), end), video)
+        surface.easedPictureFrame = EasedPictureFrame(target = end, shown = drawn)
+
+        tap(500.0, 300.0, 1.0)
+        surface.poll(1.5)
+        // The finger is on the pixel drawn under it: (300 + 100) / 600 down the picture, not 0.5.
+        assertEquals(0.5, firstPointerMove().num("x"), 1e-9)
+        assertEquals(400.0 / 600.0, firstPointerMove().num("y"), 1e-9)
+
+        link.sent.clear()
+        surface.easedPictureFrame = null
+        tap(500.0, 300.0, 2.0)
+        surface.poll(2.5)
+        assertEquals(0.5, firstPointerMove().num("y"), 1e-9)
+        assertEquals(surface.currentTransform, surface.presentedTransform)
+    }
+
+    @Test
+    fun anEaseTheViewportHasMovedOnFromIsNotAppliedToTouches() {
+        val end = CGRect(0.0, 0.0, 1000.0, 600.0)
+        surface.updateBase(RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), end), video)
+        surface.easedPictureFrame = EasedPictureFrame(target = CGRect(0.0, 50.0, 1000.0, 600.0), shown = CGRect(0.0, 20.0, 1000.0, 600.0))
+        assertEquals(surface.currentTransform, surface.presentedTransform)
+        assertEquals(0.5, surface.remotePoint(CGPoint(500.0, 300.0))!!.y, 1e-9)
+    }
+
+    @Test
+    fun aTapAdmissionAndPaneSelectionUseThePresentedFrameMidEase() {
+        val end = CGRect(0.0, 0.0, 1000.0, 600.0)
+        val drawn = CGRect(0.0, 100.0, 1000.0, 500.0)
+        surface.updateBase(RemoteViewportTransform(CGRect(0.0, 0.0, 1.0, 1.0), end), video)
+        surface.easedPictureFrame = EasedPictureFrame(target = end, shown = drawn)
+
+        // y = 50 is on the end-state picture but above the drawn one: not on the Mac's picture, so no input.
+        tap(500.0, 50.0, 1.0)
+        surface.poll(1.5)
+        assertTrue(link.sent.none { it["type"]!!.jsonPrimitive.content == "pointer" })
+
+        // Pane selection normalizes to the drawn frame: y = 350 is 250 / 500 of the way down it.
+        effects.paneTouches.clear()
+        tap(500.0, 350.0, 2.0)
+        assertEquals(0.5, effects.paneTouches.single().y, 1e-9)
+    }
+
     @Test
     fun aTapIsOneLeftClickAtTheTouchedPoint() {
         tap(500.0, 300.0, 1.0)
