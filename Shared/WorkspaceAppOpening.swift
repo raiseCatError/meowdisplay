@@ -490,6 +490,14 @@ struct WorkspaceAppFirst: Equatable, Sendable {
         return true
     }
 
+    /// What this device saves as `host`'s layout: during Open Fullscreen on that Mac, the layout
+    /// from before it (the single app pane lives only in memory), so a relaunch, a crash or
+    /// another Mac never loses the person's panes. Otherwise the layout as it is.
+    static func layoutToPersist(_ layout: WorkspaceLayout, session: WorkspaceAppFirst?, host: String) -> WorkspaceLayout {
+        guard let session, session.host == host else { return layout }
+        return session.previous.layout
+    }
+
     /// The short note that touch reaches the Mac as mouse and trackpad input (not multitouch):
     /// true the first time on this install, then never again.
     static let inputNoteKey = "workspace.appFirstInputNoteShown"

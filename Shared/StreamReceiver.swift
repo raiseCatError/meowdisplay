@@ -3675,7 +3675,7 @@ final class StreamReceiver: ObservableObject {
         guard connected,
               macProtocolVersion >= WireProtocol.displayModeWireVersion,
               videoEnabled || mode == .mirror,
-              displayModeRequestState.request(mode) else { return false }
+              displayModeRequestState.request(mode, leavingWindow: windowModeActive) else { return false }
         pendingDisplayMode = displayModeRequestState.pendingMode
         controlResetGeneration &+= 1
         sendCancelActiveInput()

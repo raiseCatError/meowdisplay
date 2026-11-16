@@ -2776,7 +2776,7 @@ final class ReceiverModel: ObservableObject {
         workspace.send = { [weak receiver] message in receiver?.sendWorkspace(message) ?? false }
         workspace.clipboard.platform = IOSClipboardPlatform.shared
         workspace.requestWindowMode = { [weak receiver] in _ = receiver?.requestWindowMode() }
-        workspace.requestDisplayMode = { [weak receiver] mode in _ = receiver?.requestDisplayMode(mode) }
+        workspace.requestDisplayMode = { [weak receiver] mode in receiver?.requestDisplayMode(mode) ?? false }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
         workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
         workspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
