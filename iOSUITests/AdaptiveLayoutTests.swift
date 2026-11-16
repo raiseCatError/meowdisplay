@@ -4,6 +4,9 @@ import XCTest
 /// with the demo stream up, in portrait and in landscape, the controls stay inside the window
 /// and usable, and Settings opens and closes. Screenshots of each state are kept for review.
 final class AdaptiveLayoutTests: XCTestCase {
+    /// How long the most recent `timed` query took.
+    private var lastQuerySeconds: TimeInterval = 0
+
     override func setUp() {
         continueAfterFailure = false
     }
@@ -52,9 +55,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         // the stream first, as a person would: that always reveals the tray and restarts the
         // countdown. Then tap Settings as soon as it can be reached.
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
-        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable after a touch")
+        waitForReachableSettings(app, "demo stream")
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
@@ -99,11 +100,7 @@ final class AdaptiveLayoutTests: XCTestCase {
     @MainActor
     private func openSettings(_ app: XCUIApplication) {
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        wakeControls(app)
-        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
-        if woke != .completed { reportReachableControls(app, "settings-not-reachable") }
-        XCTAssertEqual(woke, .completed, "Settings is reachable after a touch")
+        waitForReachableSettings(app, "open settings")
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5))
@@ -220,15 +217,21 @@ final class AdaptiveLayoutTests: XCTestCase {
         for orientation in orientations {
             XCUIDevice.shared.orientation = orientation
             sleep(1)
-            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            // Before the queries that may stall: what the screen showed (no snapshot needed).
+            keepScreen("orientation-\(orientation.rawValue)-before-queries")
+            timed("wake tap (\(orientation.rawValue))") {
+                app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            }
             sleep(1)
-            let window = app.windows.firstMatch.frame
+            let window = timed("window.frame (\(orientation.rawValue))") { app.windows.firstMatch.frame }
             XCTAssertFalse(window.isEmpty)
             print("AdaptiveLayout: requested \(orientation.rawValue), window \(window)")
             for name in ["Exit Demo", "Settings"] {
                 let control = app.descendants(matching: .any)[name].firstMatch
-                XCTAssertTrue(control.waitForExistence(timeout: 5), "\(name) after requesting \(orientation.rawValue)")
-                XCTAssertTrue(window.contains(control.frame),
+                let exists = timed("\(name).waitForExistence (\(orientation.rawValue))") { control.waitForExistence(timeout: 5) }
+                XCTAssertTrue(exists, "\(name) after requesting \(orientation.rawValue) (waited \(String(format: "%.1f", lastQuerySeconds)) s)")
+                let frame = timed("\(name).frame (\(orientation.rawValue))") { control.frame }
+                XCTAssertTrue(window.contains(frame),
                               "\(name) lies inside the window after requesting \(orientation.rawValue)")
             }
             keep(app, "orientation-\(orientation.rawValue)")
@@ -294,19 +297,113 @@ final class AdaptiveLayoutTests: XCTestCase {
         window.coordinate(withNormalizedOffset: offset).tap()
     }
 
-    /// On a failure to reach Settings: which controls can be reached, and a kept screenshot.
-    @MainActor
-    private func reportReachableControls(_ app: XCUIApplication, _ name: String) {
-        let hittable = app.buttons.allElementsBoundByIndex
-            .filter { $0.exists && $0.isHittable }
-            .map { "\($0.label)@\(Int($0.frame.midX)),\(Int($0.frame.midY))" }
-        print("AdaptiveLayout: \(name): reachable buttons \(hittable)")
-        // Where Settings and Keyboard are, and why they can't be reached (frame, hittable, type).
-        for line in app.debugDescription.split(separator: "\n")
-        where line.contains("'Settings'") || line.contains("'Keyboard'") || line.contains("Gear") {
-            print("AdaptiveLayout: \(name): tree \(line.trimmingCharacters(in: .whitespaces))")
+    // MARK: - Stall diagnostics
+    //
+    // Twice in one CI run an accessibility query stalled (4 s on one run, 215 s on the other)
+    // while the screen looked fine. Whether the app's main thread or the CI host stalls is
+    // not known, so the queries these tests make are timed, printed with a UTC wall-clock
+    // time (to line up with the host's own log), and a slow one is followed by a probe: a
+    // screenshot and `app.state`, which the host answers without the app's main thread, and a
+    // trivial query, which the app has to answer. Slow screenshot too: the host. Fast
+    // screenshot, slow query: the app (or its accessibility service). Nothing here relaxes an
+    // assertion.
+
+    /// A first query longer than this is a stalled snapshot, not a missing control.
+    private static let stalledFirstQuery: TimeInterval = 4
+    /// A query longer than this gets a screenshot and the probe.
+    private static let slowQuery: TimeInterval = 10
+    /// How long Settings may take to become hittable, re-waking the controls between polls.
+    private static let settingsDeadline: TimeInterval = 30
+
+    private static func clock() -> String { Date().ISO8601Format(.iso8601(timeZone: .gmt, includingFractionalSeconds: true)) }
+
+    /// What the first slow query of a failure says, ahead of the failure's own message.
+    private static func stallPrefix(_ firstQuery: TimeInterval?) -> String {
+        guard let firstQuery, firstQuery > stalledFirstQuery else { return "" }
+        return "snapshot stalled (first query took \(String(format: "%.1f", firstQuery)) s): "
+    }
+
+    /// Runs one accessibility query (or a few that belong together), prints how long it took
+    /// and when, and returns its result. `lastQuerySeconds` keeps the duration.
+    @MainActor @discardableResult
+    private func timed<T>(_ label: String, _ query: () -> T) -> T {
+        let started = Date()
+        let result = query()
+        let seconds = Date().timeIntervalSince(started)
+        lastQuerySeconds = seconds
+        print("AdaptiveLayout: query \(label): \(String(format: "%.2f", seconds)) s at \(Self.clock())")
+        if seconds > Self.slowQuery {
+            print("AdaptiveLayout: SLOW query \(label): \(String(format: "%.1f", seconds)) s")
+            probeAfterSlowQuery(label)
         }
-        keep(app, name)
+        return result
+    }
+
+    /// A screenshot of the whole screen (no accessibility snapshot: it works when one stalls).
+    @MainActor
+    private func keepScreen(_ name: String) {
+        let started = Date()
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        print("AdaptiveLayout: screen \(name): \(String(format: "%.2f", Date().timeIntervalSince(started))) s at \(Self.clock())")
+    }
+
+    @MainActor
+    private func probeAfterSlowQuery(_ label: String) {
+        keepScreen("slow-query-\(label)")
+        let app = XCUIApplication()
+        var started = Date()
+        let state = app.state.rawValue
+        let stateSeconds = Date().timeIntervalSince(started)
+        started = Date()
+        let windows = app.windows.count
+        let querySeconds = Date().timeIntervalSince(started)
+        print("AdaptiveLayout: probe after \(label): app.state \(state) in \(String(format: "%.2f", stateSeconds)) s; "
+              + "app.windows.count \(windows) in \(String(format: "%.2f", querySeconds)) s at \(Self.clock())")
+    }
+
+    /// Wakes the controls, then polls until Settings is hittable or the deadline passes,
+    /// waking the controls again between polls (they fade after a few idle seconds, and a
+    /// slow simulator can use that up). Settings must still be hittable, as before; only the
+    /// time allowed is longer, so a slow query is not mistaken for a missing control.
+    @MainActor
+    private func waitForReachableSettings(_ app: XCUIApplication, _ context: String) {
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        let deadline = Date().addingTimeInterval(Self.settingsDeadline)
+        var firstQuery: TimeInterval?
+        var polls = 0
+        var reachable = false
+        timed("wake (\(context))") { wakeControls(app) }
+        while true {
+            polls += 1
+            reachable = timed("Settings.isHittable (\(context), poll \(polls))") { settings.exists && settings.isHittable }
+            if firstQuery == nil { firstQuery = lastQuerySeconds }
+            if reachable || Date() >= deadline { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+            timed("wake (\(context), poll \(polls))") { wakeControls(app) }
+        }
+        let stalled = Self.stallPrefix(firstQuery)
+        if !reachable { reportReachableControls(app, "settings-not-reachable-\(context)", firstQuery: firstQuery) }
+        XCTAssertTrue(reachable, "\(stalled)Settings is reachable after a touch (\(context); \(polls) polls in "
+                      + "\(Int(Self.settingsDeadline)) s)")
+    }
+
+    /// On a failure to reach Settings: the controls the tree lists and where Settings and
+    /// Keyboard are, from one `debugDescription` (one snapshot, not one per element), and one
+    /// screenshot without a snapshot.
+    @MainActor
+    private func reportReachableControls(_ app: XCUIApplication, _ name: String, firstQuery: TimeInterval? = nil) {
+        let prefix = Self.stallPrefix(firstQuery)
+        let tree = timed("app.debugDescription (\(name))") { app.debugDescription }
+        let lines = tree.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let buttons = lines.filter { $0.hasPrefix("Button,") }
+        print("AdaptiveLayout: \(prefix)\(name): \(buttons.count) buttons in the tree")
+        for line in lines where line.contains("'Settings'") || line.contains("'Keyboard'") || line.contains("Gear") {
+            print("AdaptiveLayout: \(prefix)\(name): tree \(line)")
+        }
+        keepScreen(name)
     }
 
     /// Polls `condition` (no fixed sleep) until it holds or `timeout` passes.
@@ -325,12 +422,7 @@ final class AdaptiveLayoutTests: XCTestCase {
     /// that faded before the check can never pass by checking nothing.
     @MainActor
     private func assertControlsAvoidFold(_ app: XCUIApplication, band: CGRect, _ context: String) {
-        let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        wakeControls(app)
-        let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
-        let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
-        if woke != .completed { reportReachableControls(app, "settings-not-reachable-\(context)") }
-        XCTAssertEqual(woke, .completed, "Settings is reachable (\(context))")
+        waitForReachableSettings(app, context)
         let window = app.windows.firstMatch.frame
         // Half a point of rounding either way: frames come back in fractional points.
         let fold = band.insetBy(dx: 0.5, dy: 0.5)
