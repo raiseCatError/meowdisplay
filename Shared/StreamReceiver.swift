@@ -4767,6 +4767,19 @@ final class StreamReceiver: ObservableObject {
             lastRequest = now
             return true
         }
+
+        /// Like `shouldSend`, but a request that falls inside the window is
+        /// not lost: returns the seconds until the window closes (nil means
+        /// "send now", and the send is recorded). For a request the host
+        /// cannot re-raise later, such as the one-per-generation
+        /// stale-compressed-frame discard.
+        func sendNowOrDelay(now: Date, minimumInterval: TimeInterval) -> TimeInterval? {
+            lock.lock(); defer { lock.unlock() }
+            let elapsed = now.timeIntervalSince(lastRequest)
+            guard elapsed > minimumInterval else { return minimumInterval - elapsed + 0.05 }
+            lastRequest = now
+            return nil
+        }
     }
 
     private let keyframeThrottle = KeyframeThrottle()
@@ -5702,12 +5715,23 @@ final class StreamReceiver: ObservableObject {
                 },
                 // A delayed (A/V Sync) frame was dropped still compressed after
                 // Resync/reset: later P-frames have no reference until an IDR.
-                // Same 1 s throttle as the other keyframe requests.
+                // Same 1 s throttle as the other keyframe requests, but this
+                // one fires once per generation, so a request that lands
+                // inside the window is retried when the window closes (the
+                // earlier request's IDR may be one of the dropped frames).
                 compressedFrameDiscardedBeforeDecode: {
                     queue.async {
-                        guard keyframeThrottle.shouldSend(now: Date(), minimumInterval: 1.0) else { return }
-                        Log.info("requesting keyframe (stale compressed frame dropped before decode)")
-                        Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                        let send: @Sendable () -> Void = {
+                            Log.info("requesting keyframe (stale compressed frame dropped before decode)")
+                            Self.sendControl(["type": "kf"], sendTargetBox: sendTargetBox)
+                        }
+                        guard let wait = keyframeThrottle.sendNowOrDelay(now: Date(), minimumInterval: 1.0) else {
+                            return send()
+                        }
+                        queue.asyncAfter(deadline: .now() + wait) {
+                            guard keyframeThrottle.shouldSend(now: Date(), minimumInterval: 1.0) else { return }
+                            send()
+                        }
                     }
                 }))
     }
