@@ -45,6 +45,8 @@ struct ReceiverScreen: View {
     @State private var showPairedToast = false
     @State private var showOnboarding = false
     @State private var nagDismissed = false
+    /// The one-time "Use less data" suggestion (#123).
+    @State private var showDataSuggestion = false
     @State private var keyboardVisibleRect: CGRect?
     /// The picture's keyboard-adjusted rect in the video surface's
     /// coordinates while the on-screen keyboard moves it; see
@@ -1047,6 +1049,18 @@ struct ReceiverScreen: View {
         } message: {
             Text("Mirror requires an active physical display.")
         }
+        // Asked once per mobile-data episode, never blocking: the stream
+        // keeps running whatever the answer, and the answer stays
+        // changeable in Settings ▸ Display ▸ Use Less Data.
+        .alert("This connection may use mobile data. Save data automatically?", isPresented: $showDataSuggestion) {
+            Button("Yes") { ReceiverAdaptiveState.shared.recordSuggestion(answer: .saveData).save() }
+            Button("No", role: .cancel) { ReceiverAdaptiveState.shared.recordSuggestion(answer: .keepQuality).save() }
+        } message: {
+            Text("You can change this later in Settings ▸ Display ▸ Use Less Data.")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ReceiverAdaptiveState.suggestionNotification)) { _ in
+            showDataSuggestion = true
+        }
         .task { await versionGate.check() }
         // Merge the connected Mac's compatibility signal into the same gate.
         .onReceive(model.receiver.$peerSignal) { versionGate.applyPeer($0) }
@@ -1059,6 +1073,7 @@ struct ReceiverScreen: View {
             switch phase {
             case .active:
                 model.sceneDidActivate()
+                ReceiverModel.publishEffectiveRefresh()
                 // Copied in another app meanwhile? (Reading may make iOS ask; see Settings ▸ Clipboard.)
                 model.workspace.clipboard.checkLocal(automatic: true)
             case .background:
@@ -2524,6 +2539,14 @@ enum iOSDecodeCeiling {
 
 @MainActor
 final class ReceiverModel: ObservableObject {
+    /// The screen's current effective refresh (Low Power Mode holds
+    /// ProMotion at 60), for hello's `effHz` (#123).
+    static func publishEffectiveRefresh() {
+        ReceiverAdaptiveState.shared.setEffectiveRefresh(ReceiverEffectiveRefresh.resolve(
+            maximumFramesPerSecond: ActiveScene.screen.maximumFramesPerSecond,
+            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled))
+    }
+
     let receiver: StreamReceiver
     /// Window mode: this device's arrangement of Mac windows (PROTOCOL.md 6.10).
     let workspace = WorkspaceModel()
@@ -2673,6 +2696,14 @@ final class ReceiverModel: ObservableObject {
                                   maxEncodeWide: iOSDecodeCeiling.maxEncodeWide,
                                   maxEncodeHigh: iOSDecodeCeiling.maxEncodeHigh,
                                   maxFPS: ActiveScene.screen.maximumFramesPerSecond)
+        // Adaptive streaming (#123): "Use less data" and this screen's
+        // effective refresh ride on hello; Low Power Mode changes re-send it.
+        ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load(), suggestionsEnabled: true)
+        Self.publishEffectiveRefresh()
+        NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil,
+                                               queue: .main) { _ in
+            Task { @MainActor in ReceiverModel.publishEffectiveRefresh() }
+        }
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
         // Announce the native panel size to the Mac.

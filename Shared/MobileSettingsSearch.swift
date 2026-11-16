@@ -113,6 +113,7 @@ enum MobileSettingsSearchIndex {
         .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "fps"]),
         .init("streamingPriority", String(localized: "Streaming Priority"), .display, keywords: ["priority", "latency", "balanced", "smoothness", "smooth", "delay", "lag"]),
         .init("maxFPS", String(localized: "Enforce Maximum FPS"), .display, keywords: ["frame rate", "fps", "limit"]),
+        .init("useLessData", String(localized: "Use Less Data"), .display, keywords: ["mobile data", "cellular", "low data mode", "metered", "hotspot", "save data", "full quality"]),
         // Input
         .init("control", String(localized: "Control"), .input, keywords: ["request control", "request input", "allow input", "permission"]),
         .init("inputMode", String(localized: "Input Mode"), .input, keywords: ["direct touch", "trackpad", "pointer", "mouse"]),
