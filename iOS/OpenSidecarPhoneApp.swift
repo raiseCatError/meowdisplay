@@ -2765,6 +2765,9 @@ final class ReceiverModel: ObservableObject {
                                   maxFPS: ActiveScene.screen.maximumFramesPerSecond)
         wakeConnect = WakeConnectCoordinator(receiver: receiver)
         pictureInPicture = ReceiverPictureInPictureController(displayLayer: receiver.displayLayer)
+        // A one-tap step due while the app resigns active stops at once, before SwiftUI's
+        // scenePhase closes the input surface (`StreamReceiver.applicationIsActive`).
+        receiver.applicationIsActive = { UIApplication.shared.applicationState == .active }
         // Announce the native panel size to the Mac.
         let native = ActiveScene.screen.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
