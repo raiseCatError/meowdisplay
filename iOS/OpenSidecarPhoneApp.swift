@@ -282,6 +282,7 @@ struct ReceiverScreen: View {
         let host = model.workspace.hostName
         return KeptSessionHome(macName: host.isEmpty ? String(localized: "your Mac") : host,
                                interruption: model.receiver.session.interruption,
+                               clipboard: model.workspace.clipboard,
                                onResume: { model.resumeSession() })
     }
 
@@ -1613,7 +1614,27 @@ struct KeptSessionHome {
     let macName: String
     /// The session's interruption, if any, titles the card instead.
     let interruption: ReceiverSessionInterruption?
+    /// Its clipboard sharing, for the card's note (`KeptSessionClipboardNote`).
+    let clipboard: ClipboardModel
     let onResume: () -> Void
+}
+
+/// One line under the kept-session card's title while copies still go to the Mac on their own.
+private struct KeptSessionClipboardNoteView: View {
+    @ObservedObject var clipboard: ClipboardModel
+    let macName: String
+
+    var body: some View {
+        if let text = KeptSessionClipboardNote.text(keptSession: true, canSendToMac: clipboard.canSendToMac,
+                                                    autoSend: clipboard.autoSend, macName: macName) {
+            Label(text, systemImage: "doc.on.clipboard")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("keptSessionClipboardNote")
+        }
+    }
 }
 
 /// The home screen. Three things, top to bottom: who this is and one short
@@ -2325,6 +2346,7 @@ struct IdleView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityElement(children: .combine)
             }
+            KeptSessionClipboardNoteView(clipboard: kept.clipboard, macName: kept.macName)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { keptSessionButtons(kept) }
                 VStack(spacing: 8) { keptSessionButtons(kept) }
