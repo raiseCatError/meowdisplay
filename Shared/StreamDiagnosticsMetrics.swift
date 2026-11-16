@@ -176,7 +176,7 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
             return .init(id: "receiver.restart.frame_gap_ms", unit: "ms", side: .receiver,
                          source: "Last frame arrival before a presentation generation change to the first arrival after it (StreamDiagnosticsRecorder.noteGeneration)",
                          timebase: .localMonotonic,
-                         caveat: "One sample per restart (resync, reconnect). The arrival interval restarts its baseline at a restart, so this gap is not in it.")
+                         caveat: "One sample per resync inside a session. A full reconnect resets the receiver's recorder and records no sample. The arrival interval restarts its baseline at a resync, so this gap is not in it.")
         case .frameIDUniqueInterval:
             return .init(id: "receiver.frame_id.unique_interval_ms", unit: "ms", side: .receiver,
                          source: "PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID (ReceiverVideoPresenter.presentDecoded)",
