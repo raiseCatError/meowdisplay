@@ -83,8 +83,22 @@ enum PendingConnectPolicy {
         let admitted: Bool
         let failed: Bool
         let status: String
-        /// Sender-initiated with an `automatic` invitation.
+        /// An attempt this Mac started on its own that an explicit Connect
+        /// replaces (`replacedByExplicitConnect`). Only then does the row
+        /// offer Connect Now.
         let automatic: Bool
+
+        /// The row's `automatic`, from the same rule the tap goes through
+        /// (`ExplicitConnectAdmission`): a sender-initiated `automatic`
+        /// invitation that isn't admitted, failed or a continuation. A
+        /// continuation of such an attempt (a Mac-wide rebuild) still carries
+        /// the automatic invitation, but the admission keeps it, so a Connect
+        /// Now there would be absorbed and do nothing.
+        static func replacedByExplicitConnect(failed: Bool, admitted: Bool, invitation: SessionInvitation,
+                                              isContinuation: Bool) -> Bool {
+            ExplicitConnectAdmission.decide(existing: .init(failed: failed, admitted: admitted, invitation: invitation,
+                                                            isContinuation: isContinuation)) == .replace
+        }
     }
 
     /// The row state for `peerID`. A working session wins over a pending

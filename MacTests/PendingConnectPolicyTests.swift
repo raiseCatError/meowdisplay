@@ -192,4 +192,72 @@ final class PendingConnectPolicyTests: XCTestCase {
         let explicit = connection([session("remote:phone", intended: peer, automatic: false)])
         XCTAssertFalse(actions(explicit).offersConnect)
     }
+
+    // MARK: - Row and admission agree (#128 review C4)
+
+    private func invitation(_ initiator: SessionRole, _ intent: SessionInvitationIntent) -> SessionInvitation {
+        SessionInvitation(initiator: initiator, intent: intent, mode: .extend)
+    }
+
+    /// A Mac-wide rebuild (`restartAll`) during an unadmitted automatic dial
+    /// makes a continuation that still carries the automatic invitation. The
+    /// admission keeps it, so its row offers Cancel only, never a Connect Now
+    /// whose tap would be absorbed.
+    func testConnectNowOfferedOnlyWhenExplicitConnectWouldReplace() {
+        let automatic = invitation(.sender, .automatic)
+        let continuation = PendingConnectPolicy.SessionSnapshot.replacedByExplicitConnect(
+            failed: false, admitted: false, invitation: automatic, isContinuation: true)
+        XCTAssertFalse(continuation)
+        let row = connection([session("wifi:Phone", intended: peer, automatic: continuation)])
+        XCTAssertEqual(actions(row), .init(offersConnect: false, connectReplacesAutomaticAttempt: false, offersCancel: true))
+
+        let fresh = PendingConnectPolicy.SessionSnapshot.replacedByExplicitConnect(
+            failed: false, admitted: false, invitation: automatic, isContinuation: false)
+        XCTAssertTrue(fresh, "the original automatic attempt still offers Connect Now")
+        XCTAssertTrue(actions(connection([session("wifi:Phone", intended: peer, automatic: fresh)])).connectReplacesAutomaticAttempt)
+    }
+
+    /// Negative, over every session state: no row offers a Connect that
+    /// `ExplicitConnectAdmission` would absorb (`.keep`), and every dial the
+    /// admission would replace still offers its Connect Now. Built the
+    /// way the controller builds snapshots, from the same session facts.
+    func testNoRowOffersAConnectTheAdmissionWouldIgnore() {
+        var checked = 0
+        for failed in [false, true] {
+            for admitted in [false, true] {
+                for authenticated in [false, true] {
+                    for isContinuation in [false, true] {
+                        for initiator in [SessionRole.sender, .receiver] {
+                            for intent in [SessionInvitationIntent.manual, .automatic] {
+                                let inv = invitation(initiator, intent)
+                                let decision = ExplicitConnectAdmission.decide(existing: .init(
+                                    failed: failed, admitted: admitted, invitation: inv, isContinuation: isContinuation))
+                                let snapshot = session("wifi:Phone", intended: peer, authenticated: authenticated,
+                                                       admitted: admitted, failed: failed,
+                                                       automatic: PendingConnectPolicy.SessionSnapshot.replacedByExplicitConnect(
+                                                           failed: failed, admitted: admitted, invitation: inv,
+                                                           isContinuation: isContinuation))
+                                let row = connection([snapshot])
+                                let offered = actions(row)
+                                let label = "failed=\(failed) admitted=\(admitted) auth=\(authenticated) "
+                                    + "continuation=\(isContinuation) \(initiator) \(intent) → \(row)"
+                                if offered.offersConnect {
+                                    XCTAssertNotEqual(decision, .keep, "Connect offered but the tap would be absorbed: \(label)")
+                                }
+                                if offered.connectReplacesAutomaticAttempt {
+                                    XCTAssertEqual(decision, .replace, label)
+                                }
+                                if decision == .replace, case .connecting = row {
+                                    XCTAssertTrue(offered.connectReplacesAutomaticAttempt,
+                                                  "a replaceable dial must keep its Connect Now: \(label)")
+                                }
+                                checked += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(checked, 64)
+    }
 }
