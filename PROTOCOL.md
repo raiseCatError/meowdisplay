@@ -2723,11 +2723,13 @@ A hello sent for another reason carries the current values and resets that inter
   through a tunnel "not expensive" is `unknown`. Class and flags only: never an SSID, address,
   interface name or carrier. Missing or invalid `cost`/`conf`: the hint is ignored; an invalid
   `iface` reads as `unknown`.
-- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting. Only a receiver
-  that has the setting sends it (iOS). The Mac Receiver has none and sends neither this key nor
-  `saveDataAnswer`: absent = today's behaviour (never data-saving).
+- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting. iOS and the Mac
+  Receiver send it (Automatic until the user picks another value). Absent (a build that predates the
+  setting, Android) = today's behaviour (never data-saving).
 - `saveDataAnswer` (`"saveData"` or `"keepQuality"`): the remembered answer to the one-time
-  suggestion, or the explicit full-quality choice in Settings. Absent: not answered.
+  suggestion, or the explicit full-quality choice in Settings. Absent: not answered. Only iOS sends
+  it: the Mac Receiver has no mobile-data suggestion, so in Automatic it saves data only on clear Low
+  Data Mode (at either end).
 
 **Mac `ping`**: `"adaptive":1` while the Mac runs the adaptive controller for this session (the
 Mac's Adaptive Automatic (Beta) switch is on and its Streaming Mode is Automatic). Any other value

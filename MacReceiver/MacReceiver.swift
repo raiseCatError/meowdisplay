@@ -28,6 +28,14 @@ final class ReceiverController: ObservableObject {
             lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled))
     }
 
+    /// "Use less data" (#123) for hello: the stored setting (Automatic until
+    /// the user picks another), preference only (no mobile-data prompt on a
+    /// Mac). A change re-sends hello through the receiver's debounced gate.
+    static func publishUseLessData() {
+        ReceiverAdaptiveState.shared.setSettings(UseLessDataSettings.load(), suggestionsEnabled: false,
+                                                 reporting: .preferenceOnly)
+    }
+
     /// Window mode: this Mac's arrangement of the sending Mac's windows.
     let workspace = WorkspaceModel()
 
@@ -162,9 +170,10 @@ final class ReceiverController: ObservableObject {
                                       fallbackServiceName: fallbackName,
                                       maxEncodeWide: 4096, maxEncodeHigh: 2304,
                                       maxFPS: NSScreen.screens.first?.maximumFramesPerSecond)
-        // Adaptive streaming (#123): this screen's effective refresh rides on
-        // hello (no "Use less data" prompt here: Automatic, no suggestion).
+        // Adaptive streaming (#123): this screen's effective refresh and the
+        // "Use less data" setting ride on hello (no mobile-data prompt here).
         Self.publishEffectiveRefresh()
+        Self.publishUseLessData()
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)
