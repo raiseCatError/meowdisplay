@@ -173,11 +173,17 @@ final class LiveDisplayOverviewQATests: XCTestCase {
                 // The Mac answers by its policy for this device: a prompt for the owner, or a silent grant when the
                 // device is always allowed. Tapping it closes Stage Peek here, so reopen Stage Peek and look again.
                 print("LiveOverview: control requested; waiting up to 120 s for control (owner approval or the Mac's policy)")
+                // Control has arrived when the gallery's "Request Control for more actions" note is gone (checked at
+                // the top of a freshly opened gallery, where the note sits; no scrolling while waiting).
+                let note = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Request Control for more actions'")).firstMatch
+                let close = app.buttons["stagePeekClose"]
                 let granted = waitUntil(120) {
-                    if !app.buttons["stagePeekClose"].exists { try? openStagePeekInWindowMode(app) }
-                    return scrollTo(arrange, in: app)
+                    if !close.exists { try? openStagePeekInWindowMode(app) }
+                    return close.exists && !note.exists
                 }
-                print("LiveOverview: Stage Peek open after the request: \(app.buttons["stagePeekClose"].exists); Arrange… offered: \(granted)")
+                if close.exists { close.tap(); sleep(1) }
+                try openStagePeekInWindowMode(app)
+                print("LiveOverview: control note gone (control granted): \(granted)")
                 snapshot(app, "editor-00-after-control-request")
             } else {
                 snapshot(app, "editor-00-no-request-button")
