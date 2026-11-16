@@ -548,6 +548,10 @@ changes) so the receiver can build a decoder before any packet arrives:
 
 `cookie` is the AAC AudioSpecificConfig (the MPEG-4 "magic cookie") a
 receiver needs to construct a `CMAudioFormatDescription` (or equivalent).
+The iOS and Mac receivers treat a config (or `0x03` PCM config) whose
+`sampleRate` is outside 7350–768000 Hz as malformed and drop it, keeping
+the current audio format; video is unaffected. Every AAC frequency-table
+rate is inside that range, so this changes nothing on the wire.
 
 **`0x02` — packet.** One encoded AAC-LC access unit:
 
