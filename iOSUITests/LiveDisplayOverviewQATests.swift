@@ -161,15 +161,26 @@ final class LiveDisplayOverviewQATests: XCTestCase {
         app.launch()
         try openStagePeekInWindowMode(app)
         let arrange = app.buttons["displayArrangeButton"]
-        if !scrollTo(arrange, in: app), on("MEOW_LIVE_REQUEST_CONTROL") {
-            // Arrange… needs control. Ask the Mac once; the owner approves on the Mac (never from here).
-            let request = app.buttons.matching(NSPredicate(format: "label == 'Request Control' OR label == 'Ask Again'")).firstMatch
-            app.swipeDown(velocity: .slow); app.swipeDown(velocity: .slow)
-            if request.waitForExistence(timeout: 5), request.isHittable {
+        // Arrange… needs control. With the switch on, ask the Mac once from the top of the gallery (before
+        // any scrolling: a downward swipe closes Stage Peek); the owner approves on the Mac, never from here.
+        if on("MEOW_LIVE_REQUEST_CONTROL"), !arrange.exists {
+            // The gallery's own Request Control (a pane's pill behind Stage Peek is not hittable).
+            let candidates = app.buttons.matching(NSPredicate(format: "label == 'Request Control' OR label == 'Ask Again'"))
+            _ = candidates.firstMatch.waitForExistence(timeout: 5)
+            if let request = candidates.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
                 request.tap()
                 snapshot(app, "editor-00-control-requested")
                 print("LiveOverview: control requested; waiting up to 120 s for the owner to approve on the Mac")
-                _ = waitUntil(120) { app.buttons["displayArrangeButton"].exists }
+                // Pending: "Awaiting approval on the Mac…". Approved: the gallery's control note goes away.
+                // Refused or timed out: Ask Again.
+                let note = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Request Control for more actions'")).firstMatch
+                let awaiting = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Awaiting approval'")).firstMatch
+                let askAgain = app.buttons["Ask Again"]
+                let settled = waitUntil(120) { askAgain.exists || (!note.exists && !awaiting.exists) }
+                print("LiveOverview: control request settled=\(settled) refused=\(askAgain.exists)")
+                snapshot(app, "editor-00-after-approval-wait")
+            } else {
+                snapshot(app, "editor-00-no-request-button")
             }
         }
         guard scrollTo(arrange, in: app) else {
