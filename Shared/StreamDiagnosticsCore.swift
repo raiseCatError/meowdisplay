@@ -690,10 +690,13 @@ final class StreamDiagnosticsRecorder: @unchecked Sendable {
     /// A new capture/presentation generation: interval baselines restart
     /// (a reconnect gap is not a stall) and the in-progress window starts over.
     /// The time from the last frame before it to the first frame after it is
-    /// kept as `*.restart.frame_gap_ms`.
+    /// kept as `*.restart.frame_gap_ms`. A window that had already run its
+    /// full length (a silence with no hook) completes first, with its data,
+    /// as at any other hook: only the window in progress starts over.
     func noteGeneration(_ newGeneration: UInt64, at nowMs: Double) {
         guard isEnabled else { return }
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { unlockAndSampleResources() }
+        rotateIfNeeded(nowMs)
         guard generation != newGeneration else { return }
         let first = generation == nil
         generation = newGeneration
