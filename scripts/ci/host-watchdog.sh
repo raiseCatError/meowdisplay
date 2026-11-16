@@ -33,7 +33,9 @@ while :; do
     last_sample=$now
     echo "=== $(stamp) the test log has not grown for $((now - last_change)) s: sampling" >> "$dir/host.log"
     pids=$(pgrep -f "CoreSimulator/Devices/$udid/data/Containers/Bundle/Application" || true)
-    pids="$pids $(pgrep -f "Devices/$udid/.*testmanagerd" || true)"
+    # testmanagerd runs from the simulator runtime, not the device folder: any simulator's will do
+    # (this runner boots one simulator).
+    pids="$pids $(pgrep -x testmanagerd || true)"
     for pid in $pids; do
       name=$(ps -p "$pid" -o comm= 2>/dev/null | xargs -I{} basename {} || true)
       sample "$pid" 5 -mayDie -file "$dir/samples/$(date -u +%H%M%S)-$pid-${name:-unknown}.txt" >/dev/null 2>&1 &

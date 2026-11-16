@@ -460,6 +460,8 @@ jobs:
       # watchdog's log and samples: what a stalled run is diagnosed from.
       - name: Keep the Duo diagnostics
         if: ${{ always() }}
+        # Diagnostics only: an artifact problem must never change the job's (or promotion-gate's) result.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-duo-diagnostics
