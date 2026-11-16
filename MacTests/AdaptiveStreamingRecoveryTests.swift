@@ -780,6 +780,11 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
 
     /// F6 (b), PROTOCOL.md 6.20: while the restart limit holds the raster
     /// part of a data-policy change, its FPS and bitrate parts apply at once.
+    /// #123 churn (deliberate change): this now holds for a change toward
+    /// saving only. A return from saving waits for the dwell and then lands
+    /// whole: when its restart would be held (here the saver restart ran
+    /// late, at 10), the whole return waits for it, one restart, no separate
+    /// FPS and bitrate update first.
     func testADataPolicyChangeHoldsOnlyItsRasterPart() {
         let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
         let fake = RecordingApplier()
@@ -787,17 +792,37 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
         c.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
         c.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
         XCTAssertEqual(c.plan?.fpsCap, AdaptiveStreamingPlanner.saverFPSCap)
-        fake.now = 5
-        c.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 5)
-        XCTAssertEqual(c.appliedDataPolicy, .normal)
-        XCTAssertEqual(c.plan, AdaptiveStreamingPlan(rasterScale: StreamQuality.balanced.scale,
-                                                     bitrate: AdaptiveStreamingLadder.fixedPolicyBitrate,
-                                                     fpsCap: nil, origin: .dataSaver),
-                       "today's FPS and bitrate at once; only the raster waits")
-        XCTAssertEqual(fake.applied.map(\.path), [.captureRestart, .encoderRebuild])
-        fake.now = 20
-        c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(18, 20), now: 20)
+        let saving = c.plan
+        // The saver restart really ran at 10 (the lock screen view held it).
+        c.noteAdaptiveRestartBegan(now: 10)
+        let dwell = AdaptiveStreamingCoordinator.saverMinimumDwellSeconds
+        fake.now = dwell
+        c.helloAccepted(AdaptiveHelloFields(saveData: .off), now: dwell)
+        XCTAssertEqual(c.appliedDataPolicy, .saver, "the return would be split by the restart limit: it waits whole")
+        XCTAssertEqual(c.plan, saving)
+        XCTAssertEqual(fake.applied.map(\.path), [.captureRestart])
+        fake.now = 30
+        c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(28, 30), now: 30)
         XCTAssertNil(c.plan)
-        XCTAssertEqual(fake.times(.captureRestart), [0, 20])
+        XCTAssertEqual(c.appliedDataPolicy, .normal)
+        XCTAssertEqual(fake.applied.map(\.path), [.captureRestart, .captureRestart])
+        XCTAssertEqual(fake.times(.captureRestart), [0, 30])
+        // Saving again one second after that restart: its FPS cap applies at
+        // once, its bitrate after the 4 s encoder limit, its raster after 20 s.
+        fake.now = 31
+        c.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 31)
+        XCTAssertEqual(c.appliedDataPolicy, .saver)
+        XCTAssertEqual(c.plan?.fpsCap, AdaptiveStreamingPlanner.saverFPSCap)
+        XCTAssertEqual(c.plan?.rasterScale, 1)
+        XCTAssertEqual(fake.applied.last?.path, .liveFPSUpdate)
+        var now = 31.0
+        while now < 50 {
+            now += 1
+            fake.now = now
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 1, now), now: now)
+        }
+        XCTAssertEqual(fake.times(.encoderRebuild).last, 35)
+        XCTAssertEqual(fake.times(.captureRestart), [0, 30, 50])
+        XCTAssertEqual(c.plan, c.desiredPlan)
     }
 }

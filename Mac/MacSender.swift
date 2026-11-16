@@ -6189,9 +6189,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // Optional adaptive keys (#123); absent = today's behaviour.
                 // The Mac's own path first, so a first capture already runs
                 // the right data policy (no restart ~2 s later).
-                let adaptiveNow = ProcessInfo.processInfo.systemUptime
-                adaptiveRefreshSenderPath(now: adaptiveNow)
-                adaptive.helloAccepted(AdaptiveHelloFields.parse(obj), now: adaptiveNow)
+                adaptiveHelloAccepted(obj)
                 // Receiver-enforced max FPS (PART 3): load this peer's own
                 // stored preference the first time it's known, same
                 // convention as Extend shape — a live `maxFPSRequest` (or
@@ -9203,12 +9201,20 @@ extension MacSender: AdaptiveStreamingApplying {
         adaptive.senderPathChanged(report, epoch: epoch, now: now)
     }
 
+    /// `queue` only: an accepted hello's optional adaptive keys (#123),
+    /// after the Mac's own path. Absent keys = today's behaviour.
+    fileprivate func adaptiveHelloAccepted(_ object: [String: Any],
+                                           now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        adaptiveRefreshSenderPath(now: now)
+        adaptive.helloAccepted(AdaptiveHelloFields.parse(object), now: now)
+    }
+
     /// `queue` only, once per ping window. With the switch off and no data
     /// saving the coordinator returns at once: the inputs and the window are
     /// autoclosures it never evaluates then.
-    fileprivate func adaptiveTick(capturedFrames: Int, drops: (enc: Int, net: Int)) {
+    fileprivate func adaptiveTick(capturedFrames: Int, drops: (enc: Int, net: Int),
+                                  now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let now = ProcessInfo.processInfo.systemUptime
         let windowStart = adaptiveWindowStart
         adaptiveWindowStart = now
         adaptiveRefreshSenderPath(now: now)
@@ -9412,3 +9418,66 @@ extension MacSender: AdaptiveStreamingApplying {
         }
     }
 }
+
+#if DEBUG
+// MARK: - Adaptive call-site harness (#123 churn)
+//
+// Drives the real hello step, ping-window tick and lock screen view end of
+// this sender's adaptive coordinator with an injected clock, so tests can
+// cover the data-policy dwell and the switch-off state at the call sites.
+extension MacSender {
+    struct AdaptiveCallSiteState: Equatable, Sendable {
+        var plan: AdaptiveStreamingPlan?
+        var desiredPlan: AdaptiveStreamingPlan?
+        /// What the evidence asks for.
+        var requestedDataPolicy: NetworkCost.DataPolicy
+        var appliedDataPolicy: NetworkCost.DataPolicy
+        var hasManagedRaster: Bool
+        var work: AdaptiveStreamingCoordinator.WorkCounters
+        var deferred: AdaptiveApplyPath
+        var monitorWrites: Int
+    }
+
+    /// A hello's optional adaptive keys through `adaptiveHelloAccepted` at `now`.
+    func adaptiveHelloForTesting(_ json: Data, now: TimeInterval) async throws {
+        try await onQueue { sender in
+            let object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
+            sender.adaptiveHelloAccepted(object, now: now)
+        }
+    }
+
+    /// One ping window (`adaptiveTick`) at `now`; `lockScreenShown` starts the
+    /// view's flag first (end it with `endLockScreenViewForTesting`).
+    func adaptiveTickForTesting(now: TimeInterval, lockScreenShown: Bool = false) async throws {
+        try await onQueue { sender in
+            if lockScreenShown { sender.lockScreenActive = true }
+            sender.adaptiveTick(capturedFrames: 120, drops: (0, 0), now: now)
+        }
+    }
+
+    /// Ends the lock screen view the sender's own way (`stopLockScreenView`),
+    /// which applies what the view held.
+    func endLockScreenViewForTesting() async throws {
+        try await onQueue { sender in _ = sender.stopLockScreenView() }
+    }
+
+    /// The live connection's path changed (what `adaptiveRefreshSenderPath`
+    /// passes on for a new route epoch).
+    func adaptiveRouteChangeForTesting(_ report: NetworkCost.EndpointReport, epoch: UInt64,
+                                       now: TimeInterval) async throws {
+        try await onQueue { sender in _ = sender.adaptive.senderPathChanged(report, epoch: epoch, now: now) }
+    }
+
+    var adaptiveCallSiteStateForTesting: AdaptiveCallSiteState {
+        get async throws {
+            try await onQueue { sender in
+                let a = sender.adaptive
+                return AdaptiveCallSiteState(
+                    plan: a.plan, desiredPlan: a.desiredPlan, requestedDataPolicy: a.dataPolicy.policy,
+                    appliedDataPolicy: a.appliedDataPolicy, hasManagedRaster: a.hasManagedRaster, work: a.work,
+                    deferred: sender.adaptiveLockScreenDeferral.pending, monitorWrites: a.monitor.writeCount)
+            }
+        }
+    }
+}
+#endif

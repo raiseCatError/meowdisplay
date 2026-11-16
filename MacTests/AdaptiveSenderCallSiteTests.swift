@@ -91,6 +91,211 @@ final class AdaptiveSenderCallSiteTests: XCTestCase {
         XCTAssertEqual(afterConnectionEnd, .none, "dropped with the connection, never applied on the way out")
     }
 
+    // MARK: - #123 churn, part 3: the switch-off state at the real call sites
+
+    private func helloJSON(_ fields: AdaptiveHelloFields) throws -> Data {
+        var object = fields.wireFields
+        object["type"] = "hello"
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
+    private func report(_ flags: NetworkCost.PathFlags, _ reachability: NetworkCost.Reachability = .local)
+        -> NetworkCost.EndpointReport {
+        NetworkCost.endpointReport(flags, reachability: reachability)
+    }
+
+    /// The state a sender with the switch off and no data saving must keep:
+    /// nothing planned, held, armed or computed, whatever happened.
+    private func assertSwitchOffState(_ state: MacSender.AdaptiveCallSiteState, monitorWrites: Int, _ label: String,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertNil(state.plan, label, file: file, line: line)
+        XCTAssertNil(state.desiredPlan, label, file: file, line: line)
+        XCTAssertEqual(state.appliedDataPolicy, .normal, label, file: file, line: line)
+        XCTAssertFalse(state.hasManagedRaster, label, file: file, line: line)
+        XCTAssertEqual(state.work, AdaptiveStreamingCoordinator.WorkCounters(), "\(label): no adaptive work",
+                       file: file, line: line)
+        XCTAssertEqual(state.deferred, .none, label, file: file, line: line)
+        XCTAssertEqual(state.monitorWrites, monitorWrites, label, file: file, line: line)
+    }
+
+    /// Switch off, no data saving: hellos with and without every optional key
+    /// (and hostile values), route changes with new epochs across Wi-Fi,
+    /// cable and remote with metered and Low Data Mode flags appearing, ticks
+    /// with and without the lock screen view, a reconnect on the same sender
+    /// and a capture start whose noted size disagrees: nothing adaptive runs,
+    /// nothing is held or armed, nothing goes on the wire.
+    func testSwitchOffWithoutDataSavingStaysTodayAcrossHellosRoutesReconnectsAndTheLockScreen() async throws {
+        let (sender, sent, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        let writes = try await sender.adaptiveCallSiteStateForTesting.monitorWrites
+        let wifi = report(.init(usesWiFi: true))
+        let cable = report(.init(usesWired: true))
+        let remote = report(.init(usesWiFi: true), .remote)
+        let metered = report(.init(usesCellular: true, isExpensive: true), .remote)
+        let lowData = report(.init(usesWiFi: true, isExpensive: true, isConstrained: true))
+        let vpnLowData = report(.init(usesWiFi: true, isTunnel: true, isConstrained: true), .remote)
+        let telemetry = AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true)
+        // Each phase pairs hellos with Mac routes that together never ask for
+        // saving (Low Data Mode only counts with `saveData` on or auto).
+        let phases: [(String, [AdaptiveHelloFields], [NetworkCost.EndpointReport])] = [
+            ("no saveData", [AdaptiveHelloFields(), telemetry,
+                             AdaptiveHelloFields(cost: lowData), AdaptiveHelloFields(cost: metered),
+                             AdaptiveHelloFields(effectiveRefreshHz: 60, telemetry: true, cost: vpnLowData)],
+             [wifi, cable, remote, metered, lowData, vpnLowData]),
+            ("saveData off", [AdaptiveHelloFields(saveData: .off), AdaptiveHelloFields(cost: lowData, saveData: .off),
+                              AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true, cost: vpnLowData, saveData: .off)],
+             [wifi, lowData, cable, vpnLowData]),
+            ("saveData auto, nothing clear", [AdaptiveHelloFields(saveData: .auto),
+                                              AdaptiveHelloFields(cost: wifi, saveData: .auto),
+                                              AdaptiveHelloFields(cost: metered, saveData: .auto),
+                                              AdaptiveHelloFields(cost: metered, saveData: .auto, saveDataAnswer: .keepQuality)],
+             [wifi, cable, remote, metered]),
+        ]
+        var now = 1_000.0
+        var epoch: UInt64 = 0
+        var round = 0
+        for (label, hellos, routes) in phases {
+            for hello in hellos {
+                for route in routes {
+                    round += 1
+                    if round == 20 {
+                        // A reconnect on the same sender (a route migration swaps only the socket).
+                        let reHello: [String: Any] = ["type": "hello", "pixelsWide": 2732, "pixelsHigh": 2048,
+                                                      "scale": 2.0, "device": "iPad",
+                                                      "id": "adaptive-call-site-test-ipad", "pv": WireProtocol.version]
+                        _ = try await sender.admitConnectionForTesting(
+                            helloJSON: try JSONSerialization.data(withJSONObject: reHello),
+                            pinnedSPKI: Data([0x30, 0x59]), eventSink: RecordingEventSink(), sent: sent.record)
+                    }
+                    let sentBefore = sent.count
+                    epoch += 1
+                    now += 1
+                    try await sender.adaptiveRouteChangeForTesting(route, epoch: epoch, now: now)
+                    try await sender.adaptiveHelloForTesting(try helloJSON(hello), now: now)
+                    let state = try await sender.adaptiveCallSiteStateForTesting
+                    XCTAssertEqual(state.requestedDataPolicy, .normal, "\(label): the matrix asks for no saving")
+                    now += 2
+                    let lockScreen = round % 3 == 0
+                    try await sender.adaptiveTickForTesting(now: now, lockScreenShown: lockScreen)
+                    if lockScreen { try await sender.endLockScreenViewForTesting() }
+                    try await sender.settleForTesting()
+                    XCTAssertEqual(sent.count, sentBefore, "\(label): nothing on the wire")
+                }
+            }
+        }
+        // Hostile values read as absent.
+        for raw in [["type": "hello", "saveData": 5, "cost": "x", "effHz": 1e300] as [String: Any],
+                    ["type": "hello", "saveData": "always", "saveDataAnswer": ["v": 1], "adaptiveTelemetry": true]] {
+            now += 2
+            try await sender.adaptiveHelloForTesting(try JSONSerialization.data(withJSONObject: raw), now: now)
+            try await sender.adaptiveTickForTesting(now: now)
+        }
+        assertSwitchOffState(try await sender.adaptiveCallSiteStateForTesting, monitorWrites: writes, "after the matrix")
+        // A start whose noted size disagrees is still never restarted.
+        let probe = try await sender.adaptiveCaptureStartRecheckForTesting(
+            displayID: missingDisplay, displayWidth: 3024, displayHeight: 1964, pixelsWide: 2732, pixelsHigh: 2048,
+            lockScreenShown: true)
+        XCTAssertFalse(probe.restartRequested)
+        XCTAssertEqual(probe.deferred, .none)
+    }
+
+    /// Data saving on, then off, with the switch off: once the capture runs
+    /// at today's size again the sender is back in the switch-off state, and
+    /// a later start whose noted size disagrees is never restarted (before
+    /// this fix the re-check stayed armed for the sender's life).
+    func testAfterDataSavingEndsTheSenderIsBackInTheSwitchOffState() async throws {
+        let (sender, _, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        // Saving asked for before the capture runs, so the return needs no dwell.
+        try await sender.adaptiveHelloForTesting(try helloJSON(AdaptiveHelloFields(saveData: .on)), now: 0)
+        let saving = try await sender.adaptiveCallSiteStateForTesting
+        XCTAssertEqual(saving.plan?.origin, .dataSaver, "the documented nuance: saving acts with the switch off")
+        XCTAssertTrue(saving.hasManagedRaster)
+        // The capture starts at the saver size, then saving ends.
+        let probe = try await sender.adaptiveCaptureStartRecheckForTesting(
+            displayID: missingDisplay, displayWidth: 2732, displayHeight: 2048, pixelsWide: 2048, pixelsHigh: 1536)
+        XCTAssertFalse(probe.restartRequested, "started at the planned size")
+        try await sender.adaptiveHelloForTesting(try helloJSON(AdaptiveHelloFields(saveData: .off)), now: 1)
+        let returned = try await sender.adaptiveCallSiteStateForTesting
+        XCTAssertNil(returned.plan)
+        XCTAssertTrue(returned.hasManagedRaster, "armed until a capture runs at today's size")
+        // The restart back to today's size (what the pipeline runs for it).
+        let restarted = try await sender.adaptiveCaptureStartRecheckForTesting(
+            displayID: missingDisplay, displayWidth: 2732, displayHeight: 2048, pixelsWide: 2732, pixelsHigh: 2048)
+        XCTAssertFalse(restarted.restartRequested)
+        XCTAssertFalse(restarted.hasManagedRaster, "back in the switch-off state")
+        // Now a start noted against another mode is left alone, as with the switch off from the start.
+        for (displayWidth, displayHeight) in [(3024, 1964), (1366, 1024)] {
+            for lockScreenShown in [false, true] {
+                let later = try await sender.adaptiveCaptureStartRecheckForTesting(
+                    displayID: missingDisplay, displayWidth: displayWidth, displayHeight: displayHeight,
+                    pixelsWide: 2732, pixelsHigh: 2048, lockScreenShown: lockScreenShown)
+                XCTAssertFalse(later.restartRequested, "\(displayWidth)x\(displayHeight)")
+                XCTAssertEqual(later.deferred, .none)
+                XCTAssertFalse(later.hasManagedRaster)
+            }
+        }
+    }
+
+    /// The Beta switch turned on and then off rebuilds every session
+    /// (`restartAll`, OpenSidecarMacApp.swift), so the sender after it is a
+    /// new one: identical to a sender whose switch was never on, even though
+    /// the earlier one had managed the raster.
+    func testASenderBuiltAfterTheSwitchWentOnAndOffIsTheSwitchOffState() async throws {
+        let (earlier, _, cleanupEarlier) = try await admittedSender(adaptiveAutomatic: true)
+        defer { cleanupEarlier() }
+        XCTAssertTrue(earlier.adaptive.announcesAdaptive)
+        _ = try await earlier.adaptiveCaptureStartRecheckForTesting(
+            displayID: missingDisplay, displayWidth: 2732, displayHeight: 2048, pixelsWide: 2732, pixelsHigh: 2048,
+            saveData: .on)
+        XCTAssertTrue(earlier.adaptive.hasManagedRaster)
+        earlier.stop()
+        let (rebuilt, _, cleanupRebuilt) = try await admittedSender(adaptiveAutomatic: false)
+        defer { cleanupRebuilt() }
+        let (never, _, cleanupNever) = try await admittedSender(adaptiveAutomatic: false)
+        defer { cleanupNever() }
+        var states: [MacSender.AdaptiveCallSiteState] = []
+        for sender in [rebuilt, never] {
+            XCTAssertFalse(sender.adaptive.announcesAdaptive)
+            try await sender.adaptiveHelloForTesting(
+                try helloJSON(AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true, saveData: .off)), now: 10)
+            try await sender.adaptiveTickForTesting(now: 12)
+            _ = try await sender.adaptiveCaptureStartRecheckForTesting(
+                displayID: missingDisplay, displayWidth: 3024, displayHeight: 1964, pixelsWide: 2732, pixelsHigh: 2048)
+            let state = try await sender.adaptiveCallSiteStateForTesting
+            assertSwitchOffState(state, monitorWrites: state.monitorWrites, "switch off")
+            states.append(state)
+        }
+        XCTAssertEqual(states[0], states[1], "the same as never having switched on")
+    }
+
+    /// #123 churn: a return from saving that matures while the lock screen
+    /// view is shown is applied by the tick, held by the view like any other
+    /// adaptive change, and run when the view ends: never lost.
+    func testAReturnFromSavingThatMaturesDuringTheLockScreenViewRunsWhenItEnds() async throws {
+        let (sender, _, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        // A capture runs at today's size, then saving starts (dwell from 0).
+        _ = try await sender.adaptiveCaptureStartRecheckForTesting(
+            displayID: missingDisplay, displayWidth: 2732, displayHeight: 2048, pixelsWide: 2732, pixelsHigh: 2048)
+        try await sender.adaptiveHelloForTesting(try helloJSON(AdaptiveHelloFields(saveData: .on)), now: 0)
+        try await sender.adaptiveHelloForTesting(try helloJSON(AdaptiveHelloFields(saveData: .off)), now: 3)
+        try await sender.adaptiveTickForTesting(now: 10, lockScreenShown: true)
+        let waiting = try await sender.adaptiveCallSiteStateForTesting
+        XCTAssertEqual(waiting.appliedDataPolicy, .saver, "inside the dwell")
+        XCTAssertEqual(waiting.requestedDataPolicy, .normal)
+        let saverPath = waiting.deferred
+        try await sender.adaptiveTickForTesting(now: 22, lockScreenShown: true)
+        let held = try await sender.adaptiveCallSiteStateForTesting
+        XCTAssertEqual(held.appliedDataPolicy, .normal, "the tick applied the return")
+        XCTAssertNil(held.plan)
+        XCTAssertEqual(held.deferred, .captureRestart, "held by the lock screen view (was \(saverPath))")
+        try await sender.endLockScreenViewForTesting()
+        let ended = try await sender.adaptiveCallSiteStateForTesting
+        XCTAssertEqual(ended.deferred, .none, "run when the view ended")
+        XCTAssertNil(ended.plan)
+    }
+
     func testChangesHeldForTheLockScreenViewAreDroppedOnStop() async throws {
         let (sender, _, cleanup) = try await admittedSender()
         defer { cleanup() }
