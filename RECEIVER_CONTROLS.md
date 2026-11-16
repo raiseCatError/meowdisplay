@@ -170,6 +170,33 @@ On a fold (iPhone Duo) the roomy rails skip over the crease (a vertical crease a
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
 
+### Hold gestures (#131)
+
+Each touch-and-hold on the iPhone and iPad receiver means something different, so each keeps its own
+delay. Only the first can be changed (**Hold Response**), because a lift before it is only a latching
+tap. The rest send input to the Mac, end a session or move windows, so a shorter hold would make them
+easier to trigger by accident. The delays live in `ReceiverHoldGestures` (`Shared/ControlInteraction.swift`)
+and a test pins them. The system's own gestures and Touch Accommodations are never changed.
+
+| Hold | Delay | Adjustable | What it does |
+| --- | --- | --- | --- |
+| ⌘ ⌥ ⌃ ⇧ in the control tray | 0.18 / **0.25** / 0.4 s (Hold Response) | Yes | Opens the key's shortcuts. A lift before it latches the key; sliding away opens them at once and never latches |
+| Stage Peek edge | 0.3 s | No | Opens Stage Peek |
+| Stage Peek card | 0.35 s | No | Starts dragging an app or window onto a pane |
+| Settings control | 0.5 s | No | Opens Session Actions (Back to Home, Disconnect). A tap opens Settings |
+| Window view pane label | 0.4 s | No | Lifts the pane to move it; a release in place opens its menu |
+| Window view divider | 0.35 s | No | Drags the divider |
+| Touch hold after a tap | 0.15 s | No | Commits a held touch to a drag (Direct Touch, Trackpad) |
+| Natural Touch rest, then drag | 0.25 s | No | Drags instead of scrolling |
+| Natural Touch hold | 0.5 s | No | Right-click |
+| Smart Touch hold | 0.4 s | No | Falls back to plain Direct Touch for that touch |
+| Smart Touch title bar | 0.5 s | No | Arms a window drag |
+
+The shortcut keys show on the touch-down chip at once (a pressed state, never a key sent), and the
+haptic plays only when they open (and only with Haptics on), so an iPad without a haptic engine still
+sees the same state change. A touch the system takes (Control Center, an alert) or a rotation under
+the finger sends nothing and leaves nothing latched. Android keeps its fixed 0.35 s.
+
 ### Arrow keys (#179)
 
 **Roomy layouts** (an iPad, an unfolded iPhone Duo) have the same keypad behind an **Arrow Keys** control on the Strip and Overlay rail (a standard control, shown by default and switchable under **Standard Controls**) and as a Custom layout item (**Add Control** → Keys & Utilities; the starter radial layout does not include it). A tap opens or closes the keypad beside the control, toward the middle of the screen and clear of the other controls and of a fold. The swipe is the compact button's alone. **Show Arrow Keys** turns it off everywhere; **Arrow Keys Side** is for the compact button. The keyboard bar's Arrow Keys item now shows in roomy windows too.
