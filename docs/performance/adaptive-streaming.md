@@ -322,8 +322,9 @@ Mode set on the Mac (`NetworkCost.macSidePolicyEvidence` drops a Mac `expensive`
 reads its own path on hello, before the first capture is configured. Off is full quality always,
 Low Data Mode included. The Full Quality / "No" answer only covers mobile data: in Automatic, clear
 Low Data Mode still saves. A policy change keeps the controller and its history
-(`AdaptiveStreamingController.setDataPolicy`, never a new controller). A policy change applies at
-once. Only the raster part of the plan it leads to can wait: a raster raise comes at most once per
+(`AdaptiveStreamingController.setDataPolicy`, never a new controller). A change toward saving
+applies at once; a return to full quality waits for the saver dwell (section 12). Only the raster
+part of the plan a change leads to can wait: a raster raise comes at most once per
 `minRestartIntervalSeconds` (20 s) per receiver, re-evaluated every tick (latest wins), while the
 FPS and bitrate parts apply at once (bitrate still within its own 4 s limit). A change before the
 first capture applies at once in full. Saver with the switch off is a static point that reuses an
@@ -425,10 +426,41 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
 - **Limiter gaps (F6).** Every adaptive raster restart (from a plan change, the post-start re-check,
   the end of the lock screen view or a finished rebuild) records when it really began, for the
   coordinator's limits and the controller's own restart spacing. A data-policy change applies at
-  once and only its raster part waits for the limit.
+  once and only its raster part waits for the limit (since section 12: a change toward saving; a
+  return waits for the saver dwell).
 - **Lock screen deferral (F7).** A post-start re-check during the lock screen view is held like any
   other adaptive change. Held changes are dropped, not applied, when the sender stops or the
   connection ends; the next capture start re-checks the raster. Frame generations and lock-screen
   frame acceptance are untouched.
 - **A10.** `restartCaptureForAdaptiveRaster` now discards the cached frame, releases the stream,
   invalidates the encoder and asks for a keyframe on `queue`.
+
+## 12. Data-policy churn (review of 9ef3878d)
+
+- **The problem.** Since F6 a data-policy change applied at once and only its raster waited. A
+  receiver flipping `saveData` (or a flapping `cost` hint) on every hello then cost one pipeline
+  update per hello: the FPS cap switching between 60 and today's rate is a live
+  `SCStream.updateConfiguration` plus a VideoToolbox session recreate and keyframe; the bitrate part
+  was held only because each of those updates restarted the 4 s encoder limit. Capture restarts were
+  already bounded by the 20 s limit. Hostile peers have equivalent levers (`maxFPSRequest`), so this
+  was a robustness problem for buggy or flapping receivers rather than a new attack.
+- **The fix: one gate (`requestDataPolicy`).** Toward saving: at once, as before. Back to full
+  quality (Automatic only): once saving has been in effect for `saverMinimumDwellSeconds` (20 s,
+  counted from when saver was applied with a capture running) and, if the return restarts capture,
+  once the restart limit allows it (at most one more 20 s), so the return lands as one restart.
+  Nothing is stored while it waits: the evidence (`dataPolicy`) keeps the latest request and every
+  hello, route change and tick re-offers it, so the last request always wins. Saving set before the
+  first capture is left at once. Old receivers and Custom are unchanged; the state is per receiver.
+- **What it bounds (simulation, `AdaptiveDataPolicyChurnTests`, coordinator updates handed to the
+  sender).** 20 flips per second for 120 s: Mirror/Extend 2,400 updates before (about 2,393 FPS
+  updates, 6-7 restarts), 13-15 after (6-7 restarts); Window view 2,400 before, 16-17 after. One flip
+  per 5 s for 600 s: Mirror 195 before, 75 after (30 restarts both); Window view 120 before, 89
+  after. A cost hint flapping every 0.3 s for 90 s: 301 before, 9 after. Capture restarts stay at
+  most one per 20 s either way.
+- **Residual.** A receiver that keeps flipping slower than the dwell still costs about one restart
+  per 20 s (the limiter's bound). A cost blip after a long saving spell (an Android Activity
+  recreation can briefly send no `cost`) is one return and one re-entry; the dwell absorbs the next.
+- **Switch-off state after saving (part 3).** The re-check gate `hasManagedRaster` was sticky for
+  the sender's life, so after a "Use less data" episode with the switch off a capture start whose
+  noted size disagreed could still be restarted. It now clears when a capture with no plan is noted
+  at today's size, and is set again by the next plan that asks for another raster.
