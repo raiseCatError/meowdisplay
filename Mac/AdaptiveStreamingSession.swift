@@ -149,12 +149,13 @@ struct AdaptiveCaptureSizing: Equatable, Sendable {
     /// Today's raster before the decode ceiling: the controller's native size.
     var nativeSize: AdaptivePixelSize? { unclampedSize(scale: todayScale) }
 
-    /// True when the decode ceiling shrinks the capture at `scale`.
+    /// True when the decode ceiling shrinks the capture at `scale`. The same
+    /// guard as `DecodeCeiling.clamp`: a ceiling needs both dimensions, each
+    /// above 0; with only one, nothing is clamped (#123 F3).
     func isClampedByCeiling(scale: Double) -> Bool {
-        guard let raw = unclampedSize(scale: scale) else { return false }
-        if let maxWide, maxWide > 0, raw.width > maxWide { return true }
-        if let maxHigh, maxHigh > 0, raw.height > maxHigh { return true }
-        return false
+        guard let maxWide, let maxHigh, maxWide > 0, maxHigh > 0,
+              let raw = unclampedSize(scale: scale) else { return false }
+        return raw.width > maxWide || raw.height > maxHigh
     }
 
     /// The two scales capture the same picture: the same size, or both
@@ -334,10 +335,17 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// asked for it: the controller, a data-policy change, a clamp, a reset
     /// on reconnect or a managed/unmanaged flip (#123 A3). A restart asked
     /// for inside it waits (latest plan wins) while its bitrate/FPS part
-    /// applies at once.
+    /// applies at once. One exception (#123 F2): the controller's own lower
+    /// raster (a probe revert or a protective step down, which the controller
+    /// already spaces itself) is never held. Measured from the later of the
+    /// plan change and the restart that really ran (`noteAdaptiveRestartBegan`).
     static let restartIntervalSeconds = AdaptiveStreamingThresholds.standard.minRestartIntervalSeconds
-    /// The data-policy deferral uses the same interval (kept name).
+    /// Data-policy changes use the same interval (kept name).
     static let policyRestartIntervalSeconds = restartIntervalSeconds
+    /// No receiver telemetry for this long after some arrived: the
+    /// controller stops managing and today's fixed point returns through the
+    /// usual limits, until telemetry comes back (#123 F4). Five stale periods.
+    static let telemetryLossSeconds = AdaptiveStreamingThresholds.standard.staleAfterSeconds * 5
     /// A bitrate change rebuilds the VideoToolbox session and sends a
     /// keyframe: at most one bitrate change per this interval (#123 A8),
     /// latest wins. FPS-only changes are not held.
@@ -353,20 +361,30 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// The capture scale that size matches; nil when it matched no plan at
     /// the time it was noted (a plan changed while the capture started).
     private var startedScale: Double?
+    /// Some plan has asked for a raster other than today's. Until then every
+    /// capture was sized exactly as before adaptive streaming existed, so no
+    /// raster re-check may restart it (#123 F1: with the switch off and no
+    /// data saving this stays false for the sender's whole life).
+    private var rasterManaged = false
 
     private(set) var hello: AdaptiveHelloFields?
     /// The policy the evidence asks for (diagnostics and the UI read it).
     private(set) var dataPolicy = NetworkCost.PolicyDecision(policy: .normal, reason: .notReported)
-    /// The policy the plan and the controller run. Lags `dataPolicy` only
-    /// while a restart-class change waits out the restart limit.
+    /// The policy the plan and the controller run. Follows `dataPolicy` at
+    /// once; only the raster part of the plan it leads to can be held by the
+    /// restart limit (`gated`), never its bitrate or FPS part (#123 F6).
     private(set) var appliedDataPolicy: NetworkCost.DataPolicy = .normal
-    /// A policy waiting for the restart limit (latest wins); nil = none.
-    private(set) var pendingDataPolicy: NetworkCost.DataPolicy?
     /// The plan the controller and policy ask for. Differs from `plan`
     /// only while a rate limit holds part of it.
     private(set) var desiredPlan: AdaptiveStreamingPlan?
-    /// When this coordinator last applied a capture restart (any origin).
+    /// When this coordinator last applied a capture restart (any origin), or
+    /// a restart it asked for really began, whichever is later (#123 F6).
     private(set) var lastRestartAt: TimeInterval?
+    /// When the controller last received a telemetry sample; nil before the first.
+    private(set) var lastTelemetryAt: TimeInterval?
+    /// Telemetry stopped for `telemetryLossSeconds`: the controller's point
+    /// is not used (the plan follows today's fixed policy) until it resumes.
+    private(set) var telemetryLost = false
     /// When it last applied any change (every path rebuilds the encoder).
     private(set) var lastEncoderRebuildAt: TimeInterval?
     private(set) var routeEpoch: UInt64 = 0
@@ -468,18 +486,43 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// asks for (`today` × plan raster): a deferred or lost adaptive raster
     /// restart still has work to do. A raster step whose size equals the
     /// running one (the decode ceiling) needs no restart.
+    /// Never true before any plan asked for a non-today raster (#123 F1): the
+    /// sizing here is re-read at preparation time, so a display-mode change
+    /// or a missing mode between sizing and preparation could otherwise read
+    /// as a raster to fix and restart capture with the switch off.
     func captureNeedsRasterRestart(today: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let startedSize, let sizing else { return false }
+        guard rasterManaged, let startedSize, let sizing else { return false }
         let desired = today * (planValue?.rasterScale ?? 1)
         if let startedScale { return !sizing.capturesTheSame(startedScale, desired) }
         guard sizing.captureSize(scale: desired) != nil else { return false }
         return !sizing.matches(startedSize, scale: desired)
     }
 
+    /// Whether any plan so far asked for a raster other than today's (any thread).
+    var hasManagedRaster: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return rasterManaged
+    }
+
     private var captureStarted: Bool {
         lock.lock(); defer { lock.unlock() }
         return startedSize != nil
+    }
+
+    /// Sender queue: a raster restart this coordinator asked for really
+    /// began (planned, re-checked after a start, held by the lock screen or
+    /// by another rebuild). The limits count from now, and the controller
+    /// learns the restart time too, so its own raster steps wait for the
+    /// same interval instead of being held here behind its back (#123 F2/F6).
+    func noteAdaptiveRestartBegan(now: TimeInterval) {
+        lastRestartAt = max(lastRestartAt ?? now, now)
+        // A capture restart rebuilds the encoder too.
+        lastEncoderRebuildAt = max(lastEncoderRebuildAt ?? now, now)
+        if var controller {
+            controller.noteCaptureRestarted(at: now)
+            self.controller = controller
+        }
     }
 
     /// Whether going from raster `old` to `new` changes the captured size.
@@ -510,8 +553,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// effect or pending, and the plan is today's. Every input then returns
     /// at once: no input building, no replanning, no per-frame lock.
     private var isIdle: Bool {
-        !announcesAdaptive && appliedDataPolicy == .normal && pendingDataPolicy == nil
-            && desiredPlan == nil && plan == nil
+        !announcesAdaptive && appliedDataPolicy == .normal && desiredPlan == nil && plan == nil
     }
 
     /// An accepted hello (first or re-sent).
@@ -588,14 +630,13 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         if newGeneration != generation {
             generation = newGeneration
             pendingTelemetry = nil
+            lastTelemetryAt = nil
+            telemetryLost = false
             if var controller {
                 let decision = controller.reset(generation: newGeneration, routeEpoch: routeEpoch, now: now)
                 self.controller = controller
                 note(decision, now: now)
             }
-        }
-        if let pending = pendingDataPolicy, restartAllowed(now: now) {
-            applyDataPolicy(pending, now: now)
         }
         guard announcesAdaptive else {
             replan(now: now)
@@ -621,6 +662,14 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         if var controller {
             let decision: AdaptiveStreamingDecision
             if let telemetry = pendingTelemetry {
+                if telemetryLost {
+                    // Telemetry is back after the loss: manage again from the
+                    // initial point, with none of the stale history (#123 F4).
+                    telemetryLost = false
+                    note(controller.reset(generation: generation, routeEpoch: routeEpoch, now: now), now: now)
+                    log("adaptive: receiver telemetry is back — managing again from the initial point")
+                }
+                lastTelemetryAt = now
                 work.samplesBuilt += 1
                 decision = controller.ingest(Self.makeSample(
                     generation: generation, routeEpoch: routeEpoch, mode: controller.configuration.mode,
@@ -629,6 +678,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                 pendingTelemetry = nil
             } else {
                 decision = controller.tick(now: now)
+                if !telemetryLost, let last = lastTelemetryAt, now - last >= Self.telemetryLossSeconds {
+                    // A lowered point is never kept on old evidence: back to
+                    // today's fixed point, through the usual limits (#123 F4).
+                    telemetryLost = true
+                    log("adaptive: no receiver telemetry for \(Int(now - last)) s — back to the fixed policy")
+                }
             }
             self.controller = controller
             note(decision, now: now)
@@ -728,28 +783,18 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         requestDataPolicy(dataPolicy.policy, now: now)
     }
 
-    /// Applies a policy change now, or (restart-class and inside the
-    /// restart limit) keeps it pending until `tick` finds the limit elapsed.
+    /// Applies a policy change at once. Only the raster part of the plan it
+    /// leads to can wait for the restart limit (`gated`, re-evaluated every
+    /// tick, latest wins); its FPS and bitrate parts are not held by it
+    /// (#123 F6, PROTOCOL.md 6.20).
     private func requestDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
-        guard policy != appliedDataPolicy else {
-            if pendingDataPolicy != nil { log("adaptive: pending data policy cancelled (back to \(policy.rawValue))") }
-            pendingDataPolicy = nil
-            return
-        }
-        if policyChangeRestartsCapture(to: policy, now: now), !restartAllowed(now: now) {
-            if pendingDataPolicy != policy {
-                log("adaptive: data policy \(policy.rawValue) deferred by the restart limit")
-            }
-            pendingDataPolicy = policy
-            return
-        }
+        guard policy != appliedDataPolicy else { return }
         applyDataPolicy(policy, now: now)
     }
 
     /// The controller keeps its history (restart time, backoffs): it is
     /// told the policy, never replaced.
     private func applyDataPolicy(_ policy: NetworkCost.DataPolicy, now: TimeInterval) {
-        pendingDataPolicy = nil
         appliedDataPolicy = policy
         guard var controller else { return }
         let decision = controller.setDataPolicy(policy, now: now)
@@ -765,19 +810,6 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     private func encoderRebuildAllowed(now: TimeInterval) -> Bool {
         guard let lastEncoderRebuildAt else { return true }
         return now - lastEncoderRebuildAt >= Self.encoderRebuildIntervalSeconds
-    }
-
-    /// Whether running `policy` would change the raster of a live capture.
-    private func policyChangeRestartsCapture(to policy: NetworkCost.DataPolicy, now: TimeInterval) -> Bool {
-        guard captureStarted else { return false }
-        var decision: AdaptiveStreamingDecision?
-        if var copy = controller {
-            decision = copy.setDataPolicy(policy, now: now)
-        }
-        let candidate = AdaptiveStreamingPlanner.plan(
-            streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: policy,
-            decision: decision, mode: displayMode)
-        return applyPath(from: plan, to: candidate) == .captureRestart
     }
 
     private func note(_ decision: AdaptiveStreamingDecision, now: TimeInterval) {
@@ -797,7 +829,10 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// `restartIntervalSeconds` of the last capture restart and a bitrate
     /// change inside `encoderRebuildIntervalSeconds` of the last encoder
     /// rebuild. FPS always passes. What is held is re-evaluated on every
-    /// tick against the latest wanted plan.
+    /// tick against the latest wanted plan. The controller's own lower
+    /// raster (a probe revert or a protective step down) is never held: the
+    /// controller already spaces those, and holding them made it act on a
+    /// point the pipeline was not running (#123 F2).
     private func gated(from applied: AdaptiveStreamingPlan?, to desired: AdaptiveStreamingPlan?,
                        now: TimeInterval) -> AdaptiveStreamingPlan? {
         guard desired != applied, captureStarted else { return desired }
@@ -806,7 +841,8 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         var raster = desired?.rasterScale ?? 1, bitrate = desired?.bitrate ?? fixedBitrate
         var held = false
         var restarts = rasterChangeRestarts(from: appliedRaster, to: raster)
-        if restarts, !restartAllowed(now: now) {
+        let controllerStepsDown = desired?.origin == .controller && raster < appliedRaster - 1e-9
+        if restarts, !controllerStepsDown, !restartAllowed(now: now) {
             raster = appliedRaster
             restarts = false
             held = true
@@ -824,7 +860,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
 
     private func replan(now: TimeInterval) {
         work.replans += 1
-        let managed = controller == nil ? nil : lastDecision
+        let managed = controller == nil || telemetryLost ? nil : lastDecision
         let wanted = AdaptiveStreamingPlanner.plan(
             streamingMode: streamingMode, adaptiveEnabled: announcesAdaptive, dataPolicy: appliedDataPolicy,
             decision: managed, mode: displayMode)
@@ -836,6 +872,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         let path = applyPath(from: oldPlan, to: newPlan)
         lock.lock()
         planValue = newPlan
+        if let raster = newPlan?.rasterScale, abs(raster - 1) > 1e-9 { rasterManaged = true }
         lock.unlock()
         if path == .captureRestart, captureStarted { lastRestartAt = now }
         if path != .none { lastEncoderRebuildAt = now }

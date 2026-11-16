@@ -138,6 +138,8 @@ struct AdaptiveStreamingController: Sendable {
     private var badStreak = 0
     private var healthyStreak = 0
     private var baselineRttMs: Double?
+    /// Consecutive samples reporting a round trip of 0 ms.
+    private var zeroRttStreak = 0
     private var probe: Probe?
     private var dimensionBackoffUntil: [Dimension: TimeInterval] = [:]
     private var dimensionBackoffSeconds: [Dimension: TimeInterval] = [:]
@@ -291,6 +293,7 @@ struct AdaptiveStreamingController: Sendable {
         routeHoldUntil = now + configuration.thresholds.routeChangeHoldSeconds
         clearStreaks()
         baselineRttMs = nil
+        zeroRttStreak = 0
         if let pending = probe {
             probe = nil
             return change(to: pending.previous, dimensions: [pending.dimension], action: .probeRevert,
@@ -312,6 +315,7 @@ struct AdaptiveStreamingController: Sendable {
         routeHoldUntil = nil
         clearStreaks()
         baselineRttMs = nil
+        zeroRttStreak = 0
         probe = nil
         dimensionBackoffUntil = [:]
         dimensionBackoffSeconds = [:]
@@ -325,6 +329,15 @@ struct AdaptiveStreamingController: Sendable {
         return Decision(action: .reset, point: point, previous: previous,
                         changed: Self.changedDimensions(previous, point), cost: .none,
                         reason: .generationReset, cause: .none, evidence: baseEvidence())
+    }
+
+    /// The pipeline restarted capture at `now` for a reason this controller
+    /// did not decide just then (a restart held by the lock screen view or
+    /// another rebuild, or one re-run after a capture start): its raster
+    /// steps count their interval from that restart, the same as the
+    /// coordinator's limit (#123 F2/F6). Changes nothing else.
+    mutating func noteCaptureRestarted(at now: TimeInterval) {
+        lastRestartAt = max(lastRestartAt ?? now, now)
     }
 
     /// A data-policy change from outside the samples ("Use less data", Low
@@ -537,8 +550,21 @@ struct AdaptiveStreamingController: Sendable {
     /// Healthy windows let the RTT baseline drift up by this fraction.
     static let baselineRttDriftFraction = 0.05
 
+    /// Receivers send `rtt` in whole milliseconds, so a link under 0.5 ms
+    /// (Thunderbolt, the same Mac) always reports 0; so does a receiver that
+    /// has had no pong yet. A 0 becomes the baseline only after this many
+    /// samples in a row, so a sub-millisecond link can step up while one
+    /// early 0 never sets a baseline a real link can't meet (#123 F5).
+    static let zeroRttBaselineSamples = 3
+
     private mutating func updateBaseline(_ s: AdaptiveStreamingSample, cause: Cause) {
-        guard let rtt = s.rttMs, rtt > 0 else { return }
+        guard let rtt = s.rttMs, rtt >= 0 else { return }
+        if rtt == 0 {
+            zeroRttStreak += 1
+            guard zeroRttStreak >= Self.zeroRttBaselineSamples else { return }
+        } else {
+            zeroRttStreak = 0
+        }
         guard let baseline = baselineRttMs else {
             if cause != .network { baselineRttMs = rtt }
             return

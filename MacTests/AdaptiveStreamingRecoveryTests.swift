@@ -10,8 +10,14 @@ import XCTest
 final class AdaptiveStreamingRecoveryTests: XCTestCase {
     private final class RecordingApplier: AdaptiveStreamingApplying {
         var now = 0.0
+        /// The plan the coordinator runs when it applies (set it to record rasters).
+        var plan: (() -> AdaptiveStreamingPlan?)?
         var applied: [(time: Double, path: AdaptiveApplyPath)] = []
-        func adaptiveApply(_ path: AdaptiveApplyPath) { applied.append((now, path)) }
+        var rasters: [Double] = []
+        func adaptiveApply(_ path: AdaptiveApplyPath) {
+            applied.append((now, path))
+            rasters.append(plan?()?.rasterScale ?? 1)
+        }
         func times(_ path: AdaptiveApplyPath) -> [Double] { applied.filter { $0.path == path }.map(\.time) }
     }
 
@@ -277,8 +283,14 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
     /// telemetry keys before every Mac tick while reporting critical thermal
     /// state: each managed/unmanaged flip (fixed policy at raster 1.0, then a
     /// reset to the thermal-clamped point) would otherwise restart capture.
-    func testAHostilePeerCannotForceMoreThanOneRestartPerInterval() throws {
+    ///
+    /// #123 F2 (deliberate change): the controller's own lower raster is no
+    /// longer held, so each raise can be followed by the step back down; a
+    /// raise still never comes within the interval of the previous restart,
+    /// so the flips get at most two restarts per interval.
+    func testAHostilePeerCannotForceMoreThanOneRaisePerInterval() throws {
         let (c, fake) = managed()
+        fake.plan = { [unowned c] in c.plan }
         var now = 2.0
         for round in 0..<150 {
             now += 2
@@ -287,12 +299,26 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
             c.receiverStats(json: try realStats(delivered: 60, thermal: .critical))
             c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
         }
-        let restarts = fake.times(.captureRestart)
+        let restarts = fake.applied.indices.filter { fake.applied[$0].path == .captureRestart }
         XCTAssertFalse(restarts.isEmpty, "the flips do want restarts")
-        for (a, b) in zip(restarts, restarts.dropFirst()) {
-            XCTAssertGreaterThanOrEqual(b - a, AdaptiveStreamingCoordinator.restartIntervalSeconds, "\(restarts)")
+        var previousRaster = 1.0
+        var previousTime: Double?
+        var raises = 0
+        for index in restarts {
+            let time = fake.applied[index].time, raster = fake.rasters[index]
+            if raster > previousRaster + 1e-9 {
+                raises += 1
+                if let previousTime {
+                    XCTAssertGreaterThanOrEqual(time - previousTime, AdaptiveStreamingCoordinator.restartIntervalSeconds,
+                                                "a raise inside the interval: \(restarts.map { fake.applied[$0].time })")
+                }
+            }
+            previousRaster = raster
+            previousTime = time
         }
-        XCTAssertLessThanOrEqual(restarts.count, Int(300 / AdaptiveStreamingCoordinator.restartIntervalSeconds) + 1)
+        let intervals = Int(300 / AdaptiveStreamingCoordinator.restartIntervalSeconds) + 1
+        XCTAssertLessThanOrEqual(raises, intervals)
+        XCTAssertLessThanOrEqual(restarts.count, 2 * intervals)
     }
 
     func testAResetOnReconnectWaitsForTheRestartInterval() throws {
@@ -443,6 +469,14 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
                         c.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
                         c.helloAccepted(hello, now: 0)
                         c.tick(generation: 1, mode: mode, inputs: inputs(mode: mode), window: window(0, 2), now: 2)
+                        // #123 F1: a start whose size the note re-derives
+                        // differently (the display mode changed or was
+                        // missing between sizing and preparation) never
+                        // restarts capture with the switch off.
+                        c.noteCaptureStarted(sizing: iPadSizing, width: 2560, height: 1600)
+                        if c.captureNeedsRasterRestart(today: 1) {
+                            XCTFail("\(streamingMode) \(mode): the switch-off state asked for a capture restart")
+                        }
                         for (today, _, _) in todays {
                             let resolved = MacSender.effectiveFPS(today: today, adaptive: c)
                             if resolved != today { XCTFail("\(streamingMode) \(mode) source \(String(describing: source)): \(resolved) != \(today)") }
@@ -558,5 +592,212 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
             XCTAssertEqual(c.monitor.snapshot(now: now).videoPayloadBytes, 60 * 120 * 30_000,
                            "the payload shown in Settings is still counted")
         }
+    }
+
+    // MARK: - Review of ddcef384 (F1–F7)
+
+    /// F1: with the switch off and no data saving, the size a capture
+    /// started at is never compared with a re-derived one: no restart, no
+    /// work, nothing applied, whatever the note reads.
+    func testSwitchOffNeverAsksForARasterRestartWhenTheStartedSizeLooksWrong() {
+        let startedSizes = [(2560, 1600), (2732, 2048), (1366, 1024), (2, 2), (3000, 2000)]
+        let notedSizings = [iPadSizing, fiveK,
+                            AdaptiveCaptureSizing(sourceWidth: 3024, sourceHeight: 1964, todayScale: 1, maxWide: 2732, maxHigh: 2048)]
+        for streamingMode in [StreamingMode.automatic, .custom] {
+            for sizing in notedSizings {
+                for (width, height) in startedSizes {
+                    let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: streamingMode, displayMode: .mirror)
+                    let fake = RecordingApplier()
+                    c.applier = fake
+                    c.helloAccepted(AdaptiveHelloFields(effectiveRefreshHz: 60, telemetry: true, saveData: .off), now: 0)
+                    c.noteCaptureStarted(sizing: sizing, width: width, height: height)
+                    for round in 1...5 {
+                        let now = Double(round) * 2
+                        c.tick(generation: 1, mode: .mirror, inputs: inputs(mode: .mirror), window: window(now - 2, now),
+                               now: now)
+                    }
+                    XCTAssertFalse(c.captureNeedsRasterRestart(today: 1), "\(streamingMode) \(width)x\(height)")
+                    XCTAssertFalse(c.hasManagedRaster)
+                    XCTAssertTrue(fake.applied.isEmpty)
+                    XCTAssertEqual(c.work, AdaptiveStreamingCoordinator.WorkCounters())
+                }
+            }
+        }
+        // Once a plan asked for another raster, a wrong start is caught again.
+        let saving = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .mirror)
+        saving.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
+        saving.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
+        XCTAssertTrue(saving.hasManagedRaster)
+        XCTAssertTrue(saving.captureNeedsRasterRestart(today: 1))
+    }
+
+    /// F2: a failed raster probe is undone at once, not 20 s later, so the
+    /// controller never judges windows of a point the pipeline isn't running
+    /// (and never steps down again from the reverted point on them).
+    func testAFailedRasterProbeIsRevertedAtOnceAndThePipelineRunsTheControllersPoint() throws {
+        let (c, fake) = managed()
+        var now = 2.0
+        try congest(c, fake, from: &now) { ($0.plan?.rasterScale ?? 1) < 1 }
+        var probeAt: Double?
+        while probeAt == nil, now < 900 {
+            now += 2
+            feed(c, fake, end: now, sent: 120, stats: try realStats(delivered: 60))
+            if let d = c.lastDecision, d.action == .upshift, d.changed.contains(.raster) { probeAt = now }
+        }
+        let probe = try XCTUnwrap(probeAt, "the controller probes the raster back up")
+        XCTAssertEqual(fake.times(.captureRestart).last, probe)
+        let probed = try XCTUnwrap(c.plan?.rasterScale)
+        // Two seconds later the receiver presents only 40 of 60 frames with no
+        // other cause: the probe failed.
+        now += 2
+        feed(c, fake, end: now, sent: 120, stats: try realStats(delivered: 40))
+        XCTAssertEqual(c.lastDecision?.action, .probeRevert)
+        XCTAssertEqual(fake.times(.captureRestart).last, now, "the revert restarts capture at once")
+        XCTAssertLessThan(c.plan?.rasterScale ?? 1, probed)
+        XCTAssertEqual(c.plan?.rasterScale, c.lastDecision?.point?.rasterScale, "no drift")
+        XCTAssertEqual(c.plan, c.desiredPlan)
+    }
+
+    /// F3: a hello with only one decode-ceiling dimension clamps nothing
+    /// (`DecodeCeiling.clamp`), so no ladder step is dropped as "the same size".
+    func testAOneDimensionCeilingClampsNothing() {
+        for (wide, high) in [(4096, nil), (nil, 2304), (4096, 0), (0, 2304), (-1, 2304)] as [(Int?, Int?)] {
+            let sizing = AdaptiveCaptureSizing(sourceWidth: 5120, sourceHeight: 2880, todayScale: 1, maxWide: wide, maxHigh: high)
+            XCTAssertFalse(sizing.isClampedByCeiling(scale: 1))
+            XCTAssertFalse(sizing.capturesTheSame(1, 0.875))
+            XCTAssertEqual(AdaptiveStreamingCoordinator.distinctRasterSteps(AdaptiveStreamingLadder.standard.rasterSteps,
+                                                                            sizing: sizing),
+                           AdaptiveStreamingLadder.standard.rasterSteps)
+            let clamped = DecodeCeiling.clamp(width: 5120, height: 2880, maxWide: wide, maxHigh: high)
+            XCTAssertEqual(sizing.captureSize(scale: 1), AdaptivePixelSize(width: clamped.width, height: clamped.height))
+        }
+        XCTAssertTrue(fiveK.isClampedByCeiling(scale: 1), "both dimensions: clamped as before")
+    }
+
+    /// F4: when the receiver's stats stop after a step down, the fixed
+    /// point comes back through the usual limits; when they resume, the
+    /// controller manages again from its initial point.
+    func testStoppedTelemetryReturnsToTheFixedPointAndResumesFromTheStart() throws {
+        let (c, fake) = managed()
+        fake.plan = { [unowned c] in c.plan }
+        var now = 2.0
+        try congest(c, fake, from: &now) { ($0.plan?.rasterScale ?? 1) < 1 }
+        let lastStats = now
+        while now < lastStats + AdaptiveStreamingCoordinator.telemetryLossSeconds - 2 {
+            now += 2
+            fake.now = now
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
+        }
+        XCTAssertFalse(c.telemetryLost)
+        XCTAssertLessThan(c.plan?.rasterScale ?? 1, 1, "a short gap holds the point")
+        while now < lastStats + AdaptiveStreamingCoordinator.telemetryLossSeconds
+                + AdaptiveStreamingCoordinator.restartIntervalSeconds + 2 {
+            now += 2
+            fake.now = now
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
+        }
+        XCTAssertTrue(c.telemetryLost)
+        XCTAssertNil(c.plan, "today's fixed point")
+        let restarts = fake.times(.captureRestart)
+        for (a, b) in zip(restarts, restarts.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(b - a, AdaptiveStreamingCoordinator.restartIntervalSeconds)
+        }
+        now += 2
+        feed(c, fake, end: now, sent: 120, stats: try realStats(delivered: 60))
+        XCTAssertFalse(c.telemetryLost)
+        XCTAssertEqual(c.plan?.origin, .controller, "managed again")
+        XCTAssertEqual(c.plan?.rasterScale, 1, "from the initial point, not the old lowered one")
+    }
+
+    /// F5: a link under 0.5 ms always reports `rtt` 0; it still gets a
+    /// baseline and can step up. One early 0 (before the first pong) never
+    /// becomes the baseline.
+    func testASubMillisecondLinkThatAlwaysReportsZeroRTTStillStepsUp() {
+        let negotiation = RefreshNegotiation.negotiate(RefreshNegotiation.Input(
+            mode: .extend, sourceRefreshHz: 60, receiverMaxFPS: 60, receiverEffectiveRefreshHz: 60,
+            encodeWidth: 2388, encodeHeight: 1668, codec: .hevc))
+        func makeController() -> AdaptiveStreamingController {
+            AdaptiveStreamingController(configuration: .init(
+                mode: .extend, negotiation: negotiation, nativeEncodeWidth: 2388, nativeEncodeHeight: 1668,
+                receiver: iPad, receiverTelemetryAvailable: true), generation: 1, routeEpoch: 1)
+        }
+        func sample(_ index: Int, fps: Double, rtt: Double, thermal: AdaptiveThermalLevel = .nominal) -> AdaptiveStreamingSample {
+            var t = AdaptiveReceiverTelemetry(windowSeconds: 2)
+            t.deliveredFPS = fps
+            t.rttMs = rtt
+            t.jitterMs = 0
+            t.thermal = thermal
+            let end = Double(index) * 2 + 2
+            return AdaptiveStreamingCoordinator.makeSample(
+                generation: 1, routeEpoch: 1, mode: .extend,
+                window: .init(start: end - 2, end: end, capturedFrames: Int(fps * 2), encoderDrops: 0,
+                              networkDrops: 0, thermal: .nominal, lowPower: false, encodeLatencyMs: 4),
+                sentFrames: Int(fps * 2), sentBytes: 2_000_000, telemetry: t, dataPolicy: .normal, now: end)
+        }
+        var controller = makeController()
+        XCTAssertEqual(controller.ingest(sample(0, fps: 60, rtt: 0, thermal: .critical)).point?.fps, 30)
+        var upshifted = false
+        for index in 1..<60 where !upshifted {
+            upshifted = controller.ingest(sample(index, fps: 30, rtt: 0)).action == .upshift
+        }
+        XCTAssertTrue(upshifted, "0 ms every window is a real baseline")
+
+        var early = makeController()
+        _ = early.ingest(sample(0, fps: 60, rtt: 0))
+        _ = early.ingest(sample(1, fps: 60, rtt: 20))
+        XCTAssertEqual(early.ingest(sample(2, fps: 60, rtt: 20)).evidence.baselineRttMs, 20,
+                       "one 0 before the first pong is not a baseline")
+    }
+
+    /// F6 (a): a restart that really runs later than its plan (held by the
+    /// lock screen view, or re-run after a capture start) counts for the
+    /// limit from when it ran.
+    func testARestartThatRunsLateCountsForTheLimitFromWhenItRan() {
+        let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
+        let fake = RecordingApplier()
+        c.applier = fake
+        c.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
+        c.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
+        XCTAssertEqual(fake.times(.captureRestart), [0])
+        // The lock screen view held it; it runs when the view ends at 19.
+        c.noteAdaptiveRestartBegan(now: 19)
+        fake.now = 25
+        c.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 25)
+        XCTAssertEqual(c.plan?.rasterScale, StreamQuality.balanced.scale, "20 s from the restart at 19, not from 0")
+        var now = 25.0
+        while now < 38 {
+            now += 1
+            fake.now = now
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 1, now), now: now)
+        }
+        XCTAssertEqual(c.plan?.rasterScale, StreamQuality.balanced.scale)
+        now = 39
+        fake.now = now
+        c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 1, now), now: now)
+        XCTAssertNil(c.plan)
+        XCTAssertEqual(fake.times(.captureRestart), [0, 39])
+    }
+
+    /// F6 (b), PROTOCOL.md 6.20: while the restart limit holds the raster
+    /// part of a data-policy change, its FPS and bitrate parts apply at once.
+    func testADataPolicyChangeHoldsOnlyItsRasterPart() {
+        let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
+        let fake = RecordingApplier()
+        c.applier = fake
+        c.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
+        c.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
+        XCTAssertEqual(c.plan?.fpsCap, AdaptiveStreamingPlanner.saverFPSCap)
+        fake.now = 5
+        c.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 5)
+        XCTAssertEqual(c.appliedDataPolicy, .normal)
+        XCTAssertEqual(c.plan, AdaptiveStreamingPlan(rasterScale: StreamQuality.balanced.scale,
+                                                     bitrate: AdaptiveStreamingLadder.fixedPolicyBitrate,
+                                                     fpsCap: nil, origin: .dataSaver),
+                       "today's FPS and bitrate at once; only the raster waits")
+        XCTAssertEqual(fake.applied.map(\.path), [.captureRestart, .encoderRebuild])
+        fake.now = 20
+        c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(18, 20), now: 20)
+        XCTAssertNil(c.plan)
+        XCTAssertEqual(fake.times(.captureRestart), [0, 20])
     }
 }
