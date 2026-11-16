@@ -11,9 +11,16 @@ final class PairingPromptModel: ObservableObject {
     /// Presentation feedback only; it never resolves or extends the attempt.
     @Published private(set) var grantRefused = false
 
-    func noteRefusedGrant() {
-        guard decision != nil, pending != nil else { return }
-        grantRefused = true
+    /// A press on the approval that `ConsentGrant` refused (it came from
+    /// software). Shows the explanation; never resolves or extends the
+    /// attempt. Returns true only for the first refusal of this prompt, so
+    /// the spoken announcement is made once: repeated injected clicks can't
+    /// keep VoiceOver talking. A new prompt starts over.
+    @discardableResult
+    func noteRefusedGrant() -> Bool {
+        guard decision != nil, pending != nil else { return false }
+        defer { grantRefused = true }
+        return !grantRefused
     }
     /// Set once THIS device accepted the SAS, until the attempt ends. Purely
     /// presentational ("Waiting for confirmation…"): it never means trust was
