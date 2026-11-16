@@ -1796,6 +1796,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lockScreenInputGate.set(view: view)
         lockScreenRefusalLogged = false
         lastPixelBuffer = nil
+        diagnosticsLastCapturePTS = nil
         needsKeyframe = true
         lockScreenFrames.start(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
         lockScreenLastInput = ProcessInfo.processInfo.systemUptime
@@ -1974,6 +1975,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.nativeAppGestureState.cancelAll()
                 // Nothing from before the lock is kept to be shown again (a replay or keyframe).
                 self.lastPixelBuffer = nil
+                self.diagnosticsLastCapturePTS = nil
             }
             self.syncWorkspaceSuspension()
             guard self.sessionAuthorization.isAdmitted, self.lastHello != nil else { return }
@@ -7272,9 +7274,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastPixelBuffer = pixelBuffer
             lastCaptureAt = Date()
             capFrames += 1
-            if diagnostics.isEnabled {
-                diagnosticsLastCapturePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-            }
+            // Always paired with `lastPixelBuffer`: a frame taken while
+            // diagnostics were off has no known PTS (never an older one).
+            diagnosticsLastCapturePTS = diagnostics.isEnabled
+                ? CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds : nil
             #if DEBUG
             debugSCKWindow += 1
             #endif
@@ -7437,12 +7440,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `queue` only, diagnostics on: one encoder submission.
     private func recordSubmitDiagnostics(pts: CMTime, origin: DiagnosticsSubmitOrigin, generation: UInt64, at nowMs: Double) {
         diagnostics.noteGeneration(generation, at: nowMs)
-        let sourcePTS: Double?
-        switch origin {
-        case .workspace: sourcePTS = nil   // stamped at composition; see the compose counters
-        case .dropReplay, .reconnectReplay: sourcePTS = diagnosticsLastCapturePTS
-        case .live, .heldRetry: sourcePTS = mode == .window ? nil : pts.seconds
-        }
+        let sourcePTS = Self.diagnosticsSourcePTS(origin: origin, windowMode: mode == .window,
+                                                  lastCapturePTS: diagnosticsLastCapturePTS, livePTS: pts.seconds)
         let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
         let validPTS = sourcePTS.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         diagnostics.recordSubmit(
@@ -7451,6 +7450,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sourceAgeMs: validPTS.map { (hostNow - $0) * 1000 },
             pendingEncodes: pipelineState.pendingEncodesNow,
             at: nowMs)
+    }
+
+    /// Pure: the capture PTS of a submission's pixels, for duplicate and
+    /// source-age accounting; nil = unknown. Window view never has one (its
+    /// frames are composed and stamped at composition), so a replay there is
+    /// never matched against a stale display-capture timestamp.
+    static func diagnosticsSourcePTS(origin: DiagnosticsSubmitOrigin, windowMode: Bool,
+                                     lastCapturePTS: Double?, livePTS: Double?) -> Double? {
+        guard !windowMode else { return nil }
+        switch origin {
+        case .workspace: return nil   // stamped at composition; see the compose counters
+        case .dropReplay, .reconnectReplay: return lastCapturePTS
+        case .live, .heldRetry: return livePTS
+        }
     }
 
     /// `queue` only. Keeps `frame` as the one to send if nothing newer goes
@@ -8317,6 +8330,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pipelineState.bumpCaptureGeneration()
         if discardingLastFrame {
             lastPixelBuffer = nil
+            diagnosticsLastCapturePTS = nil
             lastCaptureAt = .distantPast
         }
     }
@@ -8822,6 +8836,9 @@ extension MacSender {
         guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
               captureStateSnapshot().phase == .running else { return }
         lastPixelBuffer = pixelBuffer
+        // A composed frame has no capture PTS: a replay of it is never
+        // matched against a display capture's timestamp.
+        diagnosticsLastCapturePTS = nil
         lastCaptureAt = Date()
         capFrames += 1
         guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
