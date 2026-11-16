@@ -396,7 +396,9 @@ final class AdaptiveLayoutTests: XCTestCase {
                 timed("re-wake after a stalled query (\(context), wake \(wakes))") { wakeControls(app) }
             }
         }
-        let extended = wakes > 1 || Date().timeIntervalSince(started) > Self.settingsPrompt + 1
+        // The allowance is used only after a stalled query (a poll that merely started inside the
+        // 5 s and finished after it is the same as the old waiter, not an allowance).
+        let extended = slowestQuery > Self.stalledFirstQuery && Date().timeIntervalSince(started) > Self.settingsPrompt
         if reachable, extended {
             print("AdaptiveLayout: Settings reached only after the stall allowance (\(context); \(wakes) wakes, slowest query "
                   + "\(String(format: "%.1f", slowestQuery)) s)")
