@@ -774,8 +774,8 @@ final class WorkspaceModel: ObservableObject {
 
     /// Sends one workspace message on the current, admitted connection.
     var send: ([String: Any]) -> Bool = { _ in false }
-    /// Asks the Mac for Window mode (displayModeRequest "window").
-    var requestWindowMode: () -> Void = {}
+    /// Asks the Mac for Window mode (displayModeRequest "window"). False: nothing was sent.
+    var requestWindowMode: () -> Bool = { false }
     /// Asks the Mac for Mirror or Extend (the existing `displayModeRequest`): Exit Fullscreen
     /// after Open Fullscreen started Window view from there. False: nothing was sent.
     var requestDisplayMode: (ReceiverDisplayMode) -> Bool = { _ in false }
@@ -791,6 +791,9 @@ final class WorkspaceModel: ObservableObject {
     /// Seconds, for waits measured here (tests step it). Not `systemUptime`: a required-reason API
     /// the iOS privacy manifest doesn't declare (the other planners here use the same clock).
     var clock: () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
+    /// Runs a step after the current event is fully handled (the receiver notes a mode change
+    /// after this model does). Tests run it by hand.
+    var nextTurn: (@escaping @MainActor () -> Void) -> Void = { work in DispatchQueue.main.async { work() } }
 
     /// A step that would start Window view from Extend, waiting for the person to confirm it.
     struct LeaveExtendRequest: Identifiable {
@@ -959,7 +962,9 @@ final class WorkspaceModel: ObservableObject {
             if window { awaitingCatalogToSend = true; requestCatalog() }
             // Open Fullscreen's Window view started; or Window view ended another way (Settings,
             // the Mac, a refused switch): its pane is gone and Exit must never ask for an old mode.
-            if window { appFirstAwaitingWindowMode = false } else { endAppFirstQuietly(reason: "window view ended") }
+            let returnTo = appFirstWindowRequest.answered(window: window, now: clock())
+            if !window { endAppFirstQuietly(reason: "window view ended") }
+            if let returnTo { returnAfterEarlyExit(to: returnTo) }
         case .catalog(let c):
             onCatalog(c)
         case .state(let s):
@@ -1051,8 +1056,9 @@ final class WorkspaceModel: ObservableObject {
                 performAppOpening(step)
             }
             // Open Fullscreen ends with the session, except across the reconnect its own switch
-            // into Window view causes (the Mac rebuilds this device's session for it).
-            if !appFirstAwaitingWindowMode { endAppFirstQuietly(reason: "disconnected") }
+            // into Window view causes (the Mac rebuilds this device's session for it), while that
+            // request really went out and hasn't expired.
+            if !appFirstWindowRequest.inFlight(now: clock()) { endAppFirstQuietly(reason: "disconnected") }
             iconsConnected = false; iconPlanner.reset(); iconRetry?.cancel(); iconRetry = nil
             canCloseWindows = false; closingWindows = []; closeNotice = nil
             canFloat = false; floatGesture = nil
@@ -1112,10 +1118,11 @@ final class WorkspaceModel: ObservableObject {
 
     private func load(for peer: String) {
         host = peer
+        appFirstWindowRequest.connected(to: peer)
         // Open Fullscreen still showing on this Mac (the reconnect its switch into Window view
         // causes): its app pane stays; what's saved on this device is the layout from before it.
         if appFirst?.host != peer || saved.tiles[appFirst?.tile ?? ""] == nil {
-            appFirst = nil; appFirstLeftExtend = false; appFirstAwaitingWindowMode = false
+            appFirst = nil; appFirstLeftExtend = false
             saved = (defaults.data(forKey: "workspace.layout.\(peer)").flatMap(WorkspaceLayoutRecord.decode) ?? WorkspaceLayout()).compacted()
         }
         nextTile = (saved.tiles.keys.compactMap { Int($0.dropFirst()) }.max() ?? 0) + 1
@@ -1629,7 +1636,7 @@ final class WorkspaceModel: ObservableObject {
     func drop(_ w: CatalogWindowItem, on target: WorkspaceWindowDrop) {
         guard let source = source(for: w) else { return }
         if holdForLeavingExtend({ [weak self] in self?.drop(w, on: target) }) { return }
-        if !windowMode { requestWindowMode() }
+        if !windowMode { askForWindowMode() }
         var focusTile: String?
         edit { l in
             let (next, focus) = dropping(source, on: target, in: l)
@@ -1943,7 +1950,7 @@ final class WorkspaceModel: ObservableObject {
         }
         let replacing = replacingTile
         closeOverview()
-        if !windowMode { requestWindowMode() }
+        if !windowMode { askForWindowMode() }
         let landscape = size.width >= size.height
         // One window, one tile: choosing a window that's already showing selects its tile,
         // or swaps the two tiles when replacing another one.
@@ -2480,9 +2487,10 @@ final class WorkspaceModel: ObservableObject {
     /// The person already confirmed leaving Extend for this Open Fullscreen: its window, placed
     /// once the app has opened, doesn't ask again.
     private var appFirstLeftExtend = false
-    /// Open Fullscreen asked for Window view and the Mac hasn't confirmed it: the reconnect that
-    /// switch causes doesn't end it.
-    private var appFirstAwaitingWindowMode = false
+    /// Open Fullscreen's own request for Window view while the Mac hasn't answered it: the
+    /// reconnect that switch causes doesn't end it, and an Exit before the answer goes back to
+    /// the mode it left once Window view starts (`WorkspaceAppFirstWindowRequest`).
+    private var appFirstWindowRequest = WorkspaceAppFirstWindowRequest()
 
     /// The session's control as the opening needs it (live session and the Mac's grant).
     private var appOpeningControl: WorkspaceAppOpening.Control {
@@ -2561,9 +2569,9 @@ final class WorkspaceModel: ObservableObject {
         appFirst = session
         refreshMissing(); persist(); publish()
         if !windowMode {
-            // Its own switch reconnects this device; Open Fullscreen survives that one.
-            appFirstAwaitingWindowMode = true
-            requestWindowMode()
+            // Its own switch reconnects this device; Open Fullscreen survives that one, but only
+            // when the request really went out (and not past its deadline).
+            appFirstWindowRequest.asked(host: host, sent: requestWindowMode(), now: clock())
         }
         Log.info("appFirst: fullscreen bundle=\(bundleID) window=\(w.id) tile=\(id) previousMode=\(session.previous.mode?.rawValue ?? "window")")
         enterLocalFullscreen(id)
@@ -2580,10 +2588,16 @@ final class WorkspaceModel: ObservableObject {
     func exitAppFirst() {
         guard let s = appFirst else { return }
         appFirst = nil
-        appFirstAwaitingWindowMode = false
         appFirstInputNote = false
         if appOpening?.fullscreenOnPlace == true { dismissAppOpening() }
         let p = s.previous
+        // Before the Mac confirmed Window view its switch may still land: then the mode Open
+        // Fullscreen left is asked for once it does (`returnAfterEarlyExit`).
+        if windowMode {
+            appFirstWindowRequest.reset()
+        } else {
+            appFirstWindowRequest.exitedBeforeConfirm(previousMode: p.mode, now: clock())
+        }
         Log.info("appFirst: exit bundle=\(s.bundleID) ended=\(String(describing: s.ended)) mode=\(p.mode?.rawValue ?? "window")")
         history.record(saved)
         saved = removingClosed(from: p.layout).compacted()
@@ -2593,10 +2607,29 @@ final class WorkspaceModel: ObservableObject {
         guard let mode = p.mode else { return }
         // Only out of Window view: asking for Mirror/Extend otherwise would be a new switch.
         guard windowMode else {
-            Log.info("appFirst: exit outside Window view; \(mode.rawValue) not requested")
+            Log.info("appFirst: exit outside Window view; \(mode.rawValue) asked for only if Window view still starts")
             return
         }
         if !requestDisplayMode(mode) { Log.info("appFirst: exit could not ask for \(mode.rawValue); staying in Window view") }
+    }
+
+    /// Exit came before the Mac confirmed Open Fullscreen's Window view, and that switch landed
+    /// anyway: ask once for the mode it left. On the next turn, once the receiver has noted that
+    /// Window view started (only then is Mirror or Extend a real change it sends). Never again
+    /// for this request, so a refusal can't loop.
+    private func returnAfterEarlyExit(to mode: ReceiverDisplayMode) {
+        Log.info("appFirst: Window view started after Exit; asking for \(mode.rawValue)")
+        nextTurn { [weak self] in
+            guard let self, self.windowMode, self.appFirst == nil else { return }
+            if !self.requestDisplayMode(mode) { Log.info("appFirst: could not ask for \(mode.rawValue) after Exit; staying in Window view") }
+        }
+    }
+
+    /// Any other step into Window view (a drop, a pick, a float): where the person wants to be
+    /// now, so an earlier Exit's return no longer applies.
+    private func askForWindowMode() {
+        appFirstWindowRequest.superseded()
+        _ = requestWindowMode()
     }
 
     /// Open Fullscreen ends without Exit (the session ended, or Window view ended another way):
@@ -2606,7 +2639,7 @@ final class WorkspaceModel: ObservableObject {
         guard let s = appFirst else { return }
         Log.info("appFirst: ended (\(reason)) bundle=\(s.bundleID)")
         appFirst = nil
-        appFirstAwaitingWindowMode = false
+        appFirstWindowRequest.reset()
         appFirstLeftExtend = false
         appFirstInputNote = false
         if localFullscreen == s.tile { localFullscreen = nil }
@@ -2780,7 +2813,7 @@ final class WorkspaceModel: ObservableObject {
             saved = next.compacted()
             localFullscreen = nil
             refreshMissing(); persist(); publish()
-            requestWindowMode()
+            askForWindowMode()
             if let focusTile { focus(focusTile) }
             return true
         }
@@ -3216,7 +3249,7 @@ extension WorkspaceModel {
             saved = desk.addingFloat(WorkspaceTile(id: id, source: source), frame: newFloatFrame(aspect: aspect, at: center, in: shown)).compacted()
             localFullscreen = nil
             refreshMissing(); persist(); publish()
-            requestWindowMode()
+            askForWindowMode()
             focus(id, raise: false)
             return
         }

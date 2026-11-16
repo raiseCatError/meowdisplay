@@ -508,6 +508,65 @@ struct WorkspaceAppFirst: Equatable, Sendable {
     }
 }
 
+/// Open Fullscreen's own request for Window view (#287), from the moment it went out until the
+/// Mac answers or it expires. While it's in flight, the reconnect that switch causes (the Mac
+/// rebuilds this device's session) doesn't end Open Fullscreen. Exit before the Mac confirmed
+/// Window view keeps the Mirror or Extend it left, and that mode is asked for once, when the
+/// late "window" arrives, so the device ends where the person was. Nothing sent, nothing awaited:
+/// a real disconnect then ends Open Fullscreen as any other. Expiry is checked when it matters
+/// (a disconnect, the Mac's answer), so no timer is needed.
+struct WorkspaceAppFirstWindowRequest: Equatable, Sendable {
+    /// As long as the receiver waits for any display-mode answer (`StreamReceiver`'s deadline).
+    static let timeout: TimeInterval = 15
+
+    /// The Mac Window view was asked of; nil: nothing is in flight.
+    private(set) var host: String?
+    private(set) var sentAt: TimeInterval?
+    /// Exit came before the Mac confirmed Window view: the mode to ask for once it starts.
+    private(set) var returnMode: ReceiverDisplayMode?
+
+    /// Open Fullscreen asked `host` for Window view. `sent` false: nothing went out (not
+    /// connected, an older Mac), so there's nothing to wait for.
+    mutating func asked(host: String, sent: Bool, now: TimeInterval) {
+        self = sent ? WorkspaceAppFirstWindowRequest(host: host, sentAt: now, returnMode: nil) : .init()
+    }
+
+    /// Asked, unanswered and not yet expired.
+    func inFlight(now: TimeInterval) -> Bool {
+        guard let sentAt else { return false }
+        return now - sentAt < Self.timeout
+    }
+
+    /// Exit before the Mac confirmed Window view. `previousMode`: what Open Fullscreen left
+    /// (nil: it started in Window view, nothing to go back to).
+    mutating func exitedBeforeConfirm(previousMode: ReceiverDisplayMode?, now: TimeInterval) {
+        guard inFlight(now: now), let previousMode else { self = .init(); return }
+        returnMode = previousMode
+    }
+
+    /// Exit once Window view showed, or anything else that ends Open Fullscreen: nothing to wait
+    /// for or go back to.
+    mutating func reset() { self = .init() }
+
+    /// Another step into Window view the person took meanwhile (a drop, a pick, a float): that's
+    /// where they want to be, so an earlier Exit's return no longer applies.
+    mutating func superseded() { returnMode = nil }
+
+    /// The Mac's answer: Window view started (`window`) or didn't (it refused, or Window view
+    /// ended). Returns the mode Exit left, to ask for now, at most once; nil otherwise. Either
+    /// way nothing is in flight any more.
+    mutating func answered(window: Bool, now: TimeInterval) -> ReceiverDisplayMode? {
+        defer { self = .init() }
+        guard window, inFlight(now: now) else { return nil }
+        return returnMode
+    }
+
+    /// A session on `peer`: a request to another Mac no longer applies there.
+    mutating func connected(to peer: String) {
+        if host != peer { self = .init() }
+    }
+}
+
 extension WorkspaceAppOpening.Control {
     /// From the session's live state and the Mac's decision on Request Control.
     init(live: Bool, state: SessionInputWireState) {
