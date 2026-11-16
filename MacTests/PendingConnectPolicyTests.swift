@@ -119,4 +119,77 @@ final class PendingConnectPolicyTests: XCTestCase {
         let plain = PendingConnectPolicy.timeoutStatus(name: "Phone", lastStatus: "Starting…")
         XCTAssertFalse(plain.contains("Last status"))
     }
+
+    // MARK: - Row actions
+
+    private func actions(_ connection: KnownDeviceConnection, hasTarget: Bool = true) -> KnownDeviceRowActions {
+        KnownDeviceRowActions.actions(for: connection, hasTarget: hasTarget)
+    }
+
+    func testIdleRowOffersPlainConnectOnly() {
+        XCTAssertEqual(actions(.idle), .init(offersConnect: true, connectReplacesAutomaticAttempt: false,
+                                             offersCancel: false))
+    }
+
+    func testFailedRowOffersConnectAgain() {
+        let state = KnownDeviceConnection.failed(sessionID: "wifi:Phone", status: "Declined")
+        XCTAssertEqual(actions(state), .init(offersConnect: true, connectReplacesAutomaticAttempt: false,
+                                             offersCancel: false))
+    }
+
+    func testIdleOrFailedRowWithoutARouteOffersNothing() {
+        let none = KnownDeviceRowActions(offersConnect: false, connectReplacesAutomaticAttempt: false,
+                                         offersCancel: false)
+        XCTAssertEqual(actions(.idle, hasTarget: false), none)
+        XCTAssertEqual(actions(.failed(sessionID: "x", status: "Declined"), hasTarget: false), none)
+    }
+
+    /// Issue #128: the explicit Connect must stay reachable while this Mac's
+    /// own automatic attempt is still dialing.
+    func testAutomaticAttemptOffersConnectNowAndCancel() {
+        let state = KnownDeviceConnection.connecting(sessionID: "wifi:Phone", status: "Starting…", automatic: true)
+        XCTAssertEqual(actions(state), .init(offersConnect: true, connectReplacesAutomaticAttempt: true,
+                                             offersCancel: true))
+    }
+
+    func testAutomaticAttemptWithoutARouteStillOffersCancelOnly() {
+        let state = KnownDeviceConnection.connecting(sessionID: "wifi:Phone", status: "Starting…", automatic: true)
+        XCTAssertEqual(actions(state, hasTarget: false),
+                       .init(offersConnect: false, connectReplacesAutomaticAttempt: false, offersCancel: true))
+    }
+
+    /// An explicit attempt in progress must not get a second Connect: it would
+    /// be absorbed or duplicate the receiver's prompt.
+    func testExplicitAttemptOffersCancelOnly() {
+        let state = KnownDeviceConnection.connecting(sessionID: "wifi:Phone", status: "Starting…", automatic: false)
+        XCTAssertEqual(actions(state), .init(offersConnect: false, connectReplacesAutomaticAttempt: false,
+                                             offersCancel: true))
+    }
+
+    func testAwaitingApprovalAndConnectedRowsOfferNoConnectOrCancel() {
+        let none = KnownDeviceRowActions(offersConnect: false, connectReplacesAutomaticAttempt: false,
+                                         offersCancel: false)
+        XCTAssertEqual(actions(.awaitingApproval(sessionID: "wifi:Phone")), none)
+        XCTAssertEqual(actions(.connected(sessionID: "wifi:Phone")), none)
+    }
+
+    func testRowResolvesItsRouteOnlyWhereConnectCanBeOffered() {
+        XCTAssertTrue(KnownDeviceRowActions.needsTarget(for: .idle))
+        XCTAssertTrue(KnownDeviceRowActions.needsTarget(for: .failed(sessionID: "x", status: "Declined")))
+        XCTAssertTrue(KnownDeviceRowActions.needsTarget(
+            for: .connecting(sessionID: "x", status: "Starting…", automatic: true)))
+        XCTAssertFalse(KnownDeviceRowActions.needsTarget(
+            for: .connecting(sessionID: "x", status: "Starting…", automatic: false)))
+        XCTAssertFalse(KnownDeviceRowActions.needsTarget(for: .awaitingApproval(sessionID: "x")))
+        XCTAssertFalse(KnownDeviceRowActions.needsTarget(for: .connected(sessionID: "x")))
+    }
+
+    /// The row's automatic flag comes from the snapshot, so a Connect Now
+    /// is offered exactly where `ExplicitConnectAdmission` would replace.
+    func testRowStateFromAutomaticSnapshotOffersConnectNow() {
+        let state = connection([session("remote:phone", intended: peer, automatic: true)])
+        XCTAssertTrue(actions(state).connectReplacesAutomaticAttempt)
+        let explicit = connection([session("remote:phone", intended: peer, automatic: false)])
+        XCTAssertFalse(actions(explicit).offersConnect)
+    }
 }

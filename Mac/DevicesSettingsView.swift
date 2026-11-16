@@ -76,23 +76,33 @@ struct DevicesSettingsView: View {
                                 .lineLimit(3)
                         }
                         Spacer()
-                        if entry.activeSessionID == nil, let target = entry.resolvedTarget {
+                        let rowActions = KnownDeviceRowActions.actions(
+                            for: entry.connection, hasTarget: entry.resolvedTarget != nil)
+                        if rowActions.offersConnect, let target = entry.resolvedTarget {
                             Menu {
                                 Button("Connect with Mirror") { controller.connect(to: target, mode: .mirror) }
                                 Button("Connect with Extend") { controller.connect(to: target, mode: .extend) }
                             } label: {
-                                Text("Connect")
+                                if rowActions.connectReplacesAutomaticAttempt {
+                                    Text("Connect Now")
+                                } else {
+                                    Text("Connect")
+                                }
                             } primaryAction: {
                                 controller.explicitConnect(to: target)
                             }
                             .menuStyle(.button)
                             .fixedSize()
                             .controlSize(.small)
+                            .accessibilityLabel(rowActions.connectReplacesAutomaticAttempt
+                                ? String(localized: "Connect to \(entry.name) now, replacing the automatic attempt")
+                                : String(localized: "Connect to \(entry.name)"))
                         }
 
                         // A dial that hasn't reached the device yet: say so
-                        // and let it be stopped, instead of a Connect it absorbs.
-                        if case .connecting(let sessionID, _, _) = entry.connection {
+                        // and let it be stopped. An automatic one can also be
+                        // replaced by the Connect above.
+                        if rowActions.offersCancel, case .connecting(let sessionID, _, _) = entry.connection {
                             ProgressView().controlSize(.small)
                             Button("Cancel") {
                                 if let session = controller.session(for: sessionID) { controller.disconnect(session) }
