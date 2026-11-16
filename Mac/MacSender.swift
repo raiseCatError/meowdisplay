@@ -3724,6 +3724,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func stopOnQueue() {
+        // Adaptive changes held for the lock screen view die with the
+        // session: ending the view below must not apply them (#123 F7).
+        _ = adaptiveLockScreenDeferral.take()
         endLockScreen()
         stopWorkspaceEngine()
         windowBrowser?.stop()
@@ -6961,6 +6964,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         displayArrangement?.sessionEnded()
         // The lock screen view belongs to the connection that asked: a new one starts without it
         // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
+        // Adaptive changes it held are dropped, not applied on the way out
+        // (#123 F7); the next capture start re-checks the raster.
+        _ = adaptiveLockScreenDeferral.take()
         if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
         lockScreenShowLimit.reset()
         // No admitted receiver: window streams stop until one is admitted again.
@@ -8957,6 +8963,45 @@ extension MacSender {
         try await onQueue { _ in }
     }
 
+    /// What the adaptive raster re-check did at its real call sites (#123 F1/F7).
+    struct AdaptiveRecheckProbe: Sendable {
+        var restartRequested: Bool
+        var deferred: AdaptiveApplyPath
+        var hasManagedRaster: Bool
+        var work: AdaptiveStreamingCoordinator.WorkCounters
+    }
+
+    /// Runs, on `queue`: the hello's data policy when `saveData` is given
+    /// (`helloAccepted`, as on a real hello), then the capture-start note
+    /// `prepareCaptureStart` makes for a capture started at
+    /// `pixelsWide`×`pixelsHigh` on `displayID`, then `commitCaptureStart`'s
+    /// raster re-check, optionally while the lock screen view is shown.
+    func adaptiveCaptureStartRecheckForTesting(
+        displayID: CGDirectDisplayID, displayWidth: Int, displayHeight: Int, pixelsWide: Int, pixelsHigh: Int,
+        saveData: NetworkCost.DataPreference? = nil, lockScreenShown: Bool = false
+    ) async throws -> AdaptiveRecheckProbe {
+        try await onQueue { sender in
+            if let saveData {
+                sender.adaptive.helloAccepted(AdaptiveHelloFields(saveData: saveData),
+                                              now: ProcessInfo.processInfo.systemUptime)
+            }
+            sender.noteAdaptiveCaptureStart(displayID: displayID, displayWidth: displayWidth,
+                                            displayHeight: displayHeight, pixelsWide: pixelsWide,
+                                            pixelsHigh: pixelsHigh)
+            let wasShown = sender.lockScreenActive
+            if lockScreenShown { sender.lockScreenActive = true }
+            let requested = sender.recheckAdaptiveRasterAfterCaptureStart()
+            sender.lockScreenActive = wasShown
+            return AdaptiveRecheckProbe(restartRequested: requested, deferred: sender.adaptiveLockScreenDeferral.pending,
+                                        hasManagedRaster: sender.adaptive.hasManagedRaster, work: sender.adaptive.work)
+        }
+    }
+
+    /// The adaptive change held for the end of the lock screen view.
+    var adaptiveLockScreenDeferralForTesting: AdaptiveApplyPath {
+        get async throws { try await onQueue { $0.adaptiveLockScreenDeferral.pending } }
+    }
+
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
 
     /// Changes the device's permit without the review a real change runs (F5: the per-event check
@@ -9147,12 +9192,22 @@ extension MacSender: AdaptiveStreamingApplying {
     /// `queue` only, after a capture start committed: if the started size is
     /// not what the plan now asks for (a raster change arrived while it was
     /// starting, or its restart was skipped with no live stream), restart
-    /// once more through the arbiter (#123 A5). Off: one locked compare.
-    fileprivate func recheckAdaptiveRasterAfterCaptureStart() {
-        guard mode != .window, !lockScreenActive, adaptive.captureNeedsRasterRestart(today: quality.scale) else { return }
+    /// once more through the arbiter (#123 A5). Off: one locked compare, and
+    /// never a restart, a log line or a deferral, because no plan has ever
+    /// asked for another raster (#123 F1). During the lock screen view the
+    /// restart is held, not lost (#123 F7). Returns whether it asked for one.
+    @discardableResult
+    fileprivate func recheckAdaptiveRasterAfterCaptureStart() -> Bool {
+        guard mode != .window, adaptive.captureNeedsRasterRestart(today: quality.scale) else { return false }
+        guard !lockScreenActive else {
+            adaptiveLockScreenDeferral.record(.captureRestart)
+            Log.info("adaptive: raster re-check deferred while the lock screen is shown")
+            return false
+        }
         Log.info("adaptive: the capture started at an older raster — restarting at the planned one")
         let selfBox = self.selfBox
         Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
+        return true
     }
 
     /// `queue` only: what waited for the lock screen view to end (#123 A7).
@@ -9216,18 +9271,28 @@ extension MacSender: AdaptiveStreamingApplying {
                 return false
             }
             // Deferred (not lost) while a rotation or another rebuild runs.
-            return sender.captureRebuild.requestAdaptiveRaster()
+            guard sender.captureRebuild.requestAdaptiveRaster() else { return false }
+            // Whatever asked for it (a plan change, the re-check after a
+            // start, the lock screen view ending, a rebuild finishing), the
+            // limits count from the restart that really runs (#123 F6).
+            sender.adaptive.noteAdaptiveRestartBegan(now: ProcessInfo.processInfo.systemUptime)
+            return true
         }) ?? false
         guard began else { return }
         let selfBox = self.selfBox
         defer { queue.async { selfBox.currentOnQueue()?.finishCaptureRebuild() } }
-        // The cached frame is the old size: never replay it into the new encoder.
-        invalidateCapturePipeline(discardingLastFrame: true)
-        if let retired = try? await onQueue({ sender in sender.releaseCaptureStream() }) {
+        // On `queue`, where the old stream's frames still land (#123 A10).
+        if let retired = try? await onQueue({ sender -> SCStream? in
+            // The cached frame is the old size: never replay it into the new encoder.
+            sender.invalidateCapturePipeline(discardingLastFrame: true)
+            return sender.releaseCaptureStream()
+        }) {
             try? await retired.stopCapture()
         }
-        videoEncoder.invalidate()
-        needsKeyframe = true
+        _ = try? await onQueue { sender in
+            sender.videoEncoder.invalidate()
+            sender.needsKeyframe = true
+        }
         do {
             switch mode {
             case .mirror: try await rebuildMirrorCapturePipeline()
