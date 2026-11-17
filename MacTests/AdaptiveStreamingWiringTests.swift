@@ -368,6 +368,16 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
                           suggestionsEnabled: false, reporting: .preferenceOnly)
         XCTAssertEqual(fresh.helloFields.saveData, .auto)
 
+        // A stored dismissal count is bounded on load and when applied: a
+        // corrupted value must not be replayed one by one at launch.
+        let corrupted = UserDefaults(suiteName: "adaptive2.\(UUID().uuidString)")!
+        corrupted.set(Int.max, forKey: UseLessDataSettings.dismissalsKey)
+        XCTAssertEqual(UseLessDataSettings.load(corrupted).dismissals, NetworkCostSuggestionTracker.maxDismissals)
+        corrupted.set(-5, forKey: UseLessDataSettings.dismissalsKey)
+        XCTAssertEqual(UseLessDataSettings.load(corrupted).dismissals, 0)
+        let bounded = ReceiverAdaptiveState()
+        bounded.setSettings(UseLessDataSettings(preference: .auto, answer: .unanswered, dismissals: Int.max))
+
         // A change re-sends hello through the debounced gate.
         fresh.noteHelloSent(fresh.helloFields, now: 0)
         fresh.setSettings(UseLessDataSettings(preference: .off), suggestionsEnabled: false, reporting: .preferenceOnly)

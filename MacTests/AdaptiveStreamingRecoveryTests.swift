@@ -710,6 +710,7 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
         while now < lastStats + AdaptiveStreamingCoordinator.telemetryLossSeconds - 2 {
             now += 2
             fake.now = now
+            for _ in 0..<100 { c.noteVideoSent(bytes: 30_000, now: now - 1) }   // video flows, stats do not
             c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
         }
         XCTAssertFalse(c.telemetryLost)
@@ -718,6 +719,7 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
                 + AdaptiveStreamingCoordinator.restartIntervalSeconds + 2 {
             now += 2
             fake.now = now
+            for _ in 0..<100 { c.noteVideoSent(bytes: 30_000, now: now - 1) }
             c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
         }
         XCTAssertTrue(c.telemetryLost)
@@ -731,6 +733,45 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
         XCTAssertFalse(c.telemetryLost)
         XCTAssertEqual(c.plan?.origin, .controller, "managed again")
         XCTAssertEqual(c.plan?.rasterScale, 1, "from the initial point, not the old lowered one")
+    }
+
+    /// A still screen sends no video, and the receiver reports only on
+    /// frames it presents: its silence then is not lost telemetry. The
+    /// lowered point is held with no capture restart, however long the
+    /// screen stays still, and the loss clock runs again once video does.
+    func testAStillScreenIsNotLostTelemetry() throws {
+        let (c, fake) = managed()
+        fake.plan = { [unowned c] in c.plan }
+        var now = 2.0
+        try congest(c, fake, from: &now) { ($0.plan?.rasterScale ?? 1) < 1 }
+        let lowered = c.plan?.rasterScale
+        let restartsBefore = fake.times(.captureRestart).count
+        // Five minutes with nothing sent.
+        for _ in 0..<150 {
+            now += 2
+            fake.now = now
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now, captured: 0), now: now)
+        }
+        XCTAssertFalse(c.telemetryLost)
+        XCTAssertEqual(c.plan?.rasterScale, lowered, "the point is held")
+        XCTAssertEqual(fake.times(.captureRestart).count, restartsBefore, "no restart on a still screen")
+        // Video flows again but stats never come: lost after the usual
+        // time of sending, counted from here and not from the still time.
+        let resumed = now
+        while now < resumed + AdaptiveStreamingCoordinator.telemetryLossSeconds - 4 {
+            now += 2
+            fake.now = now
+            for _ in 0..<100 { c.noteVideoSent(bytes: 30_000, now: now - 1) }
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
+        }
+        XCTAssertFalse(c.telemetryLost, "still inside the loss time since video resumed")
+        for _ in 0..<4 {
+            now += 2
+            fake.now = now
+            for _ in 0..<100 { c.noteVideoSent(bytes: 30_000, now: now - 1) }
+            c.tick(generation: 1, mode: .extend, inputs: inputs(), window: window(now - 2, now), now: now)
+        }
+        XCTAssertTrue(c.telemetryLost)
     }
 
     /// F5: a link under 0.5 ms always reports `rtt` 0; it still gets a
