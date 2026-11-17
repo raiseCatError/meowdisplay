@@ -126,6 +126,10 @@ actor USBTLSBridge {
     /// once: by `.ready`, by `.failed`, or by `cancel()`, whichever is first.
     private var startContinuation: CheckedContinuation<NWEndpoint.Port, Error>?
 
+    /// True while `start()` is suspended waiting for its listener. Tests
+    /// read it to cancel at exactly that point instead of after a delay.
+    var isWaitingForListener: Bool { startContinuation != nil }
+
     /// `dialTunnel` is `Usbmux.dial` in production (always targeting
     /// `WireCrypto.tlsPort` — see `start()`) and an injected fake opaque
     /// tunnel in tests, which is why it has no default here: this file must

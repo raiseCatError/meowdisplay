@@ -188,7 +188,8 @@ final class USBTLSBridgeTests: XCTestCase {
     /// handled used to leave `start()` suspended forever: the cancel cleared
     /// the listener, so its later states were ignored and nothing resumed
     /// the continuation. The bridge's queue is held inside the fake dial, so
-    /// no listener callback can run until the cancel has landed.
+    /// no listener callback can run until the cancel has landed, and the
+    /// cancel is sent only once start() is seen waiting: no timed waits.
     func testCancelWhileTheListenerStartsEndsStartOnce() async throws {
         let bridgeQueue = DispatchQueue(label: "usbtlsbridge.tests.held")
         let held = HeldQueue(bridgeQueue)
@@ -211,15 +212,29 @@ final class USBTLSBridgeTests: XCTestCase {
             }
             finished.fulfill()
         }
-        // start() is now waiting for a listener whose callbacks are held.
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Wait for the exact state under test, not for a delay: start() is
+        // suspended on its listener, whose callbacks are held. A cancel that
+        // landed earlier would take start()'s early exit and prove nothing.
+        let waitingDeadline = Date().addingTimeInterval(10)
+        while !(await bridge.isWaitingForListener) {
+            guard Date() < waitingDeadline else { return XCTFail("start() never waited for its listener") }
+            await Task.yield()
+        }
         bridge.cancel()
-        try await Task.sleep(nanoseconds: 300_000_000)
-        // The listener's late states arrive now and must not resume again.
-        held.release()
-        await fulfillment(of: [finished], timeout: 3)
+        // The queue is still held, so no listener state can have been
+        // handled: only the cancel can end start() here.
+        await fulfillment(of: [finished], timeout: 5)
         XCTAssertEqual(outcome.value, "cancelled")
-        try await Task.sleep(nanoseconds: 200_000_000)
+        let stillWaiting = await bridge.isWaitingForListener
+        XCTAssertFalse(stillWaiting)
+        // The listener's late states arrive now and must not resume again
+        // (a second resume of the continuation would crash the test run).
+        held.release()
+        await withCheckedContinuation { (flushed: CheckedContinuation<Void, Never>) in
+            bridgeQueue.async { flushed.resume() }
+        }
+        for _ in 0..<100 { await Task.yield() }
+        _ = await bridge.isWaitingForListener
         XCTAssertEqual(outcome.value, "cancelled")
         task.cancel()
     }
