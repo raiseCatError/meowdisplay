@@ -375,6 +375,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// data saving this stays false for the sender's whole life; after a
     /// data-saving episode it clears at the first start back at today's size).
     private var rasterManaged = false
+    /// Capture starts in a row whose size matched no plan. A restart that
+    /// cannot produce the planned size is not repeated without end: after
+    /// `maximumUnmatchedStarts` the running capture is kept until the plan's
+    /// raster changes (#123 churn review).
+    private var unmatchedStarts = 0
+    static let maximumUnmatchedStarts = 2
 
     private(set) var hello: AdaptiveHelloFields?
     /// The policy the evidence asks for (diagnostics and the UI read it).
@@ -493,7 +499,12 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         // for another raster again (`replan`). Without this, a "Use less
         // data" episode with the switch off kept the re-check armed for the
         // sender's life (#123 churn, part 3).
-        if planValue == nil, startedScale != nil { rasterManaged = false }
+        unmatchedStarts = startedScale == nil ? unmatchedStarts + 1 : 0
+        // The same when restarting did not produce today's size: the usual
+        // sizing path made this capture, so it is today's capture.
+        if planValue == nil, startedScale != nil || unmatchedStarts > Self.maximumUnmatchedStarts {
+            rasterManaged = false
+        }
     }
 
     /// A capture started at `width`×`height` with `scale` applied and no
@@ -506,6 +517,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                                        todayScale: 1, maxWide: nil, maxHigh: nil)
         startedSize = AdaptivePixelSize(width: width, height: height)
         startedScale = scale
+        unmatchedStarts = 0
     }
 
     /// True when the running capture does not have the size the plan now
@@ -519,7 +531,8 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// as a raster to fix and restart capture with the switch off.
     func captureNeedsRasterRestart(today: Double) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard rasterManaged, let startedSize, let sizing else { return false }
+        guard rasterManaged, unmatchedStarts <= Self.maximumUnmatchedStarts,
+              let startedSize, let sizing else { return false }
         let desired = today * (planValue?.rasterScale ?? 1)
         if let startedScale { return !sizing.capturesTheSame(startedScale, desired) }
         guard sizing.captureSize(scale: desired) != nil else { return false }
@@ -930,6 +943,7 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
         guard newPlan != oldPlan else { return }
         let path = applyPath(from: oldPlan, to: newPlan)
         lock.lock()
+        if abs((newPlan?.rasterScale ?? 1) - (planValue?.rasterScale ?? 1)) > 1e-9 { unmatchedStarts = 0 }
         planValue = newPlan
         if let raster = newPlan?.rasterScale, abs(raster - 1) > 1e-9 { rasterManaged = true }
         lock.unlock()
