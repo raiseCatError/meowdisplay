@@ -396,29 +396,18 @@ final class MacSenderTransportController: @unchecked Sendable {
             guard upgradeProbes.isEmpty else { return }   // a round is still in flight
         }
 
-        var direct: [CableCandidateSelection.ProbeCandidate] = []
-        var linkLocal: [CableCandidateSelection.ProbeCandidate] = []
         let scopes = Self.candidateInterfaceNames()
-        for addr in peerAddrs {
-            if addr.lowercased().hasPrefix("fe80:") {
-                for iface in scopes {
-                    linkLocal.append(.init(host: "\(addr)%\(iface)", scope: iface))
-                }
-            } else {
-                direct.append(.init(host: addr, scope: nil))
-            }
-        }
-        let all = direct + linkLocal
-        guard !all.isEmpty else { return }
         // At most 16 dials: the same list as always up to 16; over it,
         // duplicates and Wi-Fi-scoped fe80 dials (prohibited below) give way.
-        let candidates = CableCandidateSelection.probeCandidates(all, wifiScopes: Self.wifiInterfaceNames)
-            .map { NWEndpoint.Host($0.host) }
+        let selection = CableCandidateSelection.probeRound(peerAddrs: peerAddrs, scopes: scopes,
+                                                           wifiScopes: Self.wifiInterfaceNames)
+        guard !selection.dials.isEmpty else { return }
+        let candidates = selection.dials.map { NWEndpoint.Host($0.host) }
         let candidateNames = candidates.map { "\($0)" }
         if candidateNames != lastLoggedCandidates {
             lastLoggedCandidates = candidateNames
             Log.info("probing \(candidateNames.count) candidate cable paths"
-                     + " (direct \(direct.count),"
+                     + " (direct \(selection.directCount),"
                      + " fe80 scopes \(scopes.joined(separator: ","))) — repeats every 10s")
         }
         probeRoundGeneration += 1

@@ -76,6 +76,34 @@ enum CableCandidateSelection {
         }
     }
 
+    /// One probe round's dials and how many of the receiver's addresses
+    /// were direct (not fe80), for the log line.
+    struct ProbeRound: Equatable, Sendable {
+        let dials: [ProbeCandidate]
+        let directCount: Int
+    }
+
+    /// From the receiver's advertised addresses to the dials of one round:
+    /// every fe80 address once per local scope (its zone means nothing
+    /// without one), every other address as it is; direct addresses first,
+    /// as the sender always ordered them; then the cap above.
+    static func probeRound(peerAddrs: [String], scopes: [String], limit: Int = probeCandidateLimit,
+                           wifiScopes: () -> Set<String>) -> ProbeRound {
+        var direct: [ProbeCandidate] = []
+        var linkLocal: [ProbeCandidate] = []
+        for addr in peerAddrs {
+            if addr.lowercased().hasPrefix("fe80:") {
+                for iface in scopes {
+                    linkLocal.append(.init(host: "\(addr)%\(iface)", scope: iface))
+                }
+            } else {
+                direct.append(.init(host: addr, scope: nil))
+            }
+        }
+        return ProbeRound(dials: probeCandidates(direct + linkLocal, limit: limit, wifiScopes: wifiScopes),
+                          directCount: direct.count)
+    }
+
     // MARK: - Shared
 
     /// Keeps the `limit` best-ranked entries (lower rank first, earlier
