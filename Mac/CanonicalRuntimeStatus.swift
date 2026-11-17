@@ -31,7 +31,7 @@ enum CanonicalRuntimeStatus {
     }
 
     /// Same, with the route already worded for display
-    /// (`DeviceSession.routeLabel`, e.g. "Direct Cable").
+    /// (`DeviceSession.routeLabel`, e.g. "Thunderbolt").
     static func headline(mode: CaptureMode, routeLabel: String?) -> String {
         headline(verb: mode == .mirror
                  ? String(localized: "Mirroring", comment: "Status: showing a copy of a Mac display on the device.")

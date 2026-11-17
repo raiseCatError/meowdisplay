@@ -423,7 +423,7 @@ More on [Devices](https://meowdisplay.app/features.html#devices).
   including nearby peer-to-peer Wi-Fi.
 - **Mac to Mac by cable** — with a Thunderbolt/USB4 cable between two Macs, a
   Wi-Fi session moves onto the cable once it is found. The route then reads
-  **Direct Cable**, but only when the Mac can confirm a Thunderbolt link; any
+  **Thunderbolt** when macOS reports the session interface as a Thunderbolt link; any
   other wired path, such as Ethernet through a switch, reads **LAN**.
 - **Remote Access** — reach a paired Mac through a private network you
   control, such as Tailscale. The address only routes the connection; pairing

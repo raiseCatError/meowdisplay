@@ -342,8 +342,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         get { statusSink.onTransportPath }
         set { statusSink.onTransportPath = newValue }
     }
-    // The user-facing wording of that path ("Direct Cable" for a verified
-    // Mac-to-Mac Thunderbolt link, else the route); fired right after
+    // The user-facing wording of that path ("Thunderbolt" for a
+    // Mac-to-Mac Thunderbolt IP link, else the route); fired right after
     // `onTransportPath`, also when the route itself did not change.
     @MainActor var onTransportPathDescription: ((ConnectionPathDescription?) -> Void)? {
         get { statusSink.onTransportPathDescription }
