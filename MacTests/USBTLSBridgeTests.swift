@@ -184,6 +184,61 @@ final class USBTLSBridgeTests: XCTestCase {
         bridge.cancel()
     }
 
+    /// `cancel()` after the listener exists but before its `.ready` is
+    /// handled used to leave `start()` suspended forever: the cancel cleared
+    /// the listener, so its later states were ignored and nothing resumed
+    /// the continuation. The bridge's queue is held inside the fake dial, so
+    /// no listener callback can run until the cancel has landed, and the
+    /// cancel is sent only once start() is seen waiting: no timed waits.
+    func testCancelWhileTheListenerStartsEndsStartOnce() async throws {
+        let bridgeQueue = DispatchQueue(label: "usbtlsbridge.tests.held")
+        let held = HeldQueue(bridgeQueue)
+        defer { held.release() }
+        let bridge = USBTLSBridge(udid: "fake", queue: bridgeQueue) { _, _, _ in
+            held.hold()
+            // Never started: the bridge only keeps and finally cancels it.
+            return NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        }
+        let outcome = OutcomeBox()
+        let finished = expectation(description: "start() finished")
+        let task = Task {
+            do {
+                _ = try await bridge.start()
+                outcome.set("returned")
+            } catch USBTLSBridge.Failure.cancelled {
+                outcome.set("cancelled")
+            } catch {
+                outcome.set("other: \(error)")
+            }
+            finished.fulfill()
+        }
+        // Wait for the exact state under test, not for a delay: start() is
+        // suspended on its listener, whose callbacks are held. A cancel that
+        // landed earlier would take start()'s early exit and prove nothing.
+        let waitingDeadline = Date().addingTimeInterval(10)
+        while !(await bridge.isWaitingForListener) {
+            guard Date() < waitingDeadline else { return XCTFail("start() never waited for its listener") }
+            await Task.yield()
+        }
+        bridge.cancel()
+        // The queue is still held, so no listener state can have been
+        // handled: only the cancel can end start() here.
+        await fulfillment(of: [finished], timeout: 5)
+        XCTAssertEqual(outcome.value, "cancelled")
+        let stillWaiting = await bridge.isWaitingForListener
+        XCTAssertFalse(stillWaiting)
+        // The listener's late states arrive now and must not resume again
+        // (a second resume of the continuation would crash the test run).
+        held.release()
+        await withCheckedContinuation { (flushed: CheckedContinuation<Void, Never>) in
+            bridgeQueue.async { flushed.resume() }
+        }
+        for _ in 0..<100 { await Task.yield() }
+        _ = await bridge.isWaitingForListener
+        XCTAssertEqual(outcome.value, "cancelled")
+        task.cancel()
+    }
+
     private func receiveExactly(_ count: Int, on conn: NWConnection) async throws -> Data {
         try await withCheckedThrowingContinuation { cont in
             conn.receive(minimumIncompleteLength: count, maximumLength: count) { data, _, _, error in
@@ -194,6 +249,46 @@ final class USBTLSBridgeTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+/// A dispatch queue held (suspended) from inside a test's fake dial and
+/// released once; a suspended queue must be resumed before it is freed.
+private final class HeldQueue: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var isHeld = false
+
+    init(_ queue: DispatchQueue) { self.queue = queue }
+
+    func hold() {
+        lock.lock(); defer { lock.unlock() }
+        guard !isHeld else { return }
+        isHeld = true
+        queue.suspend()
+    }
+
+    func release() {
+        lock.lock(); defer { lock.unlock() }
+        guard isHeld else { return }
+        isHeld = false
+        queue.resume()
+    }
+}
+
+/// What `start()` ended with, written once from the test's task.
+private final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+
+    func set(_ value: String) {
+        lock.lock(); defer { lock.unlock() }
+        stored = value
+    }
+
+    var value: String? {
+        lock.lock(); defer { lock.unlock() }
+        return stored
     }
 }
 
