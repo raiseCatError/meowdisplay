@@ -15,6 +15,7 @@ final class PairingPromptModel: ObservableObject {
     private var decision: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
     private let timeoutNanoseconds: UInt64
+    private let timeoutSleep: @Sendable (UInt64) async throws -> Void
 
     var onPending: ((PendingPairing) -> Void)?
     /// The person at this device accepted the code (and any owner authentication passed).
@@ -99,8 +100,14 @@ final class PairingPromptModel: ObservableObject {
         confirmedLocally = nil
     }
 
-    nonisolated init(timeoutNanoseconds: UInt64 = 60_000_000_000) {
+    /// `timeoutSleep` is how the prompt waits out its timeout; tests replace
+    /// it to decide when the timeout fires instead of racing a wall clock.
+    nonisolated init(timeoutNanoseconds: UInt64 = 60_000_000_000,
+                     timeoutSleep: @escaping @Sendable (UInt64) async throws -> Void = {
+                         try await Task.sleep(nanoseconds: $0)
+                     }) {
         self.timeoutNanoseconds = timeoutNanoseconds
+        self.timeoutSleep = timeoutSleep
     }
 
     func request(_ value: PendingPairing, token: UUID? = nil) async -> Bool {
@@ -124,8 +131,10 @@ final class PairingPromptModel: ObservableObject {
             confirmedLocally = nil
             pending = value
             status = nil
+            let sleep = timeoutSleep
+            let nanoseconds = timeoutNanoseconds
             timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: self?.timeoutNanoseconds ?? 0)
+                try? await sleep(nanoseconds)
                 guard !Task.isCancelled else { return }
                 self?.resolve(false, reason: "timeout")
             }
