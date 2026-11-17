@@ -1,4 +1,36 @@
 import XCTest
+import Network
+
+final class MacSenderCaptureRecoveryTests: XCTestCase {
+    func testFailedRoundsStayBoundedForVideoAndAudioOnlyWithoutCountingLockedRounds() async throws {
+        let keychain = try TemporaryTestKeychain(prefix: "meowdisplay-capture-recovery-tests")
+        defer { keychain.delete() }
+        let identity = try keychain.makeIdentity()
+        let tls = TLSSessionConfig(identity: SendableSecIdentity(value: identity.identity),
+                                   pinnedPeerSPKI: identity.spki, peerID: "capture-recovery-test")
+        for video in [false, true] {
+            for audio in [false, true] {
+                for interactive in [false, true] {
+                    // Never started or dialed; no ScreenCaptureKit or input.
+                    let sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
+                                           name: "Capture Recovery Test", mode: .mirror)
+                    let probes = try await sender.failedCaptureRecoveryRoundsForTesting(
+                        video: video, audio: audio, interactive: interactive, rounds: 6)
+                    let label = "video=\(video) audio=\(audio) interactive=\(interactive)"
+                    if (video || audio) && interactive {
+                        XCTAssertEqual(probes.map(\.failedAttempts), [1, 2, 3, 4, 5, 5], label)
+                        XCTAssertEqual(probes.map(\.phase),
+                                       ["recovering", "recovering", "recovering", "recovering", "stopped", "stopped"], label)
+                        XCTAssertEqual(probes.map(\.endedSession), [false, false, false, false, true, true], label)
+                    } else {
+                        XCTAssertEqual(probes.map(\.failedAttempts), Array(repeating: 0, count: 6), label)
+                        XCTAssertTrue(probes.allSatisfy { $0.phase == "recovering" && !$0.endedSession }, label)
+                    }
+                }
+            }
+        }
+    }
+}
 
 final class CaptureLifecycleTests: XCTestCase {
     func testInputIsAllowedWhileRunningAndRecoveryButBlockedDuringPause() {
