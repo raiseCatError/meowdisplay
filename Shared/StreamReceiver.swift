@@ -4820,51 +4820,9 @@ final class StreamReceiver: ObservableObject {
 
             // Every 5s, report the aggregate to the Mac so its log holds the
             // full pipeline picture for offline analysis.
-            statsReportCounter += 1
             // Every 5 windows, or every 2 while the Mac announces adaptive
             // mode (#123, `AdaptiveTelemetryCadence`).
-            let adaptiveNow = StreamDiagnosticsClock.nowSeconds()
-            if statsReportCounter >= ReceiverAdaptiveState.shared.statsEveryWindows(now: adaptiveNow) {
-                statsReportCounter = 0
-                var statsMessage: [String: Any] = [
-                    "type": "stats",
-                    "transport": transport,
-                    "fps": fps,
-                    "mbps": (stats.mbps * 10).rounded() / 10,
-                    "e2e50": stats.e2eP50.rounded(),
-                    "e2e95": stats.e2eP95.rounded(),
-                    "enc50": stats.encodeP50.rounded(),
-                    "rtt": lastRttMs.rounded(),
-                    "stalls": stats.stalls,
-                    "cur": stats.cursorPerSec,
-                    "curLost": stats.cursorLost,
-                    "inp50": macInputP50.rounded(),
-                    "capFps": macCapFps,
-                    "dec50": stats.decodeP50.rounded(),
-                    "ph50": stats.photonP50.rounded(),
-                    "ph95": stats.photonP95.rounded(),
-                    "offsetKnown": presentationTiming.clockOffsetMs != nil,
-                ]
-                // Diagnostics (#123): optional `diag` summary, only while on.
-                if diagnostics.isEnabled {
-                    let route = DiagnosticsRouteClass(label: transport)
-                    let cost = transportState.pathCost()
-                    let metal = useMetalPath && onDecodedFrame != nil
-                    let offsetKnown = presentationTiming.clockOffsetMs != nil
-                    diagnostics.updateContext { context in
-                        context.route = route
-                        context.pathExpensive = cost?.expensive
-                        context.pathConstrained = cost?.constrained
-                        context.presentationPath = metal ? .metal : .displayLayer
-                        context.clockOffsetKnown = offsetKnown
-                    }
-                    statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
-                }
-                // Adaptive (#123): windowed telemetry, only while announced.
-                let decodeDurations = videoTelemetry.snapshotDecodeDurationsMs()
-                statsMessage.merge(ReceiverAdaptiveState.shared.drainTelemetryFields(
-                    now: adaptiveNow,
-                    decodeP95Ms: decodeDurations.isEmpty ? nil : percentile(decodeDurations, 0.95))) { current, _ in current }
+            if let statsMessage = endStatsWindow(fps: fps, stats: stats, now: StreamDiagnosticsClock.nowSeconds()) {
                 sendControl(statsMessage)
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
@@ -4875,6 +4833,57 @@ final class StreamReceiver: ObservableObject {
             let uiSink = self.uiSink
             DispatchQueue.main.async { uiSink.publishPerf(fps: fps, perf: stats) }
         }
+    }
+
+    /// `queue` only, from `presentDecodedSample` at the end of each one-second
+    /// FPS window: counts the window and, on the windows that report (every
+    /// 5, or every 2 while the Mac announces adaptive mode), returns the
+    /// `stats` message to send; nil on the others. `now` is
+    /// `StreamDiagnosticsClock.nowSeconds()`.
+    private func endStatsWindow(fps: Int, stats: PerfStats, now adaptiveNow: TimeInterval) -> [String: Any]? {
+        statsReportCounter += 1
+        guard statsReportCounter >= ReceiverAdaptiveState.shared.statsEveryWindows(now: adaptiveNow) else { return nil }
+        statsReportCounter = 0
+        var statsMessage: [String: Any] = [
+            "type": "stats",
+            "transport": transport,
+            "fps": fps,
+            "mbps": (stats.mbps * 10).rounded() / 10,
+            "e2e50": stats.e2eP50.rounded(),
+            "e2e95": stats.e2eP95.rounded(),
+            "enc50": stats.encodeP50.rounded(),
+            "rtt": lastRttMs.rounded(),
+            "stalls": stats.stalls,
+            "cur": stats.cursorPerSec,
+            "curLost": stats.cursorLost,
+            "inp50": macInputP50.rounded(),
+            "capFps": macCapFps,
+            "dec50": stats.decodeP50.rounded(),
+            "ph50": stats.photonP50.rounded(),
+            "ph95": stats.photonP95.rounded(),
+            "offsetKnown": presentationTiming.clockOffsetMs != nil,
+        ]
+        // Diagnostics (#123): optional `diag` summary, only while on.
+        if diagnostics.isEnabled {
+            let route = DiagnosticsRouteClass(label: transport)
+            let cost = transportState.pathCost()
+            let metal = useMetalPath && onDecodedFrame != nil
+            let offsetKnown = presentationTiming.clockOffsetMs != nil
+            diagnostics.updateContext { context in
+                context.route = route
+                context.pathExpensive = cost?.expensive
+                context.pathConstrained = cost?.constrained
+                context.presentationPath = metal ? .metal : .displayLayer
+                context.clockOffsetKnown = offsetKnown
+            }
+            statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
+        }
+        // Adaptive (#123): windowed telemetry, only while announced.
+        let decodeDurations = videoTelemetry.snapshotDecodeDurationsMs()
+        statsMessage.merge(ReceiverAdaptiveState.shared.drainTelemetryFields(
+            now: adaptiveNow,
+            decodeP95Ms: decodeDurations.isEmpty ? nil : percentile(decodeDurations, 0.95))) { current, _ in current }
+        return statsMessage
     }
 
     // MARK: - Explicit decode (Metal renderer path) — C4: ReceiverVideoDecoder
@@ -5522,6 +5531,19 @@ final class StreamReceiver: ObservableObject {
         reconnectContext.update { $0.authenticatedPeerIDHint = authenticatedPeerID }
         let selfBox = self.selfBox
         queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
+    }
+
+    /// Ends one stats window at `now` on `queue`, as `presentDecodedSample`
+    /// does (`endStatsWindow`), and hands back the `stats` message serialized
+    /// as `sendControl` serializes it, or nil for a window that does not report.
+    func endStatsWindowForTesting(fps: Int, stats: PerfStats, now: TimeInterval,
+                                  _ completion: @escaping @Sendable (Data?) -> Void) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            let message = receiver.endStatsWindow(fps: fps, stats: stats, now: now)
+            completion(message.flatMap { try? JSONSerialization.data(withJSONObject: $0) })
+        }
     }
 
     func probeForTesting(_ completion: @escaping @Sendable (ConnectRequestTestProbe) -> Void) {

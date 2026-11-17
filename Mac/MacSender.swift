@@ -5545,39 +5545,46 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 2.0) {
             guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             if self.transportController.isReady {
-                // Liveness + send-side health for the phone's overlay.
-                let elapsed = Date().timeIntervalSince(self.capWindowStart)
-                let capFps = elapsed > 0 ? Int(Double(self.capFrames) / elapsed) : 0
-                let adaptiveCapturedFrames = self.capFrames
-                self.capFrames = 0
-                self.capWindowStart = Date()
-                let sorted = self.inputLatencies.sorted()
-                let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
-                let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
-                #if DEBUG
-                let audioBitrateKbps = self.audioBytesThisWindow * 8 / 1000 / 2   // ~2s window
-                let audioSuffix = ",\"audioPkts\":\(self.audioPacketsThisWindow),\"audioKbps\":\(audioBitrateKbps)"
-                self.audioPacketsThisWindow = 0
-                self.audioBytesThisWindow = 0
-                #else
-                let audioSuffix = ""
-                #endif
-                // `encDrops`/`netDrops` are this ~2s window's drops (reset
-                // right after being sent), matching the `capFps` shape above
-                // — the HUD's `enc↓`/`net↓` want "recent", not a lifetime
-                // total that only ever climbs. `drops` (the sum) stays the
-                // session-lifetime total for anything relying on that legacy
-                // meaning.
-                let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
-                // Diagnostics (#123): optional `diag` summary, only while on.
-                let diagnosticsSuffix = self.diagnosticsPingSuffix()
-                // Adaptive Automatic (#123): one controller window per ping.
-                self.adaptiveTick(capturedFrames: adaptiveCapturedFrames, drops: pingWindowDrops)
-                let adaptiveSuffix = AdaptiveStreamingWire.pingSuffix(announcing: self.adaptive.announcesAdaptive)
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)\(adaptiveSuffix)}")
+                self.sendJSONFrame(self.buildPingJSON())
             }
             self.schedulePing()
         }
+    }
+
+    /// `queue` only, from `schedulePing` once the transport is ready: ends
+    /// this ~2 s window (resets its counters, runs the adaptive tick) and
+    /// returns the `ping` JSON to send.
+    private func buildPingJSON() -> String {
+        // Liveness + send-side health for the phone's overlay.
+        let elapsed = Date().timeIntervalSince(self.capWindowStart)
+        let capFps = elapsed > 0 ? Int(Double(self.capFrames) / elapsed) : 0
+        let adaptiveCapturedFrames = self.capFrames
+        self.capFrames = 0
+        self.capWindowStart = Date()
+        let sorted = self.inputLatencies.sorted()
+        let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
+        let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
+        #if DEBUG
+        let audioBitrateKbps = self.audioBytesThisWindow * 8 / 1000 / 2   // ~2s window
+        let audioSuffix = ",\"audioPkts\":\(self.audioPacketsThisWindow),\"audioKbps\":\(audioBitrateKbps)"
+        self.audioPacketsThisWindow = 0
+        self.audioBytesThisWindow = 0
+        #else
+        let audioSuffix = ""
+        #endif
+        // `encDrops`/`netDrops` are this ~2s window's drops (reset
+        // right after being sent), matching the `capFps` shape above
+        // — the HUD's `enc↓`/`net↓` want "recent", not a lifetime
+        // total that only ever climbs. `drops` (the sum) stays the
+        // session-lifetime total for anything relying on that legacy
+        // meaning.
+        let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
+        // Diagnostics (#123): optional `diag` summary, only while on.
+        let diagnosticsSuffix = self.diagnosticsPingSuffix()
+        // Adaptive Automatic (#123): one controller window per ping.
+        self.adaptiveTick(capturedFrames: adaptiveCapturedFrames, drops: pingWindowDrops)
+        let adaptiveSuffix = AdaptiveStreamingWire.pingSuffix(announcing: self.adaptive.announcesAdaptive)
+        return "{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)\(adaptiveSuffix)}"
     }
 
     /// `queue` only. Refreshes the diagnostics context and returns the
@@ -9476,6 +9483,16 @@ extension MacSender {
         try await onQueue { sender in
             if lockScreenShown { sender.lockScreenActive = true }
             sender.adaptiveTick(capturedFrames: 120, drops: (0, 0), now: now)
+        }
+    }
+
+    /// The `ping` JSON `schedulePing` sends for one window (`buildPingJSON`,
+    /// which also ends the window), on `queue`, with the window's input
+    /// latencies set to `inputLatencies` first.
+    func pingJSONForTesting(inputLatencies: [Double] = []) async throws -> String {
+        try await onQueue { sender in
+            sender.inputLatencies = inputLatencies
+            return sender.buildPingJSON()
         }
     }
 
