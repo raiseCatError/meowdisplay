@@ -2784,11 +2784,14 @@ point). A reading below 24 Hz counts as unknown (no cap). Window view has no sou
 `saveData`, `cost`, `saveDataAnswer` or the Mac's own Low Data Mode, described next) applies at once.
 A change back to full quality applies only once saving has been in effect for 20 s, and then as one
 step: if it restarts capture, it also waits for the 20 s restart limit (at most one more 20 s), so
-its FPS and bitrate do not return ahead of its raster. Until then the Mac keeps saving and keeps the
+its FPS and bitrate normally do not return ahead of its raster (after 40 s the return no longer
+waits, and a raster still inside the restart limit follows later). Until then the Mac keeps saving and keeps the
 latest request; a request to save again cancels it, and the last request always wins. Saving set
 before the first capture starts is left at once. A receiver that flips the preference or its cost
 hint on every hello therefore costs at most one capture restart and about three capture or encoder
-updates in all per 20 s, not one update per hello. Old receivers (no `saveData`) and Custom are not
+updates in all per 20 s, not one update per hello. With the Adaptive Automatic switch on and a
+receiver that sends telemetry, turning saving on can lower a raster the controller raised a moment
+before, so there the bound is two capture restarts per 20 s. Old receivers (no `saveData`) and Custom are not
 affected.
 
 "Use less data" works with the switch off too: in Automatic, the Mac uses a conservative point

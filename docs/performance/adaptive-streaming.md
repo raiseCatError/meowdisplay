@@ -456,7 +456,9 @@ bills: no TLS/QUIC/IP overhead or retransmits), and the active adaptive or data-
   updates, 6-7 restarts), 13-15 after (6-7 restarts); Window view 2,400 before, 16-17 after. One flip
   per 5 s for 600 s: Mirror 195 before, 75 after (30 restarts both); Window view 120 before, 89
   after. A cost hint flapping every 0.3 s for 90 s: 301 before, 9 after. Capture restarts stay at
-  most one per 20 s either way.
+  most one per 20 s either way for these cases (switch off, or no telemetry). With the switch on and
+  telemetry, turning saving on can lower a raster the controller raised a moment before: at most two
+  restarts per 20 s. A re-check restart that never produces the planned size stops after two retries.
 - **Residual.** A receiver that keeps flipping slower than the dwell still costs about one restart
   per 20 s (the limiter's bound). A cost blip after a long saving spell (an Android Activity
   recreation can briefly send no `cost`) is one return and one re-entry; the dwell absorbs the next.
