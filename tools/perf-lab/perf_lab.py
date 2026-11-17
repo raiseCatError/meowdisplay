@@ -103,6 +103,13 @@ def _read_json(path, root=None, budget=None):
     """One bundle file: a regular file inside the bundle folder, at most
     MAX_FILE_BYTES, and within the bundle's total `budget` if given."""
     name = os.path.basename(path)
+
+    def finite_number(text):
+        number = float(text)
+        if not math.isfinite(number):
+            raise BundleError("%s contains a non-finite number" % name)
+        return number
+
     try:
         if root is not None:
             real_root = os.path.realpath(root)
@@ -130,7 +137,7 @@ def _read_json(path, root=None, budget=None):
             budget.left -= len(data)
             if budget.left < 0:
                 raise BundleError("the bundle is larger than %d MB in total" % (MAX_BUNDLE_BYTES // (1024 * 1024)))
-        return json.loads(data.decode("utf-8"))
+        return json.loads(data.decode("utf-8"), parse_float=finite_number, parse_constant=finite_number)
     except FileNotFoundError:
         raise BundleError("missing %s" % name)
     except json.JSONDecodeError as e:
@@ -599,9 +606,16 @@ def analyse(bundle, allow_partial=False):
 
 # ---------------------------------------------------------------- formatting
 
+def _finite_report_value(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        raise BundleError("cannot report a non-finite measurement")
+    return value
+
+
 def fmt(v):
     if v is None:
         return "n/a"
+    _finite_report_value(v)
     if isinstance(v, int) or (isinstance(v, float) and v.is_integer() and abs(v) >= 1000):
         return "%d" % v
     if abs(v) >= 100:
@@ -610,7 +624,7 @@ def fmt(v):
 
 
 def fmt_cv(v):
-    return "n/a" if v is None else "%.1f%%" % (v * 100)
+    return "n/a" if v is None else "%.1f%%" % _finite_report_value(v * 100)
 
 
 def _env_lines(bundle):
@@ -855,7 +869,7 @@ def render_compare(ba, ra, bb, rb):
             "**" if key in primary else "", label + ("**" if key in primary else ""), key, unit,
             fmt(sa["median"]), fmt(sa["min"]), fmt(sa["max"]), sa["n"],
             fmt(sb["median"]), fmt(sb["min"]), fmt(sb["max"]), sb["n"],
-            fmt(delta), "n/a" if pct is None else "%.1f%%" % pct, compare_verdict(sa, sb)))
+            fmt(delta), "n/a" if pct is None else "%.1f%%" % _finite_report_value(pct), compare_verdict(sa, sb)))
     out.append("")
     out.append("Primary metrics of the scenario are in bold. Every trial of both runs is in their own reports.")
     return "\n".join(out) + "\n"

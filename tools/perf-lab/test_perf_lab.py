@@ -112,6 +112,16 @@ class BundleFixture(unittest.TestCase):
 
 
 class StatisticsTests(BundleFixture):
+    def test_nonfinite_report_values_and_percentage_overflow_are_refused(self):
+        for formatter in (perf_lab.fmt, perf_lab.fmt_cv):
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(formatter=formatter.__name__, value=value):
+                    with self.assertRaisesRegex(perf_lab.BundleError, "non-finite"):
+                        formatter(value)
+        with self.subTest(formatter="percentage overflow"):
+            with self.assertRaisesRegex(perf_lab.BundleError, "non-finite"):
+                perf_lab.fmt_cv(1e308)
+
     def test_summary_matches_hand_computed_values(self):
         s = perf_lab.summarize([54.0, 60.0, 66.0, None])
         self.assertEqual(s["n"], 3)
@@ -312,6 +322,89 @@ class GateTests(BundleFixture):
 class MalformedBundleTests(BundleFixture):
     """B15 (reproduced): exit 2 with one line, never a traceback."""
 
+    def test_nonfinite_json_numbers_are_refused_in_manifest_and_trials(self):
+        # Python's JSON decoder accepts nonstandard constants and can turn
+        # a valid exponent into infinity. NaN also defeats the histogram's
+        # difference check, so reject these before analysis or reporting.
+        literals = ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"]
+        for index, literal in enumerate(literals):
+            for target in ("manifest", "trial"):
+                with self.subTest(literal=literal, target=target):
+                    trials = [make_trial(i, 300) for i in (1, 2, 3)]
+                    path = self.write_bundle("nonfinite-%d-%s" % (index, target), trials)
+                    if target == "manifest":
+                        obj = make_manifest(trials)
+                        obj["windowSeconds"] = 987654321
+                        name = "manifest.json"
+                    else:
+                        obj = trials[1]
+                        obj["stages"][0]["max"] = 987654321
+                        name = perf_lab.trial_file_name(2)
+                    with open(os.path.join(path, name), "w") as f:
+                        f.write(json.dumps(obj).replace("987654321", literal))
+                    with self.assertRaisesRegex(perf_lab.BundleError, "non-finite"):
+                        perf_lab.load_bundle(path)
+                    output = os.path.join(path, "existing-report.md")
+                    with open(output, "w") as f:
+                        f.write("previous report")
+                    commands = [
+                        ["validate", path], ["report", path],
+                        ["report", path, "--out", output],
+                        ["compare", path, perf_lab.GOLDEN_BUNDLE, "--out", output],
+                        ["compare", perf_lab.GOLDEN_BUNDLE, path, "--out", output],
+                    ]
+                    for command in commands:
+                        out, err = io.StringIO(), io.StringIO()
+                        with redirect_stdout(out), redirect_stderr(err):
+                            self.assertEqual(perf_lab.main(command), 2)
+                        self.assertEqual(out.getvalue(), "")
+                        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+                        self.assertIn("non-finite", err.getvalue())
+                        self.assertNotIn("Traceback", err.getvalue())
+                        with open(output) as f:
+                            self.assertEqual(f.read(), "previous report")
+
+    def test_exported_nonfinite_strings_are_refused(self):
+        # PerformanceLabBundle.encoder converts non-finite floats to these
+        # strings. The existing privacy/value allowlist must still reject
+        # them rather than treating them as measurements.
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                trials = [make_trial(i, 300) for i in (1, 2, 3)]
+                trials[1]["stages"][0]["max"] = value
+                path = self.write_bundle("exported-" + value, trials)
+                with self.assertRaises(perf_lab.BundleError):
+                    perf_lab.load_bundle(path)
+                self.assert_exit_2(path)
+
+    def test_partial_report_and_comparison_refuse_derived_nonfinite_metrics(self):
+        trials = [make_trial(1, 300), make_trial(2, 0, "failed"), make_trial(3, 0, "failed")]
+        # Both operands are finite, but dividing by this measured duration
+        # overflows. One complete trial skips sample-stdev's later rejection.
+        trials[0]["measuredSeconds"] = 1e-308
+        path = self.write_bundle("finite-operands", trials)
+        output = os.path.join(path, "existing-report.md")
+        for command in (["report", path], ["compare", path, perf_lab.GOLDEN_BUNDLE]):
+            with self.subTest(command=command[0]):
+                with open(output, "w") as f:
+                    f.write("previous report")
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    self.assertEqual(perf_lab.main(command + ["--allow-partial", "--out", output]), 2)
+                self.assertEqual(out.getvalue(), "")
+                self.assertIn("non-finite", err.getvalue())
+                self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+                self.assertNotIn("Traceback", err.getvalue())
+                with open(output) as f:
+                    self.assertEqual(f.read(), "previous report")
+
+    def test_finite_exponent_numbers_remain_readable(self):
+        path = os.path.join(self.tmp, "finite.json")
+        with open(path, "w") as f:
+            f.write('{"fraction": 1.25e-2, "large": 1e308, "small": -1e-308}')
+        self.assertEqual(perf_lab._read_json(path, self.tmp),
+                         {"fraction": 0.0125, "large": 1e308, "small": -1e-308})
+
     def assert_exit_2(self, path, *extra):
         err = io.StringIO()
         with redirect_stderr(err):
@@ -479,6 +572,25 @@ class ReceiverCountingTests(BundleFixture):
 
 
 class CompareTests(BundleFixture):
+    def test_finite_comparison_metrics_cannot_export_an_infinite_percentage(self):
+        a = [make_trial(i, 300) for i in (1, 2, 3)]
+        for trial in a:
+            trial["measuredSeconds"] = 1e308
+        pa = self.write_bundle("tiny-rates", a)
+        pb = self.write_bundle("normal-rates", [make_trial(i, 300) for i in (1, 2, 3)])
+        output = os.path.join(self.tmp, "comparison.md")
+        with open(output, "w") as f:
+            f.write("previous comparison")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(perf_lab.main(["compare", pa, pb, "--out", output]), 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("non-finite", err.getvalue())
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+        self.assertNotIn("Traceback", err.getvalue())
+        with open(output) as f:
+            self.assertEqual(f.read(), "previous comparison")
+
     def test_overlap_logic(self):
         def s(vals):
             return perf_lab.summarize(vals)
