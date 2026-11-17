@@ -407,6 +407,9 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
     /// Telemetry stopped for `telemetryLossSeconds`: the controller's point
     /// is not used (the plan follows today's fixed policy) until it resumes.
     private(set) var telemetryLost = false
+    /// When the previous tick ran, to measure a window in which no video
+    /// was sent (see the telemetry-loss clock in `tick`).
+    private var lastTickAt: TimeInterval?
     /// When it last applied any change (every path rebuilds the encoder).
     private(set) var lastEncoderRebuildAt: TimeInterval?
     private(set) var routeEpoch: UInt64 = 0
@@ -662,6 +665,8 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
               now: TimeInterval) {
         publishUsage()
         if let mode { displayMode = mode }
+        let previousTickAt = lastTickAt
+        lastTickAt = now
         defer {
             sentFrames = 0
             sentBytes = 0
@@ -722,6 +727,13 @@ final class AdaptiveStreamingCoordinator: @unchecked Sendable {
                 pendingTelemetry = nil
             } else {
                 decision = controller.tick(now: now)
+                if sentFrames == 0, let last = lastTelemetryAt, let previousTickAt, now > previousTickAt {
+                    // No video left in this window (a still screen, video
+                    // off): the receiver reports on frames it presents, so
+                    // it had nothing to report. Its silence here is not
+                    // lost telemetry; the loss clock does not run.
+                    lastTelemetryAt = min(now, last + (now - previousTickAt))
+                }
                 if !telemetryLost, let last = lastTelemetryAt, now - last >= Self.telemetryLossSeconds {
                     // A lowered point is never kept on old evidence: back to
                     // today's fixed point, through the usual limits (#123 F4).
