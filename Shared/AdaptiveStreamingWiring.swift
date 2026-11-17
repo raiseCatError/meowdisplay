@@ -513,7 +513,9 @@ struct UseLessDataSettings: Equatable, Sendable {
         UseLessDataSettings(
             preference: defaults.string(forKey: preferenceKey).flatMap(NetworkCost.DataPreference.init(rawValue:)) ?? .auto,
             answer: defaults.string(forKey: answerKey).flatMap(NetworkCost.MeteredAnswer.init(rawValue:)) ?? .unanswered,
-            dismissals: max(defaults.integer(forKey: dismissalsKey), 0))
+            // Stored text is not trusted: the count is only ever compared
+            // with the limit, and `setSettings` replays it one by one.
+            dismissals: min(max(defaults.integer(forKey: dismissalsKey), 0), NetworkCostSuggestionTracker.maxDismissals))
     }
 
     func save(_ defaults: UserDefaults = .standard) {
@@ -593,7 +595,8 @@ final class ReceiverAdaptiveState: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if let suggestionsEnabled { self.suggestionsEnabled = suggestionsEnabled }
         if newSettings.answer != tracker.answer { tracker.record(answer: newSettings.answer) }
-        while tracker.dismissals < newSettings.dismissals { tracker.recordDismissal() }
+        let dismissals = min(newSettings.dismissals, NetworkCostSuggestionTracker.maxDismissals)
+        while tracker.dismissals < dismissals { tracker.recordDismissal() }
         reporting = newReporting
         settings = newSettings
     }
