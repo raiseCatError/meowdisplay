@@ -127,6 +127,24 @@ final class RemoteFileTransferTests: XCTestCase {
         XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "photo 2.jpg"), "photo 3.jpg")
     }
 
+    /// The trailing number comes from the receiver's file name.
+    func testUniqueNameSurvivesATrailingNumberAtTheIntegerLimit() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("meow-unique-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "a \(Int.max).txt"), "a \(Int.max) 2.txt")
+        XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "a \(Int.max)"), "a \(Int.max) 2")
+        // One below the limit still counts up, and a number too long for Int is not a counter.
+        XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "a \(Int.max - 1).txt"), "a \(Int.max).txt")
+        XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "a 99999999999999999999.txt"), "a 99999999999999999999 2.txt")
+        // The counted-up name is taken too: the counter is already at the limit.
+        FileManager.default.createFile(atPath: folder.appendingPathComponent("a \(Int.max).txt").path, contents: Data())
+        let fallback = RemoteFileTransfers.uniqueName(in: folder, name: "a \(Int.max - 1).txt")
+        XCTAssertTrue(fallback.hasPrefix("a ") && fallback.hasSuffix(".txt") && fallback != "a \(Int.max).txt", fallback)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent(fallback).path))
+        XCTAssertEqual(RemoteFileTransfers.uniqueName(in: folder, name: "photo 2.jpg"), "photo 3.jpg")
+    }
+
     // MARK: Browser: capabilities, scope, revocation
 
     private func browser(_ sent: @escaping ([String: Any]) -> Void) -> RemoteFileBrowser {

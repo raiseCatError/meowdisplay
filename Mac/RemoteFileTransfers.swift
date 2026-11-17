@@ -262,14 +262,18 @@ final class RemoteFileTransfers: @unchecked Sendable {
         var stem = (name as NSString).deletingPathExtension
         var n = 2
         // "Report 2" copied again becomes "Report 3", not "Report 2 2".
-        if let r = stem.range(of: #" (\d+)$"#, options: .regularExpression), let k = Int(stem[r].dropFirst()) {
+        // The name is the receiver's choice: a trailing Int.max is left as
+        // part of the stem (k + 1 would overflow) and numbered from 2.
+        if let r = stem.range(of: #" (\d+)$"#, options: .regularExpression), let k = Int(stem[r].dropFirst()),
+           k < Int.max {
             stem = String(stem[..<r.lowerBound]); n = k + 1
         }
         while true {
             let candidate = ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)"
             if !fm.fileExists(atPath: folder.appendingPathComponent(candidate).path) { return candidate }
+            // Checked before counting up: `n` can start at Int.max.
+            if n >= 10_000 { return "\(stem) \(UUID().uuidString.prefix(8))" + (ext.isEmpty ? "" : ".\(ext)") }
             n += 1
-            if n > 10_000 { return "\(stem) \(UUID().uuidString.prefix(8))" + (ext.isEmpty ? "" : ".\(ext)") }
         }
     }
 }
