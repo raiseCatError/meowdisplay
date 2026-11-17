@@ -412,6 +412,30 @@ final class AdaptiveStreamingRecoveryTests: XCTestCase {
 
     // MARK: - A5: the started size against the plan
 
+    func testACaptureThatNeverStartsAtThePlannedSizeIsNotRestartedWithoutEnd() {
+        let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
+        c.applier = RecordingApplier()
+        c.noteCaptureStarted(sizing: iPadSizing, width: 2732, height: 2048)
+        c.helloAccepted(AdaptiveHelloFields(saveData: .on), now: 0)
+        var restarts = 0
+        for _ in 0..<10 where c.captureNeedsRasterRestart(today: 1) {
+            restarts += 1
+            c.noteCaptureStarted(sizing: iPadSizing, width: 2000, height: 1500)   // never the planned size
+        }
+        XCTAssertEqual(restarts, AdaptiveStreamingCoordinator.maximumUnmatchedStarts + 1,
+                       "the first check and two retries, then the running capture is kept")
+        // Saving ends; the plan's raster changes, so one more attempt is allowed.
+        c.helloAccepted(AdaptiveHelloFields(saveData: .off), now: 100)
+        XCTAssertNil(c.plan)
+        restarts = 0
+        for _ in 0..<10 where c.captureNeedsRasterRestart(today: 1) {
+            restarts += 1
+            c.noteCaptureStarted(sizing: iPadSizing, width: 2000, height: 1500)
+        }
+        XCTAssertLessThanOrEqual(restarts, AdaptiveStreamingCoordinator.maximumUnmatchedStarts + 1)
+        XCTAssertFalse(c.hasManagedRaster, "with no plan the switch-off state returns even when no start matched")
+    }
+
     func testACaptureSizedBeforeAPlanChangeIsRestartedOnceAfterwards() {
         let c = AdaptiveStreamingCoordinator(enabled: false, streamingMode: .automatic, displayMode: .extend)
         let fake = RecordingApplier()
