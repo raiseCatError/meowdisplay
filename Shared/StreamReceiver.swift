@@ -41,7 +41,7 @@ struct PerfStats: Equatable {
     var rttMs = 0.0              // control-channel round trip
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
     var transport = "—"          // USB, AWDL, or LAN from the live NWPath
-    var transportLabel = "—"     // how the overlay words it ("Direct Cable" for a verified Thunderbolt link)
+    var transportLabel = "—"     // how the overlay words it ("Thunderbolt" for a Thunderbolt IP link)
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // cursor updates dropped as stale/reordered (this window)
     var macDrops = 0             // enc + net drops, this ~2s ping window
@@ -2742,7 +2742,7 @@ final class StreamReceiver: ObservableObject {
         Self.updateTransport(for: conn, path: path, transportState: transportState)
     }
 
-    /// Decides "Direct Cable" wording for the live path (Thunderbolt IP
+    /// Decides "Thunderbolt" wording for the live path (Thunderbolt IP
     /// lookup on macOS; never on iOS). Stateless, so one shared instance.
     private static let hostToHostCableInterfaces: HostToHostCableInterfaceChecking = HostToHostCableInterfaces.current
 
