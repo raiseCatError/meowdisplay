@@ -385,7 +385,7 @@ final class DeviceSession: ObservableObject, Identifiable {
         routeLabel.map { "\(status) · \($0)" } ?? status
     }
 
-    /// The route as the UI words it: "Direct Cable" for a verified
+    /// The route as the UI words it: "Thunderbolt" for a
     /// Mac-to-Mac Thunderbolt link, else the route's own label. A wording
     /// left over from another route never shows. Display only — `route`
     /// stays the value arbitration, overrides and diagnostics use.

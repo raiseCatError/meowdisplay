@@ -1,8 +1,8 @@
 import Network
 import XCTest
 
-/// `ConnectionPathDescription` (#291): the "Direct Cable" wording for a
-/// verified Mac-to-Mac Thunderbolt link, and everything that must keep its
+/// `ConnectionPathDescription` (#291): the "Thunderbolt" wording for a
+/// Mac-to-Mac Thunderbolt link, and everything that must keep its
 /// plain route label. Display only — the route, its tier and its rawValue
 /// are unchanged.
 final class ConnectionPathDescriptionTests: XCTestCase {
@@ -35,23 +35,23 @@ final class ConnectionPathDescriptionTests: XCTestCase {
         let description = ConnectionPathDescription(route: .lan, evidence: evidence(),
                                                     cableInterfaces: thunderboltBridge)
         XCTAssertTrue(description.isDirectCable)
-        XCTAssertEqual(description.label, "Direct Cable")
+        XCTAssertEqual(description.label, "Thunderbolt")
         XCTAssertEqual(description.route, .lan, "the route itself stays LAN")
     }
 
     func testUnscopedLinkLocalUsesThePathsFirstInterface() {
         // 169.254/16 carries no zone: the path's own interface decides.
-        XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0"], zone: nil)), "Direct Cable")
+        XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0"], zone: nil)), "Thunderbolt")
         XCTAssertEqual(label(.lan, evidence(interfaces: ["en7", "bridge0"], zone: nil)), "LAN")
         // With no zone, a cable interface listed first does not vouch for the others.
         XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0", "en7"], zone: nil)), "LAN")
         XCTAssertEqual(label(.lan, evidence(interfaces: ["bridge0", "en1"], zone: nil),
-                             cables: FakeCableInterfaces(cables: ["bridge0", "en1"])), "Direct Cable")
+                             cables: FakeCableInterfaces(cables: ["bridge0", "en1"])), "Thunderbolt")
     }
 
     func testThunderboltPortWithoutABridgeReadsDirectCable() {
         let ports = FakeCableInterfaces(cables: ["en1"])
-        XCTAssertEqual(label(.lan, evidence(interfaces: ["en1"], zone: "en1"), cables: ports), "Direct Cable")
+        XCTAssertEqual(label(.lan, evidence(interfaces: ["en1"], zone: "en1"), cables: ports), "Thunderbolt")
     }
 
     // MARK: - Ordinary Ethernet stays LAN
@@ -133,7 +133,7 @@ final class ConnectionPathDescriptionTests: XCTestCase {
 
     func testSurfaceLabelUsesTheDescriptionOnlyForItsOwnRoute() {
         let cable = ConnectionPathDescription(route: .lan, evidence: evidence(), cableInterfaces: thunderboltBridge)
-        XCTAssertEqual(ConnectionPathDescription.label(route: .lan, description: cable), "Direct Cable")
+        XCTAssertEqual(ConnectionPathDescription.label(route: .lan, description: cable), "Thunderbolt")
         XCTAssertEqual(ConnectionPathDescription.label(route: .remote, description: cable), "Remote")
         XCTAssertEqual(ConnectionPathDescription.label(route: .lan, description: nil), "LAN")
         XCTAssertNil(ConnectionPathDescription.label(route: nil, description: cable))
@@ -219,12 +219,12 @@ final class ConnectionPathDescriptionTests: XCTestCase {
     func testReceiverTransportStateKeepsRouteAndDisplayLabelApart() {
         let state = ReceiverTransportState()
         XCTAssertEqual(state.label(), "—")
-        state.set("LAN", label: "Direct Cable")
+        state.set("LAN", label: "Thunderbolt")
         XCTAssertEqual(state.get(), "LAN", "diagnostics keep the route")
-        XCTAssertEqual(state.label(), "Direct Cable")
+        XCTAssertEqual(state.label(), "Thunderbolt")
         state.set("USB")
         XCTAssertEqual(state.label(), "USB", "no label means the route label")
-        state.set("LAN", label: "Direct Cable")
+        state.set("LAN", label: "Thunderbolt")
         state.clear()
         XCTAssertEqual(state.get(), "—")
         XCTAssertEqual(state.label(), "—")
@@ -245,16 +245,16 @@ final class ConnectionPathDescriptionTests: XCTestCase {
         sink.publishTransportPath(.usb)
         sink.publishTransportPath(nil)
         XCTAssertEqual(routes, [.lan, .lan, .usb, nil])
-        XCTAssertEqual(labels, ["LAN", "Direct Cable", "USB", nil])
+        XCTAssertEqual(labels, ["LAN", "Thunderbolt", "USB", nil])
     }
 
     func testHeadlinesUseTheRouteLabel() {
-        XCTAssertEqual(CanonicalRuntimeStatus.headline(mode: .extend, routeLabel: "Direct Cable"),
-                       "Extending · Direct Cable")
-        XCTAssertEqual(CanonicalRuntimeStatus.entryStatusText(mode: .mirror, routeLabel: "Direct Cable",
-                                                              phase: .paused), "Paused · Direct Cable")
+        XCTAssertEqual(CanonicalRuntimeStatus.headline(mode: .extend, routeLabel: "Thunderbolt"),
+                       "Extending · Thunderbolt")
+        XCTAssertEqual(CanonicalRuntimeStatus.entryStatusText(mode: .mirror, routeLabel: "Thunderbolt",
+                                                              phase: .paused), "Paused · Thunderbolt")
         XCTAssertEqual(CanonicalRuntimeStatus.aggregateStatusText(
-            entries: [(mode: .extend, routeLabel: "Direct Cable", phase: .connected)]), "Extending · Direct Cable")
+            entries: [(mode: .extend, routeLabel: "Thunderbolt", phase: .connected)]), "Extending · Thunderbolt")
         // The route-taking forms are unchanged.
         XCTAssertEqual(CanonicalRuntimeStatus.headline(mode: .extend, route: .lan), "Extending · LAN")
     }

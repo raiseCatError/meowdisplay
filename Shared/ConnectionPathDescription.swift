@@ -35,11 +35,11 @@ struct NoHostToHostCableInterfaces: HostToHostCableInterfaceChecking {
 /// The user-facing wording for an established connection. Display only:
 /// the route itself (`ConnectionRoute`, its `rawValue` in diagnostics,
 /// arbitration tiers and overrides) is unchanged by it. A LAN connection
-/// that verifiably rides a direct Mac-to-Mac Thunderbolt cable reads
-/// "Direct Cable"; everything else, including anything not verified, reads
+/// that macOS reports as a Mac-to-Mac Thunderbolt IP link reads
+/// "Thunderbolt"; everything else, including anything not verified, reads
 /// as its route ("USB" stays the iPhone/iPad usbmux transport).
 struct ConnectionPathDescription: Equatable, Sendable {
-    static let directCableLabel = "Direct Cable"
+    static let directCableLabel = "Thunderbolt"
 
     let route: ConnectionRoute
     let isDirectCable: Bool
