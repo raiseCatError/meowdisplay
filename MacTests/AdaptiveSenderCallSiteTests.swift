@@ -307,4 +307,145 @@ final class AdaptiveSenderCallSiteTests: XCTestCase {
         let afterStop = try await sender.adaptiveLockScreenDeferralForTesting
         XCTAssertEqual(afterStop, .none)
     }
+
+    // MARK: - #123 Beta off: the real `stats` handler
+
+    /// A receiver `stats` exactly as origin/dev's receiver sent it (literal
+    /// keys), plus every adaptive telemetry key a newer receiver adds while
+    /// a Mac announces adaptive mode, with values that would ask a running
+    /// controller for a step down (low delivery, late frames, high jitter,
+    /// serious thermal, Low Power).
+    private func statsWithTelemetry() throws -> Data {
+        let object: [String: Any] = [
+            "type": "stats", "transport": "wifi", "fps": 18, "mbps": 4.2, "e2e50": 140, "e2e95": 420,
+            "enc50": 9, "rtt": 85, "stalls": 7, "cur": 0, "curLost": 0, "inp50": 0, "capFps": 60,
+            "dec50": 6, "ph50": 0, "ph95": 0, "offsetKnown": true,
+            "win": 2, "deliveredFps": 18, "decodedFps": 18, "enqFps": 18, "dec95": 45, "presAge": 300,
+            "late": 40, "jit": 60, "thermal": 2, "lowPower": true,
+        ]
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// Gap: no test drove the real `case "stats"` handler with telemetry keys
+    /// and the Beta switch off. Through `handleCurrentConnectionControl` (the
+    /// live connection's control path), repeated `stats` with every
+    /// telemetry key, around ticks, a telemetry hello and a reconnect: the
+    /// coordinator returns at its `announcesAdaptive` guard. Nothing is
+    /// parsed, planned, armed or held, no capture or encoder change is asked
+    /// for, and nothing goes on the wire. Fails if the guard in
+    /// `AdaptiveStreamingCoordinator.receiverStats(json:)` is removed or the
+    /// handler parses or applies telemetry another way while switched off.
+    func testSwitchOffRealStatsHandlerWithTelemetryKeysStopsAtTheGuard() async throws {
+        let (sender, sent, cleanup) = try await admittedSender()
+        defer { cleanup() }
+        XCTAssertFalse(sender.adaptive.announcesAdaptive, "the Beta switch is off: no `adaptive` key in the ping")
+        let writes = try await sender.adaptiveCallSiteStateForTesting.monitorWrites
+        let stats = try statsWithTelemetry()
+        // Even a hello that offers telemetry, as a newer receiver's does.
+        try await sender.adaptiveHelloForTesting(
+            try helloJSON(AdaptiveHelloFields(effectiveRefreshHz: 120, telemetry: true)), now: 1_000)
+        var now = 1_000.0
+        for round in 0..<6 {
+            if round == 3 {
+                // A reconnect on the same sender.
+                let reHello: [String: Any] = ["type": "hello", "pixelsWide": 2732, "pixelsHigh": 2048,
+                                              "scale": 2.0, "device": "iPad",
+                                              "id": "adaptive-call-site-test-ipad", "pv": WireProtocol.version]
+                _ = try await sender.admitConnectionForTesting(
+                    helloJSON: try JSONSerialization.data(withJSONObject: reHello),
+                    pinnedSPKI: Data([0x30, 0x59]), eventSink: RecordingEventSink(), sent: sent.record)
+            }
+            let sentBefore = sent.count
+            try await sender.receiveControlForTesting(stats)
+            try await sender.settleForTesting()
+            assertSwitchOffState(try await sender.adaptiveCallSiteStateForTesting, monitorWrites: writes,
+                                 "stats \(round), before the tick")
+            now += 2
+            try await sender.adaptiveTickForTesting(now: now)
+            try await sender.settleForTesting()
+            assertSwitchOffState(try await sender.adaptiveCallSiteStateForTesting, monitorWrites: writes,
+                                 "stats \(round), after the tick")
+            XCTAssertEqual(sent.count, sentBefore, "stats \(round): nothing on the wire")
+            XCTAssertFalse(sender.adaptive.announcesAdaptive)
+        }
+        // A hostile `stats` (wrong types, out-of-range numbers) is no different.
+        let hostile: [String: Any] = ["type": "stats", "win": 1e300, "deliveredFps": "x", "thermal": 99,
+                                      "lowPower": 1, "rtt": -5, "jit": ["v": 1]]
+        try await sender.receiveControlForTesting(try JSONSerialization.data(withJSONObject: hostile))
+        try await sender.adaptiveTickForTesting(now: now + 2)
+        assertSwitchOffState(try await sender.adaptiveCallSiteStateForTesting, monitorWrites: writes, "hostile stats")
+    }
+
+    /// The control for the test above: the same `stats` through the same
+    /// path reaches the coordinator and is parsed once the switch is on, so
+    /// the switch-off result is the guard, not a message dropped earlier.
+    func testSwitchOnRealStatsHandlerParsesTheSameTelemetry() async throws {
+        let (sender, _, cleanup) = try await admittedSender(adaptiveAutomatic: true)
+        defer { cleanup() }
+        XCTAssertTrue(sender.adaptive.announcesAdaptive)
+        let before = try await sender.adaptiveCallSiteStateForTesting.work.telemetryParsed
+        try await sender.receiveControlForTesting(try statsWithTelemetry())
+        try await sender.settleForTesting()
+        let after = try await sender.adaptiveCallSiteStateForTesting.work.telemetryParsed
+        XCTAssertEqual(after, before + 1, "the real handler hands telemetry to the coordinator")
+    }
+
+    // MARK: - #123 Beta off: the real ping
+
+    /// The `ping` origin/dev's `schedulePing` builds (`git show
+    /// origin/dev:Mac/MacSender.swift`), written out for a freshly admitted
+    /// session with input latencies 3.2, 5.4 and 8.6 ms: no drops, nothing
+    /// pending, no frames captured. The DEBUG build (the one tests run)
+    /// appends the two audio keys there too.
+    private static let originDevPing = "{\"type\":\"ping\",\"drops\":0,\"encDrops\":0,\"netDrops\":0,\"pending\":0,"
+        + "\"inp50\":5.0,\"inp95\":9.0,\"capFps\":0,\"audioPkts\":0,\"audioKbps\":0}"
+    private static let originDevPingKeys: Set<String> = [
+        "type", "drops", "encDrops", "netDrops", "pending", "inp50", "inp95", "capFps", "audioPkts", "audioKbps",
+    ]
+    private static let pingLatencies: [Double] = [8.6, 3.2, 5.4]
+
+    /// Diagnostics add their own `diag` key; these tests are about the Beta switch.
+    private func withDiagnosticsOff(_ body: () async throws -> Void) async rethrows {
+        let diagnostics = StreamDiagnosticsSwitch.shared
+        let wasOn = diagnostics.isEnabled
+        diagnostics.set(false)
+        defer { diagnostics.set(wasOn) }
+        try await body()
+    }
+
+    /// The JSON `schedulePing` really sends (`buildPingJSON`) with the Beta
+    /// switch off is byte for byte origin/dev's, every window. Fails if the
+    /// switch-off ping gains, loses, renames or reorders a key, or changes a
+    /// value's formatting (for example the `adaptive` key with the switch
+    /// off, or `inp50` as an integer).
+    func testSwitchOffPingIsByteForByteOriginDevs() async throws {
+        try await withDiagnosticsOff {
+            let (sender, _, cleanup) = try await admittedSender()
+            defer { cleanup() }
+            XCTAssertFalse(sender.adaptive.announcesAdaptive, "the Beta switch is off")
+            for window in 0..<3 {
+                let ping = try await sender.pingJSONForTesting(inputLatencies: Self.pingLatencies)
+                XCTAssertEqual(ping, Self.originDevPing, "window \(window)")
+                let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(ping.utf8)) as? [String: Any])
+                XCTAssertEqual(Set(object.keys), Self.originDevPingKeys, "window \(window)")
+            }
+        }
+    }
+
+    /// Control for the test above: the same sender path with the switch on
+    /// announces adaptive mode, so the test above sees the switch, not a
+    /// ping built some other way.
+    func testSwitchOnPingAddsOnlyTheAnnounceKey() async throws {
+        try await withDiagnosticsOff {
+            let (sender, _, cleanup) = try await admittedSender(adaptiveAutomatic: true)
+            defer { cleanup() }
+            XCTAssertTrue(sender.adaptive.announcesAdaptive)
+            let ping = try await sender.pingJSONForTesting(inputLatencies: Self.pingLatencies)
+            let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(ping.utf8)) as? [String: Any])
+            XCTAssertEqual(Set(object.keys), Self.originDevPingKeys.union(["adaptive"]))
+            XCTAssertEqual(object["adaptive"] as? Int, 1)
+            XCTAssertTrue(AdaptiveStreamingWire.isAnnounced(inPing: object))
+            XCTAssertEqual(ping, String(Self.originDevPing.dropLast()) + ",\"adaptive\":1}")
+        }
+    }
 }

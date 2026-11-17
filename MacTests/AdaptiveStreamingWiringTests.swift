@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 
 /// Phase 2 wiring of adaptive Automatic (#123): wire keys, the receiver's
@@ -861,5 +862,231 @@ final class AdaptiveStreamingWiringTests: XCTestCase {
         XCTAssertEqual(AdaptiveStreamingPlanner.resolveFPS(today: .init(fps: 30, reason: .userCeiling), plan: plan,
                                                            sourceCapFPS: 60).fps, 30, "never raises today's rate")
         XCTAssertEqual(AdaptiveStreamingPlanner.resolveFPS(today: today, plan: nil, sourceCapFPS: nil), today)
+    }
+
+    // MARK: - #123 Beta off: the receiver against a Mac that does not announce
+
+    /// The `stats` keys origin/dev's receiver sends (Shared/StreamReceiver.swift
+    /// before #123), written out rather than taken from production code.
+    private static let preFeatureStatsKeys: Set<String> = [
+        "type", "transport", "fps", "mbps", "e2e50", "e2e95", "enc50", "rtt", "stalls", "cur", "curLost",
+        "inp50", "capFps", "dec50", "ph50", "ph95", "offsetKnown",
+    ]
+
+    /// A ping exactly as a switch-off Mac builds it (origin/dev's
+    /// `schedulePing` string; the DEBUG build adds the two audio keys).
+    private static let switchOffMacPings = [
+        "{\"type\":\"ping\",\"drops\":3,\"encDrops\":1,\"netDrops\":2,\"pending\":1,\"inp50\":4.0,\"inp95\":9.0,\"capFps\":60}",
+        "{\"type\":\"ping\",\"drops\":0,\"encDrops\":0,\"netDrops\":0,\"pending\":0,\"inp50\":0.0,\"inp95\":0.0,\"capFps\":0,\"audioPkts\":100,\"audioKbps\":128}",
+    ]
+
+    private func pingObject(_ json: String) throws -> [String: Any] {
+        try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    }
+
+    /// Gap: no receiver test checked the `stats` a Mac without the announce
+    /// receives. Drives `ReceiverAdaptiveState` (the only adaptive input to
+    /// the receiver's `stats` block) the way a live session does, with
+    /// injected time: one-second FPS windows with 60 frames each, RTT
+    /// samples, an effective refresh and a Low Data Mode path for the hello,
+    /// and a switch-off Mac's ping every 2 s. Each window runs the receiver's
+    /// counter rule and merge; `stats` must go out on windows 5, 10, 15 ...
+    /// only, carrying exactly the pre-feature keys. Also covers a new session
+    /// after a Mac that did announce. Fails if a key-less ping ever counts as
+    /// an announce, if the cadence is not 5 without one, or if telemetry keys
+    /// are returned to a Mac that never announced.
+    func testAgainstAMacWithoutTheAnnounceStatsKeepThePreFeatureKeysAndFiveWindowCadence() throws {
+        let state = ReceiverAdaptiveState()
+        state.setEffectiveRefresh(120)
+        state.setPath(NetworkCost.endpointReport(.init(usesWiFi: true, isExpensive: true, isConstrained: true),
+                                                 reachability: .local))
+        state.noteHelloSent(state.helloFields, now: 0)
+
+        func runSession(from start: Double, windows: Int, label: String) throws -> [Int] {
+            var sentOn: [Int] = []
+            var counter = 0
+            for window in 1...windows {
+                let windowStart = start + Double(window - 1)
+                for frame in 0..<60 { state.noteFrame(now: windowStart + Double(frame) / 60) }
+                state.noteRTT(Double(10 + window % 7))
+                if window % 2 == 0 {
+                    let ping = Self.switchOffMacPings[window % Self.switchOffMacPings.count]
+                    state.observeMacPing(try pingObject(ping), now: windowStart + 0.5)
+                }
+                let now = windowStart + 1
+                // The receiver's rule (Shared/StreamReceiver.swift, `stats`).
+                counter += 1
+                if counter >= state.statsEveryWindows(now: now) {
+                    counter = 0
+                    let telemetry = state.drainTelemetryFields(now: now, decodeP95Ms: 7)
+                    XCTAssertTrue(telemetry.isEmpty, "\(label) window \(window): no telemetry keys, got \(telemetry.keys)")
+                    var message: [String: Any] = Dictionary(uniqueKeysWithValues: Self.preFeatureStatsKeys.map { ($0, 0) })
+                    message.merge(telemetry) { current, _ in current }
+                    XCTAssertEqual(Set(message.keys), Self.preFeatureStatsKeys, "\(label) window \(window)")
+                    sentOn.append(window)
+                }
+            }
+            return sentOn
+        }
+
+        XCTAssertEqual(try runSession(from: 10, windows: 60, label: "switch-off Mac"),
+                       Array(stride(from: 5, through: 60, by: 5)), "every 5 windows, as before #123")
+
+        // A session with a Mac that announced, then a new session with one that does not.
+        state.observeMacPing(try pingObject("{\"type\":\"ping\",\"capFps\":60,\"adaptive\":1}"), now: 100)
+        XCTAssertEqual(state.statsEveryWindows(now: 100.5), 2, "control: the announce is seen")
+        state.resetSession()
+        XCTAssertEqual(try runSession(from: 101, windows: 20, label: "after a session that announced"),
+                       [5, 10, 15, 20])
+    }
+
+    /// The same through the receiver's real control handler: a switch-off
+    /// Mac's ping, delivered to a real `StreamReceiver`, ends an announce
+    /// at once (control: an announcing ping first switches the cadence to
+    /// 2), so `stats` returns to every 5 windows with no telemetry keys.
+    /// Reads `ReceiverAdaptiveState.shared` right after the queue has
+    /// handled each ping, well inside the 6 s announce lifetime.
+    @MainActor
+    func testRealReceiverPingHandlerKeepsTodaysCadenceForASwitchOffMac() async throws {
+        let shared = ReceiverAdaptiveState.shared
+        shared.resetSession()
+        defer { shared.resetSession() }
+        let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
+                                      deviceKind: "Test", fallbackServiceName: "Test")
+        func deliver(_ json: String) async {
+            receiver.receiveControlMessageForTesting(Data(json.utf8), authenticatedPeerID: nil)
+            await withCheckedContinuation { continuation in
+                receiver.probeForTesting { _ in continuation.resume() }
+            }
+        }
+        for ping in Self.switchOffMacPings {
+            await deliver(ping)
+            let now = StreamDiagnosticsClock.nowSeconds()
+            XCTAssertEqual(shared.statsEveryWindows(now: now), 5)
+            XCTAssertTrue(shared.drainTelemetryFields(now: now, decodeP95Ms: nil).isEmpty)
+        }
+        await deliver("{\"type\":\"ping\",\"capFps\":60,\"adaptive\":1}")
+        XCTAssertEqual(shared.statsEveryWindows(now: StreamDiagnosticsClock.nowSeconds()), 2,
+                       "control: the real handler reads the announce")
+        await deliver(Self.switchOffMacPings[0])
+        let now = StreamDiagnosticsClock.nowSeconds()
+        XCTAssertEqual(shared.statsEveryWindows(now: now), 5, "a ping without the key ends the announce at once")
+        XCTAssertTrue(shared.drainTelemetryFields(now: now, decodeP95Ms: nil).isEmpty)
+    }
+
+    // MARK: - #123 Beta off: the real receiver `stats` window
+
+    @MainActor
+    private func endStatsWindow(_ receiver: StreamReceiver, fps: Int, stats: PerfStats,
+                                now: TimeInterval) async throws -> [String: Any]? {
+        let data = await withCheckedContinuation { continuation in
+            receiver.endStatsWindowForTesting(fps: fps, stats: stats, now: now) { continuation.resume(returning: $0) }
+        }
+        guard let data else { return nil }
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func windowStats() -> PerfStats {
+        var stats = PerfStats()
+        stats.mbps = 4.26
+        stats.e2eP50 = 41.4
+        stats.e2eP95 = 87.6
+        stats.encodeP50 = 6.5
+        stats.stalls = 2
+        stats.cursorPerSec = 30
+        stats.cursorLost = 1
+        stats.decodeP50 = 3.4
+        return stats
+    }
+
+    /// The `stats` a real `StreamReceiver` builds (`endStatsWindow`, the
+    /// block `presentDecodedSample` runs at the end of each one-second
+    /// window) against a Mac that does not announce, with injected time:
+    /// windows 5, 10, 15 ... report (origin/dev's `statsReportCounter >= 5`),
+    /// with exactly origin/dev's keys and its value rules (`mbps` to 0.1,
+    /// latencies rounded, `capFps`/`inp50` from the Mac's last ping). The
+    /// switch-off pings go through the real ping handler. Fails if the
+    /// cadence or the key set drifts from origin/dev with no announce.
+    @MainActor
+    func testRealReceiverStatsAgainstASwitchOffMacAreOriginDevsKeysAndCadence() async throws {
+        let shared = ReceiverAdaptiveState.shared
+        shared.resetSession()
+        defer { shared.resetSession() }
+        let diagnostics = StreamDiagnosticsSwitch.shared
+        let diagnosticsWasOn = diagnostics.isEnabled
+        diagnostics.set(false)
+        defer { diagnostics.set(diagnosticsWasOn) }
+        let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
+                                      deviceKind: "Test", fallbackServiceName: "Test")
+        func deliver(_ json: String) async {
+            receiver.receiveControlMessageForTesting(Data(json.utf8), authenticatedPeerID: nil)
+            await withCheckedContinuation { continuation in
+                receiver.probeForTesting { _ in continuation.resume() }
+            }
+        }
+        // origin/dev's keys, from `git show origin/dev:Shared/StreamReceiver.swift`.
+        let originDevKeys: Set<String> = [
+            "type", "transport", "fps", "mbps", "e2e50", "e2e95", "enc50", "rtt", "stalls", "cur", "curLost",
+            "inp50", "capFps", "dec50", "ph50", "ph95", "offsetKnown",
+        ]
+        let stats = windowStats()
+        var sentOn: [Int] = []
+        for window in 1...20 {
+            let now = 1_000 + Double(window)
+            for frame in 0..<60 { shared.noteFrame(now: now - 1 + Double(frame) / 60) }
+            shared.noteRTT(Double(10 + window % 7))
+            if window % 2 == 0 { await deliver(Self.switchOffMacPings[0]) }
+            guard let message = try await endStatsWindow(receiver, fps: 60, stats: stats, now: now) else { continue }
+            sentOn.append(window)
+            XCTAssertEqual(Set(message.keys), originDevKeys, "window \(window)")
+            XCTAssertEqual(message["type"] as? String, "stats")
+            XCTAssertEqual(message["fps"] as? Int, 60)
+            XCTAssertEqual(message["mbps"] as? Double, 4.3)
+            XCTAssertEqual(message["e2e50"] as? Double, 41)
+            XCTAssertEqual(message["e2e95"] as? Double, 88)
+            XCTAssertEqual(message["enc50"] as? Double, 7)
+            XCTAssertEqual(message["rtt"] as? Double, 0)
+            XCTAssertEqual(message["stalls"] as? Int, 2)
+            XCTAssertEqual(message["cur"] as? Int, 30)
+            XCTAssertEqual(message["curLost"] as? Int, 1)
+            XCTAssertEqual(message["inp50"] as? Double, 4, "from the Mac's last ping")
+            XCTAssertEqual(message["capFps"] as? Int, 60, "from the Mac's last ping")
+            XCTAssertEqual(message["dec50"] as? Double, 3)
+            XCTAssertEqual(message["ph50"] as? Double, 0)
+            XCTAssertEqual(message["ph95"] as? Double, 0)
+            XCTAssertEqual(message["offsetKnown"] as? Bool, false)
+            XCTAssertNotNil(message["transport"] as? String)
+        }
+        XCTAssertEqual(sentOn, [5, 10, 15, 20], "every 5 windows, as on origin/dev")
+    }
+
+    /// Control for the test above: the same real `stats` window with a Mac
+    /// that announces (its ping seen at the injected time) reports every 2
+    /// windows and adds the telemetry keys, so the test above sees the
+    /// announce, not a path that never merges telemetry.
+    @MainActor
+    func testRealReceiverStatsWithAnAnnouncingMacAddTelemetryEveryTwoWindows() async throws {
+        let shared = ReceiverAdaptiveState.shared
+        shared.resetSession()
+        defer { shared.resetSession() }
+        let diagnostics = StreamDiagnosticsSwitch.shared
+        let diagnosticsWasOn = diagnostics.isEnabled
+        diagnostics.set(false)
+        defer { diagnostics.set(diagnosticsWasOn) }
+        let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
+                                      deviceKind: "Test", fallbackServiceName: "Test")
+        let stats = windowStats()
+        var sentOn: [Int] = []
+        for window in 1...10 {
+            let now = 1_000 + Double(window)
+            shared.observeMacPing(try pingObject("{\"type\":\"ping\",\"capFps\":60,\"adaptive\":1}"), now: now - 0.5)
+            for frame in 0..<60 { shared.noteFrame(now: now - 1 + Double(frame) / 60) }
+            guard let message = try await endStatsWindow(receiver, fps: 60, stats: stats, now: now) else { continue }
+            sentOn.append(window)
+            XCTAssertTrue(Self.preFeatureStatsKeys.isSubset(of: Set(message.keys)), "window \(window)")
+            XCTAssertNotNil(message[AdaptiveStreamingWire.windowKey], "window \(window): telemetry keys added")
+            XCTAssertNotNil(AdaptiveReceiverTelemetry.parse(message), "window \(window)")
+        }
+        XCTAssertEqual(sentOn, [2, 4, 6, 8, 10], "every 2 windows while announced")
     }
 }
