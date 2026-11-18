@@ -637,6 +637,40 @@ final class AdaptiveLayoutTests: XCTestCase {
         }
     }
 
+    /// With a book fold, the toolbar and the action bar split around it: navigation and Show in
+    /// Pane before it, the tools and the other actions after it (`OverviewChromeFold` and
+    /// `FoldAwareBar`), all inside the window and none on the fold.
+    @MainActor
+    func testOverviewChromeSplitsAroundAVerticalFold() throws {
+        let app = launchOverviewFixture(fold: "vertical")
+        let band = foldBand(app, vertical: true)
+        let window = app.windows.firstMatch.frame
+        let fold = band.insetBy(dx: 0.5, dy: 0.5)
+        for required in ["displayOverviewDone", "displayOverviewFitAll", "displayOverviewShowInPane"] {
+            XCTAssertTrue(app.buttons[required].waitForExistence(timeout: 5), "\(required) is shown")
+        }
+        for (names, leading) in [(Self.leadingChrome, true), (Self.trailingChrome, false)] {
+            for name in names {
+                let button = app.buttons[name].firstMatch
+                guard button.exists else {
+                    print("AdaptiveLayout: overview \(name) not shown in the fixture")
+                    continue
+                }
+                let frame = button.frame
+                XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(name) \(frame) is inside the window \(window)")
+                XCTAssertFalse(frame.intersects(fold), "\(name) \(frame) keeps off the fold \(band)")
+                if leading {
+                    XCTAssertLessThanOrEqual(frame.maxX, band.minX + 0.5, "\(name) is before the fold")
+                } else {
+                    XCTAssertGreaterThanOrEqual(frame.minX, band.maxX - 0.5, "\(name) is after the fold")
+                }
+            }
+        }
+        keep(app, "overview-vertical-fold")
+        app.buttons["displayOverviewDone"].tap()
+        XCTAssertTrue(waitUntil { !app.buttons["displayOverviewDone"].exists }, "Done closes the overview")
+    }
+
     /// Without a fold the bars are as before: one line each, the toolbar's navigation ahead of its
     /// tools, everything inside the window. The fold seam is off, so there is no band.
     @MainActor
