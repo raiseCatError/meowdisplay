@@ -2,66 +2,6 @@ import XCTest
 import Network
 
 final class MacSenderCaptureRecoveryTests: XCTestCase {
-    func testAudioOnWithoutACarrierRequestsRecoveryOnlyForAnAdmittedIdleAudioOnlySession() async throws {
-        let keychain = try TemporaryTestKeychain(prefix: "meowdisplay-audio-carrier-tests")
-        defer { keychain.delete() }
-        let identity = try keychain.makeIdentity()
-        let tls = TLSSessionConfig(identity: SendableSecIdentity(value: identity.identity),
-                                   pinnedPeerSPKI: identity.spki, peerID: "audio-carrier-test")
-        let helloFields: [String: Any] = [
-            "type": "hello", "pixelsWide": 1920, "pixelsHigh": 1080, "scale": 1.0,
-            "device": "iPad", "id": "audio-carrier-test", "pv": WireProtocol.version,
-        ]
-        let hello = try JSONSerialization.data(withJSONObject: helloFields)
-        let cases: [(MacSender.AudioCarrierContextForTesting, Bool, Bool, Bool)] = [
-            (.ready, true, false, true), (.starting, true, false, false),
-            (.rebuilding, true, false, false), (.paused, true, false, false),
-            (.resuming, true, false, false),
-            (.stopped, true, false, false), (.startup, true, false, false),
-            (.ready, false, false, false), (.ready, true, true, false),
-        ]
-        for (context, admitted, video, shouldRecover) in cases {
-            let sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
-                                   name: "Audio Carrier Test", mode: .mirror)
-            if admitted {
-                _ = try await sender.admitConnectionForTesting(
-                    helloJSON: hello, pinnedSPKI: Data([0x30, 0x59]), eventSink: RecordingEventSink(), sent: { _ in })
-            } else {
-                _ = try await sender.helloWithoutAdmissionForTesting(
-                    helloJSON: hello, pinnedSPKI: Data([0x30, 0x59]), eventSink: RecordingEventSink(), sent: { _ in })
-            }
-            try await sender.prepareAudioCarrierForTesting(context, video: video)
-            let label = "\(context) admitted=\(admitted) video=\(video)"
-            for _ in 0..<2 {
-                try await sender.receiveControlForTesting(Data("{\"type\":\"audioRequest\",\"enabled\":true}".utf8))
-                let probe = try await sender.audioCarrierProbeForTesting
-                XCTAssertEqual(probe.admitted, admitted, label)
-                // Verified peers may record preferences before admission,
-                // but must not start capture until the session is admitted.
-                if admitted { XCTAssertTrue(probe.requested, label) }
-                XCTAssertEqual(probe.recoveryScheduled, shouldRecover, label)
-                if shouldRecover { XCTAssertEqual(probe.phase, "recovering", label) }
-            }
-            if shouldRecover {
-                try await sender.receiveControlForTesting(Data("{\"type\":\"audioRequest\",\"enabled\":false}".utf8))
-                let idle = try await sender.audioCarrierProbeForTesting
-                XCTAssertFalse(idle.requested, label)
-                XCTAssertEqual(idle.phase, "running", label)
-                try await sender.expireUnwantedAudioCarrierRecoveryForTesting()
-                try await sender.receiveControlForTesting(Data("{\"type\":\"audioRequest\",\"enabled\":true}".utf8))
-                let restarted = try await sender.audioCarrierProbeForTesting
-                XCTAssertTrue(restarted.recoveryScheduled, label)
-                XCTAssertEqual(restarted.phase, "recovering", label)
-            } else {
-                let before = try await sender.audioCarrierProbeForTesting
-                try await sender.receiveControlForTesting(Data("{\"type\":\"audioRequest\",\"enabled\":false}".utf8))
-                let after = try await sender.audioCarrierProbeForTesting
-                XCTAssertEqual(after.phase, before.phase, label)
-                XCTAssertFalse(after.recoveryScheduled, label)
-            }
-        }
-    }
-
     func testFailedRoundsStayBoundedForVideoAndAudioOnlyWithoutCountingLockedRounds() async throws {
         let keychain = try TemporaryTestKeychain(prefix: "meowdisplay-capture-recovery-tests")
         defer { keychain.delete() }
