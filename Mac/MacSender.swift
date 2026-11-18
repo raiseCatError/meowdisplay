@@ -1005,6 +1005,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`.
     private var captureRecoveryBudget = CaptureRecoveryBudget()
     private var captureRecoveryScheduled = false
+    #if DEBUG
+    private var suppressCaptureRecoveryTimerForTesting = false
+    #endif
     // Display sleep and screen lock make every recovery attempt fail until
     // the user is back, so rounds are deferred instead of spent on them —
     // otherwise any sleep longer than the budget ends the session. Set while
@@ -2073,6 +2076,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // when it commits. Nothing to reconfigure yet.
             audioEnabled = enabled
             sendAudioState()
+            if enabled, !videoEnabled, sessionAuthorization.isAdmitted,
+               !captureOwnership.isStartInFlight, !captureRebuild.isBusy,
+               captureStateSnapshot().phase == .running,
+               updateCaptureState({ $0.unexpectedStop() }) {
+                scheduleCaptureRecovery()
+            } else if !enabled, !videoEnabled, sessionAuthorization.isAdmitted,
+                      captureRecoveryScheduled, !captureOwnership.isStartInFlight,
+                      !captureRebuild.isBusy, captureStateSnapshot().phase == .recovering {
+                // With no requested media the controls-only session is idle,
+                // not waiting for capture. Pause/terminal states stay closed.
+                _ = updateCaptureState { $0.captureStarted() }
+            }
             return
         }
         let update = updateLiveCapture(stream) { $0.capturesAudio = enabled }
@@ -4483,6 +4498,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard videoEnabled || desiredAudioEnabled, !captureRecoveryScheduled,
               captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
+        #if DEBUG
+        if suppressCaptureRecoveryTimerForTesting { return }
+        #endif
         let attempt = captureRecoveryBudget.failedAttempts + 1
         if !waitingForConsole {
             Log.info("capture recovery starting mode=\(mode.rawValue) "
@@ -9029,6 +9047,67 @@ extension MacSender {
         let failedAttempts: Int
         let phase: String
         let endedSession: Bool
+    }
+
+    enum AudioCarrierContextForTesting: Equatable, Sendable {
+        case ready, starting, rebuilding, paused, resuming, stopped, startup
+    }
+
+    struct AudioCarrierProbe: Sendable {
+        let admitted: Bool
+        let requested: Bool
+        let phase: String
+        let recoveryScheduled: Bool
+    }
+
+    /// A live session with no carrier, without starting capture or timers.
+    func prepareAudioCarrierForTesting(_ context: AudioCarrierContextForTesting,
+                                      video: Bool = false) async throws {
+        try await onQueue { sender in
+            sender.videoEnabled = video
+            sender.audioEnabled = false
+            sender.desiredAudioEnabled = false
+            sender.suppressCaptureRecoveryTimerForTesting = true
+            if context == .startup {
+                _ = sender.updateCaptureState { $0 = CaptureLifecycleState(); return true }
+            } else {
+                _ = sender.updateCaptureState { $0.captureStarted() }
+            }
+            switch context {
+            case .starting: _ = sender.captureOwnership.reserveStart()
+            case .rebuilding: _ = sender.captureRebuild.requestGeometry()
+            case .paused:
+                _ = sender.updateCaptureState { $0.requestPause() }
+                _ = sender.updateCaptureState { $0.pauseCompleted() }
+            case .resuming:
+                _ = sender.updateCaptureState { $0.requestPause() }
+                _ = sender.updateCaptureState { $0.pauseCompleted() }
+                _ = sender.updateCaptureState { $0.requestResume() }
+            case .stopped: _ = sender.updateCaptureState { $0.stop(); return true }
+            case .ready, .startup: break
+            }
+        }
+    }
+
+    var audioCarrierProbeForTesting: AudioCarrierProbe {
+        get async throws {
+            try await onQueue { sender in
+                AudioCarrierProbe(admitted: sender.sessionAuthorization.isAdmitted,
+                                  requested: sender.desiredAudioEnabled,
+                                  phase: sender.captureStateSnapshot().phase.rawValue,
+                                  recoveryScheduled: sender.captureRecoveryScheduled)
+            }
+        }
+    }
+
+    /// Models the suppressed timer returning after both media kinds were
+    /// disabled; the live timer clears its flag before checking that guard.
+    func expireUnwantedAudioCarrierRecoveryForTesting() async throws {
+        try await onQueue { sender in
+            precondition(sender.suppressCaptureRecoveryTimerForTesting
+                         && !sender.videoEnabled && !sender.desiredAudioEnabled)
+            sender.captureRecoveryScheduled = false
+        }
     }
 
     /// Exercises failed-round bookkeeping without starting a capture or
