@@ -87,7 +87,7 @@ struct DisplayOverviewScreen: View {
                     .accessibilityIdentifier("displayOverviewDone")
                 Spacer(minLength: 4)
                 stepButton(.previous, symbol: "chevron.left", label: String(localized: "Previous Display"))
-                Text(selectionTitle)
+                Text("\(selectionTitle) (Beta)")
                     .font(.headline).lineLimit(1).minimumScaleFactor(0.7)
                     .accessibilityAddTraits(.isHeader)
                 stepButton(.next, symbol: "chevron.right", label: String(localized: "Next Display"))

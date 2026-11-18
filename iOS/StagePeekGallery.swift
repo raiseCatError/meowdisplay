@@ -663,7 +663,7 @@ struct StagePeekGallery: View {
             if let overview {
                 if inputAllowed, model.canArrangeDisplays {
                     Button { arrangeOverview = overview } label: {
-                        Text("Arrange…").font(.subheadline.weight(.semibold))
+                        Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(meowAccent)
@@ -671,7 +671,7 @@ struct StagePeekGallery: View {
                     .accessibilityIdentifier("displayArrangeButton")
                 }
                 Button { showDisplayOverview = true } label: {
-                    Label("Overview", systemImage: "arrow.up.left.and.arrow.down.right")
+                    Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
                         .shadow(color: .black.opacity(0.5), radius: 2)
                 }

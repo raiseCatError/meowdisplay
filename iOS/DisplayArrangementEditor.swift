@@ -175,7 +175,7 @@ private struct DisplayArrangementEditorHeader: View {
         HStack {
             Button(finished ? String(localized: "Done") : String(localized: "Cancel"), action: onCancel)
             Spacer()
-            Text("Arrange Displays").font(.headline)
+            Text("Arrange Displays (Beta)").font(.headline)
             Spacer()
             Button("Apply", action: onApply)
                 .fontWeight(.semibold)
