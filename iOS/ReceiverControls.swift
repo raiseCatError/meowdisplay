@@ -1513,7 +1513,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             }
             .onEnded { _ in releaseArrowKey() })
         // `@GestureState` resets on a cancelled touch too, where `onEnded`
-        // never runs: this is what guarantees the key up.
+        // never runs. A cancel before the next render shows no change here,
+        // so the repeat loop also checks the finger (`ArrowKeyHold.repeatStep`).
         .onChange(of: keypadFinger) { location in
             if location == nil { releaseArrowKey() }
         }
@@ -1663,7 +1664,10 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         restartArrowRepeat()
     }
 
-    /// Repeats come from here: the Mac never repeats a key on its own.
+    /// Repeats come from here: the Mac never repeats a key on its own. Each
+    /// wake also reads the gesture's live finger (`ArrowKeyHold.repeatStep`),
+    /// so a touch cancelled before a render still lets the key up, without
+    /// `onEnded` or an observed change.
     private func restartArrowRepeat() {
         arrowRepeatTask?.cancel()
         arrowRepeatTask = nil
@@ -1673,10 +1677,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 let wait = due - CACurrentMediaTime()
                 if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
                 guard !Task.isCancelled else { return }
-                guard store.preferences.allowInput else { return releaseArrowKey() }
-                if let event = arrowHold.tick(now: CACurrentMediaTime()) {
-                    sendArrowEvents([event])
+                guard let event = arrowHold.repeatStep(now: CACurrentMediaTime(), fingerDown: keypadFinger != nil,
+                                                       inputAllowed: store.preferences.allowInput) else { continue }
+                if case .up = event {
+                    arrowRepeatTask = nil
+                    return finishArrowRelease(event)
                 }
+                sendArrowEvents([event])
             }
         }
     }
@@ -1685,7 +1692,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func releaseArrowKey() {
         arrowRepeatTask?.cancel()
         arrowRepeatTask = nil
-        if let event = arrowHold.release() {
+        finishArrowRelease(arrowHold.release())
+    }
+
+    /// Sends the key up `ArrowKeyHold` gave (nil: nothing was held) and lets
+    /// the preview linger.
+    private func finishArrowRelease(_ up: ArrowKeyEvent?) {
+        if let event = up {
             sendArrowEvents([event])
             arrowPreviewLingerTask?.cancel()
             arrowPreviewLingerTask = Task { @MainActor in

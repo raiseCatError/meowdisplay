@@ -165,6 +165,20 @@ struct ArrowKeyHold: Equatable {
     mutating func release() -> ArrowKeyEvent? {
         move(to: nil, now: 0).first
     }
+
+    /// One wake of the repeat loop, which runs for as long as a key is held
+    /// and so is also its watchdog. `fingerDown`: the keypad gesture still
+    /// has a finger (its live state, not a change a render observed). A
+    /// touch the system cancels before the next render never runs `onEnded`
+    /// and shows SwiftUI no change, so the key used to stay down and repeat
+    /// on the Mac. With no finger, or with input no longer allowed, the held
+    /// key goes up here, once (a later `release()` returns nil); otherwise a
+    /// repeat when one is due.
+    mutating func repeatStep(now: TimeInterval, fingerDown: Bool, inputAllowed: Bool) -> ArrowKeyEvent? {
+        guard isHolding else { return nil }
+        guard fingerDown, inputAllowed else { return release() }
+        return tick(now: now)
+    }
 }
 
 /// The arrow keypad's own Shift, Option and Command, kept apart from the
