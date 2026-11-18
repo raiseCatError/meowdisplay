@@ -94,11 +94,17 @@ authentication review. That is a separate security decision, and it isn't part o
 | Event | Result |
 |---|---|
 | Quit (menu, ⌘Q, Sparkle update) while MEOW owns it | Alert: **Turn Sleep Back On** (asks for the password) or **Keep Sleep Off**. If restoring fails or is cancelled, a second alert says sleep is still off and gives the command. pmset isn't run on quit unless MEOW holds a record. |
+| Ordinary Quit while an administrator change is pending | Quit waits for the prompt to be answered and the write, read-back and ownership recording to finish, then follows the normal quit path above. Repeated Quit requests do not start another operation. |
 | Logout, restart, shutdown, or Privacy Shield covering the screen | No prompt: shutdown is never blocked, and nobody could see an alert under the shield. The setting and record stay; the next launch shows the state. |
 | Crash or force quit | The setting stays on. The next launch reads 1 plus the record and shows "turned on by MEOW" (same boot), or "no current MEOW record" with **Turn Sleep Back On…** (after a restart). |
 | Prompt cancelled or write failed | Nothing changes. A notice explains why. |
 | Changed elsewhere | Picked up at the next refresh trigger. MEOW drops its claim. |
 | MEOW deleted while on | The setting stays on. Recover with `sudo pmset -a disablesleep 0`. The quit alert tells you this command. |
+
+Force Quit and system termination do not guarantee cancellation of a separate administrator
+process. A write may finish after MEOW exits, before it records ownership. The next launch
+reads the actual setting and treats an unrecorded change as external; it never guesses that
+the operation was cancelled or restores the setting automatically.
 
 ## Risks shown to the person
 

@@ -1,6 +1,40 @@
 import AppKit
 import Foundation
 
+/// Ordinary Quit must wait for the separate administrator process to finish:
+/// killing or abandoning its UI cannot undo an already-authorized write.
+/// Main-actor only; the continuation runs after read-back and ownership recording.
+@MainActor
+final class ClosedLidActionGate {
+    private(set) var pending = false
+    private var deferredQuit: (() -> Void)?
+
+    func begin() -> Bool {
+        guard !pending else { return false }
+        pending = true
+        return true
+    }
+
+    func deferQuitIfPending(_ continuation: @escaping () -> Void) -> Bool {
+        guard pending else { return false }
+        if deferredQuit == nil { deferredQuit = continuation }
+        return true
+    }
+
+    func finish() {
+        pending = false
+        let continuation = deferredQuit
+        deferredQuit = nil
+        continuation?()
+    }
+
+    /// A logout/shutdown supersedes an ordinary Quit. Drop only the saved
+    /// continuation, never pretend the privileged operation was cancelled.
+    func discardDeferredQuit() {
+        deferredQuit = nil
+    }
+}
+
 // Closed-Lid Availability: optionally turns on macOS's global `SleepDisabled`
 // power setting (`pmset -a disablesleep 1`) so a MacBook stays awake with its
 // lid closed and no external display.

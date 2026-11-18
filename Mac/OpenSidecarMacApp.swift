@@ -111,6 +111,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let senderPID = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value
         let sender = senderPID.flatMap { NSRunningApplication(processIdentifier: pid_t($0))?.bundleIdentifier }
         let systemEnding = PrivacyShieldPolicy.isSystemEnding(quitReason: reason, senderBundleID: sender)
+        if systemEnding {
+            SenderController.shared.discardDeferredClosedLidQuit()
+        } else if SenderController.shared.deferClosedLidQuitIfPending({
+            if Self.finishQuit(systemEnding: false) == .terminateNow {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }) {
+            return .terminateLater
+        }
+        return Self.finishQuit(systemEnding: systemEnding)
+    }
+
+    private static func finishQuit(systemEnding: Bool) -> NSApplication.TerminateReply {
         // Never block a logout/restart/shutdown with a prompt, and never show
         // one under the Privacy Shield (nobody could see it, and it would hold
         // up the lock below). The setting and MEOW's record survive; the next
@@ -508,7 +521,8 @@ final class SenderController: ObservableObject {
     @Published private(set) var closedLidPreventedSleepBeforeAction = false
     /// A write runs on a background queue. Nothing else touches the model
     /// until it finishes (see `ClosedLidAvailabilityModel`).
-    private var closedLidActionPending = false
+    private let closedLidActionGate = ClosedLidActionGate()
+    private var closedLidActionPending: Bool { closedLidActionGate.pending }
     private let closedLidQueue = DispatchQueue(label: "closedLid.write", qos: .userInitiated)
     private var closedLidObservers: [NSObjectProtocol] = []
 
@@ -541,8 +555,7 @@ final class SenderController: ObservableObject {
     /// The administrator prompt (a separate osascript process) blocks until
     /// answered, so it runs off the main thread; the UI shows "Waiting".
     private func runClosedLidAction(_ name: String, _ action: @escaping @Sendable (ClosedLidAvailabilityModel) -> Void) {
-        guard !closedLidActionPending else { return }
-        closedLidActionPending = true
+        guard closedLidActionGate.begin() else { return }
         closedLidPreventedSleepBeforeAction = closedLidState.preventsSleep
         closedLidState = .authorizing
         closedLidNotice = nil
@@ -552,12 +565,20 @@ final class SenderController: ObservableObject {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    self.closedLidActionPending = false
                     Log.info("closedLid: \(name) → \(model.state)")
                     self.publishClosedLid()
+                    self.closedLidActionGate.finish()
                 }
             }
         }
+    }
+
+    func deferClosedLidQuitIfPending(_ continuation: @escaping () -> Void) -> Bool {
+        closedLidActionGate.deferQuitIfPending(continuation)
+    }
+
+    func discardDeferredClosedLidQuit() {
+        closedLidActionGate.discardDeferredQuit()
     }
 
     func dismissClosedLidNotice() {
