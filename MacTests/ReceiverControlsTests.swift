@@ -100,7 +100,7 @@ final class ReceiverControlsTests: XCTestCase {
         var profile = ControlProfile.canonical()
         XCTAssertEqual(profile.visibleTrayItems, ControlTrayItem.allCases)
         XCTAssertEqual(profile.actions(for: ModifierChord([.command])).map(\.displayKey),
-                       ["C", "V", "X", "Z", "A", "W", "T", "Space"])
+                       ["C", "V", "X", "Z", "A", "W", "Q", "T", "Space"])
         XCTAssertEqual(profile.actions(for: ModifierChord([.command, .option])).count, 5)
         XCTAssertEqual(profile.actions(for: ModifierChord([.command, .shift])).count, 6)
 
@@ -2180,7 +2180,7 @@ final class ShortcutPaletteAuditTests: XCTestCase {
 
     // MARK: - Canonical contents
 
-    func testNewTabIsCommandTWithAStableIDRightAfterClose() throws {
+    func testNewTabIsCommandTWithAStableIDAfterCloseAndQuit() throws {
         let actions = ControlProfile.canonical().actions(for: command)
         let ids = actions.map(\.id)
         let newTab = try XCTUnwrap(actions.first { $0.id == "new-tab" })
@@ -2189,7 +2189,7 @@ final class ShortcutPaletteAuditTests: XCTestCase {
         XCTAssertEqual(newTab.action, .keyboardShortcut(KeyboardShortcut(usage: 23, modifiers: command)))
         XCTAssertEqual(newTab.keysDescription, "⌘T")
         let closeIndex = try XCTUnwrap(ids.firstIndex(of: "close"))
-        XCTAssertEqual(ids.firstIndex(of: "new-tab"), closeIndex + 1)
+        XCTAssertEqual(ids.firstIndex(of: "new-tab"), closeIndex + 2)
     }
 
     func testReopenClosedTabStaysOnlyInCommandShiftAndIsNotDuplicated() throws {
@@ -2235,18 +2235,23 @@ final class ShortcutPaletteAuditTests: XCTestCase {
     func testCanonicalPaletteContents() {
         let profile = ControlProfile.canonical()
         XCTAssertEqual(profile.actions(for: command).map(\.id),
-                       ["copy", "paste", "cut", "undo", "select-all", "close", "new-tab", "spotlight"])
+                       ["copy", "paste", "cut", "undo", "select-all", "close", "quit", "new-tab", "spotlight"])
         XCTAssertEqual(profile.actions(for: commandOption).map(\.id),
                        ["move-here", "force-quit", "dock", "hide-others", "close-all"])
         XCTAssertEqual(profile.actions(for: commandShift).map(\.id),
                        ["redo", "new-folder", "reopen-tab", "screenshot", "screenshot-selection", "screenshot-controls"])
     }
 
-    func testNoCanonicalPaletteExceedsEightKeys() {
-        // Eight is the most a phone palette shows on one line (portrait wraps to two rows above eight;
-        // landscape never wraps), so a default palette must not grow past it.
+    func testCanonicalPalettesFitCompactPhoneInBothOrientations() {
         for palette in ControlProfile.canonical().palettes {
-            XCTAssertLessThanOrEqual(palette.actions.count, 8, palette.chord.displayName)
+            for portrait in [true, false] {
+                let grid = ControlTrayGeometry.shortcutPaletteGrid(count: palette.actions.count, portrait: portrait)
+                let width = CGFloat(grid.columns) * 38 + CGFloat(grid.columns - 1) * 5 + 4
+                let height = CGFloat(grid.rows) * 38 + CGFloat(grid.rows - 1) * 5 + 4
+                XCTAssertLessThanOrEqual(width, portrait ? 296 : 544)
+                XCTAssertLessThanOrEqual(height, portrait ? 544 : 296)
+                XCTAssertGreaterThanOrEqual(grid.rows * grid.columns, palette.actions.count)
+            }
         }
     }
 
@@ -2258,7 +2263,7 @@ final class ShortcutPaletteAuditTests: XCTestCase {
         for slot in ControlProfileSlot.allCases {
             let profile = loaded.profile(for: slot)
             XCTAssertEqual(profile.actions(for: command).map(\.id),
-                           ["copy", "paste", "cut", "undo", "select-all", "close", "new-tab", "spotlight"], "\(slot)")
+                           ["copy", "paste", "cut", "undo", "select-all", "close", "quit", "new-tab", "spotlight"], "\(slot)")
             XCTAssertEqual(profile, .canonical(slot: slot), "\(slot)")
         }
     }
@@ -2323,7 +2328,7 @@ final class ShortcutPaletteAuditTests: XCTestCase {
         preferences.updateProfile(profile)
         repository.save(preferences)
         for _ in 0..<2 {
-            XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), schema21CommandPalette())
+            XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), profile.actions(for: command))
             repository.save(repository.load())
         }
     }
@@ -2339,5 +2344,125 @@ final class ShortcutPaletteAuditTests: XCTestCase {
         repository.save(preferences)
         XCTAssertEqual(repository.load().profile(for: .profile1).actions(for: command), schema21CommandPalette(),
                        "a palette saved at the current schema is the user's, even if it looks like an old default")
+    }
+}
+
+
+final class ShortcutPaletteQuitTests: XCTestCase {
+    private let command = ModifierChord([.command])
+
+    private func schema22Palette() -> [ShortcutItem] {
+        let entries: [(String, String, String, Int)] = [
+            ("copy", "Copy", "C", 6), ("paste", "Paste", "V", 25), ("cut", "Cut", "X", 27),
+            ("undo", "Undo", "Z", 29), ("select-all", "Select All", "A", 4),
+            ("close", "Close", "W", 26), ("new-tab", "New Tab", "T", 23),
+            ("spotlight", "Spotlight", "Space", 44),
+        ]
+        return entries.map { ShortcutItem(id: $0.0, title: $0.1, displayKey: $0.2, usage: $0.3, modifiers: command) }
+    }
+
+    private func withRepository(_ body: (ReceiverControlPreferencesRepository) throws -> Void) throws {
+        let name = "ShortcutPaletteQuitTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        try body(ReceiverControlPreferencesRepository(defaults: defaults))
+    }
+
+    func testDefaultQuitUsesCommandQBesideCloseWithoutRemovingNewTab() throws {
+        let actions = ControlProfile.canonical().actions(for: command)
+        XCTAssertEqual(actions.map(\.id), ["copy", "paste", "cut", "undo", "select-all", "close", "quit", "new-tab", "spotlight"])
+        let quit = try XCTUnwrap(actions.first { $0.id == "quit" })
+        XCTAssertEqual(quit.title, "Quit App")
+        XCTAssertEqual(quit.displayKey, "Q")
+        XCTAssertEqual(quit.action, .keyboardShortcut(KeyboardShortcut(usage: 20, modifiers: command)))
+        XCTAssertEqual(quit.keysDescription, "⌘Q")
+        XCTAssertEqual(KeyboardChordPlan.events(for: KeyboardShortcut(usage: 20, modifiers: command)).count, 2)
+    }
+
+    func testNineKeysWrapAndQuitStaysBesideClose() {
+        let portrait = ControlTrayGeometry.shortcutPaletteGrid(count: 9, portrait: true)
+        XCTAssertEqual(portrait.rows, 2); XCTAssertEqual(portrait.columns, 5)
+        XCTAssertEqual((0..<9).map { portrait.row(for: $0) }, [0, 0, 0, 0, 0, 1, 1, 1, 1],
+                       "Wrapped portrait palettes keep action order along each row")
+        XCTAssertEqual(portrait.row(for: 5), 1) // W
+        XCTAssertEqual(portrait.row(for: 6), 1) // Q
+        let landscape = ControlTrayGeometry.shortcutPaletteGrid(count: 9, portrait: false)
+        XCTAssertEqual(landscape.rows, 5); XCTAssertEqual(landscape.columns, 2)
+        for edge in [ControlEdge.bottom, .leading] {
+            let available = CGSize(width: 320, height: 240)
+            let grid = PadEdgeGeometry.paletteGrid(count: 9, key: CGSize(width: 44, height: 44),
+                                                  gap: 8, edge: edge, available: available)
+            XCTAssertLessThanOrEqual(grid.size.width, available.width)
+            XCTAssertLessThanOrEqual(grid.size.height, available.height)
+            XCTAssertGreaterThanOrEqual(grid.rows * grid.columns, 9)
+        }
+        let roomy = PadEdgeGeometry.paletteGrid(count: 9, key: CGSize(width: 44, height: 44),
+                                               gap: 8, edge: .bottom, available: CGSize(width: 768, height: 600))
+        XCTAssertEqual(roomy.rows, 1); XCTAssertEqual(roomy.columns, 9)
+    }
+
+    func testUntouchedSchema22PalettesGainQuitInEverySlot() throws {
+        try withRepository { repository in
+            var saved = ReceiverControlPreferences()
+            for slot in ControlProfileSlot.allCases {
+                var profile = saved.profile(for: slot)
+                profile.setActions(schema22Palette(), for: command)
+                saved.updateProfile(profile)
+            }
+            saved.version = 22
+            repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+            let loaded = repository.load()
+            XCTAssertEqual(loaded.version, 23)
+            for slot in ControlProfileSlot.allCases {
+                XCTAssertEqual(loaded.profile(for: slot), .canonical(slot: slot))
+                XCTAssertEqual(loaded.profile(for: slot).actions(for: command).filter { $0.id == "quit" }.count, 1)
+            }
+        }
+    }
+
+    func testCustomizedOrReorderedSchema22PalettesArePreserved() throws {
+        var renamed = schema22Palette(); renamed[0].title = "My Copy"
+        let palettes = [Array(schema22Palette().reversed()), Array(schema22Palette().dropLast()), renamed,
+                        schema22Palette() + [ShortcutItem(id: "my-q", title: "My Quit", displayKey: "Q", usage: 20, modifiers: command)]]
+        for palette in palettes {
+            try withRepository { repository in
+                var saved = ReceiverControlPreferences(); saved.version = 22
+                var profile = saved.profile(for: .default); profile.setActions(palette, for: command)
+                saved.updateProfile(profile)
+                repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+                XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), palette)
+            }
+        }
+    }
+
+    func testMissingPaletteAndCurrentSchemaChoicesAreNotRecreated() throws {
+        try withRepository { repository in
+            var saved = ReceiverControlPreferences(); saved.version = 22
+            var profile = saved.profile(for: .default); profile.palettes.removeAll { $0.chord == command }
+            saved.updateProfile(profile)
+            repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+            XCTAssertTrue(repository.load().profile(for: .default).actions(for: command).isEmpty)
+            saved.version = 23
+            profile.setActions(schema22Palette(), for: command); saved.updateProfile(profile)
+            repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+            XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), schema22Palette())
+        }
+    }
+
+    func testQuitDeletedAfterMigrationStaysDeletedAcrossReloads() throws {
+        try withRepository { repository in
+            var saved = ReceiverControlPreferences(); saved.version = 22
+            var profile = saved.profile(for: .default); profile.setActions(schema22Palette(), for: command)
+            saved.updateProfile(profile)
+            repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
+            var loaded = repository.load()
+            profile = loaded.profile(for: .default)
+            profile.setActions(profile.actions(for: command).filter { $0.id != "quit" }, for: command)
+            loaded.updateProfile(profile); repository.save(loaded)
+            for _ in 0..<2 {
+                XCTAssertEqual(repository.load().profile(for: .default).actions(for: command), schema22Palette())
+                repository.save(repository.load())
+            }
+        }
     }
 }

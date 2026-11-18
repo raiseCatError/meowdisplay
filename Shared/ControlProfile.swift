@@ -405,6 +405,7 @@ extension ControlProfile {
                 shortcut("undo", "Undo", "Z", 29, command),
                 shortcut("select-all", "Select All", "A", 4, command),
                 shortcut("close", "Close", "W", 26, command),
+                shortcut("quit", "Quit App", "Q", 20, command),
                 shortcut("new-tab", "New Tab", "T", 23, command),
                 shortcut("spotlight", "Spotlight", "Space", 44, command),
             ]),
@@ -447,6 +448,34 @@ extension ControlProfile {
             shortcut("spotlight", "Spotlight", "Space", 44, command),
         ]
     }()
+
+    /// Frozen schema-22 default. Never derive an old default from today's
+    /// canonical palette: exact equality protects every user customization.
+    private static let commandPaletteBeforeQuit: [ShortcutItem] = {
+        let command = ModifierChord([.command])
+        return [
+            shortcut("copy", "Copy", "C", 6, command),
+            shortcut("paste", "Paste", "V", 25, command),
+            shortcut("cut", "Cut", "X", 27, command),
+            shortcut("undo", "Undo", "Z", 29, command),
+            shortcut("select-all", "Select All", "A", 4, command),
+            shortcut("close", "Close", "W", 26, command),
+            shortcut("new-tab", "New Tab", "T", 23, command),
+            shortcut("spotlight", "Spotlight", "Space", 44, command),
+        ]
+    }()
+
+    func addingQuitToUntouchedCommandPalette() -> ControlProfile {
+        let command = ModifierChord([.command])
+        guard let index = palettes.firstIndex(where: { $0.chord == command }),
+              palettes[index].actions == Self.commandPaletteBeforeQuit,
+              let closeIndex = palettes[index].actions.firstIndex(where: { $0.id == "close" }),
+              let quit = Self.canonical(slot: slot).actions(for: command).first(where: { $0.id == "quit" })
+        else { return self }
+        var result = self
+        result.palettes[index].actions.insert(quit, at: closeIndex + 1)
+        return result
+    }
 
     /// Schema 22: adds ⌘T New Tab (right after Close) to a Command palette
     /// that still equals the previous canonical one. Any palette the user
@@ -860,7 +889,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 22
+    static let schemaVersion = 23
 
     var version = schemaVersion
     var trayEnabled = true
@@ -1379,6 +1408,12 @@ struct ReceiverControlPreferencesRepository {
         if value.version < 22 {
             value.profiles = value.profiles.map { $0.addingNewTabToUntouchedCommandPalette() }
             value.version = 22
+        }
+        // Only untouched schema-22 defaults gain Quit. The version records
+        // this one-time decision so a later user deletion stays deleted.
+        if value.version < 23 {
+            value.profiles = value.profiles.map { $0.addingQuitToUntouchedCommandPalette() }
+            value.version = 23
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
