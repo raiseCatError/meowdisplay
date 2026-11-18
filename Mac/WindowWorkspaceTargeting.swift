@@ -182,6 +182,9 @@ protocol InputTargetMapper: AnyObject, Sendable {
     /// Where canvas point `x`/`y` (normalized) lands on the Mac, without
     /// changing hover, focus or bindings. Nil outside every tile.
     func locate(x: Double, y: Double) -> CGPoint?
+    /// Held input was cancelled (revoke, View Only, pause, lock, disconnect): end any drag
+    /// binding, whose release will never arrive, so the next press goes where it lands.
+    func cancelBinding()
 }
 
 /// Where one input event goes. Hover, active tile and the Mac's own focus are
@@ -450,6 +453,24 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
             return (n.x, n.y, t.scale / canvas.width, t.scale / canvas.height, a.rotation.rawValue)
         }
         return nil
+    }
+
+    /// The Mac cursor while it is over no pane: where it would be in the ACTIVE pane's picture
+    /// (normalized canvas, outside that pane) and the pane's visible rectangle (normalized), so
+    /// the receiver can point from that pane toward it. The pane's mapping is affine, so a point
+    /// past the window's edge extends naturally. Nil without an active pane with a live window,
+    /// or when the point falls inside the pane's visible picture (under a float covering it:
+    /// pointing into the pane would be wrong).
+    func offPaneCursor(forGlobal g: CGPoint) -> (x: Double, y: Double, pane: WorkspaceRect)? {
+        guard canvas.width > 0, canvas.height > 0, g.x.isFinite, g.y.isFinite,
+              let a = assignment(activeTile), let frame = drawnFrame(a.windowID),
+              let t = transform(for: a), let visible = t.visibleRect,
+              visible.width > 0, visible.height > 0 else { return nil }
+        let q = t.canvasPoint(fromSource: WorkspacePoint(x: g.x - frame.minX, y: g.y - frame.minY))
+        guard q.x.isFinite, q.y.isFinite, !visible.contains(q) else { return nil }
+        return (q.x / canvas.width, q.y / canvas.height,
+                WorkspaceRect(x: visible.x / canvas.width, y: visible.y / canvas.height,
+                              width: visible.width / canvas.width, height: visible.height / canvas.height))
     }
 
     /// The text caret (a global rectangle in points) in canvas coordinates,

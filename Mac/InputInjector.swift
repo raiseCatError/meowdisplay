@@ -115,6 +115,11 @@ final class InputInjector {
     private var targetMapper: InputTargetMapper?
     // A mapped point for the tablet path, which positions by `screenPoint`.
     private var mappedOverride: CGPoint?
+    // Mirror/Extend: where pointer input starts while the Mac cursor is on another display
+    // (`DisplayReentryPoint`). Per injector, so per session and target display.
+    private var reentry = DisplayReentryPoint()
+    /// Tests only: where the Mac cursor is. Nil: the real cursor.
+    var cursorLocator: (() -> CGPoint)?
 
     /// Install or remove the window-workspace mapper. Held input is released
     /// first: nothing pressed under one mapping is released under another.
@@ -162,6 +167,8 @@ final class InputInjector {
     private func cancelActiveInputLocked() {
         let point = currentCursor()
         scrollRemainder.reset()
+        // Window mode: the release of a cancelled drag never arrives, so its binding ends here.
+        targetMapper?.cancelBinding()
 
         if isDown {
             if let event = CGEvent(
@@ -251,8 +258,8 @@ final class InputInjector {
                 return
             }
         } else {
-            let bounds = CGDisplayBounds(displayID)   // global CG coords, y-down
-            point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+            let g = displayGeometry()   // global CG coords, y-down
+            point = InputCoordinateMapper.point(x: x, y: y, in: g.bounds, pixelScale: g.scale)
         }
 
         let type: CGEventType
@@ -314,9 +321,14 @@ final class InputInjector {
             let v = mapper.scrollVector(dx: dx, dy: dy)
             whole = scrollRemainder.take(dxPoints: v.dx, dyPoints: v.dy)
         } else {
-            let bounds = CGDisplayBounds(displayID)
-            let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
-            whole = scrollRemainder.take(dxPoints: dx / scale, dyPoints: dy / scale)
+            let g = displayGeometry()
+            // Scroll the receiver's display, never the one the cursor was left on.
+            guard let start = reentry.origin(cursor: currentCursor(), in: g.bounds, pixelScale: g.scale) else { return }
+            if !start.cursorOnDisplay {
+                guard pointerHeldButton == nil, !isDown else { return }
+                postMouseMoved(to: start.point)
+            }
+            whole = scrollRemainder.take(dxPoints: dx / g.scale, dyPoints: dy / g.scale)
         }
         guard whole.dx != 0 || whole.dy != 0 else { return }
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
@@ -343,14 +355,17 @@ final class InputInjector {
             postPointerMotion(to: point)
             return
         }
-        let bounds = CGDisplayBounds(displayID)
-        let point = InputCoordinateMapper.point(x: x, y: y, in: bounds)
+        let g = displayGeometry()
+        let point = InputCoordinateMapper.point(x: x, y: y, in: g.bounds, pixelScale: g.scale)
+        reentry.note(point, in: g.bounds)
         postPointerMotion(to: point)
     }
 
     /// Relative cursor move (`PointerCommand.moveRelative`) — `dx`/`dy` in
     /// video pixels, same convention as `handleScroll`. Moves from the
-    /// Mac's own current cursor position, never the touch location.
+    /// Mac's own current cursor position, never the touch location — while
+    /// that is on this display; otherwise from this session's re-entry point
+    /// there (`DisplayReentryPoint`). The result stays on this display.
     func handlePointerMoveRelative(dx: Double, dy: Double) {
         inputLock.lock()
         defer { inputLock.unlock() }
@@ -362,11 +377,21 @@ final class InputInjector {
             postPointerMotion(to: point)
             return
         }
-        let bounds = CGDisplayBounds(displayID)
-        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
-        let current = currentCursor()
-        let point = CGPoint(x: current.x + dx / scale, y: current.y + dy / scale)
+        let g = displayGeometry()
+        guard let start = reentry.origin(cursor: currentCursor(), in: g.bounds, pixelScale: g.scale) else { return }
+        let point = InputCoordinateMapper.clamp(CGPoint(x: start.point.x + dx / g.scale, y: start.point.y + dy / g.scale),
+                                                into: g.bounds, pixelScale: g.scale)
+        reentry.note(point, in: g.bounds)
         postPointerMotion(to: point)
+    }
+
+    /// A plain move with no button, bringing the cursor onto this display before a press or
+    /// scroll that started while it was elsewhere.
+    private func postMouseMoved(to point: CGPoint) {
+        guard let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                                 mouseCursorPosition: point, mouseButton: .left) else { return }
+        move.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
+        eventSink.post(move)
     }
 
     private func postPointerMotion(to point: CGPoint) {
@@ -391,7 +416,9 @@ final class InputInjector {
     /// Presses `button` down at the Mac's *current* cursor position —
     /// never a touch location, matching the chord/precision-tap product
     /// rule ("the physical centroid of the fingers should not teleport the
-    /// cursor").
+    /// cursor"). Mirror/Extend: only on this display. With the cursor on
+    /// another display it is first moved to this session's re-entry point,
+    /// so a click never lands on a display the receiver isn't showing.
     func handlePointerDown(button: PointerButton, clickCount: Int) {
         inputLock.lock()
         defer { inputLock.unlock() }
@@ -404,7 +431,10 @@ final class InputInjector {
             guard let mapped = mapper.mapPointer(phase: .down, x: nil, y: nil, dx: 0, dy: 0) else { return }
             point = mapped
         } else {
-            point = currentCursor()
+            let g = displayGeometry()
+            guard let start = reentry.origin(cursor: currentCursor(), in: g.bounds, pixelScale: g.scale) else { return }
+            if !start.cursorOnDisplay { postMouseMoved(to: start.point) }
+            point = start.point
         }
         let clickState = Int64(max(clickCount, 1))
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
@@ -825,12 +855,40 @@ final class InputInjector {
 
     private func screenPoint(nx: Double, ny: Double) -> CGPoint {
         if let mappedOverride { return mappedOverride }
-        let bounds = CGDisplayBounds(displayID)
-        return CGPoint(x: bounds.minX + nx * bounds.width,
-                       y: bounds.minY + ny * bounds.height)
+        let g = displayGeometry()
+        return InputCoordinateMapper.point(x: nx, y: ny, in: g.bounds, pixelScale: g.scale)
     }
 
     private func currentCursor() -> CGPoint {
-        CGEvent(source: source)?.location ?? .zero
+        if let cursorLocator { return cursorLocator() }
+        return CGEvent(source: source)?.location ?? .zero
+    }
+
+    /// This display's bounds (global points) and pixels per point (2 when unknown).
+    private func displayGeometry() -> (bounds: CGRect, scale: Double) {
+        let bounds = CGDisplayBounds(displayID)
+        let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
+        return (bounds, scale > 0 ? scale : 2)
+    }
+
+    /// Mirror/Extend: where receiver input takes over on this display while the Mac cursor is
+    /// elsewhere (`DisplayReentryPoint`), normalized to the display: the last spot the cursor
+    /// was seen here, else the centre. Normalized, so it is right for the display's current
+    /// bounds. Read only, and safe from any thread (the cursor echo poll reads it off the
+    /// input path).
+    func reentryNormalizedPoint() -> CGPoint {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        return reentry.normalized ?? CGPoint(x: 0.5, y: 0.5)
+    }
+
+    /// Mirror/Extend: the Mac cursor was seen at `p` (global points). When that is on this
+    /// display it becomes this session's re-entry point (`DisplayReentryPoint`). Read only:
+    /// never moves the cursor.
+    func noteCursor(_ p: CGPoint) {
+        inputLock.lock()
+        defer { inputLock.unlock() }
+        guard targetMapper == nil else { return }
+        reentry.note(p, in: CGDisplayBounds(displayID))
     }
 }
