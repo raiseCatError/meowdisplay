@@ -1,5 +1,52 @@
 import XCTest
 
+final class ClosedLidActionGateTests: XCTestCase {
+    @MainActor
+    func testSystemTerminationDiscardsOrdinaryQuitWithoutCancellingTheAction() async {
+        let gate = ClosedLidActionGate()
+        XCTAssertTrue(gate.begin())
+        XCTAssertTrue(gate.deferQuitIfPending { XCTFail("A superseded ordinary Quit must not prompt or reply again") })
+        gate.discardDeferredQuit()
+        XCTAssertTrue(gate.pending, "Discarding a continuation does not cancel authorization")
+        XCTAssertFalse(gate.begin())
+        gate.finish()
+        XCTAssertFalse(gate.pending)
+    }
+    @MainActor
+    func testQuitWaitsForActionCompletionAndRunsOnlyOnce() async {
+        let gate = ClosedLidActionGate()
+        var replies = 0
+        var ownershipRecorded = false
+        XCTAssertTrue(gate.begin())
+        XCTAssertFalse(gate.begin(), "A second privileged operation must not start")
+        XCTAssertTrue(gate.deferQuitIfPending {
+            XCTAssertTrue(ownershipRecorded, "Quit must follow write read-back and ownership recording")
+            XCTAssertFalse(gate.pending)
+            replies += 1
+        })
+        XCTAssertTrue(gate.deferQuitIfPending { XCTFail("Repeated Quit must not enqueue another reply") })
+        XCTAssertEqual(replies, 0)
+        ownershipRecorded = true
+        gate.finish()
+        gate.finish()
+        XCTAssertEqual(replies, 1)
+    }
+
+    @MainActor
+    func testIdleQuitDoesNotDeferAndCancelledActionCanFinishWithoutOwnership() async {
+        let gate = ClosedLidActionGate()
+        XCTAssertFalse(gate.deferQuitIfPending { XCTFail("Idle quit runs on its normal path") })
+        XCTAssertTrue(gate.begin())
+        var finished = false
+        XCTAssertTrue(gate.deferQuitIfPending { finished = true })
+        // Cancellation/failure also settles the writer; no ownership is needed to quit.
+        gate.finish()
+        XCTAssertTrue(finished)
+        XCTAssertTrue(gate.begin(), "A completed operation must not leave the gate stuck")
+        gate.finish()
+    }
+}
+
 // Fakes only: no test reads or changes the real Mac's power settings.
 
 private final class FakeSleepSetting: SleepDisabledReading, SleepDisabledWriting {
