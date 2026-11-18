@@ -674,8 +674,9 @@ final class AdaptiveLayoutTests: XCTestCase {
                 overviewTile(app, name).isSelected
                     && frames.keys.filter { $0 != name }.allSatisfy { !overviewTile(app, $0).isSelected }
             }, "after a pinch and a pan, a tap at \(area) selects \(name) and only it")
-            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch.exists,
-                          "the toolbar names \(name)")
+            XCTAssertTrue(app.staticTexts["displayOverviewSelectionTitle"].label.hasPrefix(name)
+                              && app.staticTexts["displayOverviewSelectionTitle"].label.hasSuffix(" (Beta)"),
+                          "the toolbar names \(name) and marks Beta")
         } else {
             XCTFail("no display is left in view after the pinch and the pan to tap: \(frames) in \(target)")
         }
