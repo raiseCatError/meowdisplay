@@ -757,6 +757,20 @@ final class StagePeekTests: XCTestCase {
         XCTAssertGreaterThan(StagePeekLegibility.whiteTextContrast(scrimOpacity: 0.55, backdropGray: 0.2), contrast)
     }
 
+    func testWidthChangeClosesAPeekWithNoGalleryScreenOpen() {
+        XCTAssertTrue(StagePeekResize.closesOnWidthChange(searching: false, galleryScreenOpen: false))
+    }
+
+    func testWidthChangeKeepsAPeekWhileSearching() {
+        XCTAssertFalse(StagePeekResize.closesOnWidthChange(searching: true, galleryScreenOpen: false))
+    }
+
+    func testWidthChangeKeepsAPeekWhileAGalleryScreenIsOpen() {
+        // The display overview or the arrangement editor is presented from the gallery.
+        XCTAssertFalse(StagePeekResize.closesOnWidthChange(searching: false, galleryScreenOpen: true))
+        XCTAssertFalse(StagePeekResize.closesOnWidthChange(searching: true, galleryScreenOpen: true))
+    }
+
     func testRelativeLuminanceMatchesWCAGReferencePoints() {
         XCTAssertEqual(StagePeekLegibility.relativeLuminance(gray: 0), 0, accuracy: 1e-9)
         XCTAssertEqual(StagePeekLegibility.relativeLuminance(gray: 1), 1, accuracy: 1e-9)

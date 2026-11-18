@@ -1502,7 +1502,13 @@ mode alike (admitted session, `hello.ws`, Window mode allowed on the Mac), so a
 receiver's switcher and search open over the desktop without changing the
 mode. One identity ledger serves every mode: a window keeps its `gen` when the
 receiver later switches to Window mode with it. `windowCatalog` also carries
-`displays` `[{id, name, w, h, main, virtual}]`. Stills are queued in the order
+`displays` `[{id, name, w, h, main, virtual}]`, plus optional, additive keys
+(older receivers ignore them) describing the Mac's arrangement: `x`, `y` (frame
+origin in global points, may be negative), `scale` (pixels per point; omitted
+when unknown), `hz` (refresh rate, only when > 0), `mirrorOf` (display id this
+one mirrors; omitted otherwise), `meow` (a MeowDisplay virtual display of any
+session) and `own` (a virtual display of this session; implies `meow`). `meow`
+and `own` come from the sender's display registry, never from names. Stills are queued in the order
 asked (the latest request first; nothing is dropped while a batch runs) and a
 fresh still is answered from the Mac's cache; a still that can't be taken now
 is answered with the last real one and `stale: true`, or `unavailable: true`
@@ -1531,6 +1537,50 @@ Launchpad), not on every catalog refresh. `windowAction` also takes
 The Mac brings a tile's minimized or hidden window back only when the tile
 first shows it that way; a window minimized later stays minimized until
 `activate`.
+
+**Display arrangement.** Optional and additive (no `pv` bump): offered only
+when the Mac's `welcome.features` lists `displayArrange` (sent with the other
+browsing features, so only while Window mode is allowed on the Mac). A receiver
+edits the catalog's `displays` and asks the Mac to move them; the Mac changes
+its arrangement only with public Quartz Display Services, never through System
+Settings.
+
+- Receiver → Mac: `displayArrangeRequest {req, origins, base}`. `origins`
+  `[{id, x, y}]` are the new frame origins (global points, whole numbers) of
+  the displays that move, with the main display at 0,0 (a receiver that moved
+  the main display translates everything so it stays there). `base`
+  `[{id, x, y, w, h}]` is every drawn display (mirror members folded into
+  their primary) of the catalog the receiver edited. At most 16 entries each.
+- Mac → receiver: `displayArrangeState {req, state, reason?, revertIn?}` with
+  `state` one of `awaitingMacConfirm`, `applied` (`revertIn`: seconds, 15),
+  `kept`, `reverted`, `denied` or `failed`.
+- Receiver → Mac: `displayArrangeKeep {req}` (keep the applied arrangement) or
+  `displayArrangeRevert {req}` (put the old one back now; before the Mac's
+  owner answered it withdraws the request: `denied` `requested`).
+
+The Mac acts on a request only from an admitted session with control (the
+input grant; otherwise `denied` `control`) and one at a time across all
+sessions (`denied` `busy`). `base` must match the Mac's current displays
+exactly (`denied` `stale`), and the result must be valid against them:
+whole-point origins within ±32768, no overlap, every display sharing an edge
+with the rest, a mirror member never moved apart from its primary, and another
+session's MeowDisplay screen never moved (`denied` with `invalidOrigin`,
+`overlap`, `disconnected`, `mirrorMember`, `notMovable`, `unknownDisplay`,
+`noMain`, `empty` or `malformed`). Then the Mac sends `awaitingMacConfirm` and
+asks its owner in a prompt on the Mac (which device asks, what moves; Rearrange
+/ Don't Allow, only real input on the Mac answers Rearrange). Don't Allow,
+closing it or 60 s without an answer is `denied` (`declined`, `timeout`).
+After Rearrange the Mac checks control and the displays again, applies the
+origins for this login session only and reads the arrangement back: anything
+macOS placed differently is undone and reported `failed` `notApplied`
+(`configurationError` when macOS refused). Otherwise it sends `applied` with
+`revertIn` 15. `displayArrangeKeep` within that time, with control, saves the
+same arrangement permanently (`kept`). Revert, the timer, Keep without control
+or after the displays changed, and the session ending all restore the previous
+origins (`reverted` with `requested`, `timeout`, `control` or
+`displaysChanged`; nothing is sent once the session is gone). A `reason` is at
+most 32 characters; receivers show unknown ones as a generic failure. After
+`kept` or `reverted` the receiver asks for `windowCatalog` again.
 
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
@@ -1584,6 +1634,34 @@ the owner answers on the Mac), `stillOpen`, `stale` (not that window any
 more), `control` (no input grant: View Only cannot close), `accessibility`
 (the Mac lacks the permission), `noButton` or `ambiguous` (more than one
 window matched; nothing was pressed). A fresh `windowCatalog` follows.
+
+**Display actions** (welcome feature `displayArrange`, the same entry as
+display arrangement editing; Window mode allowed, admitted sessions): `displayIdentify {}` shows a label (the
+display's position in the latest `windowCatalog` `displays`, main first,
+and its name) on each listed Mac screen for about 3 s; at most one every
+2 s; no control needed. `cursorToDisplay {id}` moves the Mac cursor to the
+centre of a display from the latest listing; it needs control (checked
+again right before the move), at most 4 per second; any other id, or a
+display that moved since the listing, is ignored. Neither has a reply; the
+cursor report shows the move. While a session is browsing, the Mac also
+sends a fresh `windowCatalog` when its displays change (attached, removed,
+rearranged or resized), so an overview never keeps an old arrangement.
+
+**Overview cursor** (same entry, `displayArrange`; sessions that pass the same
+gates as `windowThumbnailRequest`: `hello.ws`, Window mode allowed, video on,
+admitted, content not hidden, not paused). Receiver → Mac:
+`overviewCursorWatch {on}` while the overview is open; the receiver sends
+`on: true` when it opens, again every 60 s, and `on: false` when it closes.
+While a watch is on the Mac sends `overviewCursor {x, y, d?}`: the Mac cursor
+in global points (the coordinate space of `windowCatalog` `displays`, y down),
+rounded to 0.1, and `d`, the id of the listed display it is on (left out when
+on none). At most 10 per second and only when `x`, `y` or `d` changed since the
+last one; the first one follows the watch at once. The watch ends on `on: false`,
+on disconnect, when the session is paused, Video Off, or not admitted, when the
+Mac's content is hidden (lock, Privacy Shield), and 120 s after the last
+`on: true`. A receiver ignores a message with a missing or non-finite `x` or
+`y`, and reads a missing or invalid `d` as "no display". Neither message
+has a reply and neither needs control.
 
 **Fill Window on Mac / Restore Previous Size on Mac** (welcome feature
 `windowFrame`, listed only while Window mode is allowed; Window mode only).
@@ -2332,6 +2410,9 @@ This file is versioned by git; the authoritative change log is
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 | 2026-11-15 | Additive, no `pv` change: hidden `cursor` reports may carry `x`, `y` outside 0..1 with `"why":"display"` and optional `rx`, `ry`; Window mode `"why":"pane"` with `px`, `py`, `pw`, `ph` (section 6.2, `cursor`) |
 | 2026-11-15 | Additive, no `pv` change: optional `desktopSize` (`"standard"` / `"larger"` / `"largest"`) on `extendShapeRequest` / `extendShapeState` (section 6.7); presence in the state means supported, older peers ignore it |
+| 2026-11-15 | Additive, no `pv` change: display arrangement editing (section 6.10), `welcome.features` `displayArrange`, `displayArrangeRequest`, `displayArrangeState`, `displayArrangeKeep`, `displayArrangeRevert` |
+| 2026-11-15 | Additive, no `pv` change: display actions under `welcome.features` `displayArrange`: `displayIdentify`, `cursorToDisplay`; `windowCatalog` resent on display changes while browsing (section 6.10) |
+| 2026-11-15 | Additive, no `pv` change: overview cursor under `welcome.features` `displayArrange`: `overviewCursorWatch`, `overviewCursor` (section 6.10) |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.

@@ -396,6 +396,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Unified Clipboard (PROTOCOL.md 6.15): a `clip` message from this admitted connection.
     /// The hub checks the Mac's switch and the device's grant.
     @MainActor var onClipboardMessage: ((_ generation: UInt64, _ message: [String: Any]) -> Void)?
+    /// Display arrangement (PROTOCOL.md 6.10): shows the Mac owner's prompt for a request that
+    /// passed every check; `decide` is called once. Nil: nothing can ask, so it is never applied.
+    @MainActor var onDisplayArrangeConfirm: ((DisplayArrangementConfirmationRequest,
+                                              @escaping @Sendable (DisplayArrangementDecision) -> Void) -> Void)?
+    /// Display arrangement: the prompt with this token goes unanswered (timeout, withdrawn, session end).
+    @MainActor var onDisplayArrangeDismiss: ((UInt64) -> Void)?
     /// Fires when the connection changes, so a pending control-request
     /// prompt for the old connection is dismissed — see `connectionAuthorityEnded`.
     @MainActor var onInputAuthorityReset: (() -> Void)? {
@@ -491,6 +497,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// deciding whether a genuinely usable PHYSICAL display exists
     /// (Mirror's authoritative availability gate in `requestMode`).
     var virtualDisplayID: CGDirectDisplayID? { virtualDisplay?.displayID }
+    /// The saved-arrangement key of the current virtual display (`DisplayArrangement`), set with
+    /// it. Read on `queue` when an edited arrangement is put back.
+    private let ownArrangementKeyState = OSAllocatedUnfairLock<String?>(uncheckedState: nil)
     private let queue = DispatchQueue(label: "sender.video")
     /// See `MacSenderSelfBox`'s doc comment. Installed once `self` is fully
     /// constructed (end of `init`).
@@ -911,6 +920,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var windowBrowser: WindowBrowserService?
     /// Remote Finder for this session (created on its first request; `queue` only).
     private var fileBrowser: RemoteFileBrowser?
+    /// Display arrangement editing for this session (created on its first request; `queue` only).
+    private var displayArrangement: DisplayArrangementService?
     /// Window mode: whose sound the audio stream carries (`queue` only).
     private var windowAudioSources: WindowAudioSources?
     private var windowAudioGeneration: UInt64 = 0
@@ -2641,6 +2652,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               }) else { return nil }
         guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
         virtualDisplay = vd
+        ownArrangementKeyState.withLockUnchecked { $0 = arrangementKey }
         return vd.displayID
     }
 
@@ -3652,6 +3664,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         windowBrowser = nil
         fileBrowser?.stop()
         fileBrowser = nil
+        // Display arrangement: a pending prompt goes, an unkept arrangement is put back.
+        displayArrangement?.sessionEnded()
+        displayArrangement = nil
         textCaretFollower.stop()
         let released = haltCaptureLifecycle()
         authenticatedSession.invalidate()
@@ -6358,7 +6373,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let open = TextCaretWire.parseKeyboardState(obj) else { return }
             textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
-             WireMessage.appLaunch, WireMessage.windowClose:
+             WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor,
+             DisplayActionsWire.overviewCursorWatch:
             // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
             // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
             // Launching still needs control (checked by the service).
@@ -6389,6 +6405,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard receiverInputIsAllowed() else { reply(.control); return }
             Log.info("lock mac: requested by the device")
             DispatchQueue.main.async { MacScreenLock.lock(done: reply) }
+        case WireMessage.displayArrangeRequest, WireMessage.displayArrangeKeep, WireMessage.displayArrangeRevert:
+            // Display arrangement (PROTOCOL.md 6.10). Admitted sessions only (gate above). A request
+            // needs the advertised feature and control (`receiverInputIsAllowed()`, asked again
+            // right before anything is applied); the service then asks the Mac's owner. Keep and
+            // Revert only ever reach a request this service already holds; Keep needs control too.
+            guard sessionAuthorization.isAdmitted else { return }
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            let stillAllowed: () -> Bool = { selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false }
+            if type == WireMessage.displayArrangeRequest {
+                guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+                ensureDisplayArrangement().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
+                                                  controlStillAllowed: stillAllowed)
+            } else {
+                displayArrangement?.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
+                                           controlStillAllowed: stillAllowed)
+            }
         case WireMessage.filesRequest:
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
@@ -6842,6 +6875,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
         textCaretFollower.stop()
+        // Display arrangement belongs to the connection that asked: its prompt goes and an
+        // arrangement it hasn't kept is put back (a new connection must ask again).
+        displayArrangement?.sessionEnded()
         // The lock screen view belongs to the connection that asked: a new one starts without it
         // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
         if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
@@ -7747,6 +7783,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             features.append(WindowWorkspaceWire.floatFeature)
             features.append(WindowWorkspaceWire.floatLiftFeature)
             features.append(WindowFrameWire.welcomeFeature)
+            // Display arrangement edits the catalog's `displays`, so it comes with browsing.
+            // The overview's display actions (Identify, Move Cursor Here) come with it: one entry,
+            // since a receiver reads at most 16.
+            features.append(DisplayArrangeWire.welcomeFeature)
         }
         features.append(RemoteEndpointsWire.welcomeFeature)
         features.append(ExactKeyModifiersWire.welcomeFeature)
@@ -7853,6 +7893,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let self = selfBox.currentOnQueue() else { return }
                 self.sendMirrorDisplayState()
                 self.topologyChanged(reason: "didChangeScreenParameters")
+                // The overview's arrangement follows the Mac's (a no-op unless browsing).
+                self.windowBrowser?.displaysChanged()
             }
         }
     }
@@ -8475,11 +8517,58 @@ extension MacSender {
         return browser
     }
 
+    /// `queue` only. This session's display arrangement service: the live Quartz configurator,
+    /// timers on `queue`, and the Mac owner's prompt through the controller
+    /// (`onDisplayArrangeConfirm`; without one every request is denied, never applied).
+    private func ensureDisplayArrangement() -> DisplayArrangementService {
+        if let displayArrangement { return displayArrangement }
+        let ownerID = ObjectIdentifier(self)
+        let selfBox = self.selfBox
+        let queue = self.queue
+        let confirmer = ClosureDisplayArrangementConfirmer(
+            present: { request, decide in
+                Task { @MainActor in
+                    guard let present = selfBox.resolve()?.onDisplayArrangeConfirm else { return decide(.unavailable) }
+                    present(request, decide)
+                }
+            },
+            dismiss: { token in
+                Task { @MainActor in selfBox.resolve()?.onDisplayArrangeDismiss?(token) }
+            })
+        let service = DisplayArrangementService(
+            configurator: LiveDisplayOriginConfigurator(ownDisplayIDs: {
+                VirtualDisplayRegistry.shared.displayIDs(ownedBy: ownerID)
+            }),
+            confirmer: confirmer, scheduler: QueueDisplayArrangementScheduler(queue: queue),
+            deviceName: endpointName,
+            perform: { work in queue.async { work() } })
+        service.onArrangementRestored = { origins in
+            // On `queue`. An arrangement edit moved this session's own display and was reported
+            // to the saved arrangement by the origin poll; its revert may come during teardown,
+            // after the last poll. Record where it really is now, so the next connection does
+            // not restore an arrangement nobody kept.
+            guard let sender = selfBox.currentOnQueue(), let id = sender.virtualDisplay?.displayID,
+                  let origin = origins[id],
+                  let key = sender.ownArrangementKeyState.withLockUnchecked({ $0 }) else { return }
+            DisplayArrangement.save(origin: origin, size: CGDisplayBounds(id).size, device: key)
+        }
+        service.sendMessage = { [weak service] message in
+            // Called on `queue` (every service step runs there).
+            guard let sender = selfBox.currentOnQueue(), let service, sender.displayArrangement === service,
+                  sender.sessionAuthorization.isAdmitted else { return }
+            sender.sendJSONObject(message)
+        }
+        displayArrangement = service
+        return service
+    }
+
     /// `queue` only. One browser per session; its messages pass the same admission gate.
     @discardableResult
     private func ensureWindowBrowser() -> WindowBrowserService {
         if let windowBrowser { return windowBrowser }
         let browser = WindowBrowserService(hostID: TrustStore.shared.installID() ?? "mac")
+        let ownerID = ObjectIdentifier(self)
+        browser.ownDisplayIDs = { VirtualDisplayRegistry.shared.displayIDs(ownedBy: ownerID) }
         let selfBox = self.selfBox
         let queue = self.queue
         browser.sendMessage = { [weak browser] message in
