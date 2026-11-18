@@ -1005,10 +1005,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             CGFloat(n) * Metrics.paletteKey
                 + CGFloat(Swift.max(0, n - 1)) * Metrics.paletteGap + Metrics.touchSlack
         }
-        guard portrait else { return CGSize(width: span(1), height: span(count)) }
-        let rows = actions.count > 8 ? 2 : 1
-        let columns = max(1, Int(ceil(Double(count) / Double(rows))))
-        return CGSize(width: span(columns), height: span(rows))
+        let grid = ControlTrayGeometry.shortcutPaletteGrid(count: count, portrait: portrait)
+        return CGSize(width: span(grid.columns), height: span(grid.rows))
     }
 
     /// The one visual primitive: a translucent circle. Deliberately lighter
@@ -1136,11 +1134,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
                     .shadow(color: .black.opacity(0.28), radius: 5, y: 1)
             } else {
-                let rows = portrait ? (actions.count > 8 ? 2 : 1) : actions.count
+                let grid = ControlTrayGeometry.shortcutPaletteGrid(count: actions.count, portrait: portrait)
                 Grid(horizontalSpacing: Metrics.paletteGap, verticalSpacing: Metrics.paletteGap) {
-                    ForEach(0..<rows, id: \.self) { row in
+                    ForEach(0..<grid.rows, id: \.self) { row in
                         GridRow {
-                            ForEach(Array(actions.enumerated()).filter { $0.offset % rows == row },
+                            ForEach(Array(actions.enumerated()).filter { grid.row(for: $0.offset) == row },
                                     id: \.element.id) { _, action in
                                 shortcutButton(action, portrait: portrait)
                             }
