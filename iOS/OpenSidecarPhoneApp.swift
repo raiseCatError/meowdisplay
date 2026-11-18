@@ -15,7 +15,12 @@ let macAppURL = ProjectLinks.gitHub
 struct OpenSidecarPhoneApp: App {
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            // UI-test seam (iOS/UITestFoldSeam.swift): inert unless a test sets its environment.
+            ReceiverScreen().uiTestFoldBandMarker()
+            #else
             ReceiverScreen()
+            #endif
         }
     }
 }
@@ -278,7 +283,8 @@ struct ReceiverScreen: View {
         // A real session always wins (see `route`); never start a demo behind it.
         guard demo == nil, ReceiverPresentationRoute.canEnterDemo(realSurfaceShown: showsReceiverSurface),
               !model.presentation.keepsSessionOnHome else { return }
-        demoControlStore = DemoControlStoreFactory.make()
+        demoControlStore = DemoControlStoreFactory.make(horizontalRegular: horizontalSizeClass == .regular,
+                                                        verticalRegular: verticalSizeClass == .regular)
         demo = DemoSession(videoSize: demoVideoSize(), deviceName: String(localized: "Sample \(deviceKind)"))
         Log.info("demo mode entered")
     }
@@ -492,10 +498,41 @@ struct ReceiverScreen: View {
         return nil
     }
 
-    private func updateControlLayoutClass() {
-        controlStore.updateLayoutClass(horizontalRegular: horizontalSizeClass == .regular,
-                                       verticalRegular: verticalSizeClass == .regular)
+    /// The presentation Settings was opened with, while it is open.
+    @State private var settingsStyleLatch: SettingsPresentationStyle?
+
+    private var settingsPresentationStyle: SettingsPresentationStyle {
+        SettingsPresentationStyle.resolved(latched: settingsStyleLatch, roomyNow: controlStore.isPad)
     }
+
+    /// Both stores follow the window: the live one and, while Demo Mode is
+    /// open, the demo's own (it is a separate store, so a fold would
+    /// otherwise leave the demo in the layout it started with).
+    private func updateControlLayoutClass() {
+        let horizontalRegular = horizontalSizeClass == .regular
+        let verticalRegular = verticalSizeClass == .regular
+        controlStore.updateLayoutClass(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular)
+        demoControlStore?.updateLayoutClass(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular)
+        #if DEBUG
+        traceWindowLayout("sizeClass")
+        #endif
+    }
+
+    #if DEBUG
+    /// DEBUG only: one line per size-class or window-size change, to see what
+    /// each iPhone Duo display and fold state really reports (layout follows
+    /// size classes and window bounds, never orientation or idiom).
+    private func traceWindowLayout(_ reason: String) {
+        let window = ActiveScene.window
+        let orientation = window?.windowScene?.interfaceOrientation
+        Log.info("layoutTrace: \(reason) interfaceOrientation=\(String(describing: orientation)) "
+                 + "horizontalSizeClass=\(String(describing: horizontalSizeClass)) "
+                 + "verticalSizeClass=\(String(describing: verticalSizeClass)) "
+                 + "window=\(String(describing: window?.bounds.size)) "
+                 + "safeArea=\(String(describing: window?.safeAreaInsets)) "
+                 + "roomy=\(controlStore.isPad)")
+    }
+    #endif
 
     var body: some View {
         GeometryReader { geo in
@@ -799,6 +836,9 @@ struct ReceiverScreen: View {
             .allowsHitTesting(route != .sessionHome)
             .accessibilityHidden(route == .sessionHome)
             .background(ReceiverWindowPanelProbe { points, scale in
+                #if DEBUG
+                traceWindowLayout("windowSize")
+                #endif
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
             .onAppear { updateControlLayoutClass() }
@@ -867,13 +907,19 @@ struct ReceiverScreen: View {
         // remote Mac; a second swipe still opens Control Center, the Home
         // indicator etc. Never while input is off or outside the surface.
         .defersSystemGestures(on: deferredSystemGestureEdges)
-        // iPhone: a sheet. iPad: full screen, so the split view has the
-        // width for its sidebar (a form sheet would collapse it).
-        .sheet(isPresented: controlStore.isPad ? .constant(false) : $showSettings) {
+        // Compact window: a sheet. Roomy window: full screen, so the split view
+        // has the width for its sidebar (a form sheet would collapse it). The
+        // style is decided once, when Settings opens (`settingsStyleLatch`):
+        // a fold while it is open must not dismiss one presentation while
+        // presenting the other.
+        .sheet(isPresented: settingsPresentationStyle == .sheet ? $showSettings : .constant(false)) {
             settingsView
         }
-        .fullScreenCover(isPresented: controlStore.isPad ? $showSettings : .constant(false)) {
+        .fullScreenCover(isPresented: settingsPresentationStyle == .fullScreen ? $showSettings : .constant(false)) {
             settingsView
+        }
+        .onChange(of: showSettings) { shown in
+            settingsStyleLatch = shown ? SettingsPresentationStyle.style(roomy: controlStore.isPad) : nil
         }
         // One sheet for the whole secure pairing ceremony on every transport
         // (LAN, USB, Remote): SAS → waiting for the other device. The Remote
@@ -1356,6 +1402,14 @@ extension ControlReservedRegion {
     /// positioned in). iOS 27.1 introduced them; earlier systems report none,
     /// which leaves the safe-area/notch fallback as the only input.
     static func active(in proxy: GeometryProxy) -> [ControlReservedRegion] {
+        #if DEBUG
+        // UI-test seam: a synthetic fold while `MEOW_UITEST_FOLD` is set (iOS/UITestFoldSeam.swift).
+        if let fold = UITestFoldSeam.region(in: proxy) { return system(in: proxy) + [fold] }
+        #endif
+        return system(in: proxy)
+    }
+
+    private static func system(in proxy: GeometryProxy) -> [ControlReservedRegion] {
         // `#available` alone cannot keep older SDKs building: the compiler
         // must still resolve `reservedRegions`, which first ships in the
         // iOS 27.1 SDK. The compiler version cannot tell that SDK apart
@@ -1604,6 +1658,8 @@ struct IdleView: View {
     var body: some View {
         GeometryReader { proxy in
             Group {
+                // Horizontal class alone on purpose (standard split-view
+                // behaviour); `ReceiverLayoutClass.isRoomy` is for the controls.
                 if horizontalSizeClass == .regular {
                     regularLayout(size: proxy.size)
                 } else if proxy.size.width > proxy.size.height {
@@ -6410,7 +6466,24 @@ enum ActiveScene {
     }
 
     /// Falls back to the main screen only before any scene has connected.
+    /// Right for screen properties (refresh rate, native panel); a layout
+    /// or a size that follows the app's window uses `window` instead.
     static var screen: UIScreen { windowScene?.screen ?? UIScreen.main }
+
+    /// The app's window in the active scene. A fold, Stage Manager or Slide
+    /// Over resize it mid-session without changing the screen.
+    static var window: UIWindow? {
+        let scene = windowScene
+        return scene?.windows.first(where: \.isKeyWindow) ?? scene?.windows.first
+    }
+
+    /// The window's size in pixels: its bounds at its own display scale,
+    /// never the screen's. `nil` before a window exists.
+    static var windowPixels: CGSize? {
+        guard let window else { return nil }
+        let scale = window.traitCollection.displayScale > 0 ? window.traitCollection.displayScale : screen.scale
+        return CGSize(width: window.bounds.width * scale, height: window.bounds.height * scale)
+    }
 }
 
 /// Full-desktop view: a small yes/no offer to switch to Window view.

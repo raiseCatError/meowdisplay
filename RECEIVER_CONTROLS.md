@@ -101,7 +101,7 @@ ignore Touch Style.
 | Function tray editor (add, rename, sequences, faces) | Yes | Yes | Yes | n/a |
 | Calculator (on the device; never sent to the Mac; works in View Only) | Yes. Off by default; **Edit Function Tray** → Utilities. Upper-left corner | Yes. Same switch for Strip and Overlay (first on the Function edge); Custom: **Add Control** → Calculator | No | n/a |
 | Landscape side, Same/Opposite Side, Avoid Notch | Yes | No (edges instead) | Yes. **Landscape Tray Side**, **Function Tray Position**, **Avoid Cutouts** | n/a |
-| Layouts: Strip / Overlay / Custom | n/a | Yes | Yes on large windows (tablet, unfolded) | n/a |
+| Layouts: Strip / Overlay / Custom | Yes on an unfolded iPhone Duo (see below) | Yes | Yes on large windows (tablet, unfolded) | n/a |
 | Edges, Palette Style (Keys / Wheel), Control Size, Control Hints, Standard Controls | n/a | Yes | Yes (Tablet Layout page) | n/a |
 | Custom layout editor (up to 5, landscape and portrait, Two-Hand Assist) | n/a | Yes | Yes | n/a |
 | Custom layout share code | n/a | Yes | Yes. Copy and paste a code | n/a |
@@ -140,6 +140,23 @@ Holding or latching a modifier opens the palette for exactly that combination. A
 
 Already in the palettes and unchanged: Close ⌘W and Close All Windows ⌘⌥W are the most surprising defaults (an app may show a Save sheet, or close several windows at once), and Move Item Here, New Folder and Reopen Closed Tab only mean something in Finder or a browser.
 
+### iPhone Duo
+
+The layout follows the window, never the device or its orientation. A window that is **regular in both directions** (width and height size classes) gets the iPad-style layouts: Strip, Overlay and Custom, Control Size, Standard Controls, Custom layouts, and the iPad first-run defaults (Direct Touch and the radial Custom layout, applied once to an install with nothing saved whose first window is roomy). That is an unfolded Duo. A compact window (the outer display, a half-open fold, a landscape phone) keeps the compact tray. One rule decides it, and Demo Mode follows it too. Settings opens as a sheet in a compact window and full screen in a roomy one, decided once when it opens, so folding with Settings open changes nothing about it.
+
+Folding resizes the app mid-session, so every capability stays reachable in both layouts:
+
+| Roomy standard control | In a compact window |
+| --- | --- |
+| Menu Bar, Show Desktop, Control Center | Function Tray actions of the same name (off by default; switch them on in **Edit Function Tray**) |
+| Dock, Escape, Tab, Keyboard | The same Main Tray items |
+| Arrow Keys | The arrow button |
+| Move View | Not offered. Move View is a one-finger mode toggle with its own banner on the roomy rail; compact windows keep two-finger pan, pinch and rotate for the same view navigation |
+
+On a fold (iPhone Duo) the roomy rails skip over the crease (a vertical crease across a top or bottom rail, a horizontal one across a side rail) and Custom controls placed on it move wholly onto one half, so no control straddles it. Controls stay inside the safe area, including the trailing system area. Geometry is unit-tested only; not yet run on a real Duo.
+
+**Upside-down portrait is not available on iPhones without a Home button.** That is a system rule, not a setting here, and the app does not work around it with a transform. Use landscape either way.
+
 ## Keyboard and haptics
 
 | Control | iPhone | iPad | Android | Mac Receiver |
@@ -150,11 +167,13 @@ Already in the palettes and unchanged: Close ⌘W and Close All Windows ⌘⌥W 
 | ⌘ shortcuts from a hardware keyboard | Yes | Yes | Partial. Needs **Control Key Types ⌘** | Yes |
 | Pause forwarding | n/a | n/a | n/a | ⌃⌥⎋, or switch away |
 | Hold Response (how long ⌘ ⌥ ⌃ ⇧ are touched before their shortcuts appear: Fast 0.18 s, Standard 0.25 s, Deliberate 0.4 s) | Yes | Yes | No (fixed) | n/a |
-| Arrow keys (button, ↑ ← ↓ → keypad and its own ⇧ ⌥ ⌘) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Compact windows only (roomy layouts: planned) | No | n/a |
+| Arrow keys (button, ↑ ← ↓ → keypad and its own ⇧ ⌥ ⌘) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Yes. Compact windows keep the button; roomy layouts have an **Arrow Keys** standard control (Strip, Overlay) and Custom item, one tap for the same keypad. **Show Arrow Keys** applies to both | No | n/a |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
 
 ### Arrow keys (#179)
+
+**Roomy layouts** (an iPad, an unfolded iPhone Duo) have the same keypad behind an **Arrow Keys** control on the Strip and Overlay rail (a standard control, shown by default and switchable under **Standard Controls**) and as a Custom layout item (**Add Control** → Keys & Utilities; the starter radial layout does not include it). A tap opens or closes the keypad beside the control, toward the middle of the screen and clear of the other controls and of a fold. The swipe is the compact button's alone. **Show Arrow Keys** turns it off everywhere; **Arrow Keys Side** is for the compact button. The keyboard bar's Arrow Keys item now shows in roomy windows too.
 
 One small button gives the arrow keys. **Tap** it to open an inverted-T keypad (↑ above ← ↓ →) and tap it again to close it. **Swipe** it in a direction to send one arrow without opening anything. A touch that is neither a tap nor a clear swipe (a diagonal, a short drag, a touch the system cancelled) sends nothing.
 

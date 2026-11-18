@@ -202,6 +202,12 @@ enum PadEdgeGeometry {
     /// - Parameter keyboardTop: the docked software keyboard's top edge in
     ///   `container` coordinates, if one is open. Bottom lanes rise above it
     ///   and side lanes stop short of it; Strip rails don't move.
+    /// - Parameter divisions: folds (an iPhone Duo's crease) in `container`
+    ///   coordinates. A fold that crosses a rail (a vertical one across a
+    ///   top/bottom rail, a horizontal one across a left/right rail) is
+    ///   skipped over: no control frame touches it, and the room it takes
+    ///   comes off the rail's length, so the overflow rules above still hold.
+    ///   Without divisions every position is unchanged.
     static func layout(container: CGRect,
                        safeInsets: ControlSafeInsets,
                        reservesStrips: Bool,
@@ -211,7 +217,8 @@ enum PadEdgeGeometry {
                        mainGroupAlignments: [PadGroupAlignment] = [],
                        functionGroupCounts: [Int],
                        metrics: PadControlMetrics,
-                       keyboardTop: CGFloat? = nil) -> PadEdgeLayout {
+                       keyboardTop: CGFloat? = nil,
+                       divisions: [CGRect] = []) -> PadEdgeLayout {
         guard container.width > 0, container.height > 0 else {
             return PadEdgeLayout(canvas: container, strips: [], mainSegments: [], functionSegments: [], laneCounts: [:])
         }
@@ -228,17 +235,22 @@ enum PadEdgeGeometry {
         // settle lane counts with a few deterministic passes.
         var lanes = Dictionary(uniqueKeysWithValues: usedEdges.map { ($0, 1) })
         var packed: [ControlEdge: [PlacedBlock]] = [:]
+        // Cell starts moved off a fold, per edge; empty without one.
+        var foldStarts: [ControlEdge: [CellKey: CGFloat]] = [:]
         for _ in 0..<4 {
             var next: [ControlEdge: Int] = [:]
             for edge in usedEdges {
                 let range = alongRange(edge: edge, container: container, safeInsets: safeInsets,
                                        reservesStrips: reservesStrips, lanes: lanes, metrics: metrics,
                                        keyboardTop: keyboardTop)
-                let blocks = pack(length: range.upperBound - range.lowerBound, edge: edge, metrics: metrics,
-                                  main: edge == mainEdge ? main : [], alignments: mainAlignments,
-                                  function: edge == functionEdge ? function : [])
-                packed[edge] = blocks
-                next[edge] = max(1, (blocks.map(\.lane).max() ?? 0) + 1)
+                let cuts = foldCuts(edge: edge, range: range, lanes: lanes, container: container,
+                                    safeInsets: safeInsets, metrics: metrics, divisions: divisions)
+                let result = foldedPack(range: range, cuts: cuts, edge: edge, metrics: metrics,
+                                        main: edge == mainEdge ? main : [], alignments: mainAlignments,
+                                        function: edge == functionEdge ? function : [])
+                packed[edge] = result.blocks
+                foldStarts[edge] = result.starts
+                next[edge] = max(1, (result.blocks.map(\.lane).max() ?? 0) + 1)
             }
             if next == lanes { break }
             lanes = next
@@ -253,11 +265,12 @@ enum PadEdgeGeometry {
             let range = alongRange(edge: edge, container: container, safeInsets: safeInsets,
                                    reservesStrips: reservesStrips, lanes: lanes, metrics: metrics,
                                    keyboardTop: keyboardTop)
-            for block in packed[edge] ?? [] {
+            let folded = foldStarts[edge] ?? [:]
+            for (blockIndex, block) in (packed[edge] ?? []).enumerated() {
                 let cross = laneCenter(edge: edge, lane: block.lane, container: container, safeInsets: safeInsets,
                                        reservesStrips: reservesStrips, metrics: metrics, keyboardTop: keyboardTop)
                 let cells = (0..<block.count).map { index -> CGRect in
-                    let along = range.lowerBound + block.start
+                    let along = folded[CellKey(block: blockIndex, cell: index)] ?? range.lowerBound + block.start
                         + CGFloat(index) * ((edge.stacksVertically ? metrics.cell.height : metrics.cell.width) + metrics.gap)
                     return edge.stacksVertically
                         ? CGRect(x: cross - metrics.cell.width / 2, y: along,
@@ -408,6 +421,138 @@ enum PadEdgeGeometry {
                 for (offset, runs) in lanesOf(startRuns + endRuns).enumerated() {
                     result += placed(runs, lane: nextLane + offset, from: 0)
                 }
+            }
+        }
+        return result
+    }
+
+    // MARK: Folds
+
+    /// Room kept clear on each side of a fold.
+    private static let foldClearance: CGFloat = 8
+
+    private struct CellKey: Hashable {
+        var block: Int
+        var cell: Int
+    }
+
+    /// The along-edge intervals (in container coordinates, clipped to
+    /// `range`, sorted and merged) a fold takes out of `edge`'s rail. Only a
+    /// fold that crosses the rail counts: perpendicular to it, and touching
+    /// the band the rail's lanes occupy.
+    private static func foldCuts(edge: ControlEdge, range: ClosedRange<CGFloat>, lanes: [ControlEdge: Int],
+                                 container: CGRect, safeInsets: ControlSafeInsets, metrics: PadControlMetrics,
+                                 divisions: [CGRect]) -> [ClosedRange<CGFloat>] {
+        guard !divisions.isEmpty else { return [] }
+        let depth = inset(safeInsets, edge) + laneThickness(edge: edge, lanes: lanes[edge] ?? 1, metrics: metrics)
+            + 2 * max(PadControlMetrics.stripPadding, PadControlMetrics.edgeMargin)
+        let band: CGRect
+        switch edge {
+        case .leading: band = CGRect(x: container.minX, y: container.minY, width: depth, height: container.height)
+        case .trailing: band = CGRect(x: container.maxX - depth, y: container.minY, width: depth, height: container.height)
+        case .top: band = CGRect(x: container.minX, y: container.minY, width: container.width, height: depth)
+        case .bottom: band = CGRect(x: container.minX, y: container.maxY - depth, width: container.width, height: depth)
+        }
+        var intervals: [ClosedRange<CGFloat>] = []
+        for division in divisions where !division.isNull && !division.isEmpty && division.intersects(band) {
+            // A division wider than tall is a horizontal band; it crosses a
+            // rail that runs along y (a left/right rail). Otherwise the
+            // reverse.
+            let horizontalBand = division.width > division.height
+            guard horizontalBand == edge.stacksVertically else { continue }
+            let lower = max(range.lowerBound, (edge.stacksVertically ? division.minY : division.minX) - foldClearance)
+            let upper = min(range.upperBound, (edge.stacksVertically ? division.maxY : division.maxX) + foldClearance)
+            if lower < upper { intervals.append(lower...upper) }
+        }
+        var merged: [ClosedRange<CGFloat>] = []
+        for interval in intervals.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = merged.last, interval.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, interval.upperBound)
+            } else {
+                merged.append(interval)
+            }
+        }
+        // A rail the folds would leave without room for even one control
+        // keeps ignoring them rather than losing its controls.
+        let along = edge.stacksVertically ? metrics.cell.height : metrics.cell.width
+        let length = range.upperBound - range.lowerBound
+        return length - merged.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) + along } < along ? [] : merged
+    }
+
+    /// `pack`, with the cuts taken out of the rail.
+    ///
+    /// The rail is squeezed (its cuts deleted), packed as usual, and the cells
+    /// are then walked in rail order to their real positions: a cell past a
+    /// cut moves on by the cut's width, and one that would straddle a cut
+    /// starts after it instead. Cells before the first cut, and a rail with no
+    /// cut at all, are exactly where `pack` put them; an end-aligned group
+    /// stays flush with the rail's end. If straddling pushed anything past
+    /// the end, packing runs again with one cell of room kept per cut, which
+    /// always fits. `starts` is empty without cuts.
+    private static func foldedPack(range: ClosedRange<CGFloat>, cuts: [ClosedRange<CGFloat>], edge: ControlEdge,
+                                   metrics: PadControlMetrics, main: [Int], alignments: [PadGroupAlignment],
+                                   function: [Int]) -> (blocks: [PlacedBlock], starts: [CellKey: CGFloat]) {
+        let length = range.upperBound - range.lowerBound
+        guard !cuts.isEmpty else {
+            return (pack(length: length, edge: edge, metrics: metrics, main: main, alignments: alignments,
+                         function: function), [:])
+        }
+        let along = edge.stacksVertically ? metrics.cell.height : metrics.cell.width
+        let squeezed = length - cuts.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
+        var blocks = pack(length: squeezed, edge: edge, metrics: metrics, main: main, alignments: alignments,
+                          function: function)
+        var starts = foldedAlongStarts(blocks: blocks, range: range, cuts: cuts, edge: edge, metrics: metrics)
+        if (starts.values.max() ?? range.lowerBound) + along > range.upperBound + 0.001 {
+            blocks = pack(length: squeezed - CGFloat(cuts.count) * along, edge: edge, metrics: metrics,
+                          main: main, alignments: alignments, function: function)
+            starts = foldedAlongStarts(blocks: blocks, range: range, cuts: cuts, edge: edge, metrics: metrics)
+        }
+        return (blocks, starts)
+    }
+
+    /// Every cell's real along-edge start for blocks packed on the squeezed
+    /// rail (see `foldedPack`).
+    private static func foldedAlongStarts(blocks: [PlacedBlock], range: ClosedRange<CGFloat>,
+                                          cuts: [ClosedRange<CGFloat>], edge: ControlEdge,
+                                          metrics: PadControlMetrics) -> [CellKey: CGFloat] {
+        let along = edge.stacksVertically ? metrics.cell.height : metrics.cell.width
+        let step = along + metrics.gap
+        // Where each cut sits on the squeezed rail, and how wide it is.
+        var gaps: [(at: CGFloat, width: CGFloat)] = []
+        var removed: CGFloat = 0
+        for cut in cuts {
+            gaps.append((cut.lowerBound - range.lowerBound - removed, cut.upperBound - cut.lowerBound))
+            removed += cut.upperBound - cut.lowerBound
+        }
+        var result: [CellKey: CGFloat] = [:]
+        for lane in Set(blocks.map(\.lane)) {
+            var cells: [(key: CellKey, squeezed: CGFloat)] = []
+            for (blockIndex, block) in blocks.enumerated() where block.lane == lane {
+                for index in 0..<block.count {
+                    cells.append((CellKey(block: blockIndex, cell: index), block.start + CGFloat(index) * step))
+                }
+            }
+            cells.sort { $0.squeezed < $1.squeezed }
+            var bumped: CGFloat = 0
+            var passed: CGFloat = 0
+            var next = 0
+            for cell in cells {
+                var position = cell.squeezed + bumped
+                while next < gaps.count {
+                    let gap = gaps[next]
+                    if position >= gap.at {
+                        // Wholly past this cut.
+                    } else if position + along > gap.at {
+                        // Would straddle it: start on its far side, and carry the rest along.
+                        bumped += gap.at - position
+                        position = gap.at
+                    } else {
+                        break
+                    }
+                    passed += gap.width
+                    next += 1
+                }
+                result[cell.key] = range.lowerBound + position + passed
             }
         }
         return result
@@ -649,6 +794,7 @@ enum PadStandardControl: String, Codable, CaseIterable, Identifiable {
     case escape
     case tab
     case keyboard
+    case arrowKeys
     case moveView
 
     var id: String { rawValue }
@@ -662,6 +808,7 @@ enum PadStandardControl: String, Codable, CaseIterable, Identifiable {
         case .escape: return String(localized: "Escape")
         case .tab: return String(localized: "Tab")
         case .keyboard: return String(localized: "Keyboard")
+        case .arrowKeys: return String(localized: "Arrow Keys")
         case .moveView: return String(localized: "Move View")
         }
     }
@@ -683,6 +830,7 @@ enum PadStandardControl: String, Codable, CaseIterable, Identifiable {
         case .escape: return .tray(.escape)
         case .tab: return .tray(.tab)
         case .keyboard: return .tray(.keyboard)
+        case .arrowKeys: return .arrowKeys
         case .moveView: return .moveView
         }
     }
@@ -743,6 +891,9 @@ enum PadRailComposition {
         var keyboardAvailable: Bool
         /// Move View needs live video and Local View Navigation.
         var moveViewAvailable: Bool
+        /// The arrow keypad needs input to reach the Mac and the Show Arrow
+        /// Keys setting (`ArrowKeysAvailability`).
+        var arrowKeysAvailable: Bool = false
     }
 
     static func mainGroups(visibility: PadStandardControlVisibility,
@@ -752,14 +903,35 @@ enum PadRailComposition {
             switch control {
             case .keyboard: return availability.keyboardAvailable
             case .moveView: return availability.moveViewAvailable
+            case .arrowKeys: return availability.arrowKeysAvailable
             default: return true
             }
         }
         let system = [PadStandardControl.menuBar, .dock, .showDesktop, .controlCenter].filter(shown).map(\.kind)
         let keys = availability.modifiers.map { CustomControlKind.tray(ControlTrayItem.item(for: $0)) }
-            + [PadStandardControl.escape, .tab, .keyboard].filter(shown).map(\.kind)
+            + [PadStandardControl.escape, .tab, .keyboard, .arrowKeys].filter(shown).map(\.kind)
         let view = [PadStandardControl.moveView].filter(shown).map(\.kind) + [.tray(.settings)]
         return [system, keys, view].filter { !$0.isEmpty }
+    }
+}
+
+extension PadEdgeGeometry {
+    /// The open arrow keypad (the T and its ⇧ ⌥ ⌘ row) for the roomy Arrow
+    /// Keys control at `anchor`: beside the control toward the middle of the
+    /// screen like a palette, then moved off the other controls
+    /// (`obstacles`) and wholly into one piece of `bounds` when a fold
+    /// (`divisions`) would cut it. The control itself never moves.
+    static func arrowKeypadLayout(anchor: CGRect, edge: ControlEdge, bounds: CGRect, key: CGFloat, gap: CGFloat,
+                                  obstacles: [CGRect] = [], divisions: [CGRect] = []) -> ArrowKeysLayout {
+        let placement = ArrowKeypadModifierPlacement.below
+        let size = ArrowKeypadGeometry.blockSize(placement, key: key, gap: gap)
+        var block = paletteFrame(size: size, anchor: anchor, edge: edge, bounds: bounds, gap: gap * 2)
+        block = ControlTrayGeometry.avoidingReservedRegions(block, obstacles: obstacles, within: bounds,
+                                                            alsoAvoiding: divisions)
+        block = ControlFoldGeometry.clearOfFolds(block, in: bounds, divisions: divisions)
+        let parts = ArrowKeypadGeometry.split(block, placement: placement, key: key, gap: gap)
+        return ArrowKeysLayout(toggle: anchor, keypad: parts.keypad, modifiers: parts.modifiers,
+                               modifierPlacement: placement)
     }
 }
 
