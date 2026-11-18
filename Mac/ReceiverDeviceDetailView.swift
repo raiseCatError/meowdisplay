@@ -362,10 +362,21 @@ struct ReceiverDeviceDetailView: View {
                         session.sender.requestExtendShape(preference)
                     }))
             }
+            Picker("Desktop Size", selection: Binding(
+                get: { session.extendShapePreference.desktopSize },
+                set: { size in
+                    var preference = session.extendShapePreference
+                    preference.desktopSize = size
+                    session.sender.requestExtendShape(preference)
+                })) {
+                ForEach(ExtendDesktopSize.allCases) { size in
+                    Text(size.title).tag(size)
+                }
+            }
         } header: {
             Text("Extend Shape")
         } footer: {
-            Text("Only affects this device. Takes effect immediately while Extend is active.")
+            Text("Only affects this device. Takes effect immediately while Extend is active. Desktop Size makes text larger; macOS System Settings can't change this display's resolution, so MeowDisplay manages it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -132,4 +132,43 @@ final class ExtendIntegrationBoundaryTests: XCTestCase {
         let fullMM = ExtendPhysicalSize.millimetres(pointsWide: fullPoints.wide, pointsHigh: fullPoints.high)
         XCTAssertEqual(fullMM, CGSize(width: ExtendPhysicalSize.minimumWidth, height: 391))
     }
+
+    // MARK: - Desktop Size through the real pipeline
+
+    func testLargerTextOnAnIPhoneGivesASmallerCaptureWithinTheDecodeCeilingAndTheSameShape() {
+        let preference = ExtendDisplayShapePreference.standard
+        let aspect = preference.resolvedAspect(receiverPhysicalAspect: 2796.0 / 1290.0)
+        let standard = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .standard)
+        let larger = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .larger)
+
+        let ceilingWide = 2560
+        let ceilingHigh = 1600
+        let standardCapture = encodedSize(pointsWide: standard.wide, pointsHigh: standard.high,
+                                          maxWide: ceilingWide, maxHigh: ceilingHigh)
+        let largerCapture = encodedSize(pointsWide: larger.wide, pointsHigh: larger.high,
+                                        maxWide: ceilingWide, maxHigh: ceilingHigh)
+
+        XCTAssertLessThanOrEqual(largerCapture.width, ceilingWide)
+        XCTAssertLessThanOrEqual(largerCapture.height, ceilingHigh)
+        XCTAssertLessThan(largerCapture.width * largerCapture.height,
+                          standardCapture.width * standardCapture.height)
+        // Still a 2x desktop: the capture is not clamped, it is simply smaller.
+        XCTAssertEqual(largerCapture.width, larger.wide * 2)
+        XCTAssertEqual(largerCapture.height, larger.high * 2)
+        // Same shape: Desktop Size changes text size, never the aspect.
+        XCTAssertEqual(Double(larger.wide) / Double(larger.high),
+                       Double(standard.wide) / Double(standard.high), accuracy: 0.02)
+        XCTAssertEqual(Double(largerCapture.width) / Double(largerCapture.height), aspect, accuracy: 0.02)
+    }
+
+    func testLargerTextWithoutADecodeCeilingKeepsTheTwoXCapture() {
+        let aspect = ExtendDisplayShape.defaultAutomaticAspect
+        let larger = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .larger)
+        let capture = encodedSize(pointsWide: larger.wide, pointsHigh: larger.high)
+        XCTAssertEqual(capture.width, larger.wide * 2)
+        XCTAssertEqual(capture.height, larger.high * 2)
+    }
 }
