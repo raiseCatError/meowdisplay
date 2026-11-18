@@ -2375,7 +2375,7 @@ extension ReceiverControlOverlay {
                     .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
             }
             if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
-                arrowKeypadModifierStrip(frame: strip, placement: placement)
+                arrowKeypadModifierStrip(frame: strip, placement: placement, key: Metrics.arrowKey)
                     .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
             }
         }
