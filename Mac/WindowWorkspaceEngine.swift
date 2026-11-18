@@ -2148,8 +2148,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// (View Only, no grant, paused, lock screen) never sees the workspace pointer as the
     /// cursor: nothing moves it, so it would sit at its resume spot (the pane's centre at
     /// first) while the real Mac cursor is elsewhere.
+    ///
+    /// With the Overview pane focused, it is always the Mac's own cursor, in that pane: its captures
+    /// leave the cursor out (`showsCursor` false, as every pane's), so the receiver draws it there once.
     func cursorPlacement(forGlobal g: CGPoint, receiverMayMovePointer: Bool) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
-        inputLock.withLock {
+        inputLock.withLock { () -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? in
             if let id = targeting.relativeTile, targeting.assignment(id)?.isOverview == true,
                let placed = targeting.cursorPlacement(forGlobal: g, in: id) {
                 return placed
