@@ -54,7 +54,7 @@ final class StreamDiagnosticsResourceSampler: @unchecked Sendable {
 
     func sample() -> StreamDiagnosticsResourceSample {
         let cpu = Self.processCPUSeconds()
-        let wall = ProcessInfo.processInfo.systemUptime
+        let wall = StreamDiagnosticsClock.nowSeconds()
         lock.lock()
         var percent: Double?
         var interval: Double?
