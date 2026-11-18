@@ -2371,7 +2371,7 @@ extension ReceiverControlOverlay {
     private func roomyArrowKeypadViews(_ arrows: ArrowKeysLayout?) -> some View {
         if let arrows {
             if let keypad = arrows.keypad {
-                arrowKeypad(frame: keypad, frozen: arrows)
+                arrowKeypad(frame: keypad, frozen: arrows, key: Metrics.arrowKey)
                     .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
             }
             if let strip = arrows.modifiers, let placement = arrows.modifierPlacement {
