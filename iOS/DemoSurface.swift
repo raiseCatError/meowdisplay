@@ -32,6 +32,8 @@ struct DemoReceiverScreen: View {
     /// give way to them, as in a live session.
     @State private var controlFrames: [CGRect] = []
     @StateObject private var windowDemo = DemoWindowWorkspace(defaults: DemoSession.preferenceDefaults(demoActive: true))
+    /// Stage Peek's All Apps is open (UI tests' Stage Peek only): the controls and banner step aside.
+    @State private var allAppsOpen = false
 
     init(demo: DemoSession, store: ReceiverControlStore, showSettings: Binding<Bool>,
          keyboardActive: Binding<Bool>, haptics: ReceiverHaptics, onExit: @escaping () -> Void) {
@@ -130,7 +132,23 @@ struct DemoReceiverScreen: View {
                     onOccupiedFramesChange: { controlFrames = $0 },
                     onCanvasChange: { padCanvas = $0 },
                     surfaceOrigin: canvas.origin)
+                    .stepsAside(forAllApps: allAppsOpen)
                 chrome(canvas: canvas, insets: insets)
+                    .stepsAside(forAllApps: allAppsOpen)
+                if windowView, DemoWindowWorkspace.stagePeekForTesting {
+                    // Over the controls, as in a live session.
+                    StagePeekOverlay(
+                        model: windowDemo.model,
+                        edge: store.preferences.stagePeekEdge,
+                        frame: area,
+                        safe: insets.safeRect(in: geo.size).intersection(area).offsetBy(dx: -area.minX, dy: -area.minY),
+                        avoiding: controlFrames.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: -area.minX, dy: -area.minY) },
+                        hapticsEnabled: false,
+                        dock: store.preferences.stagePeekDock,
+                        inputAllowed: demo.inputAllowed,
+                        onDisplay: { _ in },
+                        opensOnAppearForTesting: true)
+                }
             }
             .coordinateSpace(name: Self.screenSpace)
             .onPreferenceChange(DemoBannerFramePreference.self) { bannerFrame = $0 }
@@ -139,6 +157,7 @@ struct DemoReceiverScreen: View {
         }
         .ignoresSafeArea(.keyboard)
         .sheet(isPresented: $showGuide) { DemoGuideSheet() }
+        .onReceive(windowDemo.model.$launchpadOpen) { allAppsOpen = $0 }
         .onAppear { store.applySessionInputState(demo.inputState) }
         .onChange(of: demo.inputState) { state in
             store.applySessionInputState(state)

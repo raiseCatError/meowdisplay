@@ -41,6 +41,32 @@ final class DemoWindowWorkspace: ObservableObject {
                      tint: Color(red: 0.95, green: 0.45, blue: 0.2), symbol: "calendar"),
     ]
 
+    /// UI tests only (`-demoStagePeek`): Stage Peek over the sample Mac, as a live session has it.
+    /// The demo otherwise leaves it out (its toolbar stands in for it). DEBUG builds only.
+    static var stagePeekForTesting: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-demoStagePeek")
+        #else
+        false
+        #endif
+    }
+
+    /// The sample Mac's installed apps, for Stage Peek's apps bar and All Apps: more than a row,
+    /// two different apps with the same name, a long name, and no icons (the sample Mac sends
+    /// none, so each shows its placeholder).
+    static let apps: [(bundle: String, name: String)] = [
+        ("com.apple.finder", "Finder"), ("com.apple.Safari", "Safari"), ("com.apple.Notes", "Notes"),
+        ("com.apple.Terminal", "Terminal"), ("com.apple.Music", "Music"), ("com.apple.iCal", "Calendar"),
+        ("com.apple.mail", "Mail"), ("com.apple.Maps", "Maps"), ("com.apple.Photos", "Photos"),
+        ("com.apple.reminders", "Reminders"), ("com.apple.TextEdit", "TextEdit"), ("com.apple.Preview", "Preview"),
+        ("com.apple.calculator", "Calculator"), ("com.apple.Dictionary", "Dictionary"), ("com.apple.FaceTime", "FaceTime"),
+        ("com.apple.iWork.Pages", "Pages"), ("com.apple.iWork.Numbers", "Numbers"), ("com.apple.iWork.Keynote", "Keynote"),
+        ("com.example.sample.notes", "Notes"),
+        ("com.example.sample.longname", "Sample App With A Very Long Name For Testing Truncation"),
+        ("com.apple.systempreferences", "System Settings"), ("com.apple.ActivityMonitor", "Activity Monitor"),
+        ("com.apple.Console", "Console"), ("com.apple.DiskUtility", "Disk Utility"),
+    ]
+
     let model: WorkspaceModel
     @Published private(set) var drawn: [Drawn] = []
     /// The window the last touch on the picture reached (the sample Mac's own hit test).
@@ -108,6 +134,8 @@ final class DemoWindowWorkspace: ObservableObject {
             sendState()
         case WireMessage.windowCatalogRequest:
             sendCatalog()
+        case WireMessage.appCatalogRequest:
+            sendApps()
         default:
             break   // stills, backdrops, menus: the sample Mac has none
         }
@@ -125,6 +153,17 @@ final class DemoWindowWorkspace: ObservableObject {
                                     "hostFocus": active == nil ? "noActiveTile" : "deliver", "rejected": [String: String]()]
         if let active { state["active"] = active }
         if let event = WorkspaceEvent.parse(type: WireMessage.workspaceState, state) { model.apply(event) }
+    }
+
+    private func sendApps() {
+        let windows = Dictionary(grouping: Self.windows, by: \.bundle).mapValues(\.count)
+        let apps = Self.apps.map { a -> [String: Any] in
+            var m: [String: Any] = ["bundle": a.bundle, "name": a.name]
+            if let n = windows[a.bundle] { m["running"] = true; m["windows"] = n }
+            return m
+        }
+        let list: [String: Any] = ["type": WireMessage.appCatalog, "rev": 1, "apps": apps]
+        if let event = WorkspaceEvent.parse(type: WireMessage.appCatalog, list) { model.apply(event) }
     }
 
     private func sendCatalog() {
@@ -188,6 +227,7 @@ struct DemoWindowModeView: View {
                 .accessibilityValue(Text("\(workspace.drawn.count) windows drawn"))
                 .accessibilityIdentifier("demoWindowPicture")
             WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: safe)
+                .stepsAside(forAllApps: model.launchpadOpen)
             toolbar
                 .background(GeometryReader { g in
                     Color.clear
@@ -195,6 +235,7 @@ struct DemoWindowModeView: View {
                         .onChange(of: g.frame(in: .global)) { toolbarFrame = $0; toolbarHeight = $0.height }
                 })
                 .position(x: area.midX, y: toolbarCentreY)
+                .stepsAside(forAllApps: model.launchpadOpen)
         }
         .onAppear { workspace.start(); publishReservations() }
         .onChange(of: reservations) { _ in publishReservations() }
