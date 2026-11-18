@@ -191,6 +191,77 @@ final class ArrowKeyNavigationTests: XCTestCase {
         XCTAssertEqual(hold.tick(now: 0.52 + ArrowKeyHold.initialDelay), .repeat(.left))
     }
 
+    // MARK: - Keypad: the repeat loop as watchdog (#278 review C1)
+
+    /// The system cancels the touch before the next render: no `onEnded`,
+    /// no observed change. The loop's first wake finds no finger and lets
+    /// the key up, with no repeat before it and nothing after.
+    func testRepeatStopsAndKeyGoesUpWhenTheFingerIsGoneWithoutEndOrChange() throws {
+        var hold = ArrowKeyHold()
+        let down = hold.move(to: .down, now: 0, modifiers: [.shift, .command])
+        XCTAssertEqual(down, [.down(.down, modifiers: [.shift, .command])])
+        let due = try XCTUnwrap(hold.nextRepeatAt)
+        XCTAssertEqual(hold.repeatStep(now: due, fingerDown: false, inputAllowed: true),
+                       .up(.down, modifiers: [.shift, .command]), "the up carries the down's modifiers")
+        XCTAssertFalse(hold.isHolding)
+        XCTAssertNil(hold.nextRepeatAt, "the loop ends")
+        XCTAssertNil(hold.repeatStep(now: due + 1, fingerDown: false, inputAllowed: true))
+        XCTAssertNil(hold.repeatStep(now: due + 1, fingerDown: true, inputAllowed: true), "no repeat after the up")
+        XCTAssertNil(hold.release(), "a late onEnded or reset sends no second up")
+    }
+
+    /// A normal lift: one up from `release`, and the loop's next wake sends
+    /// nothing (neither a second up nor a repeat).
+    func testANormalLiftReleasesExactlyOnce() {
+        var hold = ArrowKeyHold()
+        _ = hold.move(to: .left, now: 0)
+        XCTAssertEqual(hold.release(), .up(.left))
+        XCTAssertNil(hold.repeatStep(now: 5, fingerDown: false, inputAllowed: true))
+        XCTAssertNil(hold.repeatStep(now: 5, fingerDown: true, inputAllowed: true))
+        XCTAssertNil(hold.release())
+    }
+
+    /// Negative: a finger still down never lets the key up early; it repeats
+    /// on time and only then.
+    func testNoReleaseWhileTheFingerIsHeld() {
+        var hold = ArrowKeyHold()
+        _ = hold.move(to: .right, now: 0)
+        XCTAssertNil(hold.repeatStep(now: ArrowKeyHold.initialDelay - 0.01, fingerDown: true, inputAllowed: true))
+        XCTAssertTrue(hold.isHolding)
+        XCTAssertEqual(hold.repeatStep(now: ArrowKeyHold.initialDelay, fingerDown: true, inputAllowed: true), .repeat(.right))
+        var t = ArrowKeyHold.initialDelay
+        for _ in 0..<50 {
+            t += ArrowKeyHold.interval
+            XCTAssertEqual(hold.repeatStep(now: t, fingerDown: true, inputAllowed: true), .repeat(.right))
+        }
+        XCTAssertTrue(hold.isHolding)
+    }
+
+    /// The finger goes between two repeats: the next wake is the up, and
+    /// nothing repeats after it however long the loop would have run.
+    func testNoRepeatAfterTheWatchdogRelease() {
+        var hold = ArrowKeyHold()
+        _ = hold.move(to: .up, now: 0)
+        XCTAssertEqual(hold.repeatStep(now: 0.5, fingerDown: true, inputAllowed: true), .repeat(.up))
+        XCTAssertEqual(hold.repeatStep(now: 0.58, fingerDown: false, inputAllowed: true), .up(.up))
+        var t = 0.58
+        while t < 3 {
+            XCTAssertNil(hold.repeatStep(now: t, fingerDown: true, inputAllowed: true))
+            t += 0.01
+        }
+    }
+
+    /// Allow Input turns off mid-hold: the key still goes up (an up is never
+    /// held back), once, with the modifiers it went down with.
+    func testAllowInputTurningOffMidHoldStillSendsTheKeyUp() {
+        var hold = ArrowKeyHold()
+        _ = hold.move(to: .down, now: 0, modifiers: [.option])
+        XCTAssertEqual(hold.repeatStep(now: 0.5, fingerDown: true, inputAllowed: false), .up(.down, modifiers: [.option]))
+        XCTAssertNil(hold.repeatStep(now: 0.6, fingerDown: true, inputAllowed: false))
+        XCTAssertNil(hold.repeatStep(now: 0.7, fingerDown: true, inputAllowed: true), "nothing starts again by itself")
+        XCTAssertNil(hold.release())
+    }
+
     func testSlidingOffTheKeypadReleasesTheKey() {
         var hold = ArrowKeyHold()
         _ = hold.move(to: .right, now: 0)
