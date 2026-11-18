@@ -171,4 +171,18 @@ final class ExtendIntegrationBoundaryTests: XCTestCase {
         XCTAssertEqual(capture.width, larger.wide * 2)
         XCTAssertEqual(capture.height, larger.high * 2)
     }
+    func testDesktopSizeKeepsPhysicalDimensionsFromTheUnscaledPlan() {
+        let aspect = ExtendDisplayShape.defaultAutomaticAspect
+        let standard = ExtendDisplayPlan.resolve(receiverPixelsWide: 2796, receiverPixelsHigh: 1290,
+                                                 aspect: aspect, desktopSize: .standard)
+        let expected = ExtendPhysicalSize.millimetres(pointsWide: standard.wide, pointsHigh: standard.high)
+        for size in ExtendDesktopSize.allCases {
+            let plan = ExtendDisplayPlan.resolve(receiverPixelsWide: 2796, receiverPixelsHigh: 1290,
+                                                aspect: aspect, desktopSize: size)
+            XCTAssertEqual(ExtendPhysicalSize.millimetres(pointsWide: plan.unscaledWide,
+                                                          pointsHigh: plan.unscaledHigh), expected)
+            if size != .standard { XCTAssertLessThan(plan.wide, standard.wide) }
+        }
+    }
+
 }
