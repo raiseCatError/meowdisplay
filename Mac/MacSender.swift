@@ -2632,10 +2632,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             + "useFullDisplay=\(extendShapePreference.useFullDisplay) physicalAspect=\(physicalAspect) "
             + "resolvedAspect=\(resolvedAspect) virtualDisplayPoints=\(pointsWide)x\(pointsHigh)")
         #endif
-        // Rough physical size so macOS picks a sane default UI scale.
-        let mm = pointsWide >= pointsHigh
-            ? CGSize(width: 147, height: 68)
-            : CGSize(width: 68, height: 147)
+        // Declared physical size, derived from the virtual display's own
+        // point mode so macOS picks a sane default UI scale (see
+        // `ExtendPhysicalSize`). Fixed at creation; a rebuild re-enters here
+        // and gets the same policy.
+        let mm = ExtendPhysicalSize.millimetres(pointsWide: pointsWide, pointsHigh: pointsHigh)
         // Encoder-safe FPS (PART 1/7) depends on the actual encode pixel
         // size, not the shape/points alone — compute it from the same
         // `clampedCaptureSize` the capture start path below uses, so the
