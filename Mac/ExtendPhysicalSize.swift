@@ -94,3 +94,11 @@ enum ExtendPhysicalSize {
         return CGSize(width: wholeWidth, height: wholeHeight)
     }
 }
+
+extension ExtendPhysicalSize {
+    /// The declared size for an Extend plan: always from the UNSCALED points,
+    /// so Desktop Size changes text size only, never the declared size.
+    static func millimetres(for plan: ExtendDisplayPlan) -> CGSize {
+        millimetres(pointsWide: plan.unscaledWide, pointsHigh: plan.unscaledHigh)
+    }
+}
