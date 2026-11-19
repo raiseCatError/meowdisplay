@@ -3847,16 +3847,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
-    /// Side-effect free and safe on any thread (every part is lock-protected or a defaults read):
-    /// whether the receiver on connection `generation` may still change this Mac right now. The
-    /// conditions of `receiverInputIsAllowed()` (Allow Input on, that same connection admitted and
-    /// granted, capture state allows input) without cancelling anything, plus this login session on
-    /// the console and no Privacy Shield unlock in progress. Fill/Restore on Mac asks it right before
-    /// its first Accessibility write, after the message itself passed `receiverInputIsAllowed()`.
+    /// Side-effect-free recheck immediately before a deferred Window or Overview action.
+    /// These controls require the original connection's grant, an unlocked desktop and the
+    /// Mac's Window streaming permission even if all three were present at request time.
     func controlStillAllowed(generation: UInt64) -> Bool {
         sessionAuthorization.isAdmitted(generation: generation)
-            && sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
-            && captureStateSnapshot().allowsInput
+            && receiverMayMovePointer()
+            && WindowStreamingPolicy.isAllowed()
             && LoginSessionConsole.shared.isOnConsole
             && !PrivacyShieldWindows.isUnlocking
     }
