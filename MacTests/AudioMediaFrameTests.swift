@@ -351,6 +351,33 @@ final class AudioMediaFrameTests: XCTestCase {
         XCTAssertEqual(decoded, packet)
     }
 
+    /// A Mac-sent rate the receiver would turn into a trapping `Int32`
+    /// timescale (above `Int32.max`) or divide by (0) is dropped at decode,
+    /// for both config subtypes; every AAC table rate still decodes.
+    func testDecodeRejectsUnusableSampleRates() {
+        for rate: UInt32 in [0, 1, 7_349, 768_001, UInt32(Int32.max), UInt32(Int32.max) + 1, .max] {
+            XCTAssertNil(AudioMediaFrame.decode(AudioMediaFrame.config(
+                AudioConfigFrame(sampleRate: rate, channelCount: 2, cookie: Data([0x11, 0x90]))).encode()),
+                "AAC config rate \(rate) must be dropped")
+            XCTAssertNil(AudioMediaFrame.decode(AudioMediaFrame.pcmConfig(
+                PCMConfigFrame(sampleRate: rate, channelCount: 2)).encode()),
+                "PCM config rate \(rate) must be dropped")
+        }
+        let accepted = AACLCFraming.frequencyIndex.keys.map { UInt32($0) } + [768_000]
+        for rate in accepted {
+            let config = AudioConfigFrame(sampleRate: rate, channelCount: 2, cookie: Data([0x11, 0x90]))
+            guard case .config(let decoded)? = AudioMediaFrame.decode(AudioMediaFrame.config(config).encode()) else {
+                return XCTFail("AAC config rate \(rate) must decode")
+            }
+            XCTAssertEqual(decoded, config)
+            let pcm = PCMConfigFrame(sampleRate: rate, channelCount: 2)
+            guard case .pcmConfig(let decodedPCM)? = AudioMediaFrame.decode(AudioMediaFrame.pcmConfig(pcm).encode()) else {
+                return XCTFail("PCM config rate \(rate) must decode")
+            }
+            XCTAssertEqual(decodedPCM, pcm)
+        }
+    }
+
     func testDecodeRejectsTruncatedPCMConfigFrame() {
         let config = PCMConfigFrame(sampleRate: 48_000, channelCount: 2)
         let encoded = AudioMediaFrame.pcmConfig(config).encode()
