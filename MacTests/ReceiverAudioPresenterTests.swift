@@ -80,6 +80,31 @@ final class ReceiverAudioPresenterTests: XCTestCase {
         XCTAssertEqual(presenter.debugEnqueueCount, 2)
     }
 
+    /// A zero-length payload (accepted by the wire decoders) is dropped
+    /// before any buffer is built: no enqueue, no crash, and the following
+    /// real packet still plays.
+    func testEmptyPayloadIsDroppedBeforeBuildingASample() {
+        let presenter = ReceiverAudioPresenter(queue: DispatchQueue(label: "test"))
+        let format = makeAACFormatDescription()
+        let timing = makeSnapshot()
+
+        presenter.scheduleDecodedAudio(
+            capturedAtMs: 0, payload: Data(), sampleCount: 1,
+            duration: CMTime(value: 1024, timescale: 48_000),
+            sampleSizeEntryCount: 1, sampleSizes: { [0] },
+            formatDescription: format, timing: timing, activateSession: {})
+        XCTAssertEqual(presenter.debugEnqueueCount, 0)
+
+        schedulePacket(presenter, capturedAtMs: 21, formatDescription: format, timing: timing)
+        XCTAssertEqual(presenter.debugEnqueueCount, 1)
+    }
+
+    /// The receiver-local AAC decoder refuses an empty access unit instead
+    /// of copying from a nil base address.
+    func testDecoderRejectsEmptyPayload() {
+        XCTAssertNil(ReceiverAudioDecoder().decode(Data(), formatDescription: makeAACFormatDescription()))
+    }
+
     /// `clearAnchorOnly()` (the DEBUG KVO-error recovery path) drops only
     /// the anchor — a subsequent packet still succeeds without needing the
     /// renderer chain to be rebuilt.

@@ -378,6 +378,32 @@ final class AudioMediaFrameTests: XCTestCase {
         }
     }
 
+    /// A zero (or beyond-AAC-table) channel count would build a malformed
+    /// format description; it is dropped at decode for both config subtypes,
+    /// while 1...7 still decodes.
+    func testDecodeRejectsUnusableChannelCounts() {
+        for channels: UInt8 in [0, 8, 9, 255] {
+            XCTAssertNil(AudioMediaFrame.decode(AudioMediaFrame.config(
+                AudioConfigFrame(sampleRate: 48_000, channelCount: channels, cookie: Data([0x11, 0x90]))).encode()),
+                "AAC config channels \(channels) must be dropped")
+            XCTAssertNil(AudioMediaFrame.decode(AudioMediaFrame.pcmConfig(
+                PCMConfigFrame(sampleRate: 48_000, channelCount: channels)).encode()),
+                "PCM config channels \(channels) must be dropped")
+        }
+        for channels: UInt8 in 1...7 {
+            let config = AudioConfigFrame(sampleRate: 48_000, channelCount: channels, cookie: Data([0x11, 0x90]))
+            guard case .config(let decoded)? = AudioMediaFrame.decode(AudioMediaFrame.config(config).encode()) else {
+                return XCTFail("AAC config channels \(channels) must decode")
+            }
+            XCTAssertEqual(decoded, config)
+            let pcm = PCMConfigFrame(sampleRate: 48_000, channelCount: channels)
+            guard case .pcmConfig(let decodedPCM)? = AudioMediaFrame.decode(AudioMediaFrame.pcmConfig(pcm).encode()) else {
+                return XCTFail("PCM config channels \(channels) must decode")
+            }
+            XCTAssertEqual(decodedPCM, pcm)
+        }
+    }
+
     func testDecodeRejectsTruncatedPCMConfigFrame() {
         let config = PCMConfigFrame(sampleRate: 48_000, channelCount: 2)
         let encoded = AudioMediaFrame.pcmConfig(config).encode()

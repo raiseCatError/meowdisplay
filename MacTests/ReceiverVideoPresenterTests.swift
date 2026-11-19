@@ -27,6 +27,10 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         private var _decodedFramesReady = 0
         private var _flushesIncurred = 0
         private var _framesPresented = 0
+        private var _keyframeRequests = 0
+
+        func recordKeyframeRequest() { lock.lock(); _keyframeRequests += 1; lock.unlock() }
+        var keyframeRequests: Int { lock.lock(); defer { lock.unlock() }; return _keyframeRequests }
 
         func recordDecodeRouted() { lock.lock(); _decodeRouted += 1; lock.unlock() }
         func recordDecodedFrameReady() { lock.lock(); _decodedFramesReady += 1; lock.unlock() }
@@ -57,7 +61,8 @@ final class ReceiverVideoPresenterTests: XCTestCase {
             decodeViaVideoDecoder: { _, _, _ in recorder.recordDecodeRouted() },
             decodedFrameReady: { _, _ in recorder.recordDecodedFrameReady() },
             decodeFlushIncurred: { recorder.recordFlushIncurred() },
-            debugFramePresented: { recorder.recordFramePresented() })
+            debugFramePresented: { recorder.recordFramePresented() },
+            compressedFrameDiscardedBeforeDecode: { recorder.recordKeyframeRequest() })
         return (ReceiverVideoPresenter(displayLayer: AVSampleBufferDisplayLayer(), outputEffects: effects), recorder)
     }
 
@@ -213,6 +218,58 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         XCTAssertEqual(recorder.framesPresented, 1,
             "the generation-0 frame (stale — a resync already advanced past it) must be discarded; "
             + "only the generation-1 frame reaches displayLayer.enqueue")
+    }
+
+    // MARK: - 3b. A stale frame dropped before decode asks for one keyframe
+
+    /// Resync with A/V Sync delaying video: delayed frames of the old
+    /// generation are dropped while still compressed, on both paths, so the
+    /// next P-frames have no reference. One keyframe request per generation.
+    @MainActor
+    func testStaleCompressedFrameDiscardRequestsOneKeyframePerGeneration() async {
+        let (presenter, recorder) = makePresenter()
+        let formatDesc = makeFormatDescription()
+        let marker = LockedLog<Int>()
+        presenter.debugSubmissionObserver = { _ in marker.append(0) }
+
+        presenter.enqueueAdvanceGeneration()   // videoGeneration -> 1
+        presenter.enqueuePresentSample(FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)),
+                                       generation: 0, viaMetalPath: false, captureMs: 1)
+        presenter.enqueuePresentSample(FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)),
+                                       generation: 0, viaMetalPath: true, captureMs: 2)
+        presenter.enqueuePresentSample(FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)),
+                                       generation: 1, viaMetalPath: false, captureMs: 3)
+        await waitFor { marker.count >= 4 }
+
+        XCTAssertEqual(recorder.keyframeRequests, 1, "a burst of stale compressed frames asks once")
+        XCTAssertEqual(recorder.decodeRouted, 0, "the stale Metal-path frame never reached the decoder")
+        XCTAssertEqual(recorder.framesPresented, 1, "only the current-generation frame is enqueued")
+
+        presenter.enqueueAdvanceGeneration()   // videoGeneration -> 2: a new resync
+        presenter.enqueuePresentSample(FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)),
+                                       generation: 1, viaMetalPath: false, captureMs: 4)
+        await waitFor { marker.count >= 6 }
+        XCTAssertEqual(recorder.keyframeRequests, 2, "the next generation's first stale drop asks again")
+    }
+
+    /// No drop, no request: frames enqueued before the advance still present
+    /// (zero A/V delay), and a stale DECODED frame was already decoded, so
+    /// the reference chain is intact.
+    @MainActor
+    func testNoKeyframeRequestWithoutCompressedDiscard() async {
+        let (presenter, recorder) = makePresenter()
+        let formatDesc = makeFormatDescription()
+        let marker = LockedLog<Int>()
+        presenter.debugSubmissionObserver = { _ in marker.append(0) }
+
+        presenter.enqueuePresentSample(FrameMediaBox(makeSampleBuffer(formatDescription: formatDesc)),
+                                       generation: 0, viaMetalPath: false, captureMs: 1)
+        presenter.enqueueAdvanceGeneration()
+        presenter.enqueuePresentDecoded(FrameMediaBox(makePixelBuffer()), generation: 0, captureMs: 2)
+        await waitFor { marker.count >= 3 }
+
+        XCTAssertEqual(recorder.framesPresented, 1)
+        XCTAssertEqual(recorder.keyframeRequests, 0)
     }
 
     // MARK: - 4. Current-generation frame still presents

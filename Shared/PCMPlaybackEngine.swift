@@ -54,6 +54,19 @@ import CoreMedia
 // Playback Path → "Legacy SampleBuffer Renderer") as a reference/fallback,
 // never deleted.
 
+/// Whether the running engine's player connection can still accept a
+/// buffer: `AVAudioPlayerNode.scheduleBuffer` raises on a channel-count
+/// mismatch and plays at the wrong speed on a rate mismatch, so a decoded
+/// buffer in a different format (a second valid AAC config mid-session)
+/// needs the engine rebuilt first. Pure so it needs no audio hardware.
+enum PCMEngineFormatPolicy {
+    static func requiresRebuild(currentSampleRate: Double?, currentChannelCount: AVAudioChannelCount?,
+                                buffer format: AVAudioFormat) -> Bool {
+        guard let currentSampleRate, let currentChannelCount else { return false }
+        return currentSampleRate != format.sampleRate || currentChannelCount != format.channelCount
+    }
+}
+
 /// Pure, testable jitter-buffer policy — separated from any AVFoundation
 /// type so it can be tested without live audio hardware.
 enum PCMJitterBufferPolicy {
@@ -170,6 +183,9 @@ final class PCMPlaybackEngine: @unchecked Sendable {
     private let queue: DispatchQueue
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    /// Rate/channel count the running engine was connected with.
+    private var engineSampleRate: Double?
+    private var engineChannelCount: AVAudioChannelCount?
 
     /// Bumped by `reset()` (and the internal `reanchor()` a major
     /// discontinuity or a live A/V-offset change triggers) — every closure
@@ -234,6 +250,10 @@ final class PCMPlaybackEngine: @unchecked Sendable {
                 return
             }
 
+            if PCMEngineFormatPolicy.requiresRebuild(
+                currentSampleRate: engineSampleRate, currentChannelCount: engineChannelCount, buffer: buffer.format) {
+                resetLocked()
+            }
             ensureEngine(format: buffer.format)
             guard let player else { return }
 
@@ -348,6 +368,8 @@ final class PCMPlaybackEngine: @unchecked Sendable {
             try newEngine.start()
             engine = newEngine
             player = newPlayer
+            engineSampleRate = format.sampleRate
+            engineChannelCount = format.channelCount
             #if DEBUG
             Log.info("audioTrace: PCM engine generation=\(generation) started inputFormat=rate=\(format.sampleRate) ch=\(format.channelCount)")
             #endif
@@ -422,23 +444,30 @@ final class PCMPlaybackEngine: @unchecked Sendable {
     /// no separate "restart" API needed.
     func reset() {
         queue.async { [self] in
-            generation &+= 1
-            pendingCount = 0
-            anchor = nil
-            lastCaptureMs = nil
-            lastAppliedAVSyncOffsetMs = nil
-            player?.stop()
-            engine?.stop()
-            engine = nil
-            player = nil
-            #if DEBUG
-            loggedOutputFormat = false
-            lastPreciseTargetSeconds = nil
-            lastPreciseFrameCount = nil
-            lastPreciseSampleRate = nil
-            Log.info("audioTrace: PCM engine generation=\(generation) reset")
-            #endif
+            resetLocked()
         }
+    }
+
+    /// `reset()`'s body; must run on `queue`.
+    private func resetLocked() {
+        generation &+= 1
+        pendingCount = 0
+        anchor = nil
+        lastCaptureMs = nil
+        lastAppliedAVSyncOffsetMs = nil
+        player?.stop()
+        engine?.stop()
+        engine = nil
+        player = nil
+        engineSampleRate = nil
+        engineChannelCount = nil
+        #if DEBUG
+        loggedOutputFormat = false
+        lastPreciseTargetSeconds = nil
+        lastPreciseFrameCount = nil
+        lastPreciseSampleRate = nil
+        Log.info("audioTrace: PCM engine generation=\(generation) reset")
+        #endif
     }
 
     /// Runs `body` on the engine's queue once every call already made — in
