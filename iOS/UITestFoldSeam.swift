@@ -116,7 +116,8 @@ struct UITestOrientationReader: UIViewRepresentable {
                     "screen=\(scene.screen.bounds.size)", "window=\(window.bounds.size)"
                 ]
                 if #available(iOS 27.0, *) {
-                    let mask = scene.delegate?.supportedInterfaceOrientations?(for: scene)
+                    let delegate = scene.delegate as? UIWindowSceneDelegate
+                    let mask = delegate?.supportedInterfaceOrientations?(for: scene)
                     fields.append("sceneDelegate=\(mask.map { String($0.rawValue) } ?? "plist")")
                 }
                 if #available(iOS 26.0, *) {
