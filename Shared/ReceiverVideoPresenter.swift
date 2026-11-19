@@ -129,7 +129,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         var decodeViaVideoDecoder: @Sendable (FrameMediaBox<CMSampleBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// A decoded frame (Metal path) survived the generation check —
         /// the app-facing sink (`StreamReceiver.onDecodedFrame`).
-        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ captureMs: Double?) -> Void
+        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// `displayLayer.status == .failed` was observed and flushed —
         /// feeds `ReceiverVideoTelemetry`'s flush-count telemetry exactly
         /// as before (Receiver Swift6-B1 moved that counter's storage
@@ -361,7 +361,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         if let diagnostics, diagnostics.isEnabled {
             diagnostics.recordPresentationEnqueue(at: StreamDiagnosticsClock.nowMs())
         }
-        outputEffects.decodedFrameReady(box, captureMs)
+        outputEffects.decodedFrameReady(box, generation, captureMs)
     }
 
     private func noteStaleDiscard() {

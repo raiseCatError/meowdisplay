@@ -296,7 +296,7 @@ final class StreamDiagnosticsTests: XCTestCase {
         let sw = StreamDiagnosticsSwitch(enabled: true)
         let r = StreamDiagnosticsRecorder(side: .receiver, windowSeconds: 3600, diagnosticsSwitch: sw, resourceSampler: nil)
         let effects = ReceiverVideoPresenter.OutputEffects(
-            decodeViaVideoDecoder: { _, _, _ in }, decodedFrameReady: { _, _ in },
+            decodeViaVideoDecoder: { _, _, _ in }, decodedFrameReady: { _, _, _ in },
             decodeFlushIncurred: {}, debugFramePresented: {})
         let presenter = ReceiverVideoPresenter(displayLayer: AVSampleBufferDisplayLayer(), outputEffects: effects, diagnostics: r)
         for _ in 0..<5 { presenter.enqueueAdvanceGeneration() }
@@ -308,6 +308,23 @@ final class StreamDiagnosticsTests: XCTestCase {
         XCTAssertEqual(s.stage(.presenterQueueAge)?.count, 5)
         XCTAssertEqual(s.gauge(.presenterQueueDepth)?.samples, 5)
         XCTAssertGreaterThanOrEqual(s.gauge(.presenterQueueDepth)?.max ?? 0, 1)
+    }
+
+    @MainActor
+    func testMetalPresentationFromBeforeResyncIsExcludedFromCurrentMetrics() async {
+        let recorder = StreamDiagnosticsRecorder(side: .receiver, diagnosticsSwitch: StreamDiagnosticsSwitch(enabled: true),
+                                                resourceSampler: nil)
+        let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(), deviceKind: "Test",
+                                      fallbackServiceName: "Test", diagnostics: recorder)
+        receiver.resync()
+        // One old and two current callbacks make both an inverted check and a missing check observable.
+        receiver.recordPresented(presentedTime: 1, generation: 0, captureMs: 1)
+        receiver.recordPresented(presentedTime: 1, generation: 1, captureMs: 1)
+        receiver.recordPresented(presentedTime: 2, generation: 1, captureMs: 2)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            receiver.probeForTesting { _ in continuation.resume() }
+        }
+        XCTAssertEqual(receiver.diagnostics.snapshot().sessionCounters[DiagnosticsCounter.observedPresentations.definition.id], 2)
     }
 
     // MARK: - Metric dictionary
