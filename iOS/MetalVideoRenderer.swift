@@ -18,10 +18,10 @@ import QuartzCore
 import CoreVideo
 
 // @unchecked Sendable invariant:
-// - render(_:captureMs:) may be called from any executor (the receiver's
+// - render(_:generation:captureMs:) may be called from any executor (the receiver's
 //   decode queue); the only state it touches, `pendingFrame`, is fully
 //   guarded by `lock` for every read and write.
-// - `drainPending()`/`draw(_:captureMs:)` — and therefore all Metal resource
+// - `drainPending()`/`draw(_:generation:captureMs:)` — and therefore all Metal resource
 //   access (`metalLayer`, `textureCache`) — run exclusively, serially, on
 //   `renderQueue`. Nothing else touches those resources.
 // - `device`, `commandQueue`, `pipeline` are assigned once in `init` and
@@ -45,13 +45,13 @@ final class MetalVideoRenderer: @unchecked Sendable {
 
     private let renderQueue = DispatchQueue(label: "metal.render", qos: .userInteractive)
     private let lock = NSLock()
-    private var pendingFrame: (buffer: CVPixelBuffer, captureMs: Double?)?
+    private var pendingFrame: (buffer: CVPixelBuffer, generation: UInt64, captureMs: Double?)?
     /// `renderQueue`: the layer shows black since `clear()`, and no frame has been drawn since.
     private var cleared = false
 
     /// presentedTime (CACurrentMediaTime base) + the capture timestamp that
-    /// was threaded through render(_:captureMs:).
-    var onPresented: ((_ presentedTime: CFTimeInterval, _ captureMs: Double?) -> Void)?
+    /// was threaded through render(_:generation:captureMs:).
+    var onPresented: ((_ presentedTime: CFTimeInterval, _ generation: UInt64, _ captureMs: Double?) -> Void)?
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -117,10 +117,10 @@ final class MetalVideoRenderer: @unchecked Sendable {
     }
 
     /// Called on the receiver's queue — returns immediately.
-    func render(_ pixelBuffer: CVPixelBuffer, captureMs: Double?) {
+    func render(_ pixelBuffer: CVPixelBuffer, generation: UInt64, captureMs: Double?) {
         lock.lock()
         let hadPending = pendingFrame != nil
-        pendingFrame = (pixelBuffer, captureMs)
+        pendingFrame = (pixelBuffer, generation, captureMs)
         lock.unlock()
         // A pending frame means a drain is already queued and will pick up
         // the newer buffer we just stored.
@@ -135,10 +135,10 @@ final class MetalVideoRenderer: @unchecked Sendable {
         pendingFrame = nil
         lock.unlock()
         guard let frame else { return }
-        draw(frame.buffer, captureMs: frame.captureMs)
+        draw(frame.buffer, generation: frame.generation, captureMs: frame.captureMs)
     }
 
-    private func draw(_ pixelBuffer: CVPixelBuffer, captureMs: Double?) {
+    private func draw(_ pixelBuffer: CVPixelBuffer, generation: UInt64, captureMs: Double?) {
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
         if metalLayer.drawableSize != CGSize(width: w, height: h) {
@@ -174,7 +174,7 @@ final class MetalVideoRenderer: @unchecked Sendable {
         // glass-time telemetry, so skipping it in the Simulator is harmless.
         #if !targetEnvironment(simulator)
         drawable.addPresentedHandler { [weak self] d in
-            self?.onPresented?(d.presentedTime, captureMs)
+            self?.onPresented?(d.presentedTime, generation, captureMs)
         }
         #endif
         // Keep the source textures alive until the GPU is done with them.

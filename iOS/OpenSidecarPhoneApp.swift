@@ -3253,11 +3253,11 @@ struct VideoLayerView: UIViewRepresentable {
             Log.info("metal renderer active")
             view.metalRenderer = renderer
             view.installVideoLayer(renderer.metalLayer)
-            receiver.onDecodedFrame = { [weak renderer] pixelBuffer, captureMs in
-                renderer?.render(pixelBuffer, captureMs: captureMs)
+            renderer.onPresented = { [weak receiver] presentedTime, generation, captureMs in
+                receiver?.recordPresented(presentedTime: presentedTime, generation: generation, captureMs: captureMs)
             }
-            renderer.onPresented = { [weak receiver] presentedTime, captureMs in
-                receiver?.recordPresented(presentedTime: presentedTime, captureMs: captureMs)
+            receiver.onDecodedFrame = { [weak renderer] pixelBuffer, generation, captureMs in
+                renderer?.render(pixelBuffer, generation: generation, captureMs: captureMs)
             }
         } else {
             receiver.onDecodedFrame = nil   // route frames back to AVSBDL
