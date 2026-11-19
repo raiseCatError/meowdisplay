@@ -25,6 +25,7 @@ final class MacSenderWindowFrameTests: XCTestCase {
         // Never dialed: the endpoint only satisfies the initializer.
         sender = MacSender(transport: .tcp(.hostPort(host: "127.0.0.1", port: 9), tls: tls),
                            name: "Window Frame Test Phone", mode: .mirror)
+        sender?.privacyGate = MacPrivacyGate(.unlocked)
     }
 
     override func tearDown() {
@@ -108,6 +109,16 @@ final class MacSenderWindowFrameTests: XCTestCase {
         XCTAssertFalse(sender.controlStillAllowed(generation: first))
         XCTAssertEqual(events.take(), [], "no side effects")
         UserDefaults.standard.removeObject(forKey: InputPolicy.defaultsKey)
+        XCTAssertTrue(sender.controlStillAllowed(generation: first))
+
+        for state in [MacScreenPrivacy.locked, .switchedOut, .unknown] {
+            sender.privacyGate.set(state)
+            XCTAssertFalse(sender.controlStillAllowed(generation: first))
+        }
+        sender.privacyGate.set(.unlocked)
+        UserDefaults.standard.set(false, forKey: WindowStreamingPolicy.defaultsKey)
+        XCTAssertFalse(sender.controlStillAllowed(generation: first))
+        UserDefaults.standard.removeObject(forKey: WindowStreamingPolicy.defaultsKey)
         XCTAssertTrue(sender.controlStillAllowed(generation: first))
 
         LoginSessionConsole.shared.set(onConsole: false)
