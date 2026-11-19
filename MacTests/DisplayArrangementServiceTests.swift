@@ -280,6 +280,46 @@ final class DisplayArrangementServiceTests: XCTestCase {
         XCTAssertTrue(h.configurator.calls.isEmpty)
     }
 
+    func testResizingAtTheSameOriginInvalidatesTheMacPrompt() {
+        let h = makeHarness()
+        request(h)
+        h.configurator.displays[1].frame.size = CGSize(width: 600, height: 1000)
+        h.confirmer.answer(.allow)
+        XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.stale)
+        XCTAssertTrue(h.configurator.calls.isEmpty)
+    }
+
+    func testResizingDuringThePreviewRequiresANewArrangement() {
+        let h = applied()
+        h.configurator.displays[1].frame.size = CGSize(width: 600, height: 1000)
+        keep(h)
+        XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.displaysChanged)
+        XCTAssertEqual(h.recorder.states.last, "reverted")
+        XCTAssertEqual(h.configurator.origin(of: 2), right)
+        XCTAssertEqual(h.configurator.displays[1].frame.size, CGSize(width: 600, height: 1000))
+        XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
+    }
+
+    func testChangingTheMirrorGroupInvalidatesTheMacPrompt() {
+        let h = makeHarness()
+        request(h)
+        h.configurator.displays.append(OverviewDisplay(id: 3, frame: initial[1].frame, mirrorOf: 2))
+        h.confirmer.answer(.allow)
+        XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.stale)
+        XCTAssertTrue(h.configurator.calls.isEmpty)
+    }
+
+    func testReenumeratingTheSameMirrorMembersStillAllowsTheMove() {
+        let h = makeHarness()
+        h.configurator.displays.append(OverviewDisplay(id: 3, frame: initial[1].frame, mirrorOf: 2))
+        h.configurator.displays.append(OverviewDisplay(id: 4, frame: initial[1].frame, mirrorOf: 2))
+        request(h)
+        h.configurator.displays.swapAt(2, 3)
+        h.confirmer.answer(.allow)
+        keep(h)
+        XCTAssertEqual(h.recorder.states.last, "kept")
+    }
+
     func testRevertBeforeTheOwnerAnswersWithdrawsTheRequest() throws {
         let h = makeHarness()
         request(h)
@@ -420,12 +460,35 @@ final class DisplayArrangementServiceTests: XCTestCase {
         XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
     }
 
-    func testKeepAfterTheDisplaysChangedReverts() {
+    func testKeepAfterAnExternalMovePreservesTheNewPosition() {
         let h = applied()
-        h.configurator.displays[1].frame.origin = CGPoint(x: 0, y: 600)
+        let external = CGPoint(x: 0, y: 600)
+        h.configurator.displays[1].frame.origin = external
         keep(h)
         XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.displaysChanged)
-        XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
+        XCTAssertEqual(h.recorder.states.last, "failed")
+        XCTAssertEqual(h.configurator.origin(of: 2), external)
+        XCTAssertEqual(h.configurator.calls.count, 1, "only the original preview was written")
+    }
+
+    func testRollbackLeavesANewlyPinnedMirrorGroupAlone() {
+        let h = applied()
+        let frame = CGRect(origin: left, size: initial[1].frame.size)
+        h.configurator.displays.append(OverviewDisplay(id: 3, frame: frame, isMeow: true, mirrorOf: 2))
+        revert(h)
+        XCTAssertEqual(h.configurator.origin(of: 2), left)
+        XCTAssertEqual(h.configurator.calls.count, 1)
+        XCTAssertEqual(h.recorder.states.last, "failed")
+    }
+
+    func testRollbackDoesNotTakeAnOccupiedPositionFromANewDisplay() {
+        let h = applied()
+        h.configurator.displays.append(OverviewDisplay(id: 3, frame: initial[1].frame))
+        revert(h)
+        XCTAssertEqual(h.configurator.origin(of: 2), left)
+        XCTAssertEqual(h.configurator.origin(of: 3), right)
+        XCTAssertEqual(h.configurator.calls.count, 1)
+        XCTAssertEqual(h.recorder.states.last, "failed")
     }
 
     func testKeepForAnotherRequestIsIgnored() {
