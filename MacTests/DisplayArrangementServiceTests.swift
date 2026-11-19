@@ -294,6 +294,9 @@ final class DisplayArrangementServiceTests: XCTestCase {
         h.configurator.displays[1].frame.size = CGSize(width: 600, height: 1000)
         keep(h)
         XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.displaysChanged)
+        XCTAssertEqual(h.recorder.states.last, "reverted")
+        XCTAssertEqual(h.configurator.origin(of: 2), right)
+        XCTAssertEqual(h.configurator.displays[1].frame.size, CGSize(width: 600, height: 1000))
         XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
     }
 

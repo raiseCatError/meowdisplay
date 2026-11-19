@@ -121,10 +121,10 @@ final class DisplayArrangementService: @unchecked Sendable {
             isMovable = display.isMovable
         }
 
-        func at(_ origin: CGPoint) -> Self {
+        func hasSameRole(as other: Self) -> Bool {
             var copy = self
-            copy.frame.origin = origin
-            return copy
+            copy.frame = other.frame
+            return copy == other
         }
     }
 
@@ -393,7 +393,10 @@ final class DisplayArrangementService: @unchecked Sendable {
                 continue
             }
             if now == before { continue }
-            guard now == applied[id], now.isMovable, now == before.at(now.frame.origin) else {
+            // A resize can keep the same display and preview origin. The destination
+            // below must still fit its new bounds before we restore that origin.
+            guard let preview = applied[id], now.frame.origin == preview.frame.origin,
+                  now.isMovable, now.hasSameRole(as: before), now.hasSameRole(as: preview) else {
                 complete = false
                 continue
             }
