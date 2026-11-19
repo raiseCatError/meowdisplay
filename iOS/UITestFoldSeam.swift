@@ -5,8 +5,8 @@
 // - `MEOW_UITEST_FOLD=vertical|horizontal` (optional `MEOW_UITEST_FOLD_WIDTH`, points, default 24):
 //   a synthetic fold. `ControlReservedRegion.active(in:)` adds one `.division` region where an
 //   iPhone Duo's hinge would be: a full-height band at the window's horizontal centre (held like a
-//   book) or a full-width band at its vertical centre (tabletop). The simulator reports no fold and
-//   cannot fold, so without this the fold avoidance never runs on CI. The band is also exposed as an
+//   book) or a full-width band at its vertical centre (tabletop). The CI job leaves the simulator
+//   in its initial pose, so this seam exercises fold avoidance there. The band is also exposed as an
 //   accessibility element, `uitestFoldBand`, so XCUITest can read where it is.
 
 #if DEBUG
@@ -93,54 +93,4 @@ extension View {
     /// See `UITestFoldBandMarker`. Does nothing unless `MEOW_UITEST_FOLD` is set.
     func uiTestFoldBandMarker() -> some View { modifier(UITestFoldBandMarker()) }
 }
-
-#if targetEnvironment(simulator)
-/// Read the window that actually contains the receiver or its presented Settings.
-struct UITestOrientationReader: UIViewRepresentable {
-    final class Reader: UIView {
-        override var accessibilityValue: String? {
-            get {
-                guard let window, let scene = window.windowScene, let root = window.rootViewController else {
-                    return "no-window"
-                }
-                var presented = root
-                while let next = presented.presentedViewController { presented = next }
-                let appMask = UIApplication.shared.supportedInterfaceOrientations(for: window)
-                var fields = [
-                    "orientation=\(scene.effectiveGeometry.interfaceOrientation.rawValue)",
-                    "app=\(appMask.rawValue)",
-                    "root=\(root.supportedInterfaceOrientations.rawValue)",
-                    "presented=\(presented.supportedInterfaceOrientations.rawValue)",
-                    "rootClass=\(type(of: root))", "presentedClass=\(type(of: presented))",
-                    "traits=\(traitCollection.horizontalSizeClass.rawValue)/\(traitCollection.verticalSizeClass.rawValue)",
-                    "screen=\(scene.screen.bounds.size)", "window=\(window.bounds.size)"
-                ]
-                if #available(iOS 27.0, *) {
-                    let delegate = scene.delegate as? UIWindowSceneDelegate
-                    let mask = delegate?.supportedInterfaceOrientations?(for: scene)
-                    fields.append("sceneDelegate=\(mask.map { String($0.rawValue) } ?? "plist")")
-                }
-                if #available(iOS 26.0, *) {
-                    fields.append("geometryLocked=\(scene.effectiveGeometry.isInterfaceOrientationLocked)")
-                }
-                return fields.joined(separator: " ")
-            }
-            set {}
-        }
-    }
-
-    let surface: String
-
-    func makeUIView(context: Context) -> Reader {
-        let reader = Reader()
-        reader.isAccessibilityElement = true
-        reader.accessibilityIdentifier = "orientationAudit-" + surface
-        reader.accessibilityLabel = "Orientation audit"
-        reader.isUserInteractionEnabled = false
-        return reader
-    }
-
-    func updateUIView(_ reader: Reader, context: Context) {}
-}
-#endif
 #endif

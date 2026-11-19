@@ -92,14 +92,6 @@ struct SettingsView: View {
         // rotation and re-presentation alike.
         .statusBarHidden(false)
         .persistentSystemOverlays(.automatic)
-        #if DEBUG && targetEnvironment(simulator)
-        .overlay(alignment: .topLeading) {
-            if ProcessInfo.processInfo.environment["MEOW_UITEST_ORIENTATION"] == "1" {
-                UITestOrientationReader(surface: "settings").frame(width: 2, height: 2)
-                    .allowsHitTesting(false)
-            }
-        }
-        #endif
         .onAppear {
             if selection == nil {
                 selection = MobileSettingsCategory.initialSelection(regularWidth: horizontalSizeClass == .regular)

@@ -23,14 +23,6 @@ struct OpenSidecarPhoneApp: App {
                 UITestStagePeekFixtureHost()
             } else {
                 ReceiverScreen().uiTestFoldBandMarker()
-                    #if targetEnvironment(simulator)
-                    .overlay(alignment: .topLeading) {
-                        if ProcessInfo.processInfo.environment["MEOW_UITEST_ORIENTATION"] == "1" {
-                            UITestOrientationReader(surface: "receiver").frame(width: 2, height: 2)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    #endif
             }
             #else
             ReceiverScreen()
