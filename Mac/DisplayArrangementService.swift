@@ -102,15 +102,42 @@ final class DisplayArrangementExclusivity: @unchecked Sendable {
 /// Runs one session's display arrangement requests. Confined to its owner's queue (MacSender's
 /// `queue`): every method, timer and `perform` hop runs there.
 final class DisplayArrangementService: @unchecked Sendable {
+    /// Only the geometry and topology that determine what a move affects. Quartz may
+    /// enumerate the same mirror group in a different order between reads.
+    private struct DisplayState: Equatable {
+        var frame: CGRect
+        let mirrorMembers: Set<UInt32>
+        let isMain: Bool
+        let isOwn: Bool
+        let isMeow: Bool
+        let isMovable: Bool
+
+        init(_ display: ArrangementDisplay) {
+            frame = display.frame
+            mirrorMembers = Set(display.mirrorMemberIDs)
+            isMain = display.isMain
+            isOwn = display.isOwn
+            isMeow = display.isMeow
+            isMovable = display.isMovable
+        }
+
+        func at(_ origin: CGPoint) -> Self {
+            var copy = self
+            copy.frame.origin = origin
+            return copy
+        }
+    }
+
+    private typealias Layout = [UInt32: DisplayState]
+
     private struct Pending {
         let req: Int
         let token: UInt64
         /// The normalized changed origins: what is configured.
         let changes: [UInt32: CGPoint]
-        /// Every drawn display's origin before (restored on revert).
-        let previous: [UInt32: CGPoint]
-        /// Every drawn display's origin once applied (verified after each step).
-        let expected: [UInt32: CGPoint]
+        /// The complete layout the Mac owner was shown and the layout they approved.
+        let previous: Layout
+        let expected: Layout
         /// Asked again, side-effect free, right before anything is configured.
         let controlStillAllowed: () -> Bool
         var timer: DisplayArrangementTimer?
@@ -189,7 +216,7 @@ final class DisplayArrangementService: @unchecked Sendable {
             Log.info("display arrange: request \(pending.req) withdrawn (session ended)")
         case .applied(let pending):
             pending.timer?.cancel()
-            let restored = restore(pending.previous, scope: .forSession)
+            let restored = restore(pending, from: pending.expected, scope: .forSession)
             Log.info("display arrange: request \(pending.req) reverted (session ended), restored=\(restored)")
             onArrangementRestored(currentOrigins())
         }
@@ -221,9 +248,9 @@ final class DisplayArrangementService: @unchecked Sendable {
             changes = accepted
         }
 
-        let previous = Self.origins(of: edit.original)
-        var expected = edit.normalizedOrigins
-        for (id, origin) in changes { expected[id] = origin }
+        let previous = Self.layout(of: edit)
+        var expected = previous
+        for (id, origin) in edit.normalizedOrigins { expected[id]?.frame.origin = changes[id] ?? origin }
         let token = makeToken()
         var pending = Pending(req: request.req, token: token, changes: changes, previous: previous,
                               expected: expected, controlStillAllowed: controlStillAllowed, timer: nil)
@@ -271,17 +298,18 @@ final class DisplayArrangementService: @unchecked Sendable {
             return finish(pending.req, .denied, reason: DisplayArrangeReason.control)
         }
         // Nothing may have changed while the prompt was up: the owner approved THIS arrangement.
-        guard currentOrigins() == pending.previous else {
+        guard currentLayout() == pending.previous else {
             return finish(pending.req, .denied, reason: DisplayArrangeReason.stale)
         }
         guard configurator.configure(origins: pending.changes, scope: .forSession) else {
-            let restored = restore(pending.previous, scope: .forSession)
-            Log.info("display arrange: request \(pending.req) not applied (configuration error), restored=\(restored)")
+            // A failed Quartz transaction was cancelled without applying its origins.
+            Log.info("display arrange: request \(pending.req) not applied (configuration error)")
             return finish(pending.req, .failed, reason: DisplayArrangeReason.configurationError)
         }
-        guard currentOrigins() == pending.expected else {
-            // macOS moved something else (it snaps displays it can't place): never leave that.
-            let restored = restore(pending.previous, scope: .forSession)
+        let applied = currentLayout()
+        guard applied == pending.expected else {
+            // Quartz can snap a requested display to a different origin.
+            let restored = restore(pending, from: applied, scope: .forSession)
             Log.info("display arrange: request \(pending.req) not applied as asked, restored=\(restored)")
             return finish(pending.req, .failed, reason: DisplayArrangeReason.notApplied)
         }
@@ -303,13 +331,18 @@ final class DisplayArrangementService: @unchecked Sendable {
         pending.timer?.cancel()
         pending.timer = nil
         guard controlAllowed else { return revert(pending, reason: DisplayArrangeReason.control) }
-        guard currentOrigins() == pending.expected else {
+        guard currentLayout() == pending.expected else {
             return revert(pending, reason: DisplayArrangeReason.displaysChanged)
         }
-        guard configurator.configure(origins: pending.changes, scope: .permanently),
-              currentOrigins() == pending.expected else {
-            // The saved arrangement may have been written: put the previous one back there too.
-            let restored = restore(pending.previous, scope: .permanently)
+        guard configurator.configure(origins: pending.changes, scope: .permanently) else {
+            // The save failed atomically. Only the session preview needs undoing.
+            let restored = restore(pending, from: pending.expected, scope: .forSession)
+            Log.info("display arrange: request \(pending.req) save failed, restored=\(restored)")
+            return finish(pending.req, .failed, reason: DisplayArrangeReason.notApplied)
+        }
+        let saved = currentLayout()
+        guard saved == pending.expected else {
+            let restored = restore(pending, from: saved, scope: .permanently)
             Log.info("display arrange: request \(pending.req) not kept (macOS didn't save it), restored=\(restored)")
             return finish(pending.req, .failed, reason: DisplayArrangeReason.notApplied)
         }
@@ -333,39 +366,63 @@ final class DisplayArrangementService: @unchecked Sendable {
 
     private func revert(_ pending: Pending, reason: String) {
         pending.timer?.cancel()
-        let restored = restore(pending.previous, scope: .forSession)
+        let restored = restore(pending, from: pending.expected, scope: .forSession)
         onArrangementRestored(currentOrigins())
         if restored {
             Log.info("display arrange: request \(pending.req) reverted (\(reason))")
             finish(pending.req, .reverted, reason: reason)
         } else {
             Log.info("display arrange: request \(pending.req) revert (\(reason)) not applied as asked")
-            finish(pending.req, .failed, reason: DisplayArrangeReason.notApplied)
+            finish(pending.req, .failed, reason: reason == DisplayArrangeReason.displaysChanged
+                   ? DisplayArrangeReason.displaysChanged : DisplayArrangeReason.notApplied)
         }
     }
 
     // MARK: Helpers
 
-    /// Puts `previous` back for every display still present whose origin differs, then checks it.
-    private func restore(_ previous: [UInt32: CGPoint], scope: DisplayConfigurationScope) -> Bool {
-        let now = currentOrigins()
-        let moved = previous.filter { entry in now[entry.key] != nil && now[entry.key] != entry.value }
-        if !moved.isEmpty, !configurator.configure(origins: moved, scope: scope) { return false }
-        let after = currentOrigins()
-        return previous.allSatisfy { entry in after[entry.key] == nil || after[entry.key] == entry.value }
-    }
-
-    /// Every drawn display's origin now, read again from the OS.
-    private func currentOrigins() -> [UInt32: CGPoint] {
-        Self.origins(of: DisplayArrangementEdit(displays: configurator.currentDisplays()).original)
-    }
-
-    private static func origins(of displays: [ArrangementDisplay]) -> [UInt32: CGPoint] {
-        var out: [UInt32: CGPoint] = [:]
-        for display in displays {
-            out[display.id] = CGPoint(x: display.frame.minX.rounded(), y: display.frame.minY.rounded())
+    /// Undo our moves only while the same movable displays still occupy the positions we
+    /// applied (including synchronous Quartz snapping). Leave newer external edits alone.
+    private func restore(_ pending: Pending, from applied: Layout, scope: DisplayConfigurationScope) -> Bool {
+        let edit = DisplayArrangementEdit(displays: configurator.currentDisplays())
+        let current = Self.layout(of: edit)
+        var origins: [UInt32: CGPoint] = [:]
+        var complete = true
+        for id in pending.changes.keys {
+            guard let before = pending.previous[id], let now = current[id] else {
+                complete = false
+                continue
+            }
+            if now == before { continue }
+            guard now == applied[id], now.isMovable, now == before.at(now.frame.origin) else {
+                complete = false
+                continue
+            }
+            origins[id] = before.frame.origin
         }
-        return out
+        guard !origins.isEmpty else { return complete }
+        var destination = current
+        for (id, origin) in origins { destination[id]?.frame.origin = origin }
+        if destination != pending.previous {
+            // An external edit can occupy a former position. Validate a partial rollback
+            // against today's displays; the original, unchanged OS layout is already known.
+            guard case .success(let validated) = edit.proposal(applying: origins),
+                  validated == origins else { return false }
+        }
+        guard configurator.configure(origins: origins, scope: scope) else { return false }
+        let restored = currentLayout()
+        return restored == destination && complete
+    }
+
+    private func currentLayout() -> Layout {
+        Self.layout(of: DisplayArrangementEdit(displays: configurator.currentDisplays()))
+    }
+
+    private static func layout(of edit: DisplayArrangementEdit) -> Layout {
+        Dictionary(uniqueKeysWithValues: edit.original.map { ($0.id, DisplayState($0)) })
+    }
+
+    private func currentOrigins() -> [UInt32: CGPoint] {
+        currentLayout().mapValues { $0.frame.origin }
     }
 
     /// The receiver edited exactly this Mac's current drawn displays (same ids, same frames).
