@@ -280,6 +280,23 @@ final class DisplayArrangementServiceTests: XCTestCase {
         XCTAssertTrue(h.configurator.calls.isEmpty)
     }
 
+    func testResizingAtTheSameOriginInvalidatesTheMacPrompt() {
+        let h = makeHarness()
+        request(h)
+        h.configurator.displays[1].frame.size = CGSize(width: 600, height: 1000)
+        h.confirmer.answer(.allow)
+        XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.stale)
+        XCTAssertTrue(h.configurator.calls.isEmpty)
+    }
+
+    func testResizingDuringThePreviewRequiresANewArrangement() {
+        let h = applied()
+        h.configurator.displays[1].frame.size = CGSize(width: 600, height: 1000)
+        keep(h)
+        XCTAssertEqual(h.recorder.last?["reason"] as? String, DisplayArrangeReason.displaysChanged)
+        XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
+    }
+
     func testRevertBeforeTheOwnerAnswersWithdrawsTheRequest() throws {
         let h = makeHarness()
         request(h)
