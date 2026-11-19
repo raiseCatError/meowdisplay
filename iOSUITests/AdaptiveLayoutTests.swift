@@ -209,9 +209,9 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
     }
 
-    /// Upside-down portrait is not available on iPhones without a Home button (a system rule),
-    /// and the app does not fight it: it tolerates either outcome, and in every orientation the
-    /// controls stay inside the window.
+    /// The Duo outer display follows ordinary iPhone rules. The inner display supports
+    /// all four orientations. A requested device pose alone does not establish the scene
+    /// orientation; this test checks control reachability in the resulting window.
     @MainActor
     func testControlsStayInsideTheWindowThroughEveryOrientationIncludingUpsideDown() {
         let app = launchIntoDemo()
