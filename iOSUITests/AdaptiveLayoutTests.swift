@@ -237,6 +237,24 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
     }
 
+    @MainActor
+    func testNativeRotationAuditInReceiverAndSettings() {
+        let app = launchIntoDemo(environment: ["MEOW_UITEST_ORIENTATION": "1"])
+        for surface in ["receiver", "settings"] {
+            if surface == "settings" { openSettings(app) }
+            let reader = app.descendants(matching: .any)["orientationAudit-" + surface].firstMatch
+            XCTAssertTrue(reader.waitForExistence(timeout: 8))
+            for requested in [UIDeviceOrientation.portrait, .landscapeLeft, .portraitUpsideDown, .portrait] {
+                XCUIDevice.shared.orientation = requested
+                sleep(1)
+                let observed = reader.value as? String ?? "unavailable"
+                print("DuoOrientationAudit surface=\(surface) requested=\(requested.rawValue) \(observed)")
+                XCTAssertTrue(observed.contains("orientation="))
+                XCTAssertTrue(observed.contains("presented="))
+            }
+        }
+    }
+
     // MARK: - Synthetic fold (DEBUG seam `MEOW_UITEST_FOLD`, iOS/UITestFoldSeam.swift)
     //
     // The simulator never reports a fold (no posture control), so these tests ask the app for a

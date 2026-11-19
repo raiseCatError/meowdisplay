@@ -93,4 +93,53 @@ extension View {
     /// See `UITestFoldBandMarker`. Does nothing unless `MEOW_UITEST_FOLD` is set.
     func uiTestFoldBandMarker() -> some View { modifier(UITestFoldBandMarker()) }
 }
+
+#if targetEnvironment(simulator)
+/// Read the window that actually contains the receiver or its presented Settings.
+struct UITestOrientationReader: UIViewRepresentable {
+    final class Reader: UIView {
+        override var accessibilityValue: String? {
+            get {
+                guard let window, let scene = window.windowScene, let root = window.rootViewController else {
+                    return "no-window"
+                }
+                var presented = root
+                while let next = presented.presentedViewController { presented = next }
+                let appMask = UIApplication.shared.supportedInterfaceOrientations(for: window)
+                var fields = [
+                    "orientation=\(scene.effectiveGeometry.interfaceOrientation.rawValue)",
+                    "app=\(appMask.rawValue)",
+                    "root=\(root.supportedInterfaceOrientations.rawValue)",
+                    "presented=\(presented.supportedInterfaceOrientations.rawValue)",
+                    "rootClass=\(type(of: root))", "presentedClass=\(type(of: presented))",
+                    "traits=\(traitCollection.horizontalSizeClass.rawValue)/\(traitCollection.verticalSizeClass.rawValue)",
+                    "screen=\(scene.screen.bounds.size)", "window=\(window.bounds.size)"
+                ]
+                if #available(iOS 27.0, *) {
+                    let mask = scene.delegate?.supportedInterfaceOrientations?(for: scene)
+                    fields.append("sceneDelegate=\(mask.map { String($0.rawValue) } ?? "plist")")
+                }
+                if #available(iOS 26.0, *) {
+                    fields.append("geometryLocked=\(scene.effectiveGeometry.isInterfaceOrientationLocked)")
+                }
+                return fields.joined(separator: " ")
+            }
+            set {}
+        }
+    }
+
+    let surface: String
+
+    func makeUIView(context: Context) -> Reader {
+        let reader = Reader()
+        reader.isAccessibilityElement = true
+        reader.accessibilityIdentifier = "orientationAudit-" + surface
+        reader.accessibilityLabel = "Orientation audit"
+        reader.isUserInteractionEnabled = false
+        return reader
+    }
+
+    func updateUIView(_ reader: Reader, context: Context) {}
+}
+#endif
 #endif
