@@ -539,15 +539,21 @@ enum StagePeekLayout {
 
     /// Visible cards, back to front. `aspects` are width / height per window. `region`: the
     /// Compact Dock's band (the compact stack centres in it); nil for the Normal Dock.
+    /// `fitsRegion`: the compact cards are also no taller than `StagePeekCompactBand` allows
+    /// for that band, so a short landscape band still holds the highlighted card and its
+    /// neighbours (#130). Off, and for the Normal Dock, the sizes are what they always were.
     static func cards(aspects: [Double], position: Double, expansion: Double, edge: StagePeekEdge,
-                      safe: CGRect, isPad: Bool, reduceMotion: Bool, region: CGRect? = nil) -> [StagePeekCard] {
+                      safe: CGRect, isPad: Bool, reduceMotion: Bool, region: CGRect? = nil,
+                      fitsRegion: Bool = false) -> [StagePeekCard] {
         guard !aspects.isEmpty, safe.width > 0, safe.height > 0 else { return [] }
         let e = CGFloat(min(max(expansion, 0), 1))
         func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * e }
         let compactWidth = min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
         let expandedWidth = min(max(safe.width * 0.6, compactWidth), isPad ? 640 : 420)
         let maxWidth = lerp(compactWidth, expandedWidth)
-        let maxHeight = safe.height * lerp(0.26, 0.42)
+        var compactHeight = safe.height * 0.26
+        if fitsRegion, let region { compactHeight = StagePeekCompactBand.cardHeight(usual: compactHeight, bandHeight: region.height) }
+        let maxHeight = lerp(compactHeight, safe.height * 0.42)
         let focus = min(max(Int(position.rounded()), 0), aspects.count - 1)
         func cardSize(_ i: Int) -> CGSize {
             let aspect = CGFloat(min(max(aspects[i], 0.5), 2.2))
@@ -626,9 +632,11 @@ enum StagePeekLayout {
     }
 
     /// The frontmost card containing `p` (cards fully faded out are ignored). With a Compact
-    /// Dock `region`, nothing outside it (or in its faded edges' outer half) is a card.
-    static func hit(_ p: CGPoint, cards: [StagePeekCard], region: CGRect? = nil) -> Int? {
-        if let region, !region.insetBy(dx: 0, dy: StagePeekConfig.dockFade / 2).contains(p) { return nil }
+    /// Dock `region`, nothing outside it (or in its faded edges' outer half) is a card. `fade` is
+    /// the fade the band is drawn with: a point the mask shows at under half is not a card.
+    static func hit(_ p: CGPoint, cards: [StagePeekCard], region: CGRect? = nil,
+                    fade: CGFloat = StagePeekConfig.dockFade) -> Int? {
+        if let region, !region.insetBy(dx: 0, dy: fade / 2).contains(p) { return nil }
         for c in cards.sorted(by: { $0.z > $1.z }) where c.opacity > 0.05 {
             if contains(corners(c), p) { return c.index }
         }
@@ -644,6 +652,35 @@ enum StagePeekLayout {
             if sign == 0 { sign = cross } else if (sign > 0) != (cross > 0) { return false }
         }
         return true
+    }
+}
+
+/// The Compact Dock's band on a short screen (#130). The band is what is left between the search
+/// and app carousel above and the toolbar below, so a phone in landscape gets under 200 points,
+/// and a fixed 28-point fade at each end plus full-height cards left the highlighted card half
+/// faded and about one neighbour showing. The fade and the card height follow a short band
+/// instead; the drawn fade and the hit test use the same number, so a card that is drawn is a card
+/// you can tap. A band of 400 points or more (a portrait phone, an iPad) is unchanged: the card
+/// height eases back to its usual size between 200 and 400. Pure, tested.
+enum StagePeekCompactBand {
+    /// The fade at one end, at most this share of the band's height (the full 28 from 280 points).
+    static let fadeShare: CGFloat = 0.1
+    /// On the shortest bands the tallest card is this share of the band's height.
+    static let cardShare: CGFloat = 0.34
+    /// Band heights between which the card height eases from the short-band size back to normal.
+    static let shortBand: CGFloat = 200
+    static let roomyBand: CGFloat = 400
+
+    static func fade(bandHeight: CGFloat) -> CGFloat {
+        min(StagePeekConfig.dockFade, max(bandHeight, 0) * fadeShare)
+    }
+
+    /// The tallest compact card: `usual` (a share of the screen's height) on a roomy band, less on a
+    /// short one, so the highlighted card and a neighbour on each side fit the band.
+    static func cardHeight(usual: CGFloat, bandHeight: CGFloat) -> CGFloat {
+        let band = max(bandHeight, 0)
+        let roomy = min(max((band - shortBand) / (roomyBand - shortBand), 0), 1)
+        return min(usual, band * cardShare * (1 - roomy) + usual * roomy)
     }
 }
 
@@ -695,5 +732,41 @@ enum StagePeekLegibility {
     static func whiteTextContrast(scrimOpacity opacity: Double, backdropGray: Double = 1) -> Double {
         let composite = backdropGray * (1 - opacity)
         return 1.05 / (relativeLuminance(gray: composite) + 0.05)
+    }
+}
+
+/// Stage Peek's bottom buttons (Expand / Compact, Add as Tile, Close) at large text sizes and in
+/// narrow windows (#121). They are one fixed-size row, centred, so at an accessibility text size,
+/// in a 320 point Split View or Slide Over, or with a longer translation the row ran wider than
+/// the window. The titles go (the icons stay, and VoiceOver still reads each name) when the row
+/// with them would not fit; icons alone are no wider than three buttons. The widths are
+/// estimates from the footnote semibold face the buttons use, scaled with the text size. Pure,
+/// tested.
+enum StagePeekToolbarLayout {
+    /// Space between buttons, and the room kept at each side of the window.
+    static let spacing: CGFloat = 6
+    static let margin: CGFloat = 16
+    /// A button's capsule padding (both sides), its icon, the gap to its title, and one title
+    /// character, at the default text size.
+    static let padding: CGFloat = 24
+    static let icon: CGFloat = 16
+    static let titleGap: CGFloat = 6
+    static let character: CGFloat = 6.8
+
+    /// The row's width: `titles` is the character count of each button that has a title (Close
+    /// never does), `closeButton` whether it shows. `textScale` is 1 at the default text size.
+    static func width(titles: [Int], closeButton: Bool = true, showsTitles: Bool, textScale: CGFloat) -> CGFloat {
+        let s = max(textScale, 1)
+        var buttons = titles.map { characters -> CGFloat in
+            padding + icon * s + (showsTitles ? titleGap + CGFloat(characters) * character * s : 0)
+        }
+        if closeButton { buttons.append(padding + icon * s) }
+        guard !buttons.isEmpty else { return 0 }
+        return buttons.reduce(0, +) + CGFloat(buttons.count - 1) * spacing
+    }
+
+    /// Whether the buttons keep their titles in a window `available` points wide.
+    static func showsTitles(titles: [Int], closeButton: Bool = true, textScale: CGFloat, available: CGFloat) -> Bool {
+        width(titles: titles, closeButton: closeButton, showsTitles: true, textScale: textScale) <= available - 2 * margin
     }
 }

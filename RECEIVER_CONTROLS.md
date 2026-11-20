@@ -156,7 +156,6 @@ Folding resizes the app mid-session, so every capability stays reachable in both
 On a fold (iPhone Duo) the roomy rails skip over the crease (a vertical crease across a top or bottom rail, a horizontal one across a side rail) and Custom controls placed on it move wholly onto one half, so no control straddles it. Controls stay inside the safe area, including the trailing system area. Geometry is unit-tested only; not yet run on a real Duo.
 
 **Upside-down portrait is not available on iPhones without a Home button.** That is a system rule, not a setting here, and the app does not work around it with a transform. Use landscape either way.
-
 ## Keyboard and haptics
 
 | Control | iPhone | iPad | Android | Mac Receiver |
@@ -170,6 +169,33 @@ On a fold (iPhone Duo) the roomy rails skip over the crease (a vertical crease a
 | Arrow keys (button, ↑ ← ↓ → keypad and its own ⇧ ⌥ ⌘) | Yes. **Show Arrow Keys**, **Arrow Keys Side** | Yes. Compact windows keep the button; roomy layouts have an **Arrow Keys** standard control (Strip, Overlay) and Custom item, one tap for the same keypad. **Show Arrow Keys** applies to both | No | n/a |
 | Haptics (master) | Yes | Yes | Yes | n/a |
 | Smart Touch Haptics | Yes | Yes | Yes | n/a |
+
+### Hold gestures (#131)
+
+Each touch-and-hold on the iPhone and iPad receiver means something different, so each keeps its own
+delay. Only the first can be changed (**Hold Response**), because a lift before it is only a latching
+tap. The rest send input to the Mac, end a session or move windows, so a shorter hold would make them
+easier to trigger by accident. The delays live in `ReceiverHoldGestures` (`Shared/ControlInteraction.swift`)
+and a test pins them. The system's own gestures and Touch Accommodations are never changed.
+
+| Hold | Delay | Adjustable | What it does |
+| --- | --- | --- | --- |
+| ⌘ ⌥ ⌃ ⇧ in the control tray | 0.18 / **0.25** / 0.4 s (Hold Response) | Yes | Opens the key's shortcuts. A lift before it latches the key; sliding away opens them at once and never latches |
+| Stage Peek edge | 0.3 s | No | Opens Stage Peek |
+| Stage Peek card | 0.35 s | No | Starts dragging an app or window onto a pane |
+| Settings control | 0.5 s | No | Opens Session Actions (Back to Home, Disconnect). A tap opens Settings |
+| Window view pane label | 0.4 s | No | Lifts the pane to move it; a release in place opens its menu |
+| Window view divider | 0.35 s | No | Drags the divider |
+| Touch hold after a tap | 0.15 s | No | Commits a held touch to a drag (Direct Touch, Trackpad) |
+| Natural Touch rest, then drag | 0.25 s | No | Drags instead of scrolling |
+| Natural Touch hold | 0.5 s | No | Right-click |
+| Smart Touch hold | 0.4 s | No | Falls back to plain Direct Touch for that touch |
+| Smart Touch title bar | 0.5 s | No | Arms a window drag |
+
+The shortcut keys show on the touch-down chip at once (a pressed state, never a key sent), and the
+haptic plays only when they open (and only with Haptics on), so an iPad without a haptic engine still
+sees the same state change. A touch the system takes (Control Center, an alert) or a rotation under
+the finger sends nothing and leaves nothing latched. Android keeps its fixed 0.35 s.
 
 ### Arrow keys (#179)
 
@@ -190,6 +216,18 @@ The keypad stays open while you use Return, modifiers, the Function Tray and sho
 **Where it sits.** On iPhone in landscape it sits on the bottom edge on the chosen side (Right by default), stepping inward past whatever already holds that corner. With the default trays the Main Tray is on the right and Return is bottom-left, so on the right the button sits just inside the Main Tray, and on the left it sits beside Return. Return is never on the right by default, so "right side, next to Return" can't both hold. In portrait it sits at the chosen end of the row above the Main Tray. The keypad opens above the button and moves inward or up to clear the other controls and system-reserved areas. Its modifiers sit in a row over the T, as wide as it, making a 134×134 pt block: they are set before an arrow, the arrows stay nearest the thumb, and the row never borders the button. Where there is no height for that, they become a 2×2 grid (⇧ ⌥ over ⌘) beside the T on the side with room (toward the middle of the screen), a block as high as the T; failing that, a row under the T. The T and the modifiers move as one, so the modifiers clear everything the T clears: the trays, the calculator, the palette, the notch and reserved areas. The button never moves when the keypad opens. A shortcut palette can push both aside while it is open. They are not tray items, so tray chips keep their size, and saved profiles, Function Tray layouts and share codes are unchanged. Older builds ignore the two new preferences.
 
 **Accessibility.** The button is **Arrow Keys** (Shown/Hidden), with **Up Arrow**, **Down Arrow**, **Left Arrow** and **Right Arrow** as named actions, so VoiceOver, Voice Control and Switch Control can send arrows without a swipe. Each keypad key is a button of the same name; its value names the keypad modifiers it adds, and activating it sends the arrow with those. The keypad's modifiers are **Shift for Arrows**, **Option for Arrows** and **Command for Arrows** (Voice Control also answers to **Arrow Shift** and so on), On or Off (selected while on), with the hint "Only the arrow keys use it."; activating one turns it on or off. With an older Mac and a tray modifier on, they read Unavailable and say why. Reduce Motion turns the keypad's scale into a fade.
+
+### Text size and narrow windows (#121)
+
+The receiver adapts to the window and the text size, never to a device model.
+
+- **Main Tray chips** shrink from 40 pt only as far as the screen edge needs (9 chips are 33 pt on a 360 pt phone, 30 pt at the smallest, 320 pt). Hiding a chip you don't use gives the rest more room.
+- **Stage Peek's buttons** (Expand / Compact, Add as Tile, Close) show their titles while the row fits the window, and drop to icons when it would not (accessibility text sizes, a 320 pt Slide Over, a long translation). Each button keeps its name for VoiceOver and Voice Control.
+- **Video is off** puts **Turn Video On** under the words when they don't fit side by side.
+- **Settings** pickers that are segmented become menus at the accessibility text sizes, so no choice is cut off.
+- **Session Actions**, the Mac lock banner and Home's rows already wrap or scroll at large text.
+
+Not yet adapted, because it needs a device to judge: the Main Tray's chip size (it is a fixed 30 to 40 pt, not Dynamic Type), pane labels' reserved height at accessibility sizes, and Android.
 
 ## Typing
 
@@ -221,6 +259,7 @@ On iPhone/iPad, **tap** a pane/tab title to focus it or switch tabs. **Press and
 | Stage Peek (default quick switch) | Yes. Hold the left or right edge | Yes | Yes | No |
 | Rail (optional quick switch) | Yes. Controls → Window Switcher | Yes | Yes. Display → Window Switcher | No |
 | Stage Peek edge (Left / Right) | Yes | Yes | Yes | n/a |
+| Stage Peek **Dock** (Normal / Compact). **Normal** is the default for new installs; a saved choice, Compact included, is kept. On a short screen such as a phone in landscape, Compact's band is short, so its fade and its cards shrink with it: the highlighted card stays clear of the fade and a neighbour shows on each side, and a card is tappable exactly where it is drawn at least half shown. Android: Normal is the default; its Compact band is unchanged | Yes. Settings → Controls → Window Switcher → Dock | Yes | Normal default only | n/a |
 | Stage Peek **Expand** and **Add as Tile** | Yes | Yes | Yes | n/a |
 | **Full Desktop** card (back to the whole screen) | Yes, in Stage Peek | Yes | Yes | Partial. The overview's **Mirror** and **Extend** buttons |
 | **Switch to Window view?** prompt (once per launch, leaves after 8 s) | Yes | Yes | Yes | No |

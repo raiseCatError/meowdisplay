@@ -112,7 +112,19 @@ final class ReceiverControlStore: ObservableObject {
         beginAutoHideActivity()
     }
 
+    /// Window view is on: Move View is unavailable there (its whole-picture
+    /// zoom would separate the pane chrome from where clicks land, #92), so
+    /// it turns off when Window view starts and can't be turned on until it ends.
+    @Published private(set) var windowViewActive = false
+
+    func setWindowViewActive(_ active: Bool) {
+        guard windowViewActive != active else { return }
+        windowViewActive = active
+        if !LocalViewNavigationPolicy.allowsMoveView(windowViewActive: active) { setMoveViewActive(false) }
+    }
+
     func setMoveViewActive(_ active: Bool) {
+        guard !active || LocalViewNavigationPolicy.allowsMoveView(windowViewActive: windowViewActive) else { return }
         guard moveViewActive != active else { return }
         moveViewActive = active
         if active { beginAutoHideActivity() } else { scheduleAutoHide() }
@@ -1832,7 +1844,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .contentShape(Rectangle())
                 // The hold wins once it reaches its duration (while the finger is
                 // still down); lifting earlier is an ordinary tap on Settings.
-                .gesture(LongPressGesture(minimumDuration: 0.5)
+                .gesture(LongPressGesture(minimumDuration: ReceiverHoldGestures.sessionActions)
                     .onEnded { _ in openSessionActions() }
                     .exclusively(before: TapGesture().onEnded {
                         store.beginAutoHideActivity()
@@ -2128,7 +2140,7 @@ extension ReceiverControlOverlay {
     private var padShowsMoveView: Bool {
         !padCollapsed && LocalViewNavigationPolicy.showsMoveView(
             controlVisible: true, localNavigationAllowed: store.preferences.allowLocalViewNavigation,
-            videoEnabled: receiver.videoEnabled)
+            videoEnabled: receiver.videoEnabled, windowViewActive: store.windowViewActive)
     }
 
     @ViewBuilder
