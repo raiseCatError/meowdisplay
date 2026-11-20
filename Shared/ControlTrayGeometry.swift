@@ -317,6 +317,26 @@ enum VideoOffSurfaceGeometry {
 }
 
 enum ControlTrayGeometry {
+    struct ShortcutPaletteGrid {
+        let rows: Int
+        let columns: Int
+        let portrait: Bool
+
+        func row(for index: Int) -> Int {
+            portrait ? index / columns : index % rows
+        }
+    }
+
+    /// At most eight keys along one line; nine wraps on compact phones in
+    /// either orientation. Rendering and sizing share the same shape.
+    static func shortcutPaletteGrid(count: Int, portrait: Bool) -> ShortcutPaletteGrid {
+        let count = max(count, 1)
+        let lines = count > 8 ? 2 : 1
+        let along = Int(ceil(Double(count) / Double(lines)))
+        return ShortcutPaletteGrid(rows: portrait ? lines : along,
+                                   columns: portrait ? along : lines, portrait: portrait)
+    }
+
     /// Base placement always uses the raw/full container — or, while an
     /// active division splits it, the usable piece at the effective outer
     /// edge (`ControlPlacementArea`). `avoidNotch` affects only the final
