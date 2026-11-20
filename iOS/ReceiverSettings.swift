@@ -500,6 +500,25 @@ private struct DisplaySettingsPage: View {
                     }))
                 .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
             }
+            // Shown only for a Mac that reported `desktopSize` in its last
+            // `extendShapeState` (an older Mac would ignore the request).
+            if receiver.macReportsDesktopSize {
+                Picker("Desktop Size", selection: Binding(
+                    get: { current.desktopSize },
+                    set: { size in
+                        var preference = current
+                        preference.desktopSize = size
+                        receiver.requestExtendShape(preference)
+                    })) {
+                    ForEach(ExtendDesktopSize.allCases) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                .disabled(!receiver.connected || receiver.pendingExtendShape != nil)
+                Text(String(localized: "Makes the Mac desktop on this device use larger text. macOS System Settings can't change this display's resolution; MeowDisplay manages it."))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             if receiver.pendingExtendShape != nil {
                 LabeledContent("Updating Extend shape…") { ProgressView() }
             }

@@ -1150,6 +1150,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// (or a live `extendShapeRequest`) is known, it takes over for this
     /// peer specifically — see `applyExtendShape`.
     private var extendShapePreference: ExtendDisplayShapePreference
+    /// Desktop Size the live Extend display actually reached (set once a
+    /// mode's capture is running; unchanged by a rolled-back attempt).
+    private var reachedDesktopSize: ExtendDesktopSize?
+    /// Points plan of the most recent Extend setup/resize attempt, so the
+    /// reconfigure loop can tell whether the stored preference moved while
+    /// that attempt was running.
+    private var lastAttemptedExtendPlan: ExtendDisplayPlan?
     /// Receiver-enforced max-FPS preference (PART 2/3). Same seeding
     /// convention as `extendShapePreference`: the Mac-wide/constructor
     /// default until a peer's own stored preference (or a live
@@ -1304,9 +1311,22 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendExtendShapeState() {
         guard let info = lastHello,
               info.protocolVersion >= WireProtocol.extendShapeWireVersion else { return }
-        var dict = extendShapePreference.wireFields
+        // Always carries `desktopSize` (PROTOCOL.md 6.7: its presence tells
+        // the receiver this Mac supports it).
+        var dict = reportedExtendShape.wireFields
         dict["type"] = WireMessage.extendShapeState
         sendJSONObject(dict)
+    }
+
+    /// The shape/Desktop Size actually in effect, which can differ from the
+    /// stored request when an in-place resize rolled back to the last usable
+    /// mode — pickers then snap back to what was really reached.
+    private var reportedExtendShape: ExtendDisplayShapePreference {
+        var reported = extendShapePreference
+        if mode == .extend, virtualDisplay != nil, let reached = reachedDesktopSize {
+            reported.desktopSize = reached
+        }
+        return reported
     }
 
     /// The Mac's own per-device Extend Display control (`ReceiverDeviceDetailView`)
@@ -1345,9 +1365,30 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             await self.reconfigure(info)
             self.queue.async {
                 guard let self = selfBox.currentOnQueue() else { return }
+                // Report what was actually reached (a rolled-back resize
+                // keeps the old mode) so the Mac's and the receiver's
+                // pickers both snap back instead of showing a size that
+                // never took effect.
+                let reported = self.reportedExtendShape
+                let sink = self.statusSink
+                Task { @MainActor in sink.publishExtendShapeChanged(reported) }
                 self.sendExtendShapeState()
             }
         }
+    }
+
+    /// The Extend points plan for `info` from the CURRENT stored preference
+    /// (the per-peer store wins over the in-memory copy, exactly as in
+    /// `setupExtend`/`resizeExistingDisplay`).
+    private func currentExtendPlan(for info: PhoneInfo) -> ExtendDisplayPlan {
+        if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
+            extendShapePreference = stored
+        }
+        let physicalAspect = Double(info.pixelsWide) / Double(info.pixelsHigh)
+        let resolvedAspect = extendShapePreference.resolvedAspect(receiverPhysicalAspect: physicalAspect)
+        return ExtendDisplayPlan.resolve(
+            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh,
+            aspect: resolvedAspect, desktopSize: extendShapePreference.desktopSize)
     }
 
     /// PART 4/9: unlike `sendExtendShapeState`, max-FPS state is meaningful
@@ -2572,7 +2613,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func makeVirtualDisplayIfNotStale(
         ownerGeneration: UInt64?, name: String, pointsWide: Int, pointsHigh: Int,
         sizeInMillimeters: CGSize, serialNum: UInt32, productID: UInt32, refreshRate: Int,
-        arrangementKey: String, sizeInPoints: CGSize
+        arrangementKey: String, sizeInPoints: CGSize, reservedPointsPerAxis: Int
     ) throws -> CGDirectDisplayID? {
         guard !isExtendSetupStale(ownerGeneration: ownerGeneration) else { throw CancellationError() }
         // Headless (no usable physical display exists): place the VD at
@@ -2592,6 +2633,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               productID: productID,
                               refreshRate: refreshRate,
                               restoreOrigin: restoreOrigin,
+                              reservedPointsPerAxis: reservedPointsPerAxis,
                               owner: ObjectIdentifier(self),
                               onOriginChange: { origin, currentSize in
                                   DisplayArrangement.save(origin: origin, size: currentSize,
@@ -2625,17 +2667,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // = native pixels / 2 (rounded down to even for the encoder) when
         // the shape matches the phone's own aspect; otherwise the shape's
         // own ratio governs — see `ExtendDisplaySizing`.
-        let (pointsWide, pointsHigh) = ExtendDisplaySizing.pointSize(
-            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh, aspect: resolvedAspect)
+        // Desktop Size scales the published points (smaller desktop = bigger
+        // text); the declared physical size and the descriptor's resize
+        // reservation below stay based on the UNSCALED points.
+        let plan = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh,
+            aspect: resolvedAspect, desktopSize: extendShapePreference.desktopSize)
+        lastAttemptedExtendPlan = plan
+        let pointsWide = plan.wide
+        let pointsHigh = plan.high
         #if DEBUG
         Log.info("extendDebug: setupExtend shape=\(extendShapePreference.shape.rawValue) "
-            + "useFullDisplay=\(extendShapePreference.useFullDisplay) physicalAspect=\(physicalAspect) "
+            + "useFullDisplay=\(extendShapePreference.useFullDisplay) "
+            + "desktopSize=\(extendShapePreference.desktopSize.rawValue) physicalAspect=\(physicalAspect) "
             + "resolvedAspect=\(resolvedAspect) virtualDisplayPoints=\(pointsWide)x\(pointsHigh)")
         #endif
-        // Rough physical size so macOS picks a sane default UI scale.
-        let mm = pointsWide >= pointsHigh
-            ? CGSize(width: 147, height: 68)
-            : CGSize(width: 68, height: 147)
+        // Desktop Size changes logical points, not the declared physical
+        // display. Preserve the physical-sizing policy on UNSCALED points.
+        let mm = ExtendPhysicalSize.millimetres(pointsWide: plan.unscaledWide, pointsHigh: plan.unscaledHigh)
         // Encoder-safe FPS (PART 1/7) depends on the actual encode pixel
         // size, not the shape/points alone — compute it from the same
         // `clampedCaptureSize` the capture start path below uses, so the
@@ -2661,6 +2710,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // session serial, which is at least orientation-stable.
         let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
         let sizeInPoints = CGSize(width: pointsWide, height: pointsHigh)
+        // Reserve the UNSCALED long edge so a later Desktop Size change (or
+        // rotation) always fits through an in-place resize.
+        let reservedPointsPerAxis = plan.reservedPointsPerAxis
         // Creating a display whose serial is still registered fails — e.g. a
         // just-quit instance's display lingers in WindowServer for a moment
         // after the process dies. Retry through that window instead of
@@ -2750,7 +2802,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         productID: VirtualDisplayIdentityPlanner.identity(serial: serial, offset: totalOffset).productID,
                         refreshRate: virtualDisplayFPS,
                         arrangementKey: arrangementKey,
-                        sizeInPoints: sizeInPoints)
+                        sizeInPoints: sizeInPoints,
+                        reservedPointsPerAxis: reservedPointsPerAxis)
                 }
                 if createdID != nil { break }
                 Log.info("virtual display creation failed (identity +\(totalOffset), attempt \(attempt + 1)) — retrying")
@@ -2823,6 +2876,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         #endif
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH,
                                sessionGeneration: sessionGeneration)
+        reachedDesktopSize = extendShapePreference.desktopSize   // the plan's value (local copy)
         await logDisplayTopologyDiagnostics(reason: "setupExtend", vdID: vdID)
 
         // Debug aid (`defaults write com.raisecaterror.meowdisplay.mac testPattern -bool true`):
@@ -2910,6 +2964,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 target = latest   // rotated again while we were rebuilding
                 continue
             }
+            // A shape/Desktop Size saved while this pass was running is
+            // dropped by the `reconfiguring` guard above, so re-resolve the
+            // points from the CURRENT stored preference and go again if they
+            // moved. A rolled-back attempt resolves to the same points as it
+            // attempted, so this cannot loop on a mode macOS refuses.
+            if let attempted = lastAttemptedExtendPlan,
+               ExtendDisplayPlan.needsAnotherPass(applied: attempted, current: currentExtendPlan(for: target)) {
+                Log.info("extend preference changed during reconfigure — running again")
+                continue
+            }
             return
         }
     }
@@ -2946,13 +3010,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard !isStale() else { throw CancellationError() }
 
-        if let peerID = info.id, let stored = ExtendDisplayShapeStore.load(peerID: peerID) {
-            extendShapePreference = stored
-        }
-        let physicalAspect = Double(info.pixelsWide) / Double(info.pixelsHigh)
-        let resolvedAspect = extendShapePreference.resolvedAspect(receiverPhysicalAspect: physicalAspect)
-        let (pointsWide, pointsHigh) = ExtendDisplaySizing.pointSize(
-            receiverPixelsWide: info.pixelsWide, receiverPixelsHigh: info.pixelsHigh, aspect: resolvedAspect)
+        let plan = currentExtendPlan(for: info)
+        lastAttemptedExtendPlan = plan
+        let attemptedDesktopSize = extendShapePreference.desktopSize
+        let pointsWide = plan.wide
+        let pointsHigh = plan.high
         let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
         let size = CGSize(width: pointsWide, height: pointsHigh)
         let (resizeCaptureW, resizeCaptureH) = clampedCaptureSize(
@@ -2960,8 +3022,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let targetFPS = effectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
         #if DEBUG
         Log.info("extendDebug: resizeExistingDisplay id=\(vd.displayID) "
-            + "shape=\(extendShapePreference.shape.rawValue) resolvedAspect=\(resolvedAspect) "
-            + "targetPoints=\(pointsWide)x\(pointsHigh)")
+            + "shape=\(extendShapePreference.shape.rawValue) desktopSize=\(attemptedDesktopSize.rawValue) "
+            + "targetPoints=\(pointsWide)x\(pointsHigh) unscaled=\(plan.unscaledWide)x\(plan.unscaledHigh)")
         #endif
 
         // Brings the CURRENT vd mode online end-to-end: fresh SCK match +
@@ -3015,6 +3077,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
         do {
             try await attachCurrentMode(pointsWide: pointsWide, pointsHigh: pointsHigh, size: size)
+            reachedDesktopSize = attemptedDesktopSize
             return true
         } catch is CancellationError {
             throw CancellationError()
@@ -6493,7 +6556,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // Same gate as `mirrorDisplayRequest` above: admitted only.
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.extendShapeWireVersion,
-                  let preference = ExtendDisplayShapePreference(message: obj) else { return }
+                  var preference = ExtendDisplayShapePreference(message: obj) else { return }
+            // A receiver that predates Desktop Size omits the field; its
+            // shape request must not reset the size chosen on the Mac.
+            if ExtendDisplayShapePreference.desktopSize(inMessage: obj) == nil {
+                preference.desktopSize = extendShapePreference.desktopSize
+            }
             applyExtendShape(preference, info: info)
         case WireMessage.maxFPSRequest:
             // Same gate as `extendShapeRequest` above: admitted only.

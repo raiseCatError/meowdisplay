@@ -635,7 +635,7 @@ Coordinates use the conventions of section 7.
 | `nativeAppGesture` | pv 10 | `kind` (`magnify` or `rotate`), `phase` (`began`, `changed`, `ended`, or `cancelled`), `delta` (number) | Continuous foreground-app gesture lifecycle |
 | `audioRequest` | pv 12 | `enabled` (bool) | Request Mac system-audio capture on/off for this receiver |
 | `mirrorDisplayRequest` | pv 13 | `selectedUUID`? | Select Auto (absent/null) or a specific stable display UUID as the Mirror capture source |
-| `extendShapeRequest` | pv 14 | `shape`, `useFullDisplay` (bool) | Request an Extend virtual-display shape change (section 6.7) |
+| `extendShapeRequest` | pv 14 | `shape`, `useFullDisplay` (bool), optional `desktopSize` | Request an Extend virtual-display shape change (section 6.7) |
 | `maxFPSRequest` | pv 15 | `enabled` (bool), `maxFPS` (int) | Request this peer's receiver-enforced max-FPS enforcement (section 6.8) |
 | `smartTouchProbe` | pv 20 | `id` (int), `x`, `y` | Smart Touch (Experimental): ask whether the element at a normalized point is scrollable |
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
@@ -929,7 +929,7 @@ section 4.
 | `videoState` | pv 9 | `enabled` (bool), `width`, `height` | Mac-authoritative video state and retained mapping geometry |
 | `audioState` | pv 12 | `enabled` (bool) | Mac-authoritative confirmed system-audio production state |
 | `mirrorDisplayState` | pv 13 | `selectedUUID`?, `displays` (array) | Mac-authoritative confirmed Mirror capture-source selection + display inventory |
-| `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool) | Mac-authoritative confirmed active Extend shape (section 6.7) |
+| `extendShapeState` | pv 14 | `shape`, `useFullDisplay` (bool), `desktopSize` (always sent by a Mac that supports it) | Mac-authoritative confirmed active Extend shape (section 6.7) |
 | `smartTouchProbeResult` | pv 20 | `id` (int), `scrollable` (bool), `windowDrag` (bool, optional) | Reply to `smartTouchProbe` |
 | `maxFPSState` | pv 15 | `enabled` (bool), `maxFPS`, `availableTiers` (array), `encoderSafeFPS`, `requestedFPS`, `effectiveFPS`, `reason` | Mac-authoritative confirmed max-FPS enforcement + diagnostic ceilings (section 6.8) |
 | `mirrorUnavailable` | pv 17 | `reason` (currently always `noUsablePhysicalDisplay`) | Mirror has no usable physical display (headless Mac) — offer the receiver a chance to switch to Extend |
@@ -1244,7 +1244,8 @@ physical panel aspect verbatim (`hello.pixelsWide/High` halved per axis).
 `pv` 14 lets either end choose a Mac-like shape instead, with the Mac
 remaining the authority that actually builds the virtual display.
 
-Both messages carry the same two fields:
+Both messages carry the same fields (the first two are required, the third
+is optional):
 
 * `shape` (string): one of `"automatic"`, `"16:10"`, `"16:9"`, `"3:2"`,
   `"4:3"`, `"5:4"`, `"21:9"`, `"32:9"`, `"1:1"`. Senders MUST ignore a
@@ -1253,6 +1254,17 @@ Both messages carry the same two fields:
   `true` resolves to the receiver's own physical panel aspect (the pre-`pv`-14
   behavior); `false` (the default) resolves to a fixed 16:10. Ignored for
   every explicit ratio.
+* `desktopSize` (string, optional): `"standard"`, `"larger"` or `"largest"`
+  — how large text appears on the Extend desktop. The Mac publishes a
+  smaller virtual desktop in points (factor 1.0 / 0.8 / 0.65 of the
+  standard size, each axis rounded down to even); the capture is still
+  2 x points, so macOS renders at 2x and only the pixel count drops. An
+  absent or unrecognized value means `"standard"`. A Mac that supports it
+  MUST include `desktopSize` in every `extendShapeState`; its presence is
+  how a receiver learns the Mac supports it (no `pv` bump, no `welcome`
+  feature), and a receiver MUST NOT offer a Desktop Size control until it has
+  seen one. A peer that does not know the field ignores it. A request that
+  omits `desktopSize` leaves the Mac's current Desktop Size unchanged.
 
 **`extendShapeRequest`** (receiver -> Mac) asks the Mac to change the active
 Extend shape. The Mac owns the transition exactly like
@@ -1265,7 +1277,10 @@ shape from stream dimensions. Receivers MUST NOT send this below `pv` 14.
 shape/Full-Display setting — after a Mac-originated change (e.g. its own
 Settings UI), after honoring a receiver request, and on every newly
 established session. A receiver MUST treat it as authoritative rather than
-assuming its own request was honored verbatim.
+assuming its own request was honored verbatim. In particular, if a Desktop
+Size change could not be applied and the Mac rolled back to the last usable
+mode, `extendShapeState` reports the `desktopSize` actually in effect so the
+receiver's picker snaps back.
 
 Changing the resolved aspect changes the virtual display's **point**
 dimensions only; the encoded stream is still separately subject to the
@@ -2316,6 +2331,7 @@ This file is versioned by git; the authoritative change log is
 | 2026-11-06 | Additive, no `pv` change: `keyboard` `exactModifiers` on `press`/`down`/`up`, `welcome.features` `exactKeyModifiers` |
 | 2026-11-06 | Additive, no `pv` change: Fill Window on Mac / Restore Previous Size on Mac (section 6.10), `welcome.features` `windowFrame`, `windowFrame`, `windowFrameResult`, `workspaceState` tile `restore` |
 | 2026-11-15 | Additive, no `pv` change: hidden `cursor` reports may carry `x`, `y` outside 0..1 with `"why":"display"` and optional `rx`, `ry`; Window mode `"why":"pane"` with `px`, `py`, `pw`, `ph` (section 6.2, `cursor`) |
+| 2026-11-15 | Additive, no `pv` change: optional `desktopSize` (`"standard"` / `"larger"` / `"largest"`) on `extendShapeRequest` / `extendShapeState` (section 6.7); presence in the state means supported, older peers ignore it |
 ### 6.16 Lock This Mac (`lockMac` / `lockMacResult`)
 
 Offered when the Mac's `welcome.features` lists `lockMac`; works in every display mode.

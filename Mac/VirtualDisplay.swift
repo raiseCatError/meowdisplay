@@ -2,8 +2,10 @@ import Foundation
 import CoreGraphics
 
 /// Wraps the private CGVirtualDisplay API: makes macOS believe a real monitor
-/// is attached. Sized in points at HiDPI (@2x), so a phone with native pixels
-/// W×H gets a virtual display of (W/2)×(H/2) points backed by a W×H framebuffer.
+/// is attached. Sized in points at HiDPI (@2x): a W×H-point mode is backed by
+/// a 2W×2H-pixel framebuffer. The points come from `ExtendDisplaySizing` (the
+/// receiver's panel and the chosen shape), so they are only half the
+/// receiver's native pixels when the shape matches its own aspect.
 final class VirtualDisplay {
 
     private let display: CGVirtualDisplay
@@ -11,6 +13,9 @@ final class VirtualDisplay {
     private let maxPointsPerAxis: Int
     private(set) var pointsWide: Int
     private(set) var pointsHigh: Int
+    /// The physical size declared to macOS at creation. It cannot change
+    /// afterwards: `resize` applies a new mode only.
+    let declaredSizeInMillimeters: CGSize
     private var refreshRate: Int
 
     private var hidpiBackoff = HiDPIEnforcementBackoff()
@@ -39,15 +44,20 @@ final class VirtualDisplay {
           serialNum: UInt32 = 0x0001, productID: UInt32 = 0x4F53,
           refreshRate: Int = 60,
           restoreOrigin: CGPoint? = nil,
+          reservedPointsPerAxis: Int? = nil,
           owner: ObjectIdentifier? = nil,
           onOriginChange: ((CGPoint, CGSize) -> Void)? = nil) {
         self.pointsWide = pointsWide
         self.pointsHigh = pointsHigh
+        declaredSizeInMillimeters = sizeInMillimeters
         self.refreshRate = refreshRate
         // Reserve the longer orientation on both axes. That lets a phone or
         // tablet change orientation by applying a new mode to this *same*
         // virtual monitor instead of removing it and stranding its windows.
-        maxPointsPerAxis = max(pointsWide, pointsHigh)
+        // `reservedPointsPerAxis` lets a caller that publishes a deliberately
+        // smaller desktop (Desktop Size) reserve the UNSCALED long edge, so a
+        // later size change still fits in place. Never below the initial mode.
+        maxPointsPerAxis = max(pointsWide, pointsHigh, reservedPointsPerAxis ?? 0)
         self.originRestore = OriginRestore(target: restoreOrigin)
         self.onOriginChange = onOriginChange
 
@@ -77,7 +87,10 @@ final class VirtualDisplay {
             Log.info("CGVirtualDisplay applySettings FAILED")
             return nil
         }
-        Log.info("virtual display created: id=\(display.displayID) \(pointsWide)x\(pointsHigh)pt @2x")
+        let density = sizeInMillimeters.width > 0 ? Double(pointsWide) / Double(sizeInMillimeters.width) : 0
+        Log.info("virtual display created: id=\(display.displayID) \(pointsWide)x\(pointsHigh)pt @2x "
+            + "declared=\(declaredSizeDescription) reserve=\(maxPointsPerAxis * 2)px "
+            + "density=\(String(format: "%.1f", density))pt/mm")
         // Registered for exactly this object's lifetime (see `deinit`), so
         // every teardown path — disconnect, mode switch, rotation rebuild,
         // a failed probe — releases the record with the display itself.
@@ -106,6 +119,11 @@ final class VirtualDisplay {
                 try? await Task.sleep(for: .milliseconds(settled ? 2000 : 200))
             }
         }
+    }
+
+    /// "WxHmm" for the creation/resize log lines.
+    private var declaredSizeDescription: String {
+        String(format: "%.0fx%.0fmm", Double(declaredSizeInMillimeters.width), Double(declaredSizeInMillimeters.height))
     }
 
     deinit {
@@ -162,10 +180,12 @@ final class VirtualDisplay {
                 originRestore.rearm(at: settled)
                 Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt "
                     + "at (\(Int(origin.x)),\(Int(origin.y))), settled "
-                    + "(\(Int(settled.x)),\(Int(settled.y))) (result \(err.rawValue))")
+                    + "(\(Int(settled.x)),\(Int(settled.y))) (result \(err.rawValue)) "
+                    + "declared=\(declaredSizeDescription) (fixed at creation)")
             }
         } else {
-            Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt")
+            Log.info("virtual display \(display.displayID) resized to \(pointsWide)x\(pointsHigh)pt "
+                + "declared=\(declaredSizeDescription) (fixed at creation)")
         }
         return true
     }

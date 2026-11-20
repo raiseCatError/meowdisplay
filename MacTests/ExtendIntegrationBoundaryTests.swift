@@ -106,4 +106,83 @@ final class ExtendIntegrationBoundaryTests: XCTestCase {
         XCTAssertLessThanOrEqual(t.displayedRect.width, bounds.width + 0.5)
         XCTAssertLessThanOrEqual(t.displayedRect.height, bounds.height + 0.5)
     }
+
+    // MARK: - Declared physical size follows the fitted point mode
+
+    func testPortraitIPhoneHelloDeclaresASizeFromItsOwnPointModeNotTheReceiverAspect() {
+        // Portrait iPhone hello with the default Automatic shape (16:10):
+        // the shape, not the receiver's portrait panel, decides the virtual
+        // display's mode, so the declared size is landscape too.
+        let standard = ExtendDisplayShapePreference.standard
+        let aspect = standard.resolvedAspect(receiverPhysicalAspect: 1290.0 / 2796.0)
+        let points = ExtendDisplaySizing.pointSize(receiverPixelsWide: 1290, receiverPixelsHigh: 2796, aspect: aspect)
+        XCTAssertEqual(points.wide, 1398)
+        XCTAssertEqual(points.high, 874)
+        let mm = ExtendPhysicalSize.millimetres(pointsWide: points.wide, pointsHigh: points.high)
+        XCTAssertEqual(mm, CGSize(width: 311, height: 195))
+
+        // Automatic + Use Full Display keeps the portrait panel, and the
+        // declared width then rests on the horizontal minimum.
+        let full = ExtendDisplayShapePreference(shape: .automatic, useFullDisplay: true)
+        let fullAspect = full.resolvedAspect(receiverPhysicalAspect: 1290.0 / 2796.0)
+        let fullPoints = ExtendDisplaySizing.pointSize(
+            receiverPixelsWide: 1290, receiverPixelsHigh: 2796, aspect: fullAspect)
+        XCTAssertEqual(fullPoints.wide, 644)
+        XCTAssertEqual(fullPoints.high, 1398)
+        let fullMM = ExtendPhysicalSize.millimetres(pointsWide: fullPoints.wide, pointsHigh: fullPoints.high)
+        XCTAssertEqual(fullMM, CGSize(width: ExtendPhysicalSize.minimumWidth, height: 391))
+    }
+
+    // MARK: - Desktop Size through the real pipeline
+
+    func testLargerTextOnAnIPhoneGivesASmallerCaptureWithinTheDecodeCeilingAndTheSameShape() {
+        let preference = ExtendDisplayShapePreference.standard
+        let aspect = preference.resolvedAspect(receiverPhysicalAspect: 2796.0 / 1290.0)
+        let standard = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .standard)
+        let larger = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .larger)
+
+        let ceilingWide = 2560
+        let ceilingHigh = 1600
+        let standardCapture = encodedSize(pointsWide: standard.wide, pointsHigh: standard.high,
+                                          maxWide: ceilingWide, maxHigh: ceilingHigh)
+        let largerCapture = encodedSize(pointsWide: larger.wide, pointsHigh: larger.high,
+                                        maxWide: ceilingWide, maxHigh: ceilingHigh)
+
+        XCTAssertLessThanOrEqual(largerCapture.width, ceilingWide)
+        XCTAssertLessThanOrEqual(largerCapture.height, ceilingHigh)
+        XCTAssertLessThan(largerCapture.width * largerCapture.height,
+                          standardCapture.width * standardCapture.height)
+        // Still a 2x desktop: the capture is not clamped, it is simply smaller.
+        XCTAssertEqual(largerCapture.width, larger.wide * 2)
+        XCTAssertEqual(largerCapture.height, larger.high * 2)
+        // Same shape: Desktop Size changes text size, never the aspect.
+        XCTAssertEqual(Double(larger.wide) / Double(larger.high),
+                       Double(standard.wide) / Double(standard.high), accuracy: 0.02)
+        XCTAssertEqual(Double(largerCapture.width) / Double(largerCapture.height), aspect, accuracy: 0.02)
+    }
+
+    func testLargerTextWithoutADecodeCeilingKeepsTheTwoXCapture() {
+        let aspect = ExtendDisplayShape.defaultAutomaticAspect
+        let larger = ExtendDisplayPlan.resolve(
+            receiverPixelsWide: 2796, receiverPixelsHigh: 1290, aspect: aspect, desktopSize: .larger)
+        let capture = encodedSize(pointsWide: larger.wide, pointsHigh: larger.high)
+        XCTAssertEqual(capture.width, larger.wide * 2)
+        XCTAssertEqual(capture.height, larger.high * 2)
+    }
+    func testDesktopSizeKeepsPhysicalDimensionsFromTheUnscaledPlan() {
+        let aspect = ExtendDisplayShape.defaultAutomaticAspect
+        let standard = ExtendDisplayPlan.resolve(receiverPixelsWide: 2796, receiverPixelsHigh: 1290,
+                                                 aspect: aspect, desktopSize: .standard)
+        let expected = ExtendPhysicalSize.millimetres(pointsWide: standard.wide, pointsHigh: standard.high)
+        for size in ExtendDesktopSize.allCases {
+            let plan = ExtendDisplayPlan.resolve(receiverPixelsWide: 2796, receiverPixelsHigh: 1290,
+                                                aspect: aspect, desktopSize: size)
+            XCTAssertEqual(ExtendPhysicalSize.millimetres(pointsWide: plan.unscaledWide,
+                                                          pointsHigh: plan.unscaledHigh), expected)
+            if size != .standard { XCTAssertLessThan(plan.wide, standard.wide) }
+        }
+    }
+
 }

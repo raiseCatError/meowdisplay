@@ -759,11 +759,14 @@ final class SenderController: ObservableObject {
     @Published var extendShapeDefault = (UserDefaults.standard.dictionary(forKey: "extendShapeDefault")).flatMap {
         (raw: [String: Any]) -> ExtendDisplayShapePreference? in
         guard let rawShape = raw["shape"] as? String, let shape = ExtendDisplayShape(rawValue: rawShape) else { return nil }
-        return ExtendDisplayShapePreference(shape: shape, useFullDisplay: raw["useFullDisplay"] as? Bool ?? false)
+        return ExtendDisplayShapePreference(
+            shape: shape, useFullDisplay: raw["useFullDisplay"] as? Bool ?? false,
+            desktopSize: (raw["desktopSize"] as? String).flatMap(ExtendDesktopSize.init(rawValue:)) ?? .standard)
     } ?? .standard {
         didSet {
             UserDefaults.standard.set(["shape": extendShapeDefault.shape.rawValue,
-                                        "useFullDisplay": extendShapeDefault.useFullDisplay],
+                                        "useFullDisplay": extendShapeDefault.useFullDisplay,
+                                        "desktopSize": extendShapeDefault.desktopSize.rawValue],
                                        forKey: "extendShapeDefault")
         }
     }
