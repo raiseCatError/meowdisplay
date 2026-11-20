@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SystemConfiguration
 
 // MacSenderTransportController — owns the live NWConnection and its
 // Network.framework callback plumbing (viability/path/state handlers, the
@@ -298,15 +299,43 @@ final class MacSenderTransportController: @unchecked Sendable {
         currentPathUsesWiFi = path.usesInterfaceType(.wifi) || route == .awdl
 
         let gatewayHost = NetworkHostDetector.receiverIsGateway(remote: path.remoteEndpoint, gateways: path.gateways)
+        let description = pathDescription(route: route, path: path, conn: conn, peerDevice: peerDevice)
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
-            + " route=\(route.rawValue) direct=\(currentPathDirectLink)"
+            + " route=\(route.rawValue) label=\(description.label) direct=\(currentPathDirectLink)"
             + " local=\(path.localEndpoint.map { "\($0)" } ?? "?") remote=\(path.remoteEndpoint.map { "\($0)" } ?? "?")"
             + " gateways=\(path.gateways.map { "\($0)" }.joined(separator: ","))"
             + " expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
             + (gatewayHost ? " receiverHostsNetwork=true" : ""))
         currentRoute = route
         let sink = statusSink
-        Task { @MainActor in sink.publishTransportPath(route) }
+        Task { @MainActor in sink.publishTransportPath(route, description: description) }
+    }
+
+    /// Checks the live path for a direct Thunderbolt cable. Tests replace it.
+    var hostToHostCableInterfaces: HostToHostCableInterfaceChecking = HostToHostCableInterfaces.current
+
+    /// The user-facing wording for the live path (display only; the route
+    /// and `currentPathDirectLink` are unaffected). Holds for TCP and QUIC.
+    private func pathDescription(route: ConnectionRoute, path: NWPath, conn: NWConnection,
+                                 peerDevice: String?) -> ConnectionPathDescription {
+        let evidence = ConnectionPathEvidence(path: path, fallbackEndpoint: conn.endpoint,
+                                              peerIsMac: peerDevice == "Mac")
+        return ConnectionPathDescription(route: route, evidence: evidence,
+                                         cableInterfaces: hostToHostCableInterfaces)
+    }
+
+    /// Re-publishes the live route and its wording once the hello has named
+    /// the peer: the first report runs before it, when the peer kind (part
+    /// of the direct-cable evidence) is still unknown. The route value is
+    /// the one already reported; nothing else is reclassified.
+    func republishPathDescription(for conn: NWConnection) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard connection === conn, connectionReady, let route = currentRoute,
+              let path = conn.currentPath else { return }
+        let description = pathDescription(route: route, path: path, conn: conn,
+                                          peerDevice: delegate?.transportPeerDeviceKind())
+        let sink = statusSink
+        Task { @MainActor in sink.publishTransportPath(route, description: description) }
     }
 
     /// True when the far end of a connection is a link-local address
@@ -395,31 +424,24 @@ final class MacSenderTransportController: @unchecked Sendable {
             guard upgradeProbes.isEmpty else { return }   // a round is still in flight
         }
 
-        var candidates: [NWEndpoint.Host] = []
-        var linkLocal: [NWEndpoint.Host] = []
         let scopes = Self.candidateInterfaceNames()
-        for addr in peerAddrs {
-            if addr.lowercased().hasPrefix("fe80:") {
-                for iface in scopes {
-                    linkLocal.append(NWEndpoint.Host("\(addr)%\(iface)"))
-                }
-            } else {
-                candidates.append(NWEndpoint.Host(addr))
-            }
-        }
-        candidates.append(contentsOf: linkLocal)
-        guard !candidates.isEmpty else { return }
-        let candidateNames = candidates.prefix(16).map { "\($0)" }
+        // At most 16 dials: the same list as always up to 16; over it,
+        // duplicates and Wi-Fi-scoped fe80 dials (prohibited below) give way.
+        let selection = CableCandidateSelection.probeRound(peerAddrs: peerAddrs, scopes: scopes,
+                                                           wifiScopes: Self.wifiInterfaceNames)
+        guard !selection.dials.isEmpty else { return }
+        let candidates = selection.dials.map { NWEndpoint.Host($0.host) }
+        let candidateNames = candidates.map { "\($0)" }
         if candidateNames != lastLoggedCandidates {
             lastLoggedCandidates = candidateNames
             Log.info("probing \(candidateNames.count) candidate cable paths"
-                     + " (direct \(candidates.count - linkLocal.count),"
+                     + " (direct \(selection.directCount),"
                      + " fe80 scopes \(scopes.joined(separator: ","))) — repeats every 10s")
         }
         probeRoundGeneration += 1
         let round = probeRoundGeneration
 
-        for host in candidates.prefix(16) {
+        for host in candidates {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
             guard case .tcp(_, let config) = transport,
@@ -515,6 +537,17 @@ final class MacSenderTransportController: @unchecked Sendable {
             }
         }
         becomeReady(conn, transport: transport)
+    }
+
+    /// BSD names of this Mac's Wi-Fi interfaces (public SystemConfiguration
+    /// inventory). Consulted only when a probe round is over its cap.
+    private static func wifiInterfaceNames() -> Set<String> {
+        let interfaces = (SCNetworkInterfaceCopyAll() as? [SCNetworkInterface]) ?? []
+        return Set(interfaces.compactMap { interface -> String? in
+            guard let type = SCNetworkInterfaceGetInterfaceType(interface),
+                  (type as String) == (kSCNetworkInterfaceTypeIEEE80211 as String) else { return nil }
+            return SCNetworkInterfaceGetBSDName(interface) as String?
+        })
     }
 
     /// Local zones a link-local probe could ride: interfaces that are up,

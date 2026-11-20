@@ -342,6 +342,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         get { statusSink.onTransportPath }
         set { statusSink.onTransportPath = newValue }
     }
+    // The user-facing wording of that path ("Thunderbolt" for a
+    // Mac-to-Mac Thunderbolt IP link, else the route); fired right after
+    // `onTransportPath`, also when the route itself did not change.
+    @MainActor var onTransportPathDescription: ((ConnectionPathDescription?) -> Void)? {
+        get { statusSink.onTransportPathDescription }
+        set { statusSink.onTransportPathDescription = newValue }
+    }
     // The secure network protocol (TCP/QUIC) the established connection
     // rides; nil while disconnected and on USB (a route, not a protocol).
     @MainActor var onNetworkProtocol: ((NetworkTransportProtocol?) -> Void)? {
@@ -4640,8 +4647,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// dead this many rounds is not coming back by itself, and ending the
     /// session (display torn down, reconnect is the user's call) beats
     /// hammering WindowServer with create/destroy cycles forever.
-    private func recoveryRoundEnded() {
-        guard videoEnabled, captureStateSnapshot().shouldRetryCapture else { return }
+    private func recoveryRoundEnded(interactive: Bool? = nil) {
+        // The audio-only carrier needs the same bounded retries as video.
+        guard videoEnabled || desiredAudioEnabled,
+              captureStateSnapshot().shouldRetryCapture else { return }
         guard stream == nil else {
             captureRecoveryBudget.reset()
             return
@@ -4649,7 +4658,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // A round run only for the lock screen view (#255) doesn't count: if
         // ScreenCaptureKit can't capture this locked console, the session must
         // not end for it. The view itself is bounded (idle timeout, unlock).
-        if !LockScreenCapturePolicy.failedRoundCounts(interactive: consoleIsInteractive) {
+        if !LockScreenCapturePolicy.failedRoundCounts(interactive: interactive ?? consoleIsInteractive) {
             scheduleCaptureRecovery()
             return
         }
@@ -6067,6 +6076,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let conn = transportController.currentConnection {
                     transportController.refreshDirectLinkClassification(
                         for: conn, transport: transport, peerDevice: lastHello?.device)
+                    // The path's wording also depends on the peer kind.
+                    transportController.republishPathDescription(for: conn)
                 }
                 let helloSelfBox = self.selfBox
                 Task { @MainActor in
@@ -8744,6 +8755,32 @@ extension MacSender {
     /// Waits for everything already queued on the sender queue.
     func settleForTesting() async throws {
         try await onQueue { _ in }
+    }
+
+    struct CaptureRecoveryRoundProbe: Sendable {
+        let failedAttempts: Int
+        let phase: String
+        let endedSession: Bool
+    }
+
+    /// Exercises failed-round bookkeeping without starting a capture or
+    /// scheduling a real retry. Tests call this on a fresh, never-started sender.
+    func failedCaptureRecoveryRoundsForTesting(video: Bool, audio: Bool, interactive: Bool,
+                                              rounds: Int) async throws -> [CaptureRecoveryRoundProbe] {
+        try await onQueue { sender in
+            sender.videoEnabled = video
+            sender.desiredAudioEnabled = audio
+            // Suppress scheduleCaptureRecovery's wall-clock callback; the
+            // test advances completed rounds explicitly instead.
+            sender.captureRecoveryScheduled = true
+            return (0..<rounds).map { _ in
+                sender.recoveryRoundEnded(interactive: interactive)
+                return CaptureRecoveryRoundProbe(
+                    failedAttempts: sender.captureRecoveryBudget.failedAttempts,
+                    phase: sender.captureStateSnapshot().phase.rawValue,
+                    endedSession: sender.goneReported)
+            }
+        }
     }
 
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
