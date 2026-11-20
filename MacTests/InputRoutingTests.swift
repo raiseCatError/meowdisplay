@@ -257,8 +257,10 @@ final class InputRoutingTests: XCTestCase {
                        CGPoint(x: -1_920, y: -240))
         XCTAssertEqual(InputCoordinateMapper.point(x: 0.5, y: 0.5, in: bounds),
                        CGPoint(x: -960, y: 300))
+        // 1.0 would be the neighbouring display's first column: the last pixel instead
+        // (CursorTargetingTests).
         XCTAssertEqual(InputCoordinateMapper.point(x: 1, y: 1, in: bounds),
-                       CGPoint(x: 0, y: 840))
+                       CGPoint(x: -1, y: 839))
     }
 
     func testMirrorTargetsCapturedPhysicalDisplay() {

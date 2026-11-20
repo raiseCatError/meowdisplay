@@ -1806,6 +1806,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.globalPoint(at: WorkspacePoint(x: x, y: y)) }
     }
 
+    func cancelBinding() {
+        inputLock.withLock { targeting.cancelBinding() }
+    }
+
     func keyboardTargetReady() -> Bool {
         inputLock.lock()
         defer { inputLock.unlock() }
@@ -1855,10 +1859,33 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         inputLock.withLock { targeting.canvasPoint(forGlobal: g) }
     }
 
-    /// The cursor the receiver draws: in Trackpad mode the workspace pointer (in the focused
-    /// pane, always shown there), otherwise the Mac's own cursor while it is over a pane.
-    func cursorPlacement(forGlobal g: CGPoint) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
-        inputLock.withLock { pointerDriven ? targeting.pointerPlacement() : targeting.cursorPlacement(forGlobal: g) }
+    /// The cursor the receiver draws: in Trackpad mode, while this receiver may move the
+    /// pointer, the workspace pointer (in the focused pane, always shown there); otherwise
+    /// the Mac's own cursor while it is over a pane. A receiver that can't move the pointer
+    /// (View Only, no grant, paused, lock screen) never sees the workspace pointer as the
+    /// cursor: nothing moves it, so it would sit at its resume spot (the pane's centre at
+    /// first) while the real Mac cursor is elsewhere.
+    func cursorPlacement(forGlobal g: CGPoint, receiverMayMovePointer: Bool) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
+        inputLock.withLock {
+            Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
+                ? targeting.pointerPlacement() : targeting.cursorPlacement(forGlobal: g)
+        }
+    }
+
+    /// Where the real Mac cursor is relative to the active pane while it is over none, for the
+    /// receiver's off-pane locator. Nil while the report is the workspace pointer (the receiver
+    /// moves that one itself).
+    func offPaneCursor(forGlobal g: CGPoint, receiverMayMovePointer: Bool) -> (x: Double, y: Double, pane: WorkspaceRect)? {
+        inputLock.withLock {
+            Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
+                ? nil : targeting.offPaneCursor(forGlobal: g)
+        }
+    }
+
+    /// Whether the cursor report is the workspace pointer (a receiver resume position)
+    /// rather than the Mac's real cursor. Pure, for tests.
+    static func reportsWorkspacePointer(pointerDriven: Bool, receiverMayMovePointer: Bool) -> Bool {
+        pointerDriven && receiverMayMovePointer
     }
 
     /// The receiver's input mode from its hello: Trackpad shows the pane cursor from the start.

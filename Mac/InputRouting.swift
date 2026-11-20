@@ -19,10 +19,57 @@ enum InputTargetResolver {
 }
 
 enum InputCoordinateMapper {
-    /// Map top-left-origin normalized video coordinates into global CG bounds.
-    static func point(x: Double, y: Double, in bounds: CGRect) -> CGPoint {
-        CGPoint(x: bounds.minX + x * bounds.width,
-                y: bounds.minY + y * bounds.height)
+    /// Map top-left-origin normalized video coordinates into global CG bounds, kept on the
+    /// display: 1.0, or anything outside 0...1, lands on its edge pixel and never on the
+    /// neighbouring display that starts at `maxX`/`maxY`. `pixelScale` is the display's
+    /// pixels per point, so the edge is its last pixel.
+    static func point(x: Double, y: Double, in bounds: CGRect, pixelScale: Double = 1) -> CGPoint {
+        clamp(CGPoint(x: bounds.minX + x * bounds.width, y: bounds.minY + y * bounds.height),
+              into: bounds, pixelScale: pixelScale)
+    }
+
+    /// `p` moved onto `bounds`, at most onto its last pixel column/row (`CGRect.contains`
+    /// excludes `maxX`/`maxY`, which belong to whatever display is next to it).
+    static func clamp(_ p: CGPoint, into bounds: CGRect, pixelScale: Double = 1) -> CGPoint {
+        guard bounds.width > 0, bounds.height > 0 else { return p }
+        let inset = 1 / max(pixelScale, 1)
+        return CGPoint(x: min(max(p.x, bounds.minX), max(bounds.minX, bounds.maxX - inset)),
+                       y: min(max(p.y, bounds.minY), max(bounds.minY, bounds.maxY - inset)))
+    }
+}
+
+/// Mirror/Extend: where a receiver's pointer input starts on its target display.
+///
+/// The Mac cursor is the user's: it may be on any display, moved by the physical mouse.
+/// Receiver input still only ever acts on the receiver's own display. When the cursor is on
+/// that display, input starts from it. When it is elsewhere, input starts from the last spot
+/// the cursor was seen on that display (this session's re-entry point), or the display's
+/// centre when there is none, and the caller first moves the cursor there. Nothing here
+/// moves the cursor by itself: only a receiver input event does, never a connect, mode
+/// change or physical movement. Stored normalized, so it survives the display moving in the
+/// arrangement; a resize keeps it at the same relative spot.
+struct DisplayReentryPoint: Equatable {
+    /// The last spot (normalized to the display) the cursor was seen on the target display.
+    private(set) var normalized: CGPoint?
+
+    /// Remember `p` (global points) when it is on `bounds`.
+    mutating func note(_ p: CGPoint, in bounds: CGRect) {
+        guard bounds.width > 0, bounds.height > 0, bounds.contains(p) else { return }
+        normalized = CGPoint(x: (p.x - bounds.minX) / bounds.width, y: (p.y - bounds.minY) / bounds.height)
+    }
+
+    /// Where receiver input starts. `cursorOnDisplay` false: the cursor is on another display
+    /// (or none), so it has to be moved to `point` before a press or scroll. Nil while the
+    /// display has no bounds (gone): then the input goes nowhere.
+    mutating func origin(cursor: CGPoint, in bounds: CGRect,
+                         pixelScale: Double = 1) -> (point: CGPoint, cursorOnDisplay: Bool)? {
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        if bounds.contains(cursor) {
+            note(cursor, in: bounds)
+            return (cursor, true)
+        }
+        let n = normalized ?? CGPoint(x: 0.5, y: 0.5)
+        return (InputCoordinateMapper.point(x: n.x, y: n.y, in: bounds, pixelScale: pixelScale), false)
     }
 }
 

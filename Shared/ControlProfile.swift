@@ -989,6 +989,10 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Purely visual decoration for the mapped interaction surface shown
     /// while video production is off. It never participates in hit-testing.
     var showSurfaceGrid = true
+    /// An arrow at the edge of the picture pointing at the Mac pointer while it is somewhere
+    /// this receiver isn't showing (another display, or zoomed or panned out of view). It
+    /// never stands for the pointer itself and never affects input.
+    var showCursorLocator = true
     var pinchTarget = ReceiverGestureTarget.viewport
     /// Defaults to Disabled (schema 16): an accidental twist while pinching
     /// should never tilt the Mac display. Viewport rotation stays one
@@ -1140,6 +1144,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
+        // Absent (added 2026-11-15): on, like a new install. No schema bump.
+        showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
         rotateTarget = try value(.rotateTarget, fallback.rotateTarget)
         snapRotation = try value(.snapRotation, fallback.snapRotation)
