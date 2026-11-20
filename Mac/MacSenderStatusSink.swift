@@ -48,6 +48,11 @@ final class MacSenderStatusSink: Sendable {
     // changes. Nil while disconnected; the UI never infers a route from the
     // requested target.
     var onTransportPath: ((ConnectionRoute?) -> Void)?
+    // Fired right after `onTransportPath` with the path's user-facing
+    // wording (display only — see `ConnectionPathDescription`). Fires on
+    // every report, so a LAN path that becomes a direct cable still updates
+    // the UI although the route stays `.lan`.
+    var onTransportPathDescription: ((ConnectionPathDescription?) -> Void)?
     // Fired with the secure network protocol (TCP/QUIC) of each established
     // connection; nil while disconnected and on USB.
     var onNetworkProtocol: ((NetworkTransportProtocol?) -> Void)?
@@ -118,8 +123,14 @@ final class MacSenderStatusSink: Sendable {
         onPeerClosed?()
     }
 
+    /// A route with no path evidence: its wording is the plain route label.
     func publishTransportPath(_ route: ConnectionRoute?) {
+        publishTransportPath(route, description: route.map(ConnectionPathDescription.init(route:)))
+    }
+
+    func publishTransportPath(_ route: ConnectionRoute?, description: ConnectionPathDescription?) {
         onTransportPath?(route)
+        onTransportPathDescription?(description)
     }
 
     func publishNetworkProtocol(_ networkProtocol: NetworkTransportProtocol?) {

@@ -37,7 +37,7 @@ struct ReceiverDeviceDetailView: View {
             Section("Overview") {
                 if let entry {
                     LabeledContent("Status", value: CanonicalRuntimeStatus.entryStatusText(
-                        mode: entry.mode, route: entry.route, phase: entry.phase))
+                        mode: entry.mode, routeLabel: entry.routeLabel, phase: entry.phase))
                 } else {
                     LabeledContent("Status", value: String(localized: "Paired · Offline"))
                 }
@@ -265,9 +265,9 @@ struct ReceiverDeviceDetailView: View {
                     Text(option.title).tag(option)
                 }
             }
-            if let session, let route = session.route {
-                LabeledContent("Currently", value: session.networkProtocol.map { "\($0.title) · \(route.rawValue)" }
-                    ?? route.rawValue)
+            if let session, let route = session.routeLabel {
+                LabeledContent("Currently", value: session.networkProtocol.map { "\($0.title) · \(route)" }
+                    ?? route)
             }
         } header: {
             Text("Network")

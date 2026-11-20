@@ -27,17 +27,27 @@ enum CanonicalRuntimeStatus {
     /// "Mirroring · LAN" / "Extending · Remote" / "Extending" when the route
     /// isn't known yet (still dialing).
     static func headline(mode: CaptureMode, route: ConnectionRoute?) -> String {
+        headline(mode: mode, routeLabel: route?.rawValue)
+    }
+
+    /// Same, with the route already worded for display
+    /// (`DeviceSession.routeLabel`, e.g. "Thunderbolt").
+    static func headline(mode: CaptureMode, routeLabel: String?) -> String {
         headline(verb: mode == .mirror
                  ? String(localized: "Mirroring", comment: "Status: showing a copy of a Mac display on the device.")
                  : String(localized: "Extending", comment: "Status: the device is acting as an extra Mac display."),
-                 route: route)
+                 routeLabel: routeLabel)
     }
 
     /// The general "<verb> · <route>" shape `headline(mode:route:)` builds
     /// for the healthy case, generalized so a phase (e.g. "Paused") can
     /// reuse the exact same route formatting instead of a second literal.
     static func headline(verb: String, route: ConnectionRoute?) -> String {
-        route.map { "\(verb) · \($0.rawValue)" } ?? verb
+        headline(verb: verb, routeLabel: route?.rawValue)
+    }
+
+    static func headline(verb: String, routeLabel: String?) -> String {
+        routeLabel.map { "\(verb) · \($0)" } ?? verb
     }
 
     /// "Idle" while no session has completed the application handshake,
@@ -90,9 +100,14 @@ enum CanonicalRuntimeStatus {
     /// showing a stale "connected"-shaped string.
     static func entryStatusText(mode: CaptureMode, route: ConnectionRoute?,
                                  phase: CanonicalConnectionPhase) -> String {
+        entryStatusText(mode: mode, routeLabel: route?.rawValue, phase: phase)
+    }
+
+    static func entryStatusText(mode: CaptureMode, routeLabel: String?,
+                                 phase: CanonicalConnectionPhase) -> String {
         switch phase {
-        case .connected: return headline(mode: mode, route: route)
-        case .paused: return headline(verb: String(localized: "Paused"), route: route)
+        case .connected: return headline(mode: mode, routeLabel: routeLabel)
+        case .paused: return headline(verb: String(localized: "Paused"), routeLabel: routeLabel)
         case .reconnecting: return String(localized: "Reconnecting…")
         case .awaitingApproval: return String(localized: "Waiting for approval…")
         case .lost: return String(localized: "Connection Lost")
@@ -106,9 +121,15 @@ enum CanonicalRuntimeStatus {
     static func aggregateStatusText(
         entries: [(mode: CaptureMode, route: ConnectionRoute?, phase: CanonicalConnectionPhase)]
     ) -> String {
+        aggregateStatusText(entries: entries.map { (mode: $0.mode, routeLabel: $0.route?.rawValue, phase: $0.phase) })
+    }
+
+    static func aggregateStatusText(
+        entries: [(mode: CaptureMode, routeLabel: String?, phase: CanonicalConnectionPhase)]
+    ) -> String {
         guard !entries.isEmpty else { return String(localized: "Idle") }
         if entries.count == 1, let only = entries.first {
-            return entryStatusText(mode: only.mode, route: only.route, phase: only.phase)
+            return entryStatusText(mode: only.mode, routeLabel: only.routeLabel, phase: only.phase)
         }
         switch aggregatePhase(entryPhases: entries.map(\.phase)) {
         case .lost: return String(localized: "Connection Lost")

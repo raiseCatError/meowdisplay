@@ -298,15 +298,43 @@ final class MacSenderTransportController: @unchecked Sendable {
         currentPathUsesWiFi = path.usesInterfaceType(.wifi) || route == .awdl
 
         let gatewayHost = NetworkHostDetector.receiverIsGateway(remote: path.remoteEndpoint, gateways: path.gateways)
+        let description = pathDescription(route: route, path: path, conn: conn, peerDevice: peerDevice)
         Log.info("connection path to \(endpointName): \(names.joined(separator: ","))"
-            + " route=\(route.rawValue) direct=\(currentPathDirectLink)"
+            + " route=\(route.rawValue) label=\(description.label) direct=\(currentPathDirectLink)"
             + " local=\(path.localEndpoint.map { "\($0)" } ?? "?") remote=\(path.remoteEndpoint.map { "\($0)" } ?? "?")"
             + " gateways=\(path.gateways.map { "\($0)" }.joined(separator: ","))"
             + " expensive=\(path.isExpensive) constrained=\(path.isConstrained)"
             + (gatewayHost ? " receiverHostsNetwork=true" : ""))
         currentRoute = route
         let sink = statusSink
-        Task { @MainActor in sink.publishTransportPath(route) }
+        Task { @MainActor in sink.publishTransportPath(route, description: description) }
+    }
+
+    /// Checks the live path for a direct Thunderbolt cable. Tests replace it.
+    var hostToHostCableInterfaces: HostToHostCableInterfaceChecking = HostToHostCableInterfaces.current
+
+    /// The user-facing wording for the live path (display only; the route
+    /// and `currentPathDirectLink` are unaffected). Holds for TCP and QUIC.
+    private func pathDescription(route: ConnectionRoute, path: NWPath, conn: NWConnection,
+                                 peerDevice: String?) -> ConnectionPathDescription {
+        let evidence = ConnectionPathEvidence(path: path, fallbackEndpoint: conn.endpoint,
+                                              peerIsMac: peerDevice == "Mac")
+        return ConnectionPathDescription(route: route, evidence: evidence,
+                                         cableInterfaces: hostToHostCableInterfaces)
+    }
+
+    /// Re-publishes the live route and its wording once the hello has named
+    /// the peer: the first report runs before it, when the peer kind (part
+    /// of the direct-cable evidence) is still unknown. The route value is
+    /// the one already reported; nothing else is reclassified.
+    func republishPathDescription(for conn: NWConnection) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard connection === conn, connectionReady, let route = currentRoute,
+              let path = conn.currentPath else { return }
+        let description = pathDescription(route: route, path: path, conn: conn,
+                                          peerDevice: delegate?.transportPeerDeviceKind())
+        let sink = statusSink
+        Task { @MainActor in sink.publishTransportPath(route, description: description) }
     }
 
     /// True when the far end of a connection is a link-local address
