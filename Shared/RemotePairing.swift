@@ -421,6 +421,14 @@ enum PairingCopy {
     static let ownerAuthTitle = "Confirm it's you…"
     static let ownerAuthHelper = "Use Touch ID or enter your password to finish pairing."
 
+    /// After a press on Codes Match / Re-pair that came from software. The
+    /// press may not have been the owner's (a device controlling this Mac
+    /// can click), so this says what happened and when approving is right,
+    /// and never asks to press again.
+    static var refusedGrant: String {
+        String(localized: "Nothing was approved: that click came from software, such as Screen Sharing or a device controlling this Mac, not from a mouse, trackpad or keyboard connected to it. Approve only if you started this pairing and the codes match, and use this Mac's own mouse, trackpad or keyboard.")
+    }
+
     static func connectingHelper(target: RemotePairingTarget) -> String {
         "Make sure Pair Over Remote is turned on on the \(target.noun)."
     }

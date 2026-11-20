@@ -130,4 +130,107 @@ final class PairingPromptModelTests: XCTestCase {
         XCTAssertEqual(accepted, 0)
     }
 
+    func testRefusedGrantIsVisibleOnlyForThePendingAttempt() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        model.noteRefusedGrant()
+        XCTAssertFalse(model.grantRefused)
+        let first = Task { @MainActor in await model.request(self.pending()) }
+        await Task.yield()
+        model.noteRefusedGrant()
+        model.noteRefusedGrant()
+        XCTAssertTrue(model.grantRefused)
+        XCTAssertNotNil(model.pending)
+        model.decide(accept: false)
+        let accepted = await first.value
+        XCTAssertFalse(accepted)
+        XCTAssertFalse(model.grantRefused)
+        let second = Task { @MainActor in await model.request(self.pending("peer-b")) }
+        await Task.yield()
+        XCTAssertFalse(model.grantRefused)
+        model.decide(accept: false)
+        _ = await second.value
+    }
+
+    func testRefusedGrantDoesNotPreventTimeoutOrAuthorizeLater() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 50_000_000)
+        var accepted = 0
+        model.onAccepted = { _ in accepted += 1 }
+        let attempt = Task { @MainActor in await model.request(self.pending()) }
+        await Task.yield()
+        model.noteRefusedGrant()
+        XCTAssertTrue(model.grantRefused)
+        let result = await attempt.value
+        XCTAssertFalse(result)
+        XCTAssertFalse(model.grantRefused)
+        model.decide(accept: true)
+        XCTAssertEqual(accepted, 0)
+        XCTAssertNil(model.pending)
+    }
+
+    // MARK: Refused presses (#236 review C5)
+
+    /// Repeated injected clicks: the explanation shows, but the announcement
+    /// is asked for only once per prompt; the next prompt starts over.
+    func testRepeatedRefusalsAnnounceOncePerPrompt() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        XCTAssertFalse(model.noteRefusedGrant(), "no prompt: nothing to explain or announce")
+        let first = Task { @MainActor in await model.request(self.pending()) }
+        await Task.yield()
+        XCTAssertTrue(model.noteRefusedGrant())
+        for _ in 0..<20 { XCTAssertFalse(model.noteRefusedGrant()) }
+        XCTAssertTrue(model.grantRefused)
+        model.decide(accept: false)
+        _ = await first.value
+        XCTAssertFalse(model.grantRefused, "the flag resets with the prompt")
+        XCTAssertFalse(model.noteRefusedGrant(), "nothing pending any more")
+        let second = Task { @MainActor in await model.request(self.pending("peer-b")) }
+        await Task.yield()
+        XCTAssertFalse(model.grantRefused)
+        XCTAssertTrue(model.noteRefusedGrant(), "a new prompt announces again, once")
+        XCTAssertFalse(model.noteRefusedGrant())
+        model.decide(accept: false)
+        _ = await second.value
+    }
+
+    /// Negative: any number of refused presses leaves the attempt exactly as
+    /// it was. Nothing is accepted, the same code stays up, no waiting state
+    /// starts, and only a real decision (here the owner's Cancel) ends it.
+    func testRefusedGrantNeverResolvesOrExtendsTheAttempt() async {
+        let model = PairingPromptModel.granting(timeoutNanoseconds: 5_000_000_000)
+        var accepted = 0
+        model.onAccepted = { _ in accepted += 1 }
+        let shown = pending(sas: "314 159")
+        final class Finished { var value = false }
+        let finished = Finished()
+        let attempt = Task { @MainActor in
+            let result = await model.request(shown)
+            finished.value = true
+            return result
+        }
+        await Task.yield()
+        for _ in 0..<50 { model.noteRefusedGrant() }
+        await Task.yield()
+        XCTAssertEqual(model.pending, shown)
+        XCTAssertNil(model.confirmedLocally)
+        XCTAssertFalse(model.isAuthenticating)
+        XCTAssertFalse(finished.value, "a refused press never resolves the attempt")
+        XCTAssertEqual(accepted, 0)
+        model.decide(accept: false)
+        let result = await attempt.value
+        XCTAssertFalse(result)
+        XCTAssertEqual(accepted, 0)
+    }
+
+    /// The explanation says what happened and when approving is right, and
+    /// never coaches pressing again: the press may have come from a device
+    /// controlling this Mac.
+    func testRefusalCopyNeverAsksToTryAgain() {
+        let text = PairingCopy.refusedGrant
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("try again"))
+        XCTAssertTrue(text.hasPrefix("Nothing was approved"))
+        XCTAssertTrue(text.contains("device controlling this Mac"))
+        XCTAssertTrue(text.contains("started this pairing"))
+        XCTAssertTrue(text.contains("codes match"))
+        XCTAssertTrue(text.contains("this Mac's own mouse, trackpad or keyboard"))
+    }
 }

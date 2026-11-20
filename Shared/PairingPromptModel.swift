@@ -8,6 +8,20 @@ import Foundation
 final class PairingPromptModel: ObservableObject {
     @Published private(set) var pending: PendingPairing?
     @Published private(set) var status: String?
+    /// Presentation feedback only; it never resolves or extends the attempt.
+    @Published private(set) var grantRefused = false
+
+    /// A press on the approval that `ConsentGrant` refused (it came from
+    /// software). Shows the explanation; never resolves or extends the
+    /// attempt. Returns true only for the first refusal of this prompt, so
+    /// the spoken announcement is made once: repeated injected clicks can't
+    /// keep VoiceOver talking. A new prompt starts over.
+    @discardableResult
+    func noteRefusedGrant() -> Bool {
+        guard decision != nil, pending != nil else { return false }
+        defer { grantRefused = true }
+        return !grantRefused
+    }
     /// Set once THIS device accepted the SAS, until the attempt ends. Purely
     /// presentational ("Waiting for confirmation…"): it never means trust was
     /// written or the pairing completed.
@@ -129,6 +143,7 @@ final class PairingPromptModel: ObservableObject {
             decision = continuation
             if let token { owner = token }
             confirmedLocally = nil
+            grantRefused = false
             pending = value
             status = nil
             let sleep = timeoutSleep
@@ -282,6 +297,7 @@ final class PairingPromptModel: ObservableObject {
         decision = nil
         let accepted = value ? pending : nil
         confirmedLocally = accepted
+        grantRefused = false
         pending = nil
         Log.info("pairDebug: confirmationResolved value=\(value) reason=\(reason)")
         if let accepted { onAccepted?(accepted) }

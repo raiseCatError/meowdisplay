@@ -515,3 +515,17 @@ private final class ClipFramesBox: @unchecked Sendable {
     let frames: [[String: Any]]
     init(_ frames: [[String: Any]]) { self.frames = frames }
 }
+
+/// Home over a kept session (#121) leaves clipboard sharing as the person set it up: Clipboard
+/// on, "Send copies made in other apps when MeowDisplay comes back" on, and the Mac's owner
+/// allowed it. So a copy made in another app still goes to the Mac when MeowDisplay comes back,
+/// even with Home showing. The kept-session card says so in one line, so Home isn't read as
+/// "out of the session" for the clipboard. Nothing about sharing changes here.
+enum KeptSessionClipboardNote {
+    /// The card's note, or nil: only while copies go to the Mac on their own (`canSendToMac`
+    /// and `autoSend`). Asking first (`autoSend` off) sends nothing by itself, so no note.
+    static func text(keptSession: Bool, canSendToMac: Bool, autoSend: Bool, macName: String) -> String? {
+        guard keptSession, canSendToMac, autoSend else { return nil }
+        return String(localized: "Clipboard sharing with \(macName) is still on. Copies you make in other apps go to it when you come back.")
+    }
+}

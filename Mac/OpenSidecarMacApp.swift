@@ -3552,6 +3552,8 @@ final class SenderController: ObservableObject {
         /// connected, waiting for approval, or still dialing. Nil when idle or failed.
         let activeSessionID: String?
         let connection: KnownDeviceConnection
+        /// Resolved while the row is free or held by an automatic attempt an
+        /// explicit Connect may replace (`KnownDeviceRowActions.needsTarget`).
         let resolvedTarget: ConnectionTarget?
         let inputPolicy: PeerInputRequestPolicy
     }
@@ -3562,14 +3564,17 @@ final class SenderController: ObservableObject {
                 id: session.id, deviceID: session.deviceID, intendedPeerID: session.intendedPeerID,
                 authenticated: session.applicationAuthenticated, admitted: session.invitationAdmitted,
                 failed: session.failed, status: session.status,
-                automatic: session.invitation.initiator == .sender && session.invitation.intent == .automatic)
+                automatic: PendingConnectPolicy.SessionSnapshot.replacedByExplicitConnect(
+                    failed: session.failed, admitted: session.invitationAdmitted, invitation: session.invitation,
+                    isContinuation: session.isContinuation))
         }
         return TrustStore.shared.pinnedPeers().map { peer in
             let connection = PendingConnectPolicy.connection(forPeerID: peer.peerID, sessions: snapshots)
             let active = connection.occupyingSessionID
             return KnownDeviceEntry(
                 id: peer.peerID, name: peer.displayName, activeSessionID: active, connection: connection,
-                resolvedTarget: active == nil ? resolvedTarget(forPeerID: peer.peerID) : nil,
+                resolvedTarget: KnownDeviceRowActions.needsTarget(for: connection)
+                    ? resolvedTarget(forPeerID: peer.peerID) : nil,
                 inputPolicy: ReceiverInputAuthorizationStore.policy(peerID: peer.peerID))
         }
     }
