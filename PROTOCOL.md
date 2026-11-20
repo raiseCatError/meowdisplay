@@ -641,7 +641,7 @@ Coordinates use the conventions of section 7.
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
 | `keyboardState` | additive (welcome feature `textCaret`) | `open` (bool) | The on-screen keyboard opened or closed, so the sender can follow the text caret (section 6.11) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
-| `stats` | pv 1 | free-form | Receiver-side telemetry for the sender's log |
+| `stats` | pv 1 | free-form, `diag`? | Receiver-side telemetry for the sender's log |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
 | `closing` | pv 2 | none | App quit; session ends for good |
 
@@ -889,7 +889,8 @@ rather than disappearing.
 diagnosable from one log file. The official receiver sends it every ~5 s
 with fields like `transport`, `fps`, `mbps`, `e2e50`, `e2e95`, `enc50`,
 `rtt`, `stalls`, `dec50`, `ph50`, `ph95`, `offsetKnown`. No field is
-normative; senders MUST accept any object.
+normative; senders MUST accept any object. While streaming diagnostics are
+on, the official receiver adds `diag` (section 6.2.1).
 
 **`sleeping`** and **`closing`** let the
 sender distinguish "device locked, it will come back" (keep listening for a
@@ -916,7 +917,7 @@ section 4.
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
 | `pong` | pv 1 | `t`, `mt` | Clock-sync reply |
-| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`? | Liveness + sender health |
+| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`?, `diag`? | Liveness + sender health |
 | `cursor` | pv 1 | `x`?, `y`?, `v` | Cursor position/visibility |
 | `cursorImg` | pv 1 | `nw`, `nh`, `ax`, `ay`, `png` | Cursor sprite |
 | `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
@@ -946,9 +947,40 @@ of the reply. See section 8.1.
 the receiver's performance overlay: `encDrops`/`netDrops` (frames dropped
 at the encoder / network stage), `drops` (legacy combined counter, superseded
 by `encDrops`), `pending` (in-flight sends), `inp50`/`inp95` (input latency
-percentiles, ms), `capFps` (capture rate). All fields optional,
-informational only. Note the asymmetry: the receiver's `ping` solicits a
-`pong`; the sender's does not.
+percentiles, ms), `capFps` (capture rate), and `diag` while streaming
+diagnostics are on (section 6.2.1). All fields optional, informational
+only. Note the asymmetry: the receiver's `ping` solicits a `pong`; the
+sender's does not.
+
+#### 6.2.1 Streaming diagnostics summary (`diag`)
+
+Optional and additive: no `pv` bump, no welcome feature. An end with
+streaming diagnostics switched on (docs/performance/diagnostics.md) adds a
+`diag` object to messages it already sends: the sender to its `ping`
+(every ~2 s), the receiver to its `stats` (every ~5 s). A peer that does not
+know it ignores it; absence means "no diagnostics" and changes nothing. It
+never affects trust, input, capture, encoding or presentation; it only feeds
+the other end's diagnostics view and its bottleneck classifier.
+
+`diag` is `{"v":1, ...}` with numbers only (rounded to 0.1), all optional,
+describing the sender's last 5 s window. Unknown `v` or keys are ignored;
+values are clamped to 0…1,000,000 and anything that is not a number is
+dropped.
+
+- In the sender's `ping`: `tgt` (target FPS), `capU` (complete capture
+  frames/s), `idle` (share of capture callbacks reporting idle), `hz`
+  (source refresh, when known), `sub` (encoder submissions/s), `dup`
+  (duplicate submissions/s), `enc50`/`enc95` (encode ms), `age95` (source age
+  at submit, ms), `snd95` (send completion ms), `busy` (encoder-busy share of
+  admitted frames), `bp` (send-backpressure share), `cmp95` (Window view
+  compose ms), `cmpFps` (composites/s).
+- In the receiver's `stats`: `arrFps`, `arr50`/`arr95` (frame arrival
+  interval ms), `gap250` (arrival gaps over 250 ms), `enqFps` (frames
+  enqueued for presentation/s), `qAge95` (presenter queue age ms), `qMax`
+  (presenter queue depth), `dec95`/`decN` (decode ms and samples, Metal path
+  only), `rtt`, `jit` (control round trip and its jitter, ms).
+
+The frame header fields `cap`/`snd` are unchanged.
 
 **`cursor`**: `v` is 1 (visible) or 0 (hidden). When visible, `x`, `y`
 give the normalized position (section 7); when hidden they MAY be absent.

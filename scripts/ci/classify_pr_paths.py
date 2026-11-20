@@ -191,6 +191,9 @@ def gitignore_change_is_safe(diff: str) -> bool:
 
 def path_jobs(path: str, gitignore_diff: str = "") -> Optional[frozenset]:
     """The jobs one changed path needs, or None for full CI."""
+    # StreamDiagnosticsTests verifies this document's metric/threshold contract.
+    if path == "docs/performance/diagnostics.md":
+        return frozenset({"mac", "release_tooling"})
     if is_documentation(path) or path in ISSUE_FORMS or path in GITHUB_PAGES or is_readme_image(path):
         return NOTHING
     if is_press_kit(path):

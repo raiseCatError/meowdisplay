@@ -59,7 +59,7 @@ final class ReceiverVideoPresenterTests: XCTestCase {
         let recorder = Recorder()
         let effects = ReceiverVideoPresenter.OutputEffects(
             decodeViaVideoDecoder: { _, _, _ in recorder.recordDecodeRouted() },
-            decodedFrameReady: { _, _ in recorder.recordDecodedFrameReady() },
+            decodedFrameReady: { _, _, _ in recorder.recordDecodedFrameReady() },
             decodeFlushIncurred: { recorder.recordFlushIncurred() },
             debugFramePresented: { recorder.recordFramePresented() },
             compressedFrameDiscardedBeforeDecode: { recorder.recordKeyframeRequest() })

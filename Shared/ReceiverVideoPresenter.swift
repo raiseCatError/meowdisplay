@@ -129,7 +129,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         var decodeViaVideoDecoder: @Sendable (FrameMediaBox<CMSampleBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// A decoded frame (Metal path) survived the generation check —
         /// the app-facing sink (`StreamReceiver.onDecodedFrame`).
-        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ captureMs: Double?) -> Void
+        var decodedFrameReady: @Sendable (FrameMediaBox<CVPixelBuffer>, _ generation: UInt64, _ captureMs: Double?) -> Void
         /// `displayLayer.status == .failed` was observed and flushed —
         /// feeds `ReceiverVideoTelemetry`'s flush-count telemetry exactly
         /// as before (Receiver Swift6-B1 moved that counter's storage
@@ -178,9 +178,19 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// The ordering primitive — see the file header. `.unbounded`:
     /// commands are cheap value types (a boxed buffer reference plus a few
     /// scalars), and this must never drop or block a `nonisolated` caller
-    /// on `queue`.
-    private let commands: AsyncStream<Command>
-    private nonisolated let commandContinuation: AsyncStream<Command>.Continuation
+    /// on `queue`. Streaming diagnostics (#123) measure this queue's depth
+    /// and age (`Envelope.stamp`); they never change its buffering.
+    private let commands: AsyncStream<Envelope>
+    private nonisolated let commandContinuation: AsyncStream<Envelope>.Continuation
+
+    /// One queued command plus its diagnostics stamp (0: not measured).
+    private struct Envelope: Sendable {
+        let command: Command
+        let stamp: UInt64
+    }
+
+    /// The session's streaming diagnostics, if any. Measurement only.
+    nonisolated let diagnostics: StreamDiagnosticsRecorder?
 
     #if DEBUG
     /// Test-only: fires with each `Command` at the moment the pump begins
@@ -198,10 +208,12 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// needs nor performs any `displayLayer` access itself, so this is
     /// safe: nothing MainActor-isolated runs until the pump `Task` itself
     /// hops there to await `runCommandPump`.
-    nonisolated init(displayLayer: AVSampleBufferDisplayLayer, outputEffects: OutputEffects) {
+    nonisolated init(displayLayer: AVSampleBufferDisplayLayer, outputEffects: OutputEffects,
+                     diagnostics: StreamDiagnosticsRecorder? = nil) {
         self.displayLayer = displayLayer
         self.outputEffects = outputEffects
-        var continuation: AsyncStream<Command>.Continuation!
+        self.diagnostics = diagnostics
+        var continuation: AsyncStream<Envelope>.Continuation!
         self.commands = AsyncStream(bufferingPolicy: .unbounded) { continuation = $0 }
         self.commandContinuation = continuation
         Task { [weak self] in await self?.runCommandPump() }
@@ -212,7 +224,9 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// `enqueue`/`flush`/`flushAndRemoveImage` are the same fire-and-return
     /// calls the code this replaces made from `queue`.
     private func runCommandPump() async {
-        for await command in commands {
+        for await envelope in commands {
+            diagnostics?.presenterCommandProcessed(stamp: envelope.stamp)
+            let command = envelope.command
             #if DEBUG
             debugSubmissionObserver?(command)
             #endif
@@ -233,6 +247,11 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
 
     // MARK: - Ordered entry points (nonisolated, synchronous — see file header)
 
+    /// The one place commands enter the stream.
+    private nonisolated func yield(_ command: Command) {
+        commandContinuation.yield(Envelope(command: command, stamp: diagnostics?.presenterCommandEnqueued() ?? 0))
+    }
+
     /// Enqueues one presentation-ready sample buffer, in call order.
     /// `StreamReceiver.presentDecodedSample`'s sole entry point for both
     /// the direct-display and Metal-routed cases — `viaMetalPath` is
@@ -242,7 +261,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     nonisolated func enqueuePresentSample(
         _ box: FrameMediaBox<CMSampleBuffer>, generation: UInt64, viaMetalPath: Bool, captureMs: Double?
     ) {
-        commandContinuation.yield(.presentSample(box, generation: generation, viaMetalPath: viaMetalPath, captureMs: captureMs))
+        yield(.presentSample(box, generation: generation, viaMetalPath: viaMetalPath, captureMs: captureMs))
     }
 
     /// Enqueues a decoded (Metal path) pixel buffer — the far end of
@@ -255,13 +274,13 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// generation check in `presentDecoded`, not arrival order, is what
     /// makes that safe.
     nonisolated func enqueuePresentDecoded(_ box: FrameMediaBox<CVPixelBuffer>, generation: UInt64, captureMs: Double?) {
-        commandContinuation.yield(.presentDecoded(box, generation: generation, captureMs: captureMs))
+        yield(.presentDecoded(box, generation: generation, captureMs: captureMs))
     }
 
     /// Enqueues a plain flush — `StreamReceiver.setRenderingPaused`'s
     /// resume path (`displayLayer.flush()` on backgrounded-linger resume).
     nonisolated func enqueueFlush() {
-        commandContinuation.yield(.flush)
+        yield(.flush)
     }
 
     /// Enqueues a flush that also retires the currently-displayed image —
@@ -271,7 +290,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// `enqueuePresentSample`/`enqueuePresentDecoded` exactly like a plain
     /// flush.
     nonisolated func enqueueFlushAndRemoveImage() {
-        commandContinuation.yield(.flushAndRemoveImage)
+        yield(.flushAndRemoveImage)
     }
 
     /// Enqueues a presentation-generation bump — `resetStreamState` (new
@@ -279,7 +298,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// same-order increment of `StreamReceiver.presentationGeneration`
     /// (the shadow — see the file header's "Stale-generation safety").
     nonisolated func enqueueAdvanceGeneration() {
-        commandContinuation.yield(.advanceGeneration)
+        yield(.advanceGeneration)
     }
 
     // MARK: - Presentation
@@ -296,6 +315,7 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
         _ box: FrameMediaBox<CMSampleBuffer>, generation: UInt64, viaMetalPath: Bool, captureMs: Double?
     ) {
         guard generation == videoGeneration else {
+            noteStaleDiscard()
             if keyframeRequestedForGeneration != videoGeneration {
                 keyframeRequestedForGeneration = videoGeneration
                 outputEffects.compressedFrameDiscardedBeforeDecode()
@@ -323,6 +343,10 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
             displayLayer.flush()
         }
         displayLayer.enqueue(sample)
+        // Enqueued for presentation: the layer, not this app, decides when it is on screen.
+        if let diagnostics, diagnostics.isEnabled {
+            diagnostics.recordPresentationEnqueue(at: StreamDiagnosticsClock.nowMs())
+        }
         #if DEBUG
         outputEffects.debugFramePresented()
         #endif
@@ -333,7 +357,15 @@ final class ReceiverVideoPresenter: @unchecked Sendable {
     /// stale VT callback gap (see the file header).
     @MainActor
     private func presentDecoded(_ box: FrameMediaBox<CVPixelBuffer>, generation: UInt64, captureMs: Double?) {
-        guard generation == videoGeneration else { return }
-        outputEffects.decodedFrameReady(box, captureMs)
+        guard generation == videoGeneration else { return noteStaleDiscard() }
+        if let diagnostics, diagnostics.isEnabled {
+            diagnostics.recordPresentationEnqueue(at: StreamDiagnosticsClock.nowMs())
+        }
+        outputEffects.decodedFrameReady(box, generation, captureMs)
+    }
+
+    private func noteStaleDiscard() {
+        guard let diagnostics, diagnostics.isEnabled else { return }
+        diagnostics.increment(.presenterStaleDiscarded, at: StreamDiagnosticsClock.nowMs())
     }
 }

@@ -32,6 +32,10 @@ class Base(unittest.TestCase):
 
 
 class DocumentationOnly(Base):
+    def test_diagnostics_contract_document_runs_mac(self):
+        self.assertJobs(["docs/performance/diagnostics.md"], ["mac", RT])
+        self.assertJobs(["docs/performance/other.md"], [])
+
     def test_top_level_and_docs_markdown(self):
         self.assertJobs(["README.md", "docs/guide/setup.md", "launch/SOCIAL_POSTS.md", "SECURITY.md"], [])
 
@@ -585,7 +589,7 @@ def probes(path):
     and, in case it is a directory that is read whole, a document and a source
     file inside it."""
     path = path.rstrip("/")
-    return [path] if path in TOP_FILES else [path, f"{path}/guard.md", f"{path}/guard.swift"]
+    return [path] if path in TOP_FILES or (ROOT / path).is_file() else [path, f"{path}/guard.md", f"{path}/guard.swift"]
 
 
 class DependencyGraph(unittest.TestCase):

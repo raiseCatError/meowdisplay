@@ -151,6 +151,8 @@ struct SystemSettingsView: View {
                     .controlSize(.small)
             }
 
+            StreamDiagnosticsSettingsSection(controller: controller)
+
             Section {
                 // Devices list this Mac with the same ID, so two Macs with one name can be told apart.
                 if let spki = TrustStore.shared.ownSPKI() {

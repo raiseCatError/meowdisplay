@@ -15,8 +15,13 @@ final class ReceiverDecodedFrameSinkTests: XCTestCase {
     func testSetThenGetReturnsCurrentCallback() {
         let sink = ReceiverDecodedFrameSink()
         var observed: Double?
-        sink.set { _, captureMs in observed = captureMs }
-        sink.get()?(makePixelBuffer(), 42)
+        var observedGeneration: UInt64?
+        sink.set { _, generation, captureMs in
+            observedGeneration = generation
+            observed = captureMs
+        }
+        sink.get()?(makePixelBuffer(), 3, 42)
+        XCTAssertEqual(observedGeneration, 3)
         XCTAssertEqual(observed, 42)
     }
 
@@ -24,16 +29,16 @@ final class ReceiverDecodedFrameSinkTests: XCTestCase {
         let sink = ReceiverDecodedFrameSink()
         var firstCalled = false
         var secondCaptureMs: Double?
-        sink.set { _, _ in firstCalled = true }
-        sink.set { _, captureMs in secondCaptureMs = captureMs }
-        sink.get()?(makePixelBuffer(), 7)
+        sink.set { _, _, _ in firstCalled = true }
+        sink.set { _, _, captureMs in secondCaptureMs = captureMs }
+        sink.get()?(makePixelBuffer(), 5, 7)
         XCTAssertFalse(firstCalled)
         XCTAssertEqual(secondCaptureMs, 7)
     }
 
     func testSetNilClearsCallback() {
         let sink = ReceiverDecodedFrameSink()
-        sink.set { _, _ in }
+        sink.set { _, _, _ in }
         sink.set(nil)
         XCTAssertNil(sink.get())
     }
