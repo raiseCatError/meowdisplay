@@ -814,7 +814,7 @@ final class WorkspaceFloatTests: XCTestCase {
         var windowModeRequests = 0
         let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
                                window: false, displays: Self.twoDisplays) { sent.append($0) }
-        m.requestWindowMode = { windowModeRequests += 1 }
+        m.requestWindowMode = { windowModeRequests += 1; return true }
         m.mirroring = { true }
         m.mirrorChoice = { Self.mirrorEntry("LG UltraFine", 2560, 1440, main: false) }
         m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
@@ -852,7 +852,7 @@ final class WorkspaceFloatTests: XCTestCase {
         var windowModeRequests = 0
         let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
                                window: false, displays: Self.twoDisplays) { sent.append($0) }
-        m.requestWindowMode = { windowModeRequests += 1 }
+        m.requestWindowMode = { windowModeRequests += 1; return true }
         m.mirroring = { false }   // Extend (or a Mac that hasn't confirmed Mirror)
         m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: ipad.width, height: ipad.height)
         let w = m.catalog!.windows
@@ -1007,7 +1007,7 @@ final class WorkspaceFloatTests: XCTestCase {
         var windowModeRequests = 0
         let m = connectedModel(features: [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature],
                                window: false, displays: Self.twoDisplays) { sent.append($0) }
-        m.requestWindowMode = { windowModeRequests += 1 }
+        m.requestWindowMode = { windowModeRequests += 1; return true }
         m.extending = { true }
         let w = m.catalog!.windows
         let before = m.layout.orderedTileIDs
@@ -1050,7 +1050,7 @@ final class WorkspaceFloatTests: XCTestCase {
     func testMirrorAndWindowViewNeverAskToLeaveExtend() {
         var windowModeRequests = 0
         let mirror = connectedModel(features: [WindowWorkspaceWire.welcomeFeature], window: false, displays: Self.twoDisplays) { _ in }
-        mirror.requestWindowMode = { windowModeRequests += 1 }
+        mirror.requestWindowMode = { windowModeRequests += 1; return true }
         mirror.mirroring = { true }
         mirror.switchTo(mirror.catalog!.windows[0])
         XCTAssertNil(mirror.leaveExtendRequest)

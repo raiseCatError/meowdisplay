@@ -765,8 +765,12 @@ struct DisplayModeRequestState: Equatable {
     /// request it was armed for, never a newer one.
     private(set) var pendingGeneration = 0
 
-    mutating func request(_ mode: ReceiverDisplayMode) -> Bool {
-        guard pendingMode == nil, mode != confirmedMode else { return false }
+    /// `leavingWindow`: this device shows Window view now. The Mac's "window" state never
+    /// replaces `confirmedMode` (it isn't a `ReceiverDisplayMode`), so the Mirror or Extend
+    /// confirmed before Window view is still recorded; asking for that mode again is then a real
+    /// change on the Mac (it switches out of Window view) and must be sent, not refused.
+    mutating func request(_ mode: ReceiverDisplayMode, leavingWindow: Bool = false) -> Bool {
+        guard pendingMode == nil, leavingWindow || mode != confirmedMode else { return false }
         pendingMode = mode
         pendingGeneration &+= 1
         return true
