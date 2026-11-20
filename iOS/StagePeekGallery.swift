@@ -382,6 +382,107 @@ struct StagePeekDisplayCard: View {
     }
 }
 
+// MARK: - Display arrangement map
+
+/// One real display in the arrangement map: its thumbnail filling a small rounded rectangle at the
+/// display's place in the Mac's arrangement. The gallery adds the gestures (as for the grid's cards).
+private struct StagePeekArrangementDisplayTile: View {
+    let thumbnail: CGImage?
+    let name: String
+    let label: String
+    let isMain: Bool
+    let isMirrored: Bool
+    let current: Bool
+    let showsName: Bool
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        shape.fill(Color(white: 0.08))
+            .overlay { picture }
+            // The menu bar's cue: the main display.
+            .overlay(alignment: .top) { if isMain { Rectangle().fill(Color.white.opacity(0.55)).frame(height: 3) } }
+            .overlay(alignment: .bottomLeading) { if showsName { caption } }
+            .overlay(alignment: .topTrailing) { if isMirrored { mirroredBadge } }
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(current ? meowAccent : Color.white.opacity(0.18), lineWidth: current ? 2.5 : 0.6))
+            .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+    }
+
+    @ViewBuilder private var picture: some View {
+        if let thumbnail {
+            Image(decorative: thumbnail, scale: 1).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
+        }
+    }
+
+    private var caption: some View {
+        Text(name).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.5))
+    }
+
+    private var mirroredBadge: some View {
+        Text("Mirrored").font(.system(size: 9, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(Color.black.opacity(0.6), in: Capsule())
+            .padding(5)
+    }
+}
+
+/// A MeowDisplay virtual display in the arrangement map: this device's own, or another MeowDisplay
+/// screen. Never captured, never tappable; only a dashed outline that keeps the arrangement honest.
+/// The full-screen overview draws the same tile.
+struct StagePeekArrangementPlaceholderTile: View {
+    let kind: DisplayArrangementLayout.Tile.Kind
+    let size: CGSize
+
+    private var symbol: String {
+        switch kind {
+        case .thisDevice: return UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone"
+        default: return "rectangle.on.rectangle"
+        }
+    }
+
+    private var title: String {
+        switch kind {
+        case .thisDevice:
+            return UIDevice.current.userInterfaceIdiom == .pad ? String(localized: "This iPad") : String(localized: "This iPhone")
+        default: return String(localized: "MeowDisplay")
+        }
+    }
+
+    private var accessibilityText: String {
+        kind == .thisDevice ? String(localized: "This device's extended display") : String(localized: "Another MeowDisplay screen")
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        shape.fill(Color.white.opacity(0.04))
+            .overlay(shape.strokeBorder(Color.white.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            .overlay { content }
+            // Not tappable, but a tap here must not fall through to the gallery's empty-space
+            // tap (which closes the peek): the placeholder is part of the map, not empty space.
+            .contentShape(Rectangle())
+            .onTapGesture {}
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityText)
+    }
+
+    @ViewBuilder private var content: some View {
+        if size.height >= 24 {
+            VStack(spacing: 2) {
+                Image(systemName: symbol).font(.system(size: size.height >= 56 ? 20 : 13))
+                if size.height >= 44 { Text(title).font(.system(size: 10, weight: .semibold)).lineLimit(1) }
+            }
+            .foregroundStyle(Color.white.opacity(0.75))
+            .padding(4)
+        }
+    }
+}
+
 // MARK: - Expanded gallery
 
 struct StagePeekGallery: View {
@@ -411,6 +512,7 @@ struct StagePeekGallery: View {
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
+    @State private var showDisplayOverview = false
     @Environment(\.controlRequest) private var controlRequest
     /// The card showing its Close Window button (swiped left), and a swipe in progress.
     @State private var revealed: UInt32?
@@ -421,6 +523,8 @@ struct StagePeekGallery: View {
     @State private var menuWindow: CatalogWindowItem?
     @State private var confirmClose: CatalogWindowItem?
     @State private var cardGestureClock = CardGestureClock()
+    /// The arrangement the Arrange… editor opened with (nil: closed).
+    @State private var arrangeOverview: DisplayOverviewModel?
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
     @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
@@ -481,20 +585,8 @@ struct StagePeekGallery: View {
                     if windows.isEmpty { emptyApp(app) } else { windowsView(windows, cols) }
                 } else {
                     if let displays = model.catalog?.displays, !displays.isEmpty {
-                        sectionTitle(String(localized: "Displays"))
-                        LazyVGrid(columns: cols, spacing: 16) {
-                            ForEach(displays) { d in
-                                let source = model.displayWindow(d)
-                                StagePeekDisplayCard(model: model, display: d,
-                                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
-                                    .scaleEffect(held == source.id ? 1.04 : 1)
-                                    // The desktop is a pane source too: hold and drag it onto a pane.
-                                    .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
-                                    .accessibilityAddTraits(.isButton)
-                                    .accessibilityAction { onDisplay(d) }
-                                    .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
-                            }
-                        }
+                        displaysHeader(displays)
+                        displaysSection(displays, cols)
                     }
                     sectionTitle(String(localized: "Windows"))
                     if allWindows.isEmpty {
@@ -521,6 +613,8 @@ struct StagePeekGallery: View {
             if toward > 90, toward > abs(v.translation.height) * 1.5 { onCompact() }
         })
         .onChange(of: visible) { model.thumbnailPriority = $0 }
+        .modifier(DisplayOverviewPresentation(isPresented: $showDisplayOverview, model: model, onShowInPane: onDisplay,
+                                              onAddAsNewPane: { d in onAddTile(model.displayWindow(d)) }))
         .onChange(of: model.closingWindows) { closing in if let r = revealed, closing.contains(r) { revealed = nil } }
         .confirmationDialog(menuWindow.map { $0.title.isEmpty ? $0.app : $0.title } ?? "",
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
@@ -539,6 +633,116 @@ struct StagePeekGallery: View {
         } message: { _ in
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
+        .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangeOverview))
+    }
+
+    /// The Mac's displays: in their real arrangement when the Mac sent it for two or more of them,
+    /// otherwise (one display, or an older Mac) the grid of cards.
+    @ViewBuilder private func displaysSection(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
+        if let overview = arrangementOverview(displays) {
+            arrangementMap(overview, displays)
+        } else {
+            displayGrid(displays, cols)
+        }
+    }
+
+    /// The arrangement to draw, or nil when the section shows the card grid instead.
+    private func arrangementOverview(_ displays: [CatalogDisplayItem]) -> DisplayOverviewModel? {
+        let overview = DisplayOverviewModel(catalog: displays)
+        return overview.drawnDisplays.count >= 2 && overview.hasArrangement ? overview : nil
+    }
+
+    /// The section title. With the arrangement map it also carries Overview (the full-screen
+    /// overview) and, when the Mac offers display arrangement and this device has control,
+    /// Arrange… (the Mac also asks its owner every time).
+    private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
+        let overview = arrangementOverview(displays)
+        return HStack(spacing: 12) {
+            sectionTitle(String(localized: "Displays"))
+            Spacer(minLength: 8)
+            if let overview {
+                if inputAllowed, model.canArrangeDisplays {
+                    Button { arrangeOverview = overview } label: {
+                        Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(meowAccent)
+                    .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
+                    .accessibilityIdentifier("displayArrangeButton")
+                }
+                Button { showDisplayOverview = true } label: {
+                    Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                        .shadow(color: .black.opacity(0.5), radius: 2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("displayOverviewButton")
+            }
+        }
+    }
+
+    private func displayGrid(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
+        LazyVGrid(columns: cols, spacing: 16) {
+            ForEach(displays) { d in
+                let source = model.displayWindow(d)
+                StagePeekDisplayCard(model: model, display: d,
+                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
+                    .scaleEffect(held == source.id ? 1.04 : 1)
+                    // The desktop is a pane source too: hold and drag it onto a pane.
+                    .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onDisplay(d) }
+                    .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+            }
+        }
+    }
+
+    /// The arrangement map: a read-only navigation aid. Real displays take the grid card's gestures;
+    /// placeholders (this device's screen, other MeowDisplay screens) take none.
+    private func arrangementMap(_ overview: DisplayOverviewModel, _ displays: [CatalogDisplayItem]) -> some View {
+        // The section's width: the gallery's less its horizontal padding (as the spatial layout does).
+        let mapWidth = max(width - 40, 100)
+        let mapHeight = DisplayArrangementLayout.height(forWidth: mapWidth, model: overview)
+        return GeometryReader { g in
+            let tiles = DisplayArrangementLayout.tiles(for: overview, in: g.size)
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                ForEach(tiles, id: \.id) { tile in arrangementTile(tile, displays) }
+            }
+            .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
+        }
+        .frame(height: mapHeight)
+    }
+
+    @ViewBuilder private func arrangementTile(_ tile: DisplayArrangementLayout.Tile, _ displays: [CatalogDisplayItem]) -> some View {
+        switch tile.kind {
+        case .display:
+            if let d = displays.first(where: { $0.id == tile.id }) { arrangementDisplayTile(tile, d) }
+        case .thisDevice, .otherMeow:
+            StagePeekArrangementPlaceholderTile(kind: tile.kind, size: tile.rect.size)
+                .frame(width: tile.rect.width, height: tile.rect.height)
+                .offset(x: tile.rect.minX, y: tile.rect.minY)
+        }
+    }
+
+    private func arrangementDisplayTile(_ tile: DisplayArrangementLayout.Tile, _ d: CatalogDisplayItem) -> some View {
+        let source = model.displayWindow(d)
+        let mirrored = tile.mirrorCount > 1
+        let name = d.isMain ? String(localized: "Full Desktop, \(d.name)") : d.name
+        return StagePeekArrangementDisplayTile(
+            thumbnail: model.displayThumbnails[d.id], name: d.name,
+            label: mirrored ? String(localized: "\(name), mirrored") : name,
+            isMain: tile.isMain, isMirrored: mirrored,
+            current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain,
+            showsName: tile.rect.height >= 28)
+            .frame(width: tile.rect.width, height: tile.rect.height)
+            .scaleEffect(held == source.id ? 1.04 : 1)
+            // The desktop is a pane source too: hold and drag it onto a pane.
+            .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onDisplay(d) }
+            .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+            .offset(x: tile.rect.minX, y: tile.rect.minY)
     }
 
     /// In Window view, or over the mirrored desktop; never offered in Extend (see `canOpenFloats`).

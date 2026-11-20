@@ -273,6 +273,26 @@ enum WindowCloseWire {
     static let welcomeFeature = "windowClose"
 }
 
+/// The overview's display actions (PROTOCOL.md 6.10): Identify Displays shows a label on each
+/// Mac screen; Move Cursor Here puts the Mac cursor in the middle of a listed display (needs
+/// control). Sent only to a Mac that lists `DisplayArrangeWire.welcomeFeature` (one feature
+/// entry for every display edit and action: a receiver reads at most 16 entries).
+enum DisplayActionsWire {
+    /// receiver -> Mac: `{}`.
+    static let identify = "displayIdentify"
+    /// receiver -> Mac: `{id}` (a display from the latest `windowCatalog`).
+    static let moveCursor = "cursorToDisplay"
+    /// receiver -> Mac: `{on}`. While the overview is open: send `overviewCursor`. Renewed by
+    /// the receiver every `overviewCursorRenewSeconds`; the Mac stops after
+    /// `overviewCursorWatchSeconds` without a renewal.
+    static let overviewCursorWatch = "overviewCursorWatch"
+    /// Mac -> receiver: `{x, y, d?}` the Mac cursor in global points (0.1 precision) and the
+    /// listed display it is on (left out when on none).
+    static let overviewCursor = "overviewCursor"
+    static let overviewCursorWatchSeconds: Double = 120
+    static let overviewCursorRenewSeconds: Double = 60
+}
+
 /// Exact key modifiers (PROTOCOL.md `keyboard`): a `press`, `down` or `up` marked
 /// `exactModifiers: true` posts with exactly its own `modifiers`, never adding the ones this
 /// device holds down with `modifierDown`. The arrow keypad's own ⇧ ⌥ ⌘ use it, so they never
@@ -344,6 +364,56 @@ enum WindowFrameWire {
         if let req { m["req"] = req }
         return m
     }
+}
+
+/// Display arrangement editing (PROTOCOL.md 6.10, Display arrangement): a receiver proposes new
+/// origins for the Mac's displays; the Mac checks them against its current displays, asks its
+/// owner on the Mac, applies them for this login session only, and makes them permanent only when
+/// the receiver says Keep within `revertSeconds`. Anything else puts the old arrangement back.
+/// Offered only when the Mac lists `welcomeFeature`; every request needs control.
+enum DisplayArrangeWire {
+    static let welcomeFeature = "displayArrange"
+    /// How long the Mac's owner has to answer the Mac's prompt before it counts as Don't Allow.
+    static let confirmSeconds = 60
+    /// How long an applied arrangement waits for `displayArrangeKeep` before it is reverted.
+    static let revertSeconds = 15
+    /// Most entries in `origins` or `base` (as many displays as the overview keeps).
+    static let maxDisplays = 16
+}
+
+/// `displayArrangeState` `state` values.
+enum DisplayArrangeState: String, Sendable, CaseIterable {
+    /// The Mac's owner is being asked on the Mac.
+    case awaitingMacConfirm
+    /// Applied for this login session; reverted after `revertIn` seconds without Keep.
+    case applied
+    /// Made permanent after Keep.
+    case kept
+    /// The previous arrangement is back (Revert, the timer, control ending or the session ending).
+    case reverted
+    /// Nothing was changed (`reason`: control, busy, stale, invalid request, the owner said no...).
+    case denied
+    /// macOS didn't take the arrangement exactly (or reported an error); nothing stays changed.
+    case failed
+
+    /// True once the request is over: nothing more comes for its `req`.
+    var isFinal: Bool { self != .awaitingMacConfirm && self != .applied }
+}
+
+/// `reason` values of `displayArrangeState` (besides `DisplayArrangementProblem.wireReason`).
+enum DisplayArrangeReason {
+    static let control = "control"
+    static let busy = "busy"
+    static let stale = "stale"
+    static let malformed = "malformed"
+    static let declined = "declined"
+    static let timeout = "timeout"
+    static let unavailable = "unavailable"
+    static let requested = "requested"
+    static let sessionEnded = "sessionEnded"
+    static let displaysChanged = "displaysChanged"
+    static let notApplied = "notApplied"
+    static let configurationError = "configurationError"
 }
 
 enum WindowFrameOp: String, Sendable, CaseIterable {
@@ -462,6 +532,11 @@ enum WireMessage {
     static let windowCloseResult = "windowCloseResult"         // Mac -> receiver: {window, req, result}
     // Fill Window on Mac / Restore Previous Size on Mac: `WindowFrameWire.request` / `.result` (control, Window mode).
     static let displayThumbnail = "displayThumbnail"           // Mac -> receiver: one display's still
+    // Display arrangement editing (PROTOCOL.md 6.10): only with the Mac's `displayArrange` feature.
+    static let displayArrangeRequest = "displayArrangeRequest" // receiver -> Mac: {req, origins, base} (control)
+    static let displayArrangeState = "displayArrangeState"     // Mac -> receiver: {req, state, reason?, revertIn?}
+    static let displayArrangeKeep = "displayArrangeKeep"       // receiver -> Mac: {req}: keep the applied arrangement
+    static let displayArrangeRevert = "displayArrangeRevert"   // receiver -> Mac: {req}: put the old one back now
     static let filesRequest = "filesRequest"                   // receiver -> Mac: Remote Finder (state/list/search/preview/open)
     static let files = "files"                                 // Mac -> receiver: its answer (or a pushed state)
     static let menuRequest = "menuRequest"                     // receiver -> Mac: a pane's app menus, one level (control)

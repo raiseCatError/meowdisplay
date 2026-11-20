@@ -209,6 +209,78 @@ enum SecurityPresentationCoordinator {
         SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
     }
 
+    // MARK: - Display arrangement ("<Device Name> wants to rearrange this Mac's displays")
+
+    private struct DisplayArrangementShown {
+        let token: UInt64
+        let decide: @Sendable (DisplayArrangementDecision) -> Void
+    }
+
+    private static var displayArrangementPanel: NSPanel?
+    private static var displayArrangementPanelDelegate: DisplayArrangementPanelWindowDelegate?
+    /// The request on screen, answered exactly once. One at a time Mac-wide: a second device's
+    /// request is answered `busy` instead of replacing it, so a click can't land on another
+    /// device's question.
+    private static var displayArrangementShown: DisplayArrangementShown?
+
+    /// Asks the Mac's owner whether a device may rearrange the displays (Rearrange / Don't
+    /// Allow). Closing the panel, 60 s without an answer and `dismissDisplayArrangement` are all
+    /// Don't Allow. Doesn't activate the app, and Rearrange only counts from real input on this
+    /// Mac (`ConsentGrant`), never from a device's injected click or key.
+    static func presentDisplayArrangement(_ request: DisplayArrangementConfirmationRequest, deviceName: String,
+                                          decide: @escaping @Sendable (DisplayArrangementDecision) -> Void) {
+        guard displayArrangementShown == nil else { return decide(.busy) }
+        displayArrangementShown = DisplayArrangementShown(token: request.token, decide: decide)
+        let names = Dictionary(NSScreen.screens.compactMap { screen -> (UInt32, String)? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return (number.uint32Value, screen.localizedName)
+        }, uniquingKeysWith: { first, _ in first })
+        let lines = DisplayArrangementSummary.lines(for: request) { id in
+            names[id] ?? String(localized: "Display \(Int(id))")
+        }
+        let panel = SecurityPanelPlacement.makePanel(
+            title: String(localized: "Display Arrangement"), contentRect: NSRect(x: 0, y: 0, width: 380, height: 1))
+        displayArrangementPanel = panel
+        let delegate = DisplayArrangementPanelWindowDelegate(token: request.token)
+        displayArrangementPanelDelegate = delegate
+        panel.delegate = delegate
+        let token = request.token
+        let hostingController = NSHostingController(rootView: DisplayArrangementPanelView(
+            deviceName: deviceName, lines: lines, token: token) { allowed in
+            answerDisplayArrangement(token: token, allowed ? .allow : .deny)
+        })
+        hostingController.sizingOptions = [.preferredContentSize]
+        panel.contentViewController = hostingController
+        SecurityPanelPlacement.show(panel, avoiding: streamedDisplays())
+        // The service times out too; this keeps the panel from outliving it either way.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(DisplayArrangeWire.confirmSeconds)) {
+            answerDisplayArrangement(token: token, .deny)
+        }
+    }
+
+    /// The request ended unanswered (timeout, withdrawn, session ended): its panel goes.
+    static func dismissDisplayArrangement(token: UInt64) {
+        guard displayArrangementShown?.token == token else { return }
+        displayArrangementShown = nil
+        closeDisplayArrangementPanel()
+    }
+
+    fileprivate static func answerDisplayArrangement(token: UInt64, _ decision: DisplayArrangementDecision) {
+        guard let shown = displayArrangementShown, shown.token == token else { return }
+        displayArrangementShown = nil
+        closeDisplayArrangementPanel()
+        shown.decide(decision)
+    }
+
+    private static func closeDisplayArrangementPanel() {
+        guard let panel = displayArrangementPanel else { return }
+        displayArrangementPanel = nil
+        panel.delegate = nil
+        displayArrangementPanelDelegate = nil
+        panel.orderOut(nil)
+        panel.close()
+    }
+
     // MARK: - Forget Device
 
     // Guards against a double-presentation if requestForget is somehow
@@ -606,6 +678,57 @@ private struct FilesConsentPanelView: View {
             armed = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { armed = true }
         }
+    }
+}
+
+/// Closing the display arrangement panel with its window controls is Don't Allow.
+@MainActor
+private final class DisplayArrangementPanelWindowDelegate: NSObject, NSWindowDelegate {
+    private let token: UInt64
+
+    init(token: UInt64) {
+        self.token = token
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        SecurityPresentationCoordinator.answerDisplayArrangement(token: token, .deny)
+    }
+}
+
+/// "<Device Name> wants to rearrange this Mac's displays": what moves, then Rearrange / Don't Allow.
+private struct DisplayArrangementPanelView: View {
+    let deviceName: String
+    let lines: [String]
+    let token: UInt64
+    let decide: (Bool) -> Void
+    /// Rearrange wakes up a moment after the panel appears, so a click meant for whatever was
+    /// under the pointer can't answer it.
+    @State private var armed = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            VStack(spacing: 6) {
+                Text("\(deviceName) wants to rearrange this Mac's displays")
+                    .font(.headline).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Text("The new arrangement is used right away and goes back after \(DisplayArrangeWire.revertSeconds) seconds unless the device keeps it.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Button("Don't Allow") { decide(false) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rearrange") { if ConsentGrant.allowed() { decide(true) } }
+                    .disabled(!armed)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+        .modifier(ArmsAfterDelay(armed: $armed, key: token))
     }
 }
 

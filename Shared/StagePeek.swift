@@ -113,6 +113,17 @@ enum StagePeekConfig {
     static let dockGap: CGFloat = 8
 }
 
+/// What a width change (rotation, fold, Split View, Stage Manager resize) does to an open peek.
+enum StagePeekResize {
+    /// A width change closes the peek, unless the search field is focused (a keyboard needs room,
+    /// not a close) or a screen opened from the gallery (the display overview, the arrangement
+    /// editor) is presented: that screen and its state live in the gallery, so closing the peek
+    /// would dismiss it and lose them. The peek stays open underneath it instead.
+    static func closesOnWidthChange(searching: Bool, galleryScreenOpen: Bool) -> Bool {
+        !searching && !galleryScreenOpen
+    }
+}
+
 enum StagePeekHaptic: String, Equatable { case activate, tick, boundary, select }
 
 enum StagePeekEffect: Equatable {
