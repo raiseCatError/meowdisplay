@@ -1250,6 +1250,10 @@ struct ReceiverControlPreferencesRepository {
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
+    /// Whether anything has ever been saved here. Decided before the first
+    /// `save`, so it tells a first run from a returning user.
+    var hasSavedPreferences: Bool { defaults.data(forKey: Self.defaultsKey) != nil }
+
     /// `initial` is what a device starts with while nothing usable is saved
     /// (see `ReceiverControlPreferences.initial(isPad:)`).
     ///

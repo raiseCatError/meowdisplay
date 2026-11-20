@@ -608,16 +608,31 @@ extension ControlTrayGeometry {
         }
 
         var frames: [CGRect]
+        // The pieces a portrait row is split across when a vertical fold
+        // crosses a row too wide for the piece it would otherwise fill.
+        var rowPieces: [CGRect] = []
         if portrait {
             let sizes = groupSizes.map(bounded)
             let totalWidth = sizes.reduce(0) { $0 + $1.width } + CGFloat(max(0, sizes.count - 1)) * groupGap
-            var x = visible.midX - totalWidth / 2
             let rowHeight = sizes.map(\.height).max() ?? 0
             let y = mainTrayFrame.minY - spacing - rowHeight
-            frames = sizes.map { size in
-                let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
-                x += size.width + groupGap
-                return frame
+            let wanted = groupSizes.reduce(0) { $0 + $1.width } + CGFloat(max(0, groupSizes.count - 1)) * groupGap
+            let split = wanted > visible.width - margin * 2
+                ? ControlFoldGeometry.groupRow(
+                    sizes: zip(groupSizes, sizes).map { CGSize(width: $0.width, height: $1.height) },
+                    groupGap: groupGap, y: y, height: rowHeight, container: fullVisible,
+                    divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions), margin: margin)
+                : nil
+            if let split {
+                frames = split.frames
+                rowPieces = split.pieces
+            } else {
+                var x = visible.midX - totalWidth / 2
+                frames = sizes.map { size in
+                    let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+                    x += size.width + groupGap
+                    return frame
+                }
             }
         } else if bottomRow, groupSizes.count > 1 {
             // Landscape with `bottomRow`: the first group keeps the top corner and every other
@@ -700,10 +715,17 @@ extension ControlTrayGeometry {
         // group back onto the tray it just cleared. Each frame is processed
         // independently, therefore only an actually-colliding group moves.
         let protectedFrames = !portrait && position == .sameSide ? [mainTrayFrame] : []
+        // `visible`, or — for a row split around a fold — the piece holding the frame.
+        func home(of frame: CGRect) -> CGRect {
+            guard let piece = rowPieces.first(where: { frame.midX >= $0.minX && frame.midX <= $0.maxX }) else {
+                return visible
+            }
+            return CGRect(x: piece.minX, y: visible.minY, width: piece.width, height: visible.height)
+        }
         frames = frames.map {
             displaced($0, avoiding: collisionFrame,
                       alsoAvoiding: protectedFrames,
-                      within: visible.insetBy(dx: margin, dy: margin),
+                      within: home(of: $0).insetBy(dx: margin, dy: margin),
                       axis: portrait ? .horizontal : .vertical, spacing: spacing)
         }
         frames = frames.map {
@@ -713,7 +735,8 @@ extension ControlTrayGeometry {
         let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
         return frames.map { frame in
             var result = frame
-            result.origin.x = clamp(result.origin.x, min: visible.minX + margin, max: visible.maxX - margin - result.width)
+            let piece = home(of: frame)
+            result.origin.x = clamp(result.origin.x, min: piece.minX + margin, max: piece.maxX - margin - result.width)
             result.origin.y = clamp(result.origin.y, min: visible.minY + margin, max: visible.maxY - margin - result.height)
             return avoidingReservedRegions(result, obstacles: obstacles,
                                            within: fullVisible.insetBy(dx: margin, dy: margin),

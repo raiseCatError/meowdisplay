@@ -64,6 +64,10 @@ enum CustomControlKind: Hashable, Codable {
     case function(String)
     /// The receiver-local Move View mode toggle.
     case moveView
+    /// The arrow button: a tap opens the existing arrow keypad (#179).
+    /// Builds that predate it drop just this placement (an unknown kind;
+    /// placements decode lossily).
+    case arrowKeys
     /// A user-made one-tap keyboard shortcut, owned by this placement. Uses
     /// the same `ShortcutItem`/`KeyboardShortcut` model as every palette.
     case shortcut(ShortcutItem)
@@ -90,6 +94,8 @@ enum CustomControlKind: Hashable, Codable {
             self = .function(try container.decode(String.self, forKey: .value))
         case "moveView":
             self = .moveView
+        case "arrowKeys":
+            self = .arrowKeys
         case "calculator":
             self = .calculator
         case "shortcut":
@@ -116,6 +122,8 @@ enum CustomControlKind: Hashable, Codable {
             try container.encode(id, forKey: .value)
         case .moveView:
             try container.encode("moveView", forKey: .kind)
+        case .arrowKeys:
+            try container.encode("arrowKeys", forKey: .kind)
         case .shortcut(let item):
             try container.encode("shortcut", forKey: .kind)
             try container.encode(item, forKey: .shortcut)
@@ -134,7 +142,7 @@ enum CustomControlKind: Hashable, Codable {
     var isOneTapAction: Bool {
         switch self {
         case .function, .shortcut, .calculator: return true
-        case .tray, .moveView: return false
+        case .tray, .moveView, .arrowKeys: return false
         }
     }
 }
@@ -356,6 +364,7 @@ extension CustomControlKind {
         case .tray(let item): return item.rawValue
         case .function(let id): return id
         case .moveView: return "move-view"
+        case .arrowKeys: return "arrow-keys"
         case .shortcut(let item): return item.id
         case .calculator: return "calculator"
         }
@@ -673,10 +682,17 @@ enum CustomLayoutGeometry {
     }
 
     /// Every placement's resolved circle, by placement id.
+    ///
+    /// With `divisions` (a fold), a circle that would touch one moves wholly
+    /// into the piece of the area that holds most of it
+    /// (`ControlFoldGeometry.clearOfFolds`), so no control straddles the
+    /// crease. Without divisions every frame is exactly the stored placement.
     static func frames(for arrangement: CustomControlArrangement, in area: CGRect,
-                       baseDiameter: CGFloat) -> [String: CGRect] {
-        Dictionary(arrangement.placements.map { ($0.id, frame(for: $0, in: area, baseDiameter: baseDiameter)) },
-                   uniquingKeysWith: { first, _ in first })
+                       baseDiameter: CGFloat, divisions: [CGRect] = []) -> [String: CGRect] {
+        Dictionary(arrangement.placements.map { placement -> (String, CGRect) in
+            let placed = frame(for: placement, in: area, baseDiameter: baseDiameter)
+            return (placement.id, ControlFoldGeometry.clearOfFolds(placed, in: area, divisions: divisions))
+        }, uniquingKeysWith: { first, _ in first })
     }
 
     /// Where the palette of the modifier placed at `anchorID` goes — the one
