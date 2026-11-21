@@ -113,9 +113,11 @@ struct SystemSettingsView: View {
                 Text("Prevent this Mac from automatically sleeping while MEOW is running, so remote devices can connect without Wake-on-LAN.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("The display can still turn off normally. Closing a MacBook's lid can still put it to sleep; closed-lid use requires your MacBook to be connected to power and is up to macOS.")
+                Text("The display can still turn off normally. Closing a MacBook's lid without an external display can still put it to sleep — Stay Awake with Lid Closed below covers that case.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                ClosedLidAvailabilityRow(controller: controller)
+                    .padding(.top, 4)
                 DisclosureGroup("Prefer Terminal?") {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("caffeinate -i")
