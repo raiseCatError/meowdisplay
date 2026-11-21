@@ -15,6 +15,7 @@ import kotlinx.serialization.json.put
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -22,6 +23,31 @@ import java.io.File
 
 /** The Kotlin clipboard rules against the Swift ones (fixtures/clipboard/vectors.json, MacTests/UnifiedClipboardTests). */
 class UnifiedClipboardTest {
+    @Test
+    fun wireCountersStayWithinTheSharedExactIntegerBound() {
+        val limit = 1L shl 53
+        val event = ClipEvent(ClipHeader(ClipEventID("mac", 1), 1, emptyMap(), "hash"),
+            0, emptyList(), listOf(ClipFile(listOf("Folder"), 0, true)))
+        for (field in listOf("s", "lc", "vv")) {
+            for (value in listOf(limit, limit + 1, Long.MAX_VALUE)) {
+                val wire = buildJsonObject {
+                    event.wire().forEach { (k, v) -> put(k, v) }
+                    if (field == "vv") put("vv", buildJsonObject { put("other", value) })
+                    else put(field, value)
+                }
+                val parsed = ClipEvent.parse(wire)
+                if (value == limit) assertNotNull("$field=$value", parsed)
+                else assertNull("$field=$value must be dropped before ordering", parsed)
+            }
+        }
+    }
+
+    @Test
+    fun aPersistedPeerLamportCannotWrapTheNextLocalCopy() {
+        val sync = ClipboardSync("phone", lamport = Long.MAX_VALUE)
+        assertEquals((1L shl 53) + 1, sync.localCopy("new content")!!.lamport)
+    }
+
     private val root: JsonObject by lazy {
         val dir = System.getProperty("meow.clipboardFixtures") ?: error("meow.clipboardFixtures not set")
         Json.parseToJsonElement(File(dir, "vectors.json").readText()).jsonObject
