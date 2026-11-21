@@ -2796,6 +2796,8 @@ final class StreamReceiver: ObservableObject {
             cableInterfaces: hostToHostCableInterfaces)
         transportState.set(route.rawValue, label: description.label)
         transportState.setPathCost(expensive: path.isExpensive, constrained: path.isConstrained)
+        ReceiverAdaptiveState.shared.setPath(NetworkCost.endpointReport(
+            NetworkCost.PathFlags(path: path), reachability: route == .remote ? .remote : .local))
         let names = path.availableInterfaces.map(\.name).joined(separator: ",")
         Log.info("connection path from \(peer): \(names) route=\(route.rawValue) label=\(description.label)")
     }
@@ -2873,8 +2875,11 @@ final class StreamReceiver: ObservableObject {
                 presentationTiming.clockOffsetMs = best.offset
             }
             lastRttMs = rtt
+            ReceiverAdaptiveState.shared.noteRTT(rtt)
             if diagnostics.isEnabled { diagnostics.recordRTT(rtt, at: StreamDiagnosticsClock.nowMs()) }
         case "ping":
+            // Adaptive (#123): `adaptive: 1` asks for 2 s `stats` with telemetry.
+            ReceiverAdaptiveState.shared.observeMacPing(obj, now: StreamDiagnosticsClock.nowSeconds())
             // The Mac piggybacks its send-side health on liveness pings.
             if let enc = obj["encDrops"] as? Int {
                 macEncDrops = enc
@@ -3210,6 +3215,7 @@ final class StreamReceiver: ObservableObject {
         presentationTiming.resetPhotonWindow()
         // A new session: diagnostics start over too.
         diagnostics.reset()
+        ReceiverAdaptiveState.shared.resetSession()
         // A new connection is a new generation (RECONNECT — never play
         // stale audio, and never present a video frame delayed by a
         // negative offset from the superseded connection). Shadow bump
@@ -3337,6 +3343,11 @@ final class StreamReceiver: ObservableObject {
         // only while this receiver's QUIC listener is bound; a sender treats
         // absence as TCP-only and never infers QUIC from `pv`.
         hello.merge(QUICPeerCapability.advertisedFields(quicAvailable: helloState.isQUICAvailable())) { $1 }
+        // Additive (#123, PROTOCOL.md 6.20): effective refresh + telemetry
+        // flag, cost hint and "Use less data". Old Macs ignore them.
+        let adaptiveFields = ReceiverAdaptiveState.shared.helloFields
+        hello.merge(adaptiveFields.wireFields) { $1 }
+        ReceiverAdaptiveState.shared.noteHelloSent(adaptiveFields, now: StreamDiagnosticsClock.nowSeconds())
         // Additive: the addresses this receiver can be reached on, so the
         // sender can probe for a better (cabled) path and migrate a WiFi
         // session onto it — mDNS resolution under an interface-restricted
@@ -4648,6 +4659,7 @@ final class StreamReceiver: ObservableObject {
         // and is more precise than counting raw TCP chunks (which could
         // span multiple frames or arrive as a fraction of one).
         bytesThisWindow += CMSampleBufferGetTotalSampleSize(sample)
+        ReceiverAdaptiveState.shared.noteFrame(now: StreamDiagnosticsClock.nowSeconds())
         #if DEBUG
         debugFramesReceivedWindow += 1
         let arrivalNow = Date()
@@ -4815,43 +4827,9 @@ final class StreamReceiver: ObservableObject {
 
             // Every 5s, report the aggregate to the Mac so its log holds the
             // full pipeline picture for offline analysis.
-            statsReportCounter += 1
-            if statsReportCounter >= 5 {
-                statsReportCounter = 0
-                var statsMessage: [String: Any] = [
-                    "type": "stats",
-                    "transport": transport,
-                    "fps": fps,
-                    "mbps": (stats.mbps * 10).rounded() / 10,
-                    "e2e50": stats.e2eP50.rounded(),
-                    "e2e95": stats.e2eP95.rounded(),
-                    "enc50": stats.encodeP50.rounded(),
-                    "rtt": lastRttMs.rounded(),
-                    "stalls": stats.stalls,
-                    "cur": stats.cursorPerSec,
-                    "curLost": stats.cursorLost,
-                    "inp50": macInputP50.rounded(),
-                    "capFps": macCapFps,
-                    "dec50": stats.decodeP50.rounded(),
-                    "ph50": stats.photonP50.rounded(),
-                    "ph95": stats.photonP95.rounded(),
-                    "offsetKnown": presentationTiming.clockOffsetMs != nil,
-                ]
-                // Diagnostics (#123): optional `diag` summary, only while on.
-                if diagnostics.isEnabled {
-                    let route = DiagnosticsRouteClass(label: transport)
-                    let cost = transportState.pathCost()
-                    let metal = useMetalPath && onDecodedFrame != nil
-                    let offsetKnown = presentationTiming.clockOffsetMs != nil
-                    diagnostics.updateContext { context in
-                        context.route = route
-                        context.pathExpensive = cost?.expensive
-                        context.pathConstrained = cost?.constrained
-                        context.presentationPath = metal ? .metal : .displayLayer
-                        context.clockOffsetKnown = offsetKnown
-                    }
-                    statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
-                }
+            // Every 5 windows, or every 2 while the Mac announces adaptive
+            // mode (#123, `AdaptiveTelemetryCadence`).
+            if let statsMessage = endStatsWindow(fps: fps, stats: stats, now: StreamDiagnosticsClock.nowSeconds()) {
                 sendControl(statsMessage)
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
@@ -4862,6 +4840,57 @@ final class StreamReceiver: ObservableObject {
             let uiSink = self.uiSink
             DispatchQueue.main.async { uiSink.publishPerf(fps: fps, perf: stats) }
         }
+    }
+
+    /// `queue` only, from `presentDecodedSample` at the end of each one-second
+    /// FPS window: counts the window and, on the windows that report (every
+    /// 5, or every 2 while the Mac announces adaptive mode), returns the
+    /// `stats` message to send; nil on the others. `now` is
+    /// `StreamDiagnosticsClock.nowSeconds()`.
+    private func endStatsWindow(fps: Int, stats: PerfStats, now adaptiveNow: TimeInterval) -> [String: Any]? {
+        statsReportCounter += 1
+        guard statsReportCounter >= ReceiverAdaptiveState.shared.statsEveryWindows(now: adaptiveNow) else { return nil }
+        statsReportCounter = 0
+        var statsMessage: [String: Any] = [
+            "type": "stats",
+            "transport": transport,
+            "fps": fps,
+            "mbps": (stats.mbps * 10).rounded() / 10,
+            "e2e50": stats.e2eP50.rounded(),
+            "e2e95": stats.e2eP95.rounded(),
+            "enc50": stats.encodeP50.rounded(),
+            "rtt": lastRttMs.rounded(),
+            "stalls": stats.stalls,
+            "cur": stats.cursorPerSec,
+            "curLost": stats.cursorLost,
+            "inp50": macInputP50.rounded(),
+            "capFps": macCapFps,
+            "dec50": stats.decodeP50.rounded(),
+            "ph50": stats.photonP50.rounded(),
+            "ph95": stats.photonP95.rounded(),
+            "offsetKnown": presentationTiming.clockOffsetMs != nil,
+        ]
+        // Diagnostics (#123): optional `diag` summary, only while on.
+        if diagnostics.isEnabled {
+            let route = DiagnosticsRouteClass(label: transport)
+            let cost = transportState.pathCost()
+            let metal = useMetalPath && onDecodedFrame != nil
+            let offsetKnown = presentationTiming.clockOffsetMs != nil
+            diagnostics.updateContext { context in
+                context.route = route
+                context.pathExpensive = cost?.expensive
+                context.pathConstrained = cost?.constrained
+                context.presentationPath = metal ? .metal : .displayLayer
+                context.clockOffsetKnown = offsetKnown
+            }
+            statsMessage[StreamDiagnosticsPeerSummary.wireKey] = StreamDiagnosticsPeerSummary.from(diagnostics.snapshot()).wireFields
+        }
+        // Adaptive (#123): windowed telemetry, only while announced.
+        let decodeDurations = videoTelemetry.snapshotDecodeDurationsMs()
+        statsMessage.merge(ReceiverAdaptiveState.shared.drainTelemetryFields(
+            now: adaptiveNow,
+            decodeP95Ms: decodeDurations.isEmpty ? nil : percentile(decodeDurations, 0.95))) { current, _ in current }
+        return statsMessage
     }
 
     // MARK: - Explicit decode (Metal renderer path) — C4: ReceiverVideoDecoder
@@ -5511,6 +5540,19 @@ final class StreamReceiver: ObservableObject {
         queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
     }
 
+    /// Ends one stats window at `now` on `queue`, as `presentDecodedSample`
+    /// does (`endStatsWindow`), and hands back the `stats` message serialized
+    /// as `sendControl` serializes it, or nil for a window that does not report.
+    func endStatsWindowForTesting(fps: Int, stats: PerfStats, now: TimeInterval,
+                                  _ completion: @escaping @Sendable (Data?) -> Void) {
+        let selfBox = self.selfBox
+        queue.async {
+            guard let receiver = selfBox.currentOnQueue() else { return }
+            let message = receiver.endStatsWindow(fps: fps, stats: stats, now: now)
+            completion(message.flatMap { try? JSONSerialization.data(withJSONObject: $0) })
+        }
+    }
+
     func probeForTesting(_ completion: @escaping @Sendable (ConnectRequestTestProbe) -> Void) {
         let reconnectContext = self.reconnectContext
         let pipeline = self.pipeline
@@ -6064,6 +6106,25 @@ final class StreamReceiver: ObservableObject {
                 queue.async {
                     Self.sendControl(["type": "ping", "t": Date().timeIntervalSince1970 * 1000],
                                       sendTargetBox: sendTargetBox)
+                    // Adaptive (#123): a change the Mac uses (effective
+                    // refresh, cost, "Use less data") re-sends hello, at most
+                    // once per 5 s with the latest values (A9); the one-time
+                    // suggestion is evaluated here too.
+                    let adaptiveState = ReceiverAdaptiveState.shared
+                    if let connection = sendTargetBox.current()?.connection, connection.state == .ready,
+                       adaptiveState.consumeHelloResend(now: StreamDiagnosticsClock.nowSeconds()) {
+                        Self.sendHello(
+                            on: connection, helloState: helloState, displayGeometryState: displayGeometryState,
+                            avSyncPreference: avSyncPreference, sendTargetBox: sendTargetBox,
+                            deviceKind: deviceKind, maxEncodeWide: maxEncodeWide, maxEncodeHigh: maxEncodeHigh,
+                            maxFPS: maxFPS, advertisedProtocolVersion: advertisedProtocolVersion,
+                            advertisesAddresses: advertises)
+                    }
+                    if adaptiveState.checkSuggestion(now: StreamDiagnosticsClock.nowSeconds()) {
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(name: ReceiverAdaptiveState.suggestionNotification, object: nil)
+                        }
+                    }
                 }
             },
             checkAddressChangeAndSendHello: { conn in
@@ -6128,6 +6189,7 @@ final class StreamReceiver: ObservableObject {
         let presenter = presenter
         let videoDecoderRef = videoDecoderRef
         let uiSink = uiSink
+        let diagnostics = self.diagnostics
         return .init(
             controlMessage: { data in
                 queue.async { selfBox.currentOnQueue()?.handleVideoChannelJSON(data) }
@@ -6137,6 +6199,7 @@ final class StreamReceiver: ObservableObject {
             },
             codecConfigurationChanged: { box, videoSize in
                 queue.async {
+                    diagnostics.sampleColourReceiverFormat(box.value)   // colour metadata (#241), read-only
                     // Retires the previous session's/format's currently-
                     // displayed frame — see `handleAnnexB`'s old inline
                     // comment (now `ReceiverFramePipeline.handleAnnexB`)

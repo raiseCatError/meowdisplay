@@ -30,6 +30,8 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
         i.presenterQueueAgeP95Ms = 2
         i.presenterQueueSamples = 300
         i.rttJitterMs = 2
+        // The Mac's view: its own numbers plus the receiver's summary.
+        i.receiverFromPeer = true
         return i
     }
 
@@ -44,7 +46,64 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
     func testHealthySessionHasNoBottleneck() {
         let v = StreamBottleneckClassifier.classify(healthy())
         XCTAssertEqual(v.cause, .noBottleneckEvident)
+        XCTAssertEqual(v.confidence, .medium)
+        XCTAssertNil(v.reason)
         XCTAssertEqual(v.frameBudgetMs ?? 0, 1000.0 / 60, accuracy: 0.001)
+    }
+
+    /// B7: with nothing from the other device, "no bottleneck" is only low.
+    func testNoBottleneckWithoutThePeerIsLowConfidence() {
+        let v = verdict {
+            $0.receiverFromPeer = false
+            $0.arrivalFPS = nil; $0.arrivalP50Ms = nil; $0.arrivalP95Ms = nil; $0.arrivalSamples = 0
+            $0.enqueueFPS = nil; $0.presenterQueueAgeP95Ms = nil; $0.presenterQueueSamples = 0; $0.rttJitterMs = nil
+        }
+        XCTAssertEqual(v.cause, .noBottleneckEvident)
+        XCTAssertEqual(v.confidence, .low)
+        XCTAssertEqual(v.reason, .peerMissing)
+        // A real sender snapshot with no receiver summary says the same.
+        let r = StreamDiagnosticsRecorder(side: .sender, windowSeconds: 5, diagnosticsSwitch: StreamDiagnosticsSwitch(enabled: true),
+                                          resourceSampler: nil, nowMs: 0)
+        r.updateContext { $0.targetFPS = 60 }
+        var t = 0.0, key: Int64 = 0
+        while t < 5_000 {
+            key += 1
+            r.recordCapture(.complete, at: t)
+            r.increment(.admittedLive, at: t)
+            r.recordSubmit(origin: .live, sourceKey: key, sourceAgeMs: 5, pendingEncodes: 1, at: t)
+            r.recordEncodeOutput(durationMs: 5, bytes: 1_000, keyframe: false, outcome: .sent, at: t)
+            r.recordSendCompletion(durationMs: 1, bytes: 1_000, error: false, at: t)
+            t += 1000.0 / 60
+        }
+        let live = StreamBottleneckClassifier.classify(r.snapshot(at: 5_050))
+        XCTAssertEqual(live.cause, .noBottleneckEvident)
+        XCTAssertEqual(live.confidence, .low)
+        XCTAssertEqual(live.reason, .peerMissing)
+    }
+
+    /// B13: a numbering receiver sends no window number while its window is
+    /// partial; its rates must not be read as a whole window of samples.
+    func testAPartialPeerWindowCountsAsNoSamples() {
+        let r = StreamDiagnosticsRecorder(side: .sender, windowSeconds: 5, diagnosticsSwitch: StreamDiagnosticsSwitch(enabled: true),
+                                          resourceSampler: nil, nowMs: 0)
+        var peer = StreamDiagnosticsPeerSummary(side: .receiver)
+        peer.windowSeriesID = 77
+        peer.arrivalFPS = 60; peer.arrivalP95Ms = 18; peer.enqueueFPS = 60; peer.decodeSamples = 300
+        r.updatePeer(peer, at: 1_000)
+        let partial = StreamClassifierInputs(snapshot: r.snapshot(at: 5_050))
+        XCTAssertEqual(partial.arrivalSamples, 0)
+        XCTAssertEqual(partial.presenterQueueSamples, 0)
+        XCTAssertEqual(partial.decodeSamples, 0)
+        peer.windowSequence = 1
+        r.updatePeer(peer, at: 5_100)
+        let whole = StreamClassifierInputs(snapshot: r.snapshot(at: 5_200))
+        XCTAssertGreaterThan(whole.arrivalSamples, 0)
+        XCTAssertEqual(whole.decodeSamples, 300)
+        // An older receiver numbers nothing and is read as before.
+        var legacy = StreamDiagnosticsPeerSummary(side: .receiver)
+        legacy.arrivalFPS = 60
+        r.updatePeer(legacy, at: 5_300)
+        XCTAssertGreaterThan(StreamClassifierInputs(snapshot: r.snapshot(at: 5_400)).arrivalSamples, 0)
     }
 
     func testEncoderOverloaded() {
@@ -96,14 +155,39 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
         XCTAssertEqual(v.cause, .presentationSchedulingLimited)
     }
 
-    func testSenderCaptureLimited() {
-        let v = verdict {
+    /// B9: 31 complete frames/s against 60 with no idle callbacks is also
+    /// what 30 fps content looks like. Capture-limited needs evidence that
+    /// the source changed faster than capture delivered.
+    func testSenderCaptureLimitedNeedsEvidenceOfSourceDemand() {
+        let slow: (inout StreamClassifierInputs) -> Void = {
             $0.captureCompleteFPS = 31
             $0.submitFPS = 31
             $0.arrivalFPS = 31
             $0.enqueueFPS = 31
         }
-        XCTAssertEqual(v.cause, .senderCaptureLimited)
+        let unknown = verdict(slow)
+        XCTAssertEqual(unknown.cause, .unknownInsufficientData)
+        XCTAssertEqual(unknown.reason, .sourceDemandUnknown)
+        let demanded = verdict { slow(&$0); $0.sourceDemandFPS = 60 }
+        XCTAssertEqual(demanded.cause, .senderCaptureLimited)
+        XCTAssertTrue(demanded.evidence.contains { $0.metric == "derived.source_demand_fps" && $0.met })
+        // The source itself changed only 30 times a second: not capture.
+        let slowSource = verdict { slow(&$0); $0.sourceDemandFPS = 30 }
+        XCTAssertNotEqual(slowSource.cause, .senderCaptureLimited)
+        XCTAssertNotEqual(slowSource.reason, .sourceDemandUnknown)
+    }
+
+    func testEvidenceLinesUseEachValuesOwnUnit() {
+        let share = StreamVerdictEvidence(metric: "derived.encoder_busy_share", value: 0.04, comparison: .atLeast,
+                                          threshold: 0.05, met: false, fromPeer: false)
+        XCTAssertEqual(StreamDiagnosticsPresentation.evidenceLine(share), "derived.encoder_busy_share = 4.0% (>= 5.0%: not met)")
+        let rate = StreamVerdictEvidence(metric: DiagnosticsCounter.captureComplete.definition.id, value: 31, comparison: .below,
+                                         threshold: 48, met: true, fromPeer: true)
+        XCTAssertEqual(StreamDiagnosticsPresentation.evidenceLine(rate), "sender.capture.complete = 31.0/s (< 48.0/s: met) [peer]")
+        let ms = StreamVerdictEvidence(metric: DiagnosticsStage.encode.definition.id, value: 40, comparison: .atLeast,
+                                       threshold: 25, met: true, fromPeer: false)
+        XCTAssertEqual(StreamDiagnosticsPresentation.evidenceLine(ms), "sender.encode_ms = 40.0 ms (>= 25.0 ms: met)")
+        for reason in StreamVerdictReason.allCases { XCTAssertFalse(StreamDiagnosticsPresentation.reasonText(reason).isEmpty) }
     }
 
     func testSourceRefreshLimited() {
@@ -282,7 +366,7 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
     /// Every key in the export, at any depth, must be one of these (or a
     /// metric id / threshold name). A new field fails here until reviewed
     /// for privacy and added deliberately.
-    private static let allowedKeys: Set<String> = [
+    static let allowedKeys: Set<String> = [
         // StreamDiagnosticsExport / build / session
         "schemaVersion", "metricDictionaryVersion", "generatedAt", "build", "sessions", "classifierThresholds",
         "limitations", "appVersion", "osMajor", "osMinor", "osPatch", "platform", "deviceClass", "snapshot", "verdict",
@@ -301,15 +385,21 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
         "cause", "confidence", "reason", "evidence", "alternatives", "frameBudgetMs", "metric", "value", "comparison",
         "threshold", "met", "fromPeer",
         // peer summary
-        "captureCompleteFPS", "captureIdleShare", "submitFPS", "duplicateSubmitFPS", "encodeP50Ms", "encodeP95Ms",
-        "sourceAgeP95Ms", "sendP95Ms", "encoderBusyShare", "sendBackpressureShare", "composeP95Ms", "composeFPS",
+        "captureCompleteFPS", "captureIdleShare", "submitFPS", "encodeP95Ms",
+        "sendP95Ms", "encoderBusyShare", "sendBackpressureShare", "composeP95Ms", "composeFPS",
         "arrivalFPS", "arrivalP50Ms", "arrivalP95Ms", "arrivalGapsOver250ms", "enqueueFPS", "presenterQueueAgeP95Ms",
-        "presenterQueueDepthMax", "decodeP95Ms", "decodeSamples", "rttMs",
+        "decodeP95Ms", "decodeSamples", "rttMs",
+        // peer summary, Performance Lab frame-ID reader (numbers only)
+        "frameIDUniqueFPS", "frameIDDuplicates", "frameIDMissing", "frameIDUnreadable", "frameIDUnexamined",
+        "frameIDIntervalP95Ms",
+        // window numbering (snapshot and peer summary): a random per-session
+        // number and counters, nothing about the device
+        "windowSeriesID", "windowSequence", "peerWindowSequenceAtStart",
     ]
 
     /// Kinds of field that must never appear, even if someone adds them to
     /// the allowlist by mistake.
-    private static let forbiddenKeyFragments = [
+    static let forbiddenKeyFragments = [
         "title", "name", "path", "file", "ssid", "host", "address", "addr", "ip", "endpoint", "serial", "pair",
         "spki", "key", "token", "secret", "screenshot", "image", "pixel", "input", "text", "url", "user", "bundle",
     ]
@@ -348,11 +438,54 @@ final class StreamDiagnosticsClassifierExportTests: XCTestCase {
              "tcp", "quic", "displayLayer", "metal", "nominal", "fair", "serious", "critical", "unplugged", "charging",
              "full", "none", "low", "medium", "high", "atLeast", "below", "macOS", "iOS", "mac", "iPhone", "iPad"]
             + StreamBottleneckCause.allCases.map(\.rawValue)
-            + ["windowTooShort", "noTargetFrameRate", "tooFewSamples", "sourceIdle", "conflictingEvidence"])
+            + StreamVerdictReason.allCases.map(\.rawValue))
         let evidenceIDs = metricIDs.union(StreamBottleneckClassifier.derivedIDs).union(metricIDs.map { $0 + ".p50" })
         let fixed = Set(StreamDiagnosticsExport.limitationsText).union(["2.0 (214)", "2027-01-15T08:02:00Z"])
         for s in strings {
             XCTAssertTrue(enumValues.contains(s) || evidenceIDs.contains(s) || fixed.contains(s), "unexpected string in export: \(s)")
+        }
+    }
+
+    /// B14: adaptive decisions are exported with times from the recorder's
+    /// reset, never time since boot, and carry only codes and numbers.
+    func testAdaptiveDecisionTimesCountFromTheResetNotFromBoot() throws {
+        let json = #"{"atSeconds": 86523.4, "action": "hold", "reason": "insufficientData", "cause": "insufficientData", "changed": [], "evidence": {"badStreak": 0, "healthyStreak": 0}}"#
+        let decision = try JSONDecoder().decode(StreamDiagnosticsAdaptiveDecision.self, from: Data(json.utf8))
+        let r = StreamDiagnosticsRecorder(side: .sender, windowSeconds: 5, diagnosticsSwitch: StreamDiagnosticsSwitch(enabled: true),
+                                          resourceSampler: nil, nowMs: 86_500_000)
+        r.recordAdaptiveDecision(decision)
+        let recorded = try XCTUnwrap(r.snapshot(at: 86_600_000).adaptiveDecisions?.first)
+        XCTAssertEqual(recorded.atSeconds, 23.4, accuracy: 1e-9, "86523.4 s of uptime is 23.4 s after the reset at 86500 s")
+        r.reset(at: 86_530_000)
+        r.recordAdaptiveDecision(decision)
+        XCTAssertEqual(try XCTUnwrap(r.snapshot(at: 86_600_000).adaptiveDecisions?.first).atSeconds, 0, "never negative")
+        // The export of a decision holds no string outside the reviewed sets.
+        let export = StreamDiagnosticsExport(sessions: [r.snapshot(at: 86_600_000)],
+                                             build: StreamDiagnosticsBuildInfo.current(deviceClass: .mac, appVersion: "2.0 (214)"),
+                                             now: Date(timeIntervalSince1970: 1_800_000_123))
+        let object = try JSONSerialization.jsonObject(with: try export.jsonData())
+        var keys: Set<String> = []
+        func walk(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                for (k, v) in dict { keys.insert(k); walk(v) }
+            } else if let array = value as? [Any] { array.forEach(walk) }
+        }
+        walk(object)
+        // Metric ids (counter and stage names) are reviewed dictionary keys.
+        let metricIDs = Set(StreamDiagnosticsMetricDictionary.all.map(\.id))
+        let thresholdNames = Set(StreamBottleneckClassifier.thresholds.keys)
+        // The adaptive decision's fields, reviewed: codes, counts and factors.
+        let decisionKeys: Set<String> = [
+            "adaptiveDecisions", "atSeconds", "action", "reason", "cause", "changed", "evidence",
+            "badStreak", "healthyStreak", "activeSourceIdleShare", "backpressureShare", "captureShortfall",
+            "deliveryBudgetFactor", "encodeBudgetFactor", "headroomShare", "idleFPS", "rateShortfall",
+        ]
+        let unexpected = keys.subtracting(Self.allowedKeys).subtracting(metricIDs).subtracting(thresholdNames).subtracting(decisionKeys)
+        XCTAssertTrue(unexpected.isEmpty, "unreviewed export keys: \(unexpected.sorted())")
+        for key in keys.subtracting(metricIDs) {
+            for bad in Self.forbiddenKeyFragments where key.lowercased().contains(bad) {
+                XCTAssertTrue(["pathExpensive", "pathConstrained", "context", "presentationPath"].contains(key), "\(key) looks like a \(bad) field")
+            }
         }
     }
 

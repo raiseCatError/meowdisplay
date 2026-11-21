@@ -1,0 +1,1591 @@
+{
+  "analysisMetrics" : [
+    "source_unique_fps",
+    "capture_complete_fps",
+    "submitted_fps",
+    "encoded_fps",
+    "sent_fps",
+    "duplicate_submit_fps",
+    "capture_interval_p95_ms",
+    "submit_interval_p50_ms",
+    "submit_interval_p95_ms",
+    "submit_interval_p99_ms",
+    "submit_gaps_over_100ms",
+    "submit_gaps_over_250ms",
+    "submit_gaps_over_500ms",
+    "source_age_p95_ms",
+    "encode_p50_ms",
+    "encode_p95_ms",
+    "encode_p99_ms",
+    "send_p95_ms",
+    "encoder_busy_holds",
+    "send_backpressure_drops",
+    "payload_mbps",
+    "compose_p95_ms",
+    "composites_fps",
+    "receiver_arrival_fps",
+    "receiver_arrival_p95_ms",
+    "receiver_gaps_over_250ms",
+    "receiver_enqueue_fps",
+    "presenter_queue_age_p95_ms",
+    "frame_id_unique_fps",
+    "frame_id_skipped",
+    "frame_id_duplicates",
+    "frame_id_unreadable",
+    "frame_id_unexamined",
+    "frame_id_interval_p95_ms",
+    "fixture_drawn_fps",
+    "sender_cpu_percent_median",
+    "sender_memory_mb_max",
+    "sender_memory_mb_delta",
+    "generation_resets",
+    "restart_frame_gap_max_ms",
+    "route_changes"
+  ],
+  "bundleStringConstants" : [
+    "",
+    "% of one core",
+    "A TCP\/QUIC send completion means the local stack accepted the bytes, not that the receiver got them.",
+    "A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change",
+    "A delayed but not duplicated frame.",
+    "A long gap can be an idle source; compare with the sender's capture and submit rates.",
+    "A lower bound on fixture frames drawn on the Mac that never reached this point (an unread frame may have carried a missing ID). Rate limiting at a lower target FPS skips frames by design. Counted only while the reader follows a strip.",
+    "A pixel buffer captured once and submitted once. Display capture only.",
+    "AVSampleBufferDisplayLayer enqueue is counted as enqueued for presentation, not as presented.",
+    "AVSampleBufferDisplayLayer.enqueue or Metal handoff",
+    "Admitted by the rate limiter; may still be dropped by backpressure.",
+    "Annex B payload size of each encoded frame",
+    "App payload, not bytes billed by a network: encryption, transport and tunnel overhead are not included.",
+    "Blended, partially updated or heavily compressed frames; also the fixture leaving the screen.",
+    "Byte counts are app payload, not bytes billed by a network.",
+    "CPU-side time to build and render the composite; GPU work that finishes later is not included.",
+    "Capture or presentation generation changed; interval baselines restart",
+    "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+    "Coarse four-level system state.",
+    "Complete video frames at presentDecodedSample",
+    "Composites made by the ~1 s static resend, not by a change",
+    "Composition and pacing with the fixture as the only Window View pane.",
+    "Composition cost and pacing with the fixture plus three static panes.",
+    "Composition with the fixture as a floating pane partly covering a still pane.",
+    "Control-channel jitter, not video arrival jitter. A session value, not a window value; reported only after 8 RTT samples (one per receiver ping, about every 2 s).",
+    "Control-message round trip; it rides behind any queued video on the same connection. Both ends of the span are this device's wall clock (the ping time also feeds the clock offset), so a clock step during a round trip skews one sample; samples outside 0-2000 ms are dropped.",
+    "Cost of a capture restart: the operator changes the frame-rate cap mid-trial and back.",
+    "Counts duplicates and replays too; see the submit counters for source-unique frames.",
+    "Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found.",
+    "Counts only commands yielded while diagnostics were on.",
+    "Cross-device spans use a ping\/pong clock offset; error is up to about half the best round trip.",
+    "Decoded frames the reader did not read while it searched for a lost strip again (it probes one frame in 30)",
+    "Decoded frames where a located strip failed its guard or checksum",
+    "Decoded frames whose Performance Lab frame-ID strip was read",
+    "Display capture only (Mirror, Extend). The closest available proxy for source-unique frames: ScreenCaptureKit sends a complete frame when content changed.",
+    "Display layer failed and was flushed",
+    "Duplicates by design (heal a lost frame).",
+    "Encoded but intentionally never sent.",
+    "Encoded frames that are sync samples",
+    "Encoded output from a retired session or generation",
+    "Encoder and network load when every pixel changes every frame.",
+    "Encoder submission of a Window view composite",
+    "Encoder submission of a held frame",
+    "Encoder submission straight from a capture callback",
+    "Enqueued for presentation, never confirmed on glass.",
+    "Enqueued for presentation, not presented: the layer decides when a frame reaches the screen.",
+    "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. Values outside -50 to 5000 ms are dropped, so p99 and max under-report a pathological latency.",
+    "Experimental Metal path only. The only presentation this app can observe.",
+    "Experimental Metal path only; only while the lab fixture is visible.",
+    "Extend, capture retuning",
+    "Extend, frame counter",
+    "Extend, idle screen",
+    "Extend, rapid interaction",
+    "Extend, reconnection",
+    "Extend, scrolling fine text",
+    "Extend, sustained 10 minutes",
+    "Fixture restarted; counting starts again from the new ID.",
+    "Floating panes on the canvas at each composite",
+    "Frame header cap is stamped at encoder submission, not at capture.",
+    "Frame header snd minus cap (both written by the sender)",
+    "Frame-ID counts exist only on the receiver's experimental Metal path, which itself changes presentation timing.",
+    "FrameAdmission.offer returned hold",
+    "FrameAdmission.offer returned send",
+    "Framed video bytes whose send completed",
+    "Frames in flight in the encoder, sampled at each submission",
+    "How quickly frames resume after a still screen: 4 s still, 4 s full motion, repeating.",
+    "IDs provably missing between two successive read IDs: the ID difference minus one, minus the frames that arrived in between but could not be read",
+    "Includes VideoToolbox's own queueing when more than one frame is in flight (StreamingPriority in-flight limit 1\/2\/3).",
+    "Includes the rate limiter's trailing-edge hold and any replay delay. Display capture only: Window view composites have no capture PTS, so nothing is recorded there.",
+    "Keep hands off both devices while the trial measures.",
+    "Last encoder submission of the previous capture generation to the first submission of the new one (StreamDiagnosticsRecorder.noteGeneration)",
+    "Last frame arrival before a presentation generation change to the first arrival after it (StreamDiagnosticsRecorder.noteGeneration)",
+    "Long-run stability, not peak: frame rate, gaps, CPU, memory and thermal state over 10 minutes.",
+    "MB",
+    "MacSender stream(_:didOutputSampleBuffer:) frames with SCFrameStatus.complete (display capture)",
+    "MacSender.encode: host clock now minus the ScreenCaptureKit sample PTS of the pixels being submitted",
+    "MacSender.sendFramed: frame handed to the transport until its send completion",
+    "Measures the AsyncStream command queue and MainActor scheduling only; the queue is unbounded by design and is not changed here.",
+    "Metal drawable presented handler",
+    "Metal drawable presented handler (StreamReceiver.recordPresented) minus cap",
+    "Mirror, frame counter",
+    "Mirror, high motion",
+    "Mirror, still to motion",
+    "No metric measures capture-to-photon; that needs external measurement.",
+    "Normal rate limiting at about 2x capture headroom: expected to be roughly as many as admitted frames while content moves.",
+    "Not counted as skipped: the reader re-baselines when it finds the strip again.",
+    "Note (do not touch): is the scrolling text readable on the receiver? Record it as a subjective observation.",
+    "Now: change it back.",
+    "Now: change the frame-rate cap to another value.",
+    "Now: disconnect the route the same way as in every trial.",
+    "Now: on the receiver, follow the moving target with your finger or pointer, dragging and scrolling, until the trial ends.",
+    "Now: reconnect it.",
+    "Now: switch to Mirror and back to Extend five times, waiting for the picture each time, then leave it in Extend.",
+    "One sample per restart (reconnect, retune, mode change). The interval stages restart their baselines at a restart, so this gap is not in them.",
+    "One sample per resync inside a session. A full reconnect resets the receiver's recorder and records no sample. The arrival interval restarts its baseline at a resync, so this gap is not in it.",
+    "Only the experimental Metal path reports an observed presentation, and it changes timing itself.",
+    "Only while the Performance Lab fixture is on screen and only on the experimental Metal path, which itself changes timing. Measured at the decoded-frame handoff, not on glass.",
+    "Operator steps are done by hand; their timing varies between trials.",
+    "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+    "Pacing and payload for scrolling text; judge text clarity separately and label it subjective.",
+    "Pacing while the operator scrolls and drags on the receiver over the moving target. Human-driven: compare only runs by the same operator.",
+    "Panes drawn dimmed (offscreen, closed, paused) at each composite",
+    "Panes on the canvas at each composite",
+    "Panes that had a captured frame at each composite",
+    "PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID (ReceiverVideoPresenter.presentDecoded)",
+    "Presenter generation check discarded a frame",
+    "ProcessInfo.isLowPowerModeEnabled",
+    "ProcessInfo.thermalState",
+    "Re-encodes the newest pixels after send backpressure cleared.",
+    "Read ID went backwards or jumped by more than half the counter range",
+    "Read frame IDs equal to the previous read ID",
+    "Read frame IDs that differ from the previous read ID",
+    "Receiver numbers are the receiver's own 5 s windows, each counted once, that provably began after the trial's first sender window began and before its last one ended (unless the receiver restarted at that moment); they are not aligned with the sender's windows, so the last one may run up to one receiver window past the trial's end.",
+    "Receiver ping to sender pong on the control channel",
+    "Receiver wall clock (mapped with the ping\/pong offset) minus cap at presentDecodedSample",
+    "ReceiverVideoDecoder decode duration (experimental Metal path only)",
+    "ReceiverVideoPresenter commands yielded but not yet processed, sampled at each yield",
+    "ReceiverVideoPresenter: command yield until the MainActor pump processes it",
+    "Recovery after a connection loss the operator causes on purpose, measured as frame gaps and restarts.",
+    "Repeated mode transitions",
+    "Replays of pixels already encoded.",
+    "Resource cleanup across repeated Mirror\/Extend switches: memory and CPU after the transitions settle.",
+    "Route class changed between samples",
+    "SCK callback, status blank\/suspended\/started\/stopped or no pixels",
+    "SCK callback, status complete with pixels",
+    "SCK callback, status idle",
+    "SYNTHETIC self-test",
+    "SYNTHETIC: a scripted 300 ms stall happens in trial 3.",
+    "SYNTHETIC: a scripted event stream through the real recorder and run controller. It validates the harness, not performance.",
+    "SYNTHETIC: nothing to set up.",
+    "Sample buffer size of each arrived frame",
+    "Sampled about every 2 s.",
+    "ScreenCaptureKit delivers a complete frame only when the screen changed, so long intervals on a static screen are idle, not stalls. Capture runs at about 2x the target rate (DisplayCaptureSettings).",
+    "Smoothed absolute difference of successive RTT samples (RFC 3550: starts at 0, gain 1\/16), over the session",
+    "Source-unique fixture frames that reached the decoded-frame handoff.",
+    "Source-unique frame rate and pacing on the virtual display (Extend).",
+    "Source-unique frame rate and pacing when every display refresh changes the screen (Mirror).",
+    "Start Window View and add only the fixture window as a pane; maximise that pane on the receiver.",
+    "Start Window View with one still window as a pane and float the fixture over about half of it.",
+    "Start Window View with the fixture and three other windows that stay still (for example empty Finder windows): four panes in all. Use the same windows for every run.",
+    "Start a Mirror session to the receiving device.",
+    "Start an Extend session and put the fixture on the extended display.",
+    "Start an Extend session at the frame-rate cap you are testing.",
+    "Start an Extend session over the route you are testing. Use only a disconnection you can undo safely (for example unplugging USB, or turning Wi-Fi off on the receiver); never a paid or unattended cellular path.",
+    "Start an Extend session with input control allowed, and put the fixture on the extended display.",
+    "Start an Extend session.",
+    "Start an Extend session. Note the power source and starting thermal state; keep the room and the devices' placement the same for every trial.",
+    "Start an Extend session; move the pointer off the extended display.",
+    "StreamReceiver.presentDecodedSample: successive complete video frames off the wire",
+    "Submission repeating the previous submission's capture PTS",
+    "Submission whose capture PTS differs from the previous submission's",
+    "Submission without a capture PTS (Window view composite, replay before any capture)",
+    "Submit or output callback failure",
+    "Successive AVSampleBufferDisplayLayer.enqueue calls in ReceiverVideoPresenter",
+    "Successive composites in WindowWorkspaceEngine.composeTick",
+    "Successive encoder submissions in MacSender.encode",
+    "The default AVSampleBufferDisplayLayer path decodes inside the system layer and reports no decode time.",
+    "The encoder already had its in-flight limit of frames.",
+    "The engine composes only when a pane changed, plus about one resend per second when static.",
+    "The performance overlay labels this \"encode\". cap is stamped at encoder submission, not at capture, so this is encode plus packaging, not capture-to-send.",
+    "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A\/V delay, queueing, decode or display. Offset error is up to about half the best round trip. Values outside -50 to 5000 ms are dropped (clock mapping not settled), so p99 and max under-report a pathological latency.",
+    "The same source frame handed over again (replay, static resend or re-encode).",
+    "The source did not change; not a drop.",
+    "The trailing-edge hold released the last change on screen.",
+    "The transport still had its limit of unsent video frames.",
+    "Trials cover whole 5 s diagnostics windows after the warm-up; up to one window at each end is outside the measurement.",
+    "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+    "UIDevice.batteryState (iOS, only while the diagnostics page is open)",
+    "Uniqueness comes from the compose counters, not the PTS.",
+    "Unknown elsewhere.",
+    "VTCompressionSession submit (MacSender.encode) to its output callback",
+    "Video frames awaiting send completion, sampled at each send",
+    "Video payload only.",
+    "Video payload only; framing, TLS, QUIC\/TCP and IP overhead are not counted.",
+    "Video send completion with an error",
+    "Video send completion without error",
+    "VideoToolbox output callback with noErr",
+    "Watchdog keyframe replay on a static screen after reconnect",
+    "What a still screen costs: should be close to no new frames, only the periodic resend.",
+    "Whole process, sampled once per window (5 s). Not GPU, encoder or decoder hardware load.",
+    "Whole process.",
+    "Window View, floating pane",
+    "Window View, four panes",
+    "Window View, one pane",
+    "WindowWorkspaceEngine composites delivered",
+    "WindowWorkspaceEngine.composeTick around WorkspaceCompositor.compose",
+    "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+    "absent",
+    "adobeRGB1998",
+    "agree",
+    "aligned",
+    "atLeast",
+    "atTop",
+    "awdl",
+    "beforeEachTrial",
+    "beforeRun",
+    "below",
+    "bgra",
+    "bitDepth",
+    "bitrate",
+    "bool",
+    "bt2020",
+    "bt2020Cl",
+    "bt2020Ncl",
+    "bt2020Ten",
+    "bt2020Twelve",
+    "bt470bg",
+    "bt470m",
+    "bt709",
+    "bypass",
+    "bytes",
+    "cancelled",
+    "cancelledByOperator",
+    "capture",
+    "ceilingClamp",
+    "charging",
+    "cmyk",
+    "commands",
+    "complete",
+    "compose_p95_ms",
+    "composited",
+    "composites_fps",
+    "confirmingDownshift",
+    "conflictingEvidence",
+    "counter",
+    "critical",
+    "cursor-target",
+    "cursor-target@1:cursorTarget\/60",
+    "cursorTarget",
+    "customModeBypass",
+    "dataSaverClamp",
+    "dciP3",
+    "decoder",
+    "derived.capture_idle_share",
+    "derived.encoder_busy_share",
+    "derived.expected_capture_fps",
+    "derived.send_backpressure_share",
+    "derived.source_demand_fps",
+    "derived.source_refresh_hz",
+    "derived.target_fps",
+    "diagnosticsOff",
+    "differ",
+    "displayLayer",
+    "displayP3",
+    "downshift",
+    "duringTrial",
+    "dwell",
+    "ebu3213",
+    "empty",
+    "encode_p95_ms",
+    "encoder",
+    "encoderFormat",
+    "encoderOverloaded",
+    "encoderVUI",
+    "encoder_busy_holds",
+    "events",
+    "exceedsBound",
+    "extend",
+    "extend.capture-retune",
+    "extend.frame-counter",
+    "extend.idle",
+    "extend.rapid-interaction",
+    "extend.reconnection",
+    "extend.scrolling-text",
+    "extend.sustained",
+    "extend.transition-cleanup",
+    "extendedDisplayP3",
+    "extendedLinearSRGB",
+    "extendedSRGB",
+    "failed",
+    "fair",
+    "fcc",
+    "firstUnlabelled",
+    "fixedPolicy",
+    "fixtureNotOpen",
+    "floating",
+    "fps",
+    "frame-counter",
+    "frame-counter@1:counter\/60",
+    "frame_id_skipped",
+    "frame_id_unique_fps",
+    "frames",
+    "full",
+    "gamma22",
+    "gamma28",
+    "generationReset",
+    "generation_resets",
+    "genericFilm",
+    "getrusage(RUSAGE_SELF) user+system time delta over wall time between samples",
+    "h264",
+    "healthy",
+    "hevc",
+    "high",
+    "high-motion",
+    "high-motion@1:highMotion\/60",
+    "highMotion",
+    "hlg",
+    "hold",
+    "iOS",
+    "iPad",
+    "iPhone",
+    "identity",
+    "idle",
+    "idle@1:still\/60",
+    "incomplete",
+    "initial",
+    "initialPoint",
+    "insufficientData",
+    "invalidValue",
+    "itur2020",
+    "itur709",
+    "lab",
+    "lan",
+    "lastResortRasterBelowFloor",
+    "legacyPeerFixedPolicy",
+    "limited",
+    "linear",
+    "linearSRGB",
+    "localMonotonic",
+    "localWallClock",
+    "low",
+    "mac",
+    "macOS",
+    "matrix",
+    "medium",
+    "meowdisplay-performance-lab-run",
+    "meowdisplay-performance-lab-trial",
+    "metal",
+    "mirror",
+    "mirror.frame-counter",
+    "mirror.high-motion",
+    "mirror.static-to-motion",
+    "missingWindows",
+    "monochrome",
+    "ms",
+    "multiple",
+    "network",
+    "networkBitrateDown",
+    "networkDeliveryLimited",
+    "networkFPSDown",
+    "networkRasterDown",
+    "noBottleneckEvident",
+    "noData",
+    "noHeadroom",
+    "noLowerOption",
+    "noParameterSet",
+    "noReceiverSummary",
+    "noSession",
+    "noTargetFrameRate",
+    "nominal",
+    "none",
+    "normal",
+    "notAnSPS",
+    "notApplicable",
+    "notStarted",
+    "nv12FullRange",
+    "nv12VideoRange",
+    "oscillationBackoff",
+    "other",
+    "overloadFPSDown",
+    "overloadRasterDown",
+    "p010FullRange",
+    "p010VideoRange",
+    "p22",
+    "paneClamp",
+    "panes",
+    "partial",
+    "payload_mbps",
+    "peerMissing",
+    "pending_encode backpressure (overlay enc↓)",
+    "pending_sends backpressure (overlay net↓)",
+    "perWindow",
+    "policyClamp",
+    "possiblyDoubleCounted",
+    "powerClamp",
+    "pq",
+    "presentationSchedulingLimited",
+    "primaries",
+    "probeConfirmed",
+    "probeConfirming",
+    "probeFailedRevert",
+    "probeRevert",
+    "quic",
+    "range",
+    "raster",
+    "receiver",
+    "receiver.arrival.bytes",
+    "receiver.arrival.bytes.p50",
+    "receiver.arrival.frames",
+    "receiver.arrival.frames.p50",
+    "receiver.arrival_interval_ms",
+    "receiver.arrival_interval_ms.p50",
+    "receiver.decode_ms",
+    "receiver.decode_ms.p50",
+    "receiver.frame_id.discontinuity",
+    "receiver.frame_id.discontinuity.p50",
+    "receiver.frame_id.duplicate",
+    "receiver.frame_id.duplicate.p50",
+    "receiver.frame_id.read",
+    "receiver.frame_id.read.p50",
+    "receiver.frame_id.skipped",
+    "receiver.frame_id.skipped.p50",
+    "receiver.frame_id.unexamined",
+    "receiver.frame_id.unexamined.p50",
+    "receiver.frame_id.unique",
+    "receiver.frame_id.unique.p50",
+    "receiver.frame_id.unique_interval_ms",
+    "receiver.frame_id.unique_interval_ms.p50",
+    "receiver.frame_id.unreadable",
+    "receiver.frame_id.unreadable.p50",
+    "receiver.presentation.enqueue_interval_ms",
+    "receiver.presentation.enqueue_interval_ms.p50",
+    "receiver.presentation.enqueued",
+    "receiver.presentation.enqueued.p50",
+    "receiver.presentation.layer_flushes",
+    "receiver.presentation.layer_flushes.p50",
+    "receiver.presentation.observed",
+    "receiver.presentation.observed.p50",
+    "receiver.presentation.observed_submit_to_glass_ms",
+    "receiver.presentation.observed_submit_to_glass_ms.p50",
+    "receiver.presentation.stale_discarded",
+    "receiver.presentation.stale_discarded.p50",
+    "receiver.presenter.queue_age_ms",
+    "receiver.presenter.queue_age_ms.p50",
+    "receiver.presenter.queue_depth",
+    "receiver.presenter.queue_depth.p50",
+    "receiver.restart.frame_gap_ms",
+    "receiver.restart.frame_gap_ms.p50",
+    "receiver.rtt_jitter_ms",
+    "receiver.rtt_jitter_ms.p50",
+    "receiver.rtt_ms",
+    "receiver.rtt_ms.p50",
+    "receiver.wire.submit_to_receive_ms",
+    "receiver.wire.submit_to_receive_ms.p50",
+    "receiver.wire.submit_to_send_ms",
+    "receiver.wire.submit_to_send_ms.p50",
+    "receiverDecoderOverloaded",
+    "receiverFormat",
+    "receiverVUI",
+    "receiver_arrival_fps",
+    "receiver_arrival_p95_ms",
+    "receiver_gaps_over_250ms",
+    "remote",
+    "replayLastFrameAfterDrop",
+    "reset",
+    "resource.battery_state",
+    "resource.battery_state.p50",
+    "resource.low_power_mode",
+    "resource.low_power_mode.p50",
+    "resource.memory_footprint_mb",
+    "resource.memory_footprint_mb.p50",
+    "resource.process_cpu_percent",
+    "resource.process_cpu_percent.p50",
+    "resource.thermal_state",
+    "resource.thermal_state.p50",
+    "restartRateLimited",
+    "restart_frame_gap_max_ms",
+    "retryHeldFrame offered a held frame again",
+    "rgb",
+    "routeChangeSettling",
+    "route_changes",
+    "sampled",
+    "saver",
+    "scrolling-text",
+    "scrolling-text@1:scrollingText\/60",
+    "scrollingText",
+    "secondUnlabelled",
+    "send_backpressure_drops",
+    "send_p95_ms",
+    "sender",
+    "sender.admission.admitted",
+    "sender.admission.admitted.p50",
+    "sender.admission.dropped_pending_sends",
+    "sender.admission.dropped_pending_sends.p50",
+    "sender.admission.held_encoder_busy",
+    "sender.admission.held_encoder_busy.p50",
+    "sender.admission.held_rate_limit",
+    "sender.admission.held_rate_limit.p50",
+    "sender.admission.held_retry",
+    "sender.admission.held_retry.p50",
+    "sender.capture.complete",
+    "sender.capture.complete.p50",
+    "sender.capture.complete_interval_ms",
+    "sender.capture.complete_interval_ms.p50",
+    "sender.capture.idle",
+    "sender.capture.idle.p50",
+    "sender.capture.other_status",
+    "sender.capture.other_status.p50",
+    "sender.encode.bytes",
+    "sender.encode.bytes.p50",
+    "sender.encode.completed",
+    "sender.encode.completed.p50",
+    "sender.encode.failed",
+    "sender.encode.failed.p50",
+    "sender.encode.keyframes",
+    "sender.encode.keyframes.p50",
+    "sender.encode.pending",
+    "sender.encode.pending.p50",
+    "sender.encode.stale_discarded",
+    "sender.encode.stale_discarded.p50",
+    "sender.encode_ms",
+    "sender.encode_ms.p50",
+    "sender.restart.frame_gap_ms",
+    "sender.restart.frame_gap_ms.p50",
+    "sender.send.bytes",
+    "sender.send.bytes.p50",
+    "sender.send.completed",
+    "sender.send.completed.p50",
+    "sender.send.errors",
+    "sender.send.errors.p50",
+    "sender.send.pending",
+    "sender.send.pending.p50",
+    "sender.send_ms",
+    "sender.send_ms.p50",
+    "sender.source_age_at_submit_ms",
+    "sender.source_age_at_submit_ms.p50",
+    "sender.submit.drop_replay",
+    "sender.submit.drop_replay.p50",
+    "sender.submit.duplicate",
+    "sender.submit.duplicate.p50",
+    "sender.submit.held_retry",
+    "sender.submit.held_retry.p50",
+    "sender.submit.live",
+    "sender.submit.live.p50",
+    "sender.submit.reconnect_replay",
+    "sender.submit.reconnect_replay.p50",
+    "sender.submit.source_unique",
+    "sender.submit.source_unique.p50",
+    "sender.submit.uniqueness_unknown",
+    "sender.submit.uniqueness_unknown.p50",
+    "sender.submit.window_composite",
+    "sender.submit.window_composite.p50",
+    "sender.submit_interval_ms",
+    "sender.submit_interval_ms.p50",
+    "sender.window.compose_interval_ms",
+    "sender.window.compose_interval_ms.p50",
+    "sender.window.compose_ms",
+    "sender.window.compose_ms.p50",
+    "sender.window.composites",
+    "sender.window.composites.p50",
+    "sender.window.dimmed_tiles",
+    "sender.window.dimmed_tiles.p50",
+    "sender.window.floats",
+    "sender.window.floats.p50",
+    "sender.window.static_resends",
+    "sender.window.static_resends.p50",
+    "sender.window.tiles",
+    "sender.window.tiles.p50",
+    "sender.window.tiles_with_frame",
+    "sender.window.tiles_with_frame.p50",
+    "senderCaptureLimited",
+    "senderHostClock",
+    "senderRecorderChanged",
+    "senderWallClock",
+    "sender_cpu_percent_median",
+    "sender_memory_mb_delta",
+    "sender_memory_mb_max",
+    "serious",
+    "session.colour_samples",
+    "session.colour_samples.p50",
+    "session.generation_resets",
+    "session.generation_resets.p50",
+    "session.route_changes",
+    "session.route_changes.p50",
+    "single",
+    "smpte170m",
+    "smpte240m",
+    "smpte428",
+    "sourceDemandUnknown",
+    "sourceIdle",
+    "sourceLimited",
+    "sourceRefreshLimited",
+    "source_age_p95_ms",
+    "source_unique_fps",
+    "srgb",
+    "stale",
+    "staleGeneration",
+    "staleRouteEpoch",
+    "staleTelemetry",
+    "stalled",
+    "state",
+    "static-to-motion",
+    "static-to-motion@1:still\/4,highMotion\/4",
+    "still",
+    "submit_gaps_over_250ms",
+    "submit_gaps_over_500ms",
+    "submit_interval_p95_ms",
+    "submit_interval_p99_ms",
+    "submitted_fps",
+    "synthetic.self-test",
+    "task_info TASK_VM_INFO phys_footprint",
+    "tcp",
+    "thermal",
+    "thermalClamp",
+    "thermalFPSDown",
+    "thermalRasterDown",
+    "tooFewSamples",
+    "tooLarge",
+    "transfer",
+    "truncated",
+    "unexpectedRestart",
+    "unknown",
+    "unknownInsufficientData",
+    "unlisted",
+    "unnamed",
+    "unplugged",
+    "unspecified",
+    "unsupportedCodec",
+    "unsupportedLayer",
+    "upshift",
+    "upshiftBitrate",
+    "upshiftFPS",
+    "upshiftHighRefresh",
+    "upshiftRaster",
+    "usb",
+    "useGamma",
+    "userOverride",
+    "wallClockMapped",
+    "window",
+    "window.floating-pane",
+    "window.multiple-panes",
+    "window.single-pane",
+    "windowCompositionLimited",
+    "windowGap",
+    "windowTooShort",
+    "ycgco"
+  ],
+  "catalogVersion" : 1,
+  "classifierThresholdNames" : [
+    "activeSourceIdleShare",
+    "backpressureShare",
+    "captureShortfall",
+    "deliveryBudgetFactor",
+    "encodeBudgetFactor",
+    "headroomShare",
+    "idleFPS",
+    "minimumRTTSamples",
+    "minimumSamples",
+    "minimumWindowSeconds",
+    "rateShortfall",
+    "refreshMatchTolerance",
+    "rttJitterMs"
+  ],
+  "frameID" : {
+    "codeModules" : 50,
+    "counterBits" : 20,
+    "stripModules" : 54,
+    "version" : 1
+  },
+  "metricDictionaryVersion" : 2,
+  "metricIDs" : [
+    "receiver.arrival.bytes",
+    "receiver.arrival.frames",
+    "receiver.arrival_interval_ms",
+    "receiver.decode_ms",
+    "receiver.frame_id.discontinuity",
+    "receiver.frame_id.duplicate",
+    "receiver.frame_id.read",
+    "receiver.frame_id.skipped",
+    "receiver.frame_id.unexamined",
+    "receiver.frame_id.unique",
+    "receiver.frame_id.unique_interval_ms",
+    "receiver.frame_id.unreadable",
+    "receiver.presentation.enqueue_interval_ms",
+    "receiver.presentation.enqueued",
+    "receiver.presentation.layer_flushes",
+    "receiver.presentation.observed",
+    "receiver.presentation.observed_submit_to_glass_ms",
+    "receiver.presentation.stale_discarded",
+    "receiver.presenter.queue_age_ms",
+    "receiver.presenter.queue_depth",
+    "receiver.restart.frame_gap_ms",
+    "receiver.rtt_jitter_ms",
+    "receiver.rtt_ms",
+    "receiver.wire.submit_to_receive_ms",
+    "receiver.wire.submit_to_send_ms",
+    "resource.battery_state",
+    "resource.low_power_mode",
+    "resource.memory_footprint_mb",
+    "resource.process_cpu_percent",
+    "resource.thermal_state",
+    "sender.admission.admitted",
+    "sender.admission.dropped_pending_sends",
+    "sender.admission.held_encoder_busy",
+    "sender.admission.held_rate_limit",
+    "sender.admission.held_retry",
+    "sender.capture.complete",
+    "sender.capture.complete_interval_ms",
+    "sender.capture.idle",
+    "sender.capture.other_status",
+    "sender.encode.bytes",
+    "sender.encode.completed",
+    "sender.encode.failed",
+    "sender.encode.keyframes",
+    "sender.encode.pending",
+    "sender.encode.stale_discarded",
+    "sender.encode_ms",
+    "sender.restart.frame_gap_ms",
+    "sender.send.bytes",
+    "sender.send.completed",
+    "sender.send.errors",
+    "sender.send.pending",
+    "sender.send_ms",
+    "sender.source_age_at_submit_ms",
+    "sender.submit.drop_replay",
+    "sender.submit.duplicate",
+    "sender.submit.held_retry",
+    "sender.submit.live",
+    "sender.submit.reconnect_replay",
+    "sender.submit.source_unique",
+    "sender.submit.uniqueness_unknown",
+    "sender.submit.window_composite",
+    "sender.submit_interval_ms",
+    "sender.window.compose_interval_ms",
+    "sender.window.compose_ms",
+    "sender.window.composites",
+    "sender.window.dimmed_tiles",
+    "sender.window.floats",
+    "sender.window.static_resends",
+    "sender.window.tiles",
+    "sender.window.tiles_with_frame",
+    "session.colour_samples",
+    "session.generation_resets",
+    "session.route_changes"
+  ],
+  "minimumTrials" : 3,
+  "scenarios" : [
+    {
+      "caption" : "Mirror, frame counter",
+      "expectsRestarts" : false,
+      "id" : "mirror.frame-counter",
+      "mode" : "mirror",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "submit_interval_p99_ms",
+        "submit_gaps_over_250ms",
+        "receiver_arrival_fps",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped",
+        "encode_p95_ms",
+        "send_p95_ms",
+        "source_age_p95_ms",
+        "payload_mbps",
+        "encoder_busy_holds",
+        "send_backpressure_drops"
+      ],
+      "purpose" : "Source-unique frame rate and pacing when every display refresh changes the screen (Mirror).",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start a Mirror session to the receiving device.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Extend, frame counter",
+      "expectsRestarts" : false,
+      "id" : "extend.frame-counter",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "submit_interval_p99_ms",
+        "submit_gaps_over_250ms",
+        "receiver_arrival_fps",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped",
+        "encode_p95_ms",
+        "send_p95_ms",
+        "source_age_p95_ms",
+        "payload_mbps",
+        "encoder_busy_holds",
+        "send_backpressure_drops"
+      ],
+      "purpose" : "Source-unique frame rate and pacing on the virtual display (Extend).",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session and put the fixture on the extended display.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Window View, one pane",
+      "expectsRestarts" : false,
+      "id" : "window.single-pane",
+      "mode" : "window",
+      "panes" : "single",
+      "primaryMetrics" : [
+        "composites_fps",
+        "compose_p95_ms",
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "submit_interval_p99_ms",
+        "submit_gaps_over_250ms",
+        "receiver_arrival_fps",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped",
+        "encode_p95_ms",
+        "payload_mbps"
+      ],
+      "purpose" : "Composition and pacing with the fixture as the only Window View pane.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start Window View and add only the fixture window as a pane; maximise that pane on the receiver.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Window View, four panes",
+      "expectsRestarts" : false,
+      "id" : "window.multiple-panes",
+      "mode" : "window",
+      "panes" : "multiple",
+      "primaryMetrics" : [
+        "composites_fps",
+        "compose_p95_ms",
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "submit_interval_p99_ms",
+        "submit_gaps_over_250ms",
+        "receiver_arrival_fps",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped",
+        "encode_p95_ms",
+        "payload_mbps"
+      ],
+      "purpose" : "Composition cost and pacing with the fixture plus three static panes.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start Window View with the fixture and three other windows that stay still (for example empty Finder windows): four panes in all. Use the same windows for every run.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Window View, floating pane",
+      "expectsRestarts" : false,
+      "id" : "window.floating-pane",
+      "mode" : "window",
+      "panes" : "floating",
+      "primaryMetrics" : [
+        "composites_fps",
+        "compose_p95_ms",
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "submit_interval_p99_ms",
+        "submit_gaps_over_250ms",
+        "receiver_arrival_fps",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped"
+      ],
+      "purpose" : "Composition with the fixture as a floating pane partly covering a still pane.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start Window View with one still window as a pane and float the fixture over about half of it.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Mirror, still to motion",
+      "expectsRestarts" : false,
+      "id" : "mirror.static-to-motion",
+      "mode" : "mirror",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_gaps_over_250ms",
+        "submit_gaps_over_500ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_unique_fps",
+        "frame_id_skipped",
+        "source_age_p95_ms",
+        "encode_p95_ms"
+      ],
+      "purpose" : "How quickly frames resume after a still screen: 4 s still, 4 s full motion, repeating.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start a Mirror session to the receiving device.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 8,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "static-to-motion"
+    },
+    {
+      "caption" : "Extend, scrolling fine text",
+      "expectsRestarts" : false,
+      "id" : "extend.scrolling-text",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "receiver_arrival_p95_ms",
+        "frame_id_skipped",
+        "payload_mbps",
+        "encode_p95_ms"
+      ],
+      "purpose" : "Pacing and payload for scrolling text; judge text clarity separately and label it subjective.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session and put the fixture on the extended display.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 15,
+          "instruction" : "Note (do not touch): is the scrolling text readable on the receiver? Record it as a subjective observation.",
+          "timing" : "duringTrial"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "scrolling-text"
+    },
+    {
+      "caption" : "Mirror, high motion",
+      "expectsRestarts" : false,
+      "id" : "mirror.high-motion",
+      "mode" : "mirror",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "encode_p95_ms",
+        "send_p95_ms",
+        "source_age_p95_ms",
+        "payload_mbps",
+        "encoder_busy_holds",
+        "send_backpressure_drops",
+        "source_unique_fps",
+        "receiver_arrival_fps",
+        "frame_id_unique_fps",
+        "frame_id_skipped"
+      ],
+      "purpose" : "Encoder and network load when every pixel changes every frame.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start a Mirror session to the receiving device.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "high-motion"
+    },
+    {
+      "caption" : "Extend, rapid interaction",
+      "expectsRestarts" : false,
+      "id" : "extend.rapid-interaction",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "receiver_arrival_p95_ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_skipped"
+      ],
+      "purpose" : "Pacing while the operator scrolls and drags on the receiver over the moving target. Human-driven: compare only runs by the same operator.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session with input control allowed, and put the fixture on the extended display.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 0,
+          "instruction" : "Now: on the receiver, follow the moving target with your finger or pointer, dragging and scrolling, until the trial ends.",
+          "timing" : "duringTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "cursor-target"
+    },
+    {
+      "caption" : "Extend, reconnection",
+      "expectsRestarts" : true,
+      "id" : "extend.reconnection",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "generation_resets",
+        "restart_frame_gap_max_ms",
+        "route_changes",
+        "submit_gaps_over_500ms",
+        "receiver_gaps_over_250ms",
+        "frame_id_skipped",
+        "source_unique_fps"
+      ],
+      "purpose" : "Recovery after a connection loss the operator causes on purpose, measured as frame gaps and restarts.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session over the route you are testing. Use only a disconnection you can undo safely (for example unplugging USB, or turning Wi-Fi off on the receiver); never a paid or unattended cellular path.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 10,
+          "instruction" : "Now: disconnect the route the same way as in every trial.",
+          "timing" : "duringTrial"
+        },
+        {
+          "atSecond" : 15,
+          "instruction" : "Now: reconnect it.",
+          "timing" : "duringTrial"
+        }
+      ],
+      "trialWindows" : 8,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Extend, capture retuning",
+      "expectsRestarts" : true,
+      "id" : "extend.capture-retune",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "generation_resets",
+        "restart_frame_gap_max_ms",
+        "submit_gaps_over_250ms",
+        "submit_gaps_over_500ms",
+        "frame_id_skipped",
+        "source_unique_fps"
+      ],
+      "purpose" : "Cost of a capture restart: the operator changes the frame-rate cap mid-trial and back.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session at the frame-rate cap you are testing.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 10,
+          "instruction" : "Now: change the frame-rate cap to another value.",
+          "timing" : "duringTrial"
+        },
+        {
+          "atSecond" : 25,
+          "instruction" : "Now: change it back.",
+          "timing" : "duringTrial"
+        }
+      ],
+      "trialWindows" : 8,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "frame-counter"
+    },
+    {
+      "caption" : "Repeated mode transitions",
+      "expectsRestarts" : true,
+      "id" : "extend.transition-cleanup",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "sender_memory_mb_max",
+        "sender_memory_mb_delta",
+        "sender_cpu_percent_median",
+        "generation_resets"
+      ],
+      "purpose" : "Resource cleanup across repeated Mirror\/Extend switches: memory and CPU after the transitions settle.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 5,
+          "instruction" : "Now: switch to Mirror and back to Extend five times, waiting for the picture each time, then leave it in Extend.",
+          "timing" : "duringTrial"
+        }
+      ],
+      "trialWindows" : 12,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "idle"
+    },
+    {
+      "caption" : "Extend, sustained 10 minutes",
+      "expectsRestarts" : false,
+      "id" : "extend.sustained",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "receiver_arrival_fps",
+        "submit_gaps_over_250ms",
+        "receiver_gaps_over_250ms",
+        "sender_cpu_percent_median",
+        "sender_memory_mb_max",
+        "sender_memory_mb_delta",
+        "payload_mbps"
+      ],
+      "purpose" : "Long-run stability, not peak: frame rate, gaps, CPU, memory and thermal state over 10 minutes.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session. Note the power source and starting thermal state; keep the room and the devices' placement the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 120,
+      "version" : 1,
+      "warmUpSeconds" : 30,
+      "workload" : "high-motion"
+    },
+    {
+      "caption" : "Extend, idle screen",
+      "expectsRestarts" : false,
+      "id" : "extend.idle",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submitted_fps",
+        "payload_mbps",
+        "sender_cpu_percent_median"
+      ],
+      "purpose" : "What a still screen costs: should be close to no new frames, only the periodic resend.",
+      "steps" : [
+        {
+          "instruction" : "Turn on Streaming Diagnostics on this Mac and on the receiving device (iPhone\/iPad: Settings > Diagnostics > Streaming Diagnostics).",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Write down the conditions the app cannot see: sender power source and display refresh, receiver model and OS, network, other running apps. Keep them the same for every trial.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Click Open Fixture Window and move the fixture onto the streamed display. Make it fill that display (Zoom), unless the scenario says otherwise.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Optional, for exact frame-ID counts: turn on the experimental Metal renderer on the receiver. It changes presentation timing, so record it and use the same setting for every run you compare.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Start an Extend session; move the pointer off the extended display.",
+          "timing" : "beforeRun"
+        },
+        {
+          "instruction" : "Keep hands off both devices while the trial measures.",
+          "timing" : "beforeEachTrial"
+        }
+      ],
+      "trialWindows" : 6,
+      "version" : 1,
+      "warmUpSeconds" : 10,
+      "workload" : "idle"
+    }
+  ],
+  "synthetic" : {
+    "caption" : "SYNTHETIC self-test",
+    "expectsRestarts" : false,
+    "id" : "synthetic.self-test",
+    "mode" : "extend",
+    "panes" : "none",
+    "primaryMetrics" : [
+      "source_unique_fps",
+      "submit_interval_p95_ms",
+      "encode_p95_ms",
+      "payload_mbps",
+      "receiver_arrival_fps",
+      "frame_id_unique_fps",
+      "frame_id_skipped"
+    ],
+    "purpose" : "SYNTHETIC: a scripted event stream through the real recorder and run controller. It validates the harness, not performance.",
+    "steps" : [
+      {
+        "instruction" : "SYNTHETIC: nothing to set up.",
+        "timing" : "beforeRun"
+      },
+      {
+        "atSecond" : 11,
+        "instruction" : "SYNTHETIC: a scripted 300 ms stall happens in trial 3.",
+        "timing" : "duringTrial"
+      }
+    ],
+    "trialWindows" : 3,
+    "version" : 1,
+    "warmUpSeconds" : 5,
+    "workload" : "frame-counter"
+  },
+  "windowSeconds" : 5,
+  "workloadSignatures" : [
+    "frame-counter@1:counter\/60",
+    "static-to-motion@1:still\/4,highMotion\/4",
+    "scrolling-text@1:scrollingText\/60",
+    "high-motion@1:highMotion\/60",
+    "cursor-target@1:cursorTarget\/60",
+    "idle@1:still\/60"
+  ],
+  "workloads" : [
+    {
+      "cycle" : [
+        {
+          "kind" : "counter",
+          "seconds" : 60
+        }
+      ],
+      "id" : "frame-counter",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    },
+    {
+      "cycle" : [
+        {
+          "kind" : "still",
+          "seconds" : 4
+        },
+        {
+          "kind" : "highMotion",
+          "seconds" : 4
+        }
+      ],
+      "id" : "static-to-motion",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    },
+    {
+      "cycle" : [
+        {
+          "kind" : "scrollingText",
+          "seconds" : 60
+        }
+      ],
+      "id" : "scrolling-text",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    },
+    {
+      "cycle" : [
+        {
+          "kind" : "highMotion",
+          "seconds" : 60
+        }
+      ],
+      "id" : "high-motion",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    },
+    {
+      "cycle" : [
+        {
+          "kind" : "cursorTarget",
+          "seconds" : 60
+        }
+      ],
+      "id" : "cursor-target",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    },
+    {
+      "cycle" : [
+        {
+          "kind" : "still",
+          "seconds" : 60
+        }
+      ],
+      "id" : "idle",
+      "seed" : 5576986271741469233,
+      "version" : 1
+    }
+  ]
+}

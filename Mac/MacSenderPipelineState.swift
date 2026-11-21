@@ -18,6 +18,8 @@ final class MacSenderPipelineState: @unchecked Sendable {
 
     private var pendingEncodes = 0
     let maxPendingEncodes: Int
+    private var adaptiveEncodeLatencySumMs = 0.0
+    private var adaptiveEncodeLatencyCount = 0
 
     private var pendingSends = 0
     let maxPendingSends: Int
@@ -145,6 +147,31 @@ final class MacSenderPipelineState: @unchecked Sendable {
 
     func decrementPendingEncodes() {
         lock.lock(); pendingEncodes = max(0, pendingEncodes - 1); lock.unlock()
+    }
+
+    /// Same, also adding one output's submit → output time to the adaptive
+    /// encode-latency window (#123 A1) under the same lock: no extra lock
+    /// per frame. Only called while the adaptive controller runs.
+    func decrementPendingEncodes(adaptiveEncodeLatencyMs latency: Double) {
+        lock.lock()
+        pendingEncodes = max(0, pendingEncodes - 1)
+        if latency.isFinite, latency >= 0 {
+            adaptiveEncodeLatencySumMs += latency
+            adaptiveEncodeLatencyCount += 1
+        }
+        lock.unlock()
+    }
+
+    /// Mean submit → output time since the last drain; nil when nothing was
+    /// encoded. Read once per adaptive tick.
+    func drainAdaptiveEncodeLatencyMs() -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        defer {
+            adaptiveEncodeLatencySumMs = 0
+            adaptiveEncodeLatencyCount = 0
+        }
+        guard adaptiveEncodeLatencyCount > 0 else { return nil }
+        return adaptiveEncodeLatencySumMs / Double(adaptiveEncodeLatencyCount)
     }
 
     func resetPendingEncodes() {

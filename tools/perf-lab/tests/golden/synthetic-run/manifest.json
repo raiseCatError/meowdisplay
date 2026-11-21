@@ -1,0 +1,767 @@
+{
+  "classifierThresholds" : {
+    "activeSourceIdleShare" : 0.1,
+    "backpressureShare" : 0.05,
+    "captureShortfall" : 0.8,
+    "deliveryBudgetFactor" : 2,
+    "encodeBudgetFactor" : 1.5,
+    "headroomShare" : 0.02,
+    "idleFPS" : 1,
+    "minimumRTTSamples" : 8,
+    "minimumSamples" : 30,
+    "minimumWindowSeconds" : 2,
+    "rateShortfall" : 0.9,
+    "refreshMatchTolerance" : 0.1,
+    "rttJitterMs" : 20
+  },
+  "createdAt" : "2026-11-17T00:00:00Z",
+  "diagnosticsSchemaVersion" : 1,
+  "environment" : {
+    "context" : {
+      "codec" : "hevc",
+      "displayMode" : "extend",
+      "encoderInFlightLimit" : 2,
+      "networkProtocol" : "tcp",
+      "pathConstrained" : false,
+      "pathExpensive" : false,
+      "presentationPath" : "unknown",
+      "rasterHeight" : 2048,
+      "rasterWidth" : 2732,
+      "route" : "usb",
+      "targetFPS" : 60
+    },
+    "sender" : {
+      "appVersion" : "synthetic",
+      "deviceClass" : "mac",
+      "osMajor" : 0,
+      "osMinor" : 0,
+      "osPatch" : 0,
+      "platform" : "macOS"
+    }
+  },
+  "format" : "meowdisplay-performance-lab-run",
+  "frameIDVersion" : 1,
+  "histogramUpperEdgesMs" : [
+    0.25,
+    0.5,
+    0.75,
+    1,
+    1.5,
+    2,
+    2.5,
+    3,
+    3.5,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    20,
+    22,
+    25,
+    28,
+    30,
+    33,
+    36,
+    40,
+    45,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100,
+    125,
+    150,
+    175,
+    200,
+    250,
+    300,
+    400,
+    500,
+    750,
+    1000,
+    1500,
+    2000,
+    3000,
+    5000,
+    10000
+  ],
+  "limitations" : [
+    "AVSampleBufferDisplayLayer enqueue is counted as enqueued for presentation, not as presented.",
+    "Only the experimental Metal path reports an observed presentation, and it changes timing itself.",
+    "No metric measures capture-to-photon; that needs external measurement.",
+    "Frame header cap is stamped at encoder submission, not at capture.",
+    "Cross-device spans use a ping\/pong clock offset; error is up to about half the best round trip.",
+    "Byte counts are app payload, not bytes billed by a network.",
+    "Trials cover whole 5 s diagnostics windows after the warm-up; up to one window at each end is outside the measurement.",
+    "Receiver numbers are the receiver's own 5 s windows, each counted once, that provably began after the trial's first sender window began and before its last one ended (unless the receiver restarted at that moment); they are not aligned with the sender's windows, so the last one may run up to one receiver window past the trial's end.",
+    "Frame-ID counts exist only on the receiver's experimental Metal path, which itself changes presentation timing.",
+    "Operator steps are done by hand; their timing varies between trials."
+  ],
+  "metricDictionaryVersion" : 2,
+  "metrics" : [
+    {
+      "caveat" : "ScreenCaptureKit delivers a complete frame only when the screen changed, so long intervals on a static screen are idle, not stalls. Capture runs at about 2x the target rate (DisplayCaptureSettings).",
+      "id" : "sender.capture.complete_interval_ms",
+      "side" : "sender",
+      "source" : "MacSender stream(_:didOutputSampleBuffer:) frames with SCFrameStatus.complete (display capture)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Includes the rate limiter's trailing-edge hold and any replay delay. Display capture only: Window view composites have no capture PTS, so nothing is recorded there.",
+      "id" : "sender.source_age_at_submit_ms",
+      "side" : "sender",
+      "source" : "MacSender.encode: host clock now minus the ScreenCaptureKit sample PTS of the pixels being submitted",
+      "timebase" : "senderHostClock",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Includes VideoToolbox's own queueing when more than one frame is in flight (StreamingPriority in-flight limit 1\/2\/3).",
+      "id" : "sender.encode_ms",
+      "side" : "sender",
+      "source" : "VTCompressionSession submit (MacSender.encode) to its output callback",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Counts duplicates and replays too; see the submit counters for source-unique frames.",
+      "id" : "sender.submit_interval_ms",
+      "side" : "sender",
+      "source" : "Successive encoder submissions in MacSender.encode",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "A TCP\/QUIC send completion means the local stack accepted the bytes, not that the receiver got them.",
+      "id" : "sender.send_ms",
+      "side" : "sender",
+      "source" : "MacSender.sendFramed: frame handed to the transport until its send completion",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "CPU-side time to build and render the composite; GPU work that finishes later is not included.",
+      "id" : "sender.window.compose_ms",
+      "side" : "sender",
+      "source" : "WindowWorkspaceEngine.composeTick around WorkspaceCompositor.compose",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "The engine composes only when a pane changed, plus about one resend per second when static.",
+      "id" : "sender.window.compose_interval_ms",
+      "side" : "sender",
+      "source" : "Successive composites in WindowWorkspaceEngine.composeTick",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "One sample per restart (reconnect, retune, mode change). The interval stages restart their baselines at a restart, so this gap is not in them.",
+      "id" : "sender.restart.frame_gap_ms",
+      "side" : "sender",
+      "source" : "Last encoder submission of the previous capture generation to the first submission of the new one (StreamDiagnosticsRecorder.noteGeneration)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "A long gap can be an idle source; compare with the sender's capture and submit rates.",
+      "id" : "receiver.arrival_interval_ms",
+      "side" : "receiver",
+      "source" : "StreamReceiver.presentDecodedSample: successive complete video frames off the wire",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "The performance overlay labels this \"encode\". cap is stamped at encoder submission, not at capture, so this is encode plus packaging, not capture-to-send.",
+      "id" : "receiver.wire.submit_to_send_ms",
+      "side" : "receiver",
+      "source" : "Frame header snd minus cap (both written by the sender)",
+      "timebase" : "senderWallClock",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A\/V delay, queueing, decode or display. Offset error is up to about half the best round trip. Values outside -50 to 5000 ms are dropped (clock mapping not settled), so p99 and max under-report a pathological latency.",
+      "id" : "receiver.wire.submit_to_receive_ms",
+      "side" : "receiver",
+      "source" : "Receiver wall clock (mapped with the ping\/pong offset) minus cap at presentDecodedSample",
+      "timebase" : "wallClockMapped",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "The default AVSampleBufferDisplayLayer path decodes inside the system layer and reports no decode time.",
+      "id" : "receiver.decode_ms",
+      "side" : "receiver",
+      "source" : "ReceiverVideoDecoder decode duration (experimental Metal path only)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Measures the AsyncStream command queue and MainActor scheduling only; the queue is unbounded by design and is not changed here.",
+      "id" : "receiver.presenter.queue_age_ms",
+      "side" : "receiver",
+      "source" : "ReceiverVideoPresenter: command yield until the MainActor pump processes it",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Enqueued for presentation, not presented: the layer decides when a frame reaches the screen.",
+      "id" : "receiver.presentation.enqueue_interval_ms",
+      "side" : "receiver",
+      "source" : "Successive AVSampleBufferDisplayLayer.enqueue calls in ReceiverVideoPresenter",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. Values outside -50 to 5000 ms are dropped, so p99 and max under-report a pathological latency.",
+      "id" : "receiver.presentation.observed_submit_to_glass_ms",
+      "side" : "receiver",
+      "source" : "Metal drawable presented handler (StreamReceiver.recordPresented) minus cap",
+      "timebase" : "wallClockMapped",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Control-message round trip; it rides behind any queued video on the same connection. Both ends of the span are this device's wall clock (the ping time also feeds the clock offset), so a clock step during a round trip skews one sample; samples outside 0-2000 ms are dropped.",
+      "id" : "receiver.rtt_ms",
+      "side" : "receiver",
+      "source" : "Receiver ping to sender pong on the control channel",
+      "timebase" : "localWallClock",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "One sample per resync inside a session. A full reconnect resets the receiver's recorder and records no sample. The arrival interval restarts its baseline at a resync, so this gap is not in it.",
+      "id" : "receiver.restart.frame_gap_ms",
+      "side" : "receiver",
+      "source" : "Last frame arrival before a presentation generation change to the first arrival after it (StreamDiagnosticsRecorder.noteGeneration)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Only while the Performance Lab fixture is on screen and only on the experimental Metal path, which itself changes timing. Measured at the decoded-frame handoff, not on glass.",
+      "id" : "receiver.frame_id.unique_interval_ms",
+      "side" : "receiver",
+      "source" : "PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID (ReceiverVideoPresenter.presentDecoded)",
+      "timebase" : "localMonotonic",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Display capture only (Mirror, Extend). The closest available proxy for source-unique frames: ScreenCaptureKit sends a complete frame when content changed.",
+      "id" : "sender.capture.complete",
+      "side" : "sender",
+      "source" : "SCK callback, status complete with pixels",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "The source did not change; not a drop.",
+      "id" : "sender.capture.idle",
+      "side" : "sender",
+      "source" : "SCK callback, status idle",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.capture.other_status",
+      "side" : "sender",
+      "source" : "SCK callback, status blank\/suspended\/started\/stopped or no pixels",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Admitted by the rate limiter; may still be dropped by backpressure.",
+      "id" : "sender.admission.admitted",
+      "side" : "sender",
+      "source" : "FrameAdmission.offer returned send",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Normal rate limiting at about 2x capture headroom: expected to be roughly as many as admitted frames while content moves.",
+      "id" : "sender.admission.held_rate_limit",
+      "side" : "sender",
+      "source" : "FrameAdmission.offer returned hold",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "The encoder already had its in-flight limit of frames.",
+      "id" : "sender.admission.held_encoder_busy",
+      "side" : "sender",
+      "source" : "pending_encode backpressure (overlay enc↓)",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "The trailing-edge hold released the last change on screen.",
+      "id" : "sender.admission.held_retry",
+      "side" : "sender",
+      "source" : "retryHeldFrame offered a held frame again",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "The transport still had its limit of unsent video frames.",
+      "id" : "sender.admission.dropped_pending_sends",
+      "side" : "sender",
+      "source" : "pending_sends backpressure (overlay net↓)",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.submit.live",
+      "side" : "sender",
+      "source" : "Encoder submission straight from a capture callback",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "A delayed but not duplicated frame.",
+      "id" : "sender.submit.held_retry",
+      "side" : "sender",
+      "source" : "Encoder submission of a held frame",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Re-encodes the newest pixels after send backpressure cleared.",
+      "id" : "sender.submit.drop_replay",
+      "side" : "sender",
+      "source" : "replayLastFrameAfterDrop",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.submit.reconnect_replay",
+      "side" : "sender",
+      "source" : "Watchdog keyframe replay on a static screen after reconnect",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Uniqueness comes from the compose counters, not the PTS.",
+      "id" : "sender.submit.window_composite",
+      "side" : "sender",
+      "source" : "Encoder submission of a Window view composite",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "A pixel buffer captured once and submitted once. Display capture only.",
+      "id" : "sender.submit.source_unique",
+      "side" : "sender",
+      "source" : "Submission whose capture PTS differs from the previous submission's",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Replays of pixels already encoded.",
+      "id" : "sender.submit.duplicate",
+      "side" : "sender",
+      "source" : "Submission repeating the previous submission's capture PTS",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.submit.uniqueness_unknown",
+      "side" : "sender",
+      "source" : "Submission without a capture PTS (Window view composite, replay before any capture)",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.encode.completed",
+      "side" : "sender",
+      "source" : "VideoToolbox output callback with noErr",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.encode.failed",
+      "side" : "sender",
+      "source" : "Submit or output callback failure",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Encoded but intentionally never sent.",
+      "id" : "sender.encode.stale_discarded",
+      "side" : "sender",
+      "source" : "Encoded output from a retired session or generation",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Video payload only; framing, TLS, QUIC\/TCP and IP overhead are not counted.",
+      "id" : "sender.encode.bytes",
+      "side" : "sender",
+      "source" : "Annex B payload size of each encoded frame",
+      "timebase" : "none",
+      "unit" : "bytes"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.encode.keyframes",
+      "side" : "sender",
+      "source" : "Encoded frames that are sync samples",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.send.completed",
+      "side" : "sender",
+      "source" : "Video send completion without error",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.send.errors",
+      "side" : "sender",
+      "source" : "Video send completion with an error",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "App payload, not bytes billed by a network: encryption, transport and tunnel overhead are not included.",
+      "id" : "sender.send.bytes",
+      "side" : "sender",
+      "source" : "Framed video bytes whose send completed",
+      "timebase" : "none",
+      "unit" : "bytes"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.window.composites",
+      "side" : "sender",
+      "source" : "WindowWorkspaceEngine composites delivered",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Duplicates by design (heal a lost frame).",
+      "id" : "sender.window.static_resends",
+      "side" : "sender",
+      "source" : "Composites made by the ~1 s static resend, not by a change",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Sampled about every 2 s.",
+      "id" : "session.route_changes",
+      "source" : "Route class changed between samples",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
+      "caveat" : "",
+      "id" : "session.generation_resets",
+      "source" : "Capture or presentation generation changed; interval baselines restart",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
+      "caveat" : "Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found.",
+      "id" : "session.colour_samples",
+      "source" : "A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
+      "caveat" : "",
+      "id" : "receiver.arrival.frames",
+      "side" : "receiver",
+      "source" : "Complete video frames at presentDecodedSample",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Video payload only.",
+      "id" : "receiver.arrival.bytes",
+      "side" : "receiver",
+      "source" : "Sample buffer size of each arrived frame",
+      "timebase" : "none",
+      "unit" : "bytes"
+    },
+    {
+      "caveat" : "Enqueued for presentation, never confirmed on glass.",
+      "id" : "receiver.presentation.enqueued",
+      "side" : "receiver",
+      "source" : "AVSampleBufferDisplayLayer.enqueue or Metal handoff",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "receiver.presentation.stale_discarded",
+      "side" : "receiver",
+      "source" : "Presenter generation check discarded a frame",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Experimental Metal path only. The only presentation this app can observe.",
+      "id" : "receiver.presentation.observed",
+      "side" : "receiver",
+      "source" : "Metal drawable presented handler",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "receiver.presentation.layer_flushes",
+      "side" : "receiver",
+      "source" : "Display layer failed and was flushed",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
+      "caveat" : "Experimental Metal path only; only while the lab fixture is visible.",
+      "id" : "receiver.frame_id.read",
+      "side" : "receiver",
+      "source" : "Decoded frames whose Performance Lab frame-ID strip was read",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Source-unique fixture frames that reached the decoded-frame handoff.",
+      "id" : "receiver.frame_id.unique",
+      "side" : "receiver",
+      "source" : "Read frame IDs that differ from the previous read ID",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "The same source frame handed over again (replay, static resend or re-encode).",
+      "id" : "receiver.frame_id.duplicate",
+      "side" : "receiver",
+      "source" : "Read frame IDs equal to the previous read ID",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "A lower bound on fixture frames drawn on the Mac that never reached this point (an unread frame may have carried a missing ID). Rate limiting at a lower target FPS skips frames by design. Counted only while the reader follows a strip.",
+      "id" : "receiver.frame_id.skipped",
+      "side" : "receiver",
+      "source" : "IDs provably missing between two successive read IDs: the ID difference minus one, minus the frames that arrived in between but could not be read",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Blended, partially updated or heavily compressed frames; also the fixture leaving the screen.",
+      "id" : "receiver.frame_id.unreadable",
+      "side" : "receiver",
+      "source" : "Decoded frames where a located strip failed its guard or checksum",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Not counted as skipped: the reader re-baselines when it finds the strip again.",
+      "id" : "receiver.frame_id.unexamined",
+      "side" : "receiver",
+      "source" : "Decoded frames the reader did not read while it searched for a lost strip again (it probes one frame in 30)",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Fixture restarted; counting starts again from the new ID.",
+      "id" : "receiver.frame_id.discontinuity",
+      "side" : "receiver",
+      "source" : "Read ID went backwards or jumped by more than half the counter range",
+      "timebase" : "none",
+      "unit" : "events"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.encode.pending",
+      "side" : "sender",
+      "source" : "Frames in flight in the encoder, sampled at each submission",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.send.pending",
+      "side" : "sender",
+      "source" : "Video frames awaiting send completion, sampled at each send",
+      "timebase" : "none",
+      "unit" : "frames"
+    },
+    {
+      "caveat" : "Counts only commands yielded while diagnostics were on.",
+      "id" : "receiver.presenter.queue_depth",
+      "side" : "receiver",
+      "source" : "ReceiverVideoPresenter commands yielded but not yet processed, sampled at each yield",
+      "timebase" : "none",
+      "unit" : "commands"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.window.tiles",
+      "side" : "sender",
+      "source" : "Panes on the canvas at each composite",
+      "timebase" : "none",
+      "unit" : "panes"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.window.floats",
+      "side" : "sender",
+      "source" : "Floating panes on the canvas at each composite",
+      "timebase" : "none",
+      "unit" : "panes"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.window.dimmed_tiles",
+      "side" : "sender",
+      "source" : "Panes drawn dimmed (offscreen, closed, paused) at each composite",
+      "timebase" : "none",
+      "unit" : "panes"
+    },
+    {
+      "caveat" : "",
+      "id" : "sender.window.tiles_with_frame",
+      "side" : "sender",
+      "source" : "Panes that had a captured frame at each composite",
+      "timebase" : "none",
+      "unit" : "panes"
+    },
+    {
+      "caveat" : "Control-channel jitter, not video arrival jitter. A session value, not a window value; reported only after 8 RTT samples (one per receiver ping, about every 2 s).",
+      "id" : "receiver.rtt_jitter_ms",
+      "side" : "receiver",
+      "source" : "Smoothed absolute difference of successive RTT samples (RFC 3550: starts at 0, gain 1\/16), over the session",
+      "timebase" : "localWallClock",
+      "unit" : "ms"
+    },
+    {
+      "caveat" : "Whole process, sampled once per window (5 s). Not GPU, encoder or decoder hardware load.",
+      "id" : "resource.process_cpu_percent",
+      "source" : "getrusage(RUSAGE_SELF) user+system time delta over wall time between samples",
+      "timebase" : "sampled",
+      "unit" : "% of one core"
+    },
+    {
+      "caveat" : "Whole process.",
+      "id" : "resource.memory_footprint_mb",
+      "source" : "task_info TASK_VM_INFO phys_footprint",
+      "timebase" : "sampled",
+      "unit" : "MB"
+    },
+    {
+      "caveat" : "Coarse four-level system state.",
+      "id" : "resource.thermal_state",
+      "source" : "ProcessInfo.thermalState",
+      "timebase" : "sampled",
+      "unit" : "state"
+    },
+    {
+      "caveat" : "",
+      "id" : "resource.low_power_mode",
+      "source" : "ProcessInfo.isLowPowerModeEnabled",
+      "timebase" : "sampled",
+      "unit" : "bool"
+    },
+    {
+      "caveat" : "Unknown elsewhere.",
+      "id" : "resource.battery_state",
+      "source" : "UIDevice.batteryState (iOS, only while the diagnostics page is open)",
+      "timebase" : "sampled",
+      "unit" : "state"
+    }
+  ],
+  "minimumTrials" : 3,
+  "plan" : {
+    "scenario" : {
+      "caption" : "SYNTHETIC self-test",
+      "expectsRestarts" : false,
+      "id" : "synthetic.self-test",
+      "mode" : "extend",
+      "panes" : "none",
+      "primaryMetrics" : [
+        "source_unique_fps",
+        "submit_interval_p95_ms",
+        "encode_p95_ms",
+        "payload_mbps",
+        "receiver_arrival_fps",
+        "frame_id_unique_fps",
+        "frame_id_skipped"
+      ],
+      "purpose" : "SYNTHETIC: a scripted event stream through the real recorder and run controller. It validates the harness, not performance.",
+      "steps" : [
+        {
+          "instruction" : "SYNTHETIC: nothing to set up.",
+          "timing" : "beforeRun"
+        },
+        {
+          "atSecond" : 11,
+          "instruction" : "SYNTHETIC: a scripted 300 ms stall happens in trial 3.",
+          "timing" : "duringTrial"
+        }
+      ],
+      "trialWindows" : 3,
+      "version" : 1,
+      "warmUpSeconds" : 5,
+      "workload" : "frame-counter"
+    },
+    "synthetic" : true,
+    "trials" : 3
+  },
+  "scenarioCatalogVersion" : 1,
+  "schemaVersion" : 1,
+  "synthetic" : true,
+  "trials" : [
+    {
+      "index" : 1,
+      "issues" : [
+
+      ],
+      "status" : "complete"
+    },
+    {
+      "index" : 2,
+      "issues" : [
+
+      ],
+      "status" : "complete"
+    },
+    {
+      "index" : 3,
+      "issues" : [
+
+      ],
+      "status" : "complete"
+    }
+  ],
+  "windowSeconds" : 5,
+  "workload" : {
+    "cycle" : [
+      {
+        "kind" : "counter",
+        "seconds" : 60
+      }
+    ],
+    "id" : "frame-counter",
+    "seed" : 5576986271741469233,
+    "version" : 1
+  },
+  "workloadSignature" : "frame-counter@1:counter\/60"
+}

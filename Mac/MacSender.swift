@@ -538,6 +538,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// keeps them out of the message.
     private let reportedStreamingMode: StreamingMode?
     private let reportedCustomFrameRate: CustomFrameRateSelection?
+    /// Adaptive Automatic (#123, phase 2) and "Use less data" for this
+    /// receiver only. Its plan is nil (today's fixed policy) unless the Beta
+    /// switch is on or the receiver asks to save data, and never in Custom.
+    let adaptive: AdaptiveStreamingCoordinator
+    /// `queue` only: start of the adaptive sender window (ping cadence).
+    private var adaptiveWindowStart = ProcessInfo.processInfo.systemUptime
+    /// Fixed at construction: the encode path times VideoToolbox outputs for
+    /// the controller only while it runs (#123 A1); off, it costs nothing.
+    private let adaptiveMeasuresEncodeLatency: Bool
+    /// `queue` only: adaptive changes held while the lock screen view is
+    /// shown, applied when it ends (#123 A7).
+    private var adaptiveLockScreenDeferral = AdaptiveApplyDeferral()
     /// Streaming Priority (bounded encoder-pipelining depth, see
     /// `StreamingPriorityPolicy`): like `streamingProfile`, applies per-
     /// pipeline at construction — a change rebuilds the session (see
@@ -613,12 +625,34 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// deciding the codec against IT, then applying only the CHOSEN codec's
     /// own ceiling closes that gap.
     private func effectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
+        Self.effectiveFPS(today: todayEffectiveFPS(width: width, height: height), adaptive: adaptive)
+    }
+
+    /// The production resolver behind `effectiveFPS` (a test seam, #123 A6):
+    /// today's result, lowered only by this receiver's adaptive plan and,
+    /// with the Beta switch on, the source cadence.
+    static func effectiveFPS(today: StreamingFPSPolicy.Result,
+                             adaptive: AdaptiveStreamingCoordinator) -> StreamingFPSPolicy.Result {
+        adaptive.resolveFPS(today)
+    }
+
+    /// Today's FPS for an already chosen codec: what `todayEffectiveFPS`
+    /// returns once `selectCodec` has run (a test seam, #123 A6).
+    static func todayEffectiveFPS(commonTarget: StreamingFPSPolicy.Result, codec: StreamCodec,
+                                  width: Int, height: Int) -> StreamingFPSPolicy.Result {
+        StreamingFPSPolicy.codecEffectiveFPS(commonTarget: commonTarget, codec: codec,
+                                             encoderSafeFPS: EncoderCapability.codecSafeFPS(width: width, height: height))
+    }
+
+    /// Today's capability-aware FPS without the adaptive plan: what the
+    /// SOURCE runs at (the Extend virtual display's refresh, the Window view
+    /// composition budget), so the controller can later step back up.
+    private func todayEffectiveFPS(width: Int, height: Int) -> StreamingFPSPolicy.Result {
         let commonTarget = StreamingFPSPolicy.commonTargetFPS(
             profile: streamingProfile, requestedFPS: customFPS,
             receiverMaxFPS: lastHello?.maxFPS, userMaxFPS: receiverMaxFPSPreference.userCeilingFPS)
         let codec = selectCodec(width: width, height: height, fps: commonTarget.fps).codec
-        let encoderSafeFPS = EncoderCapability.codecSafeFPS(width: width, height: height)
-        return StreamingFPSPolicy.codecEffectiveFPS(commonTarget: commonTarget, codec: codec, encoderSafeFPS: encoderSafeFPS)
+        return Self.todayEffectiveFPS(commonTarget: commonTarget, codec: codec, width: width, height: height)
     }
     /// The FPS actually applied to the live capture/encoder pipeline, latched
     /// at the last `startCapture`/`setupEncoder` call — for status/telemetry
@@ -971,6 +1005,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`.
     private var captureRecoveryBudget = CaptureRecoveryBudget()
     private var captureRecoveryScheduled = false
+    #if DEBUG
+    private var suppressCaptureRecoveryTimerForTesting = false
+    #endif
     // Display sleep and screen lock make every recovery attempt fail until
     // the user is back, so rounds are deferred instead of spent on them —
     // otherwise any sleep longer than the budget ends the session. Set while
@@ -1201,7 +1238,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
          streamingPriority: StreamingPriority = .auto,
          codecPreference: CodecPreference = .auto,
          streamingMode: StreamingMode? = nil,
-         customFrameRateSelection: CustomFrameRateSelection? = nil) {
+         customFrameRateSelection: CustomFrameRateSelection? = nil,
+         adaptiveAutomatic: Bool = false) {
         self.transport = transport
         self.endpointName = name
         self.mode = mode
@@ -1215,6 +1253,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         self.customFPS = customFPS
         self.reportedStreamingMode = streamingMode
         self.reportedCustomFrameRate = customFrameRateSelection
+        self.adaptive = AdaptiveStreamingCoordinator(
+            enabled: adaptiveAutomatic, streamingMode: streamingMode, displayMode: MacSender.adaptiveMode(mode),
+            log: { Log.info($0) })
+        self.adaptiveMeasuresEncodeLatency = adaptive.announcesAdaptive
         self.extendShapePreference = extendShapePreference
         self.receiverMaxFPSPreference = receiverMaxFPSPreference
         self.streamingPriority = streamingPriority
@@ -1228,6 +1270,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.setSpecific(key: queueKey, value: ())
         transportController.delegate = self
         selfBox.install(self)
+        adaptive.applier = self
+        adaptive.recorder = diagnostics
     }
 
     // MARK: - Queue ownership
@@ -1777,6 +1821,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lockScreenInputGate.set(view: view)
         lockScreenRefusalLogged = false
         lastPixelBuffer = nil
+        diagnosticsLastCapturePTS = nil
         needsKeyframe = true
         lockScreenFrames.start(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
         lockScreenLastInput = ProcessInfo.processInfo.systemUptime
@@ -1858,6 +1903,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lockScreenIdleTimer = nil
         inputInjector?.cancelActiveInput()
         nativeAppGestureState.cancelAll()
+        applyAdaptiveChangesDeferredByLockScreen()
         return true
     }
 
@@ -1955,6 +2001,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 self.nativeAppGestureState.cancelAll()
                 // Nothing from before the lock is kept to be shown again (a replay or keyframe).
                 self.lastPixelBuffer = nil
+                self.diagnosticsLastCapturePTS = nil
             }
             self.syncWorkspaceSuspension()
             guard self.sessionAuthorization.isAdmitted, self.lastHello != nil else { return }
@@ -2029,6 +2076,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             // when it commits. Nothing to reconfigure yet.
             audioEnabled = enabled
             sendAudioState()
+            if enabled, !videoEnabled, sessionAuthorization.isAdmitted,
+               !captureOwnership.isStartInFlight, !captureRebuild.isBusy,
+               captureStateSnapshot().phase == .running,
+               updateCaptureState({ $0.unexpectedStop() }) {
+                scheduleCaptureRecovery()
+            } else if !enabled, !videoEnabled, sessionAuthorization.isAdmitted,
+                      captureRecoveryScheduled, !captureOwnership.isStartInFlight,
+                      !captureRebuild.isBusy, captureStateSnapshot().phase == .recovering {
+                // With no requested media the controls-only session is idle,
+                // not waiting for capture. Pause/terminal states stay closed.
+                _ = updateCaptureState { $0.captureStarted() }
+            }
             return
         }
         let update = updateLiveCapture(stream) { $0.capturesAudio = enabled }
@@ -2720,7 +2779,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // encoder can't actually sustain at this size.
         let (virtualDisplayCaptureW, virtualDisplayCaptureH) = clampedCaptureSize(
             pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
-        let virtualDisplayFPS = effectiveFPS(width: virtualDisplayCaptureW, height: virtualDisplayCaptureH).fps
+        let virtualDisplayFPS = todayEffectiveFPS(width: virtualDisplayCaptureW, height: virtualDisplayCaptureH).fps
+        adaptive.setSourceRefresh(virtualDisplayFPS)
 
         // USB sessions can start before lockdown resolves the device name —
         // fall back to the kind from the hello rather than the generic label.
@@ -2920,17 +2980,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// until the built display matches the latest hello, so rotations that
     /// arrive mid-rebuild aren't lost (and rapid flip-flops settle once).
     /// `queue` only, like the capture lifecycle it guards: one rebuild at a
-    /// time.
-    private var reconfiguring = false
+    /// time. A request that arrives while an adaptive raster restart holds
+    /// the pipeline is queued and runs right after it (#123 F3): user-driven
+    /// geometry always wins over adaptive tuning.
+    private var captureRebuild = CaptureRebuildArbiter()
     private func reconfigure(_ info: PhoneInfo) async {
         let began = (try? await onQueue { sender -> Bool in
-            guard !sender.reconfiguring, !sender.stopped else { return false }
-            sender.reconfiguring = true
-            return true
+            guard !sender.stopped else { return false }
+            return sender.captureRebuild.requestGeometry()
         }) ?? false
         guard began else { return }
         let selfBox = self.selfBox
-        defer { queue.async { selfBox.currentOnQueue()?.reconfiguring = false } }
+        defer { queue.async { selfBox.currentOnQueue()?.finishCaptureRebuild() } }
         var target = info
         while !stopped {
             Log.info("reconfiguring for \(target.pixelsWide)x\(target.pixelsHigh)")
@@ -3047,7 +3108,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let size = CGSize(width: pointsWide, height: pointsHigh)
         let (resizeCaptureW, resizeCaptureH) = clampedCaptureSize(
             pointsWide: pointsWide, pointsHigh: pointsHigh, info: info)
-        let targetFPS = effectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
+        let targetFPS = todayEffectiveFPS(width: resizeCaptureW, height: resizeCaptureH).fps
+        adaptive.setSourceRefresh(targetFPS)
         #if DEBUG
         Log.info("extendDebug: resizeExistingDisplay id=\(vd.displayID) "
             + "shape=\(extendShapePreference.shape.rawValue) desktopSize=\(attemptedDesktopSize.rawValue) "
@@ -3142,6 +3204,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// The capture scale: the quality's, times the adaptive plan's raster.
+    private var captureScale: Double { adaptive.captureScale(today: quality.scale) }
+
     /// hello.maxEncodeWide/High (PROTOCOL.md 6.5): a big panel does not imply
     /// a big decoder. Caps the stream at the receiver's advertised decode
     /// ceiling — SCK scales the capture — while the desktop keeps its full
@@ -3166,7 +3231,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Total sizing math (`PeerDisplayBounds`): the same sizes as before for
         // every real display, and no trap for any other.
         let size = PeerDisplayBounds.extendCapture(
-            pointsWide: pointsWide, pointsHigh: pointsHigh, scale: quality.scale, maxWide: maxWide, maxHigh: maxHigh)
+            pointsWide: pointsWide, pointsHigh: pointsHigh, scale: captureScale, maxWide: maxWide, maxHigh: maxHigh)
         let (captureW, captureH) = size.capture
         if captureW != size.native.width || captureH != size.native.height {
             Log.info("stream capped at \(captureW)x\(captureH) by the receiver's decode ceiling "
@@ -3466,6 +3531,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         captureDisplayID = displayID
         capturePixelsWide = pixelsWide
         capturePixelsHigh = pixelsHigh
+        noteAdaptiveCaptureStart(displayID: displayID, displayWidth: displayWidth, displayHeight: displayHeight,
+                                 pixelsWide: pixelsWide, pixelsHigh: pixelsHigh)
         guard videoEnabled || desiredAudioEnabled else {
             // Nothing wants ScreenCaptureKit right now — stay a no-op
             // logical session exactly as before audio existed, rather than
@@ -3609,6 +3676,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         sendExtendShapeState()
         applyEffectiveFPSChange()   // a max-FPS change while it was starting
+        // An adaptive raster change that arrived while this capture was being
+        // set up (or a restart skipped because no stream was live) runs now.
+        recheckAdaptiveRasterAfterCaptureStart()
         Log.info("capture started: \(plan.capture.pixelsWide)x\(plan.capture.pixelsHigh) display \(displayID) "
             + "generation \(plan.captureGeneration) mode \(mode.rawValue) localCursor=\(localCursor) "
             + "video=\(videoEnabled) audio=\(audioEnabled)")
@@ -3674,6 +3744,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func stopOnQueue() {
+        // Adaptive changes held for the lock screen view die with the
+        // session: ending the view below must not apply them (#123 F7).
+        _ = adaptiveLockScreenDeferral.take()
         endLockScreen()
         stopWorkspaceEngine()
         windowBrowser?.stop()
@@ -4047,8 +4120,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 if width <= 0 || height <= 0 {
                     (width, height) = lastHello.map {
                         clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-                    } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-                          (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+                    } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+                          (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
                 }
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
@@ -4103,8 +4176,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 let display = try await findSCDisplay(id: vd.displayID, expectedSize: size)
                 let (width, height) = lastHello.map {
                     clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-                } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-                      (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+                } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+                      (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
                 try await startCapture(display: display, pixelsWide: width, pixelsHigh: height)
             }
         } catch is CancellationError {
@@ -4419,6 +4492,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard videoEnabled || desiredAudioEnabled, !captureRecoveryScheduled,
               captureStateSnapshot().shouldRetryCapture else { return }
         captureRecoveryScheduled = true
+        #if DEBUG
+        if suppressCaptureRecoveryTimerForTesting { return }
+        #endif
         let attempt = captureRecoveryBudget.failedAttempts + 1
         if !waitingForConsole {
             Log.info("capture recovery starting mode=\(mode.rawValue) "
@@ -4538,10 +4614,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let displayMode = CGDisplayCopyDisplayMode(display.displayID)
+        adaptive.setSourceRefresh(Self.physicalRefreshHz(display.displayID, mode: displayMode))
         let pixelsW = displayMode?.pixelWidth ?? display.width
         let pixelsH = displayMode?.pixelHeight ?? display.height
-        let nativeCaptureW = (Int(Double(pixelsW) * quality.scale)) & ~1
-        let nativeCaptureH = (Int(Double(pixelsH) * quality.scale)) & ~1
+        let nativeCaptureW = (Int(Double(pixelsW) * captureScale)) & ~1
+        let nativeCaptureH = (Int(Double(pixelsH) * captureScale)) & ~1
         // Clamp to the receiver's advertised decode ceiling (PROTOCOL.md
         // 6.5) exactly like Extend does via `clampedCaptureSize` — Mirror
         // used to skip this because capture started before any hello was
@@ -4611,8 +4688,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !isStale() else { throw CancellationError() }
         let (captureW, captureH) = lastHello.map {
             clampedCaptureSize(pointsWide: vd.pointsWide, pointsHigh: vd.pointsHigh, info: $0)
-        } ?? ((Int(Double(vd.pointsWide * 2) * quality.scale)) & ~1,
-              (Int(Double(vd.pointsHigh * 2) * quality.scale)) & ~1)
+        } ?? ((Int(Double(vd.pointsWide * 2) * captureScale)) & ~1,
+              (Int(Double(vd.pointsHigh * 2) * captureScale)) & ~1)
         try await startCapture(display: display, pixelsWide: captureW, pixelsHigh: captureH)
     }
 
@@ -5483,35 +5560,46 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.asyncAfter(deadline: .now() + 2.0) {
             guard let self = selfBox.currentOnQueue(), !self.stopped else { return }
             if self.transportController.isReady {
-                // Liveness + send-side health for the phone's overlay.
-                let elapsed = Date().timeIntervalSince(self.capWindowStart)
-                let capFps = elapsed > 0 ? Int(Double(self.capFrames) / elapsed) : 0
-                self.capFrames = 0
-                self.capWindowStart = Date()
-                let sorted = self.inputLatencies.sorted()
-                let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
-                let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
-                #if DEBUG
-                let audioBitrateKbps = self.audioBytesThisWindow * 8 / 1000 / 2   // ~2s window
-                let audioSuffix = ",\"audioPkts\":\(self.audioPacketsThisWindow),\"audioKbps\":\(audioBitrateKbps)"
-                self.audioPacketsThisWindow = 0
-                self.audioBytesThisWindow = 0
-                #else
-                let audioSuffix = ""
-                #endif
-                // `encDrops`/`netDrops` are this ~2s window's drops (reset
-                // right after being sent), matching the `capFps` shape above
-                // — the HUD's `enc↓`/`net↓` want "recent", not a lifetime
-                // total that only ever climbs. `drops` (the sum) stays the
-                // session-lifetime total for anything relying on that legacy
-                // meaning.
-                let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
-                // Diagnostics (#123): optional `diag` summary, only while on.
-                let diagnosticsSuffix = self.diagnosticsPingSuffix()
-                self.sendJSONFrame("{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)}")
+                self.sendJSONFrame(self.buildPingJSON())
             }
             self.schedulePing()
         }
+    }
+
+    /// `queue` only, from `schedulePing` once the transport is ready: ends
+    /// this ~2 s window (resets its counters, runs the adaptive tick) and
+    /// returns the `ping` JSON to send.
+    private func buildPingJSON() -> String {
+        // Liveness + send-side health for the phone's overlay.
+        let elapsed = Date().timeIntervalSince(self.capWindowStart)
+        let capFps = elapsed > 0 ? Int(Double(self.capFrames) / elapsed) : 0
+        let adaptiveCapturedFrames = self.capFrames
+        self.capFrames = 0
+        self.capWindowStart = Date()
+        let sorted = self.inputLatencies.sorted()
+        let inp50 = sorted.isEmpty ? 0 : sorted[sorted.count / 2].rounded()
+        let inp95 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))].rounded()
+        #if DEBUG
+        let audioBitrateKbps = self.audioBytesThisWindow * 8 / 1000 / 2   // ~2s window
+        let audioSuffix = ",\"audioPkts\":\(self.audioPacketsThisWindow),\"audioKbps\":\(audioBitrateKbps)"
+        self.audioPacketsThisWindow = 0
+        self.audioBytesThisWindow = 0
+        #else
+        let audioSuffix = ""
+        #endif
+        // `encDrops`/`netDrops` are this ~2s window's drops (reset
+        // right after being sent), matching the `capFps` shape above
+        // — the HUD's `enc↓`/`net↓` want "recent", not a lifetime
+        // total that only ever climbs. `drops` (the sum) stays the
+        // session-lifetime total for anything relying on that legacy
+        // meaning.
+        let pingWindowDrops = self.pipelineState.drainPingWindowDrops()
+        // Diagnostics (#123): optional `diag` summary, only while on.
+        let diagnosticsSuffix = self.diagnosticsPingSuffix()
+        // Adaptive Automatic (#123): one controller window per ping.
+        self.adaptiveTick(capturedFrames: adaptiveCapturedFrames, drops: pingWindowDrops)
+        let adaptiveSuffix = AdaptiveStreamingWire.pingSuffix(announcing: self.adaptive.announcesAdaptive)
+        return "{\"type\":\"ping\",\"drops\":\(self.dropsTotal),\"encDrops\":\(pingWindowDrops.enc),\"netDrops\":\(pingWindowDrops.net),\"pending\":\(self.pipelineState.pendingSendsNow),\"inp50\":\(inp50),\"inp95\":\(inp95),\"capFps\":\(capFps)\(audioSuffix)\(diagnosticsSuffix)\(adaptiveSuffix)}"
     }
 
     /// `queue` only. Refreshes the diagnostics context and returns the
@@ -5535,7 +5623,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let codec: DiagnosticsCodec = activeCodec == .hevc ? .hevc : .h264
         let width = capturePixelsWide, height = capturePixelsHigh, fps = captureTargetFPS
         let inFlight = StreamingPriorityPolicy.maxPendingEncodes(for: streamingPriority)
+        let sourceHz = adaptive.sourceRefreshHz
         diagnostics.updateContext { context in
+            context.sourceRefreshHz = sourceHz.map(Double.init)
             context.displayMode = displayMode
             context.codec = codec
             context.rasterWidth = width
@@ -6027,6 +6117,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 sendJSONFrame("{\"type\":\"pong\",\"t\":\(t),\"mt\":\(mt)}")
             }
         case "stats":
+            // Adaptive Automatic (#123): the optional windowed telemetry keys.
+            // Parsed only while the controller runs (off: nothing to do).
+            adaptive.receiverStats(json: obj)
             // Aggregated pipeline health measured on the phone — logged here
             // so one file holds both ends of the story.
             if let json = try? JSONSerialization.data(withJSONObject: obj),
@@ -6114,6 +6207,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Task { @MainActor in sink.publishStatus("Connected") }
                 let previous = lastHello
                 lastHello = info
+                // Optional adaptive keys (#123); absent = today's behaviour.
+                // The Mac's own path first, so a first capture already runs
+                // the right data policy (no restart ~2 s later).
+                adaptiveHelloAccepted(obj)
                 // Receiver-enforced max FPS (PART 3): load this peer's own
                 // stored preference the first time it's known, same
                 // convention as Extend shape — a live `maxFPSRequest` (or
@@ -6941,6 +7038,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         displayArrangement?.sessionEnded()
         // The lock screen view belongs to the connection that asked: a new one starts without it
         // and must ask again (F2). Nothing is sent here; the new connection hears the lock state.
+        // Adaptive changes it held are dropped, not applied on the way out
+        // (#123 F7); the next capture start re-checks the raster.
+        _ = adaptiveLockScreenDeferral.take()
         if stopLockScreenView() { Log.info("lockScreen: ended (connection ended)") }
         lockScreenShowLimit.reset()
         // No admitted receiver: window streams stop until one is admitted again.
@@ -7067,7 +7167,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           lowLatency: Bool, codec: StreamCodec) -> OSStatus {
         videoEncoder.create(MacSenderVideoEncoder.Configuration(
             width: width, height: height, fps: fps,
-            bitrate: quality.bitrate, codec: codec, lowLatency: lowLatency))
+            bitrate: adaptive.encoderBitrate(today: quality.bitrate), codec: codec, lowLatency: lowLatency))
     }
 
     /// Decides the codec for the NEXT `setupEncoder` call, per
@@ -7173,7 +7273,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         frameAdmission.reconfigure(fps: fps)
         Log.info("receiver codecs: \(lastHello?.codecs?.joined(separator: ", ") ?? "h264") "
             + "codec preference: \(codecPreference.rawValue) effective codec: \(codec.wireValue) reason: \(reason)")
-        Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(quality.bitrate / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        Log.info("encoder ready: \(width)x\(height)@\(fps) \(codec == .hevc ? "HEVC" : "H.264") \(adaptive.encoderBitrate(today: quality.bitrate) / 1_000_000)Mbps quality=\(quality.rawValue) profile=\(streamingProfile.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
         sendStreamCodecState()
     }
 
@@ -7227,9 +7327,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             lastPixelBuffer = pixelBuffer
             lastCaptureAt = Date()
             capFrames += 1
-            if diagnostics.isEnabled {
-                diagnosticsLastCapturePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-            }
+            // Always paired with `lastPixelBuffer`: a frame taken while
+            // diagnostics were off has no known PTS (never an older one).
+            diagnosticsLastCapturePTS = diagnostics.isEnabled
+                ? CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds : nil
             #if DEBUG
             debugSCKWindow += 1
             #endif
@@ -7392,12 +7493,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `queue` only, diagnostics on: one encoder submission.
     private func recordSubmitDiagnostics(pts: CMTime, origin: DiagnosticsSubmitOrigin, generation: UInt64, at nowMs: Double) {
         diagnostics.noteGeneration(generation, at: nowMs)
-        let sourcePTS: Double?
-        switch origin {
-        case .workspace: sourcePTS = nil   // stamped at composition; see the compose counters
-        case .dropReplay, .reconnectReplay: sourcePTS = diagnosticsLastCapturePTS
-        case .live, .heldRetry: sourcePTS = mode == .window ? nil : pts.seconds
-        }
+        let sourcePTS = Self.diagnosticsSourcePTS(origin: origin, windowMode: mode == .window,
+                                                  lastCapturePTS: diagnosticsLastCapturePTS, livePTS: pts.seconds)
         let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
         let validPTS = sourcePTS.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         diagnostics.recordSubmit(
@@ -7406,6 +7503,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             sourceAgeMs: validPTS.map { (hostNow - $0) * 1000 },
             pendingEncodes: pipelineState.pendingEncodesNow,
             at: nowMs)
+    }
+
+    /// Pure: the capture PTS of a submission's pixels, for duplicate and
+    /// source-age accounting; nil = unknown. Window view never has one (its
+    /// frames are composed and stamped at composition), so a replay there is
+    /// never matched against a stale display-capture timestamp.
+    static func diagnosticsSourcePTS(origin: DiagnosticsSubmitOrigin, windowMode: Bool,
+                                     lastCapturePTS: Double?, livePTS: Double?) -> Double? {
+        guard !windowMode else { return nil }
+        switch origin {
+        case .workspace: return nil   // stamped at composition; see the compose counters
+        case .dropReplay, .reconnectReplay: return lastCapturePTS
+        case .live, .heldRetry: return livePTS
+        }
     }
 
     /// `queue` only. Keeps `frame` as the one to send if nothing newer goes
@@ -7521,8 +7632,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let diagnosticsSubmitMs = diagnosticsOn ? StreamDiagnosticsClock.nowMs() : 0
         if diagnosticsOn {
             recordSubmitDiagnostics(pts: pts, origin: origin, generation: generation, at: diagnosticsSubmitMs)
+            // Colour metadata (#241), read-only, once per generation / pixel format.
+            diagnostics.sampleColourSubmitted(pixelBuffer, windowComposite: mode == .window, generation: generation)
         }
         let encodeSignpost = StreamDiagnosticsSignposts.begin("Encode", enabled: diagnosticsOn)
+        // Adaptive Automatic (#123 A1): the encode latency the controller's
+        // headroom check uses. Measured only while the controller runs.
+        let adaptiveSubmitNs = adaptiveMeasuresEncodeLatency ? DispatchTime.now().uptimeNanoseconds : 0
         pipelineState.incrementPendingEncodes()
         let capturedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
         // Latched here, on `queue`, and handed to the encoder as an immutable
@@ -7552,7 +7668,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let submitStatus = videoEncoder.submit(
             pixelBuffer, pts: pts, forceKeyframe: forceKeyframe
         ) { status, buffer, sessionCodec in
-            defer { pipelineState.decrementPendingEncodes() }
+            defer {
+                if adaptiveSubmitNs != 0, status == noErr, buffer != nil {
+                    let ns = DispatchTime.now().uptimeNanoseconds &- adaptiveSubmitNs
+                    pipelineState.decrementPendingEncodes(adaptiveEncodeLatencyMs: Double(ns) / 1_000_000)
+                } else {
+                    pipelineState.decrementPendingEncodes()
+                }
+            }
             defer { StreamDiagnosticsSignposts.end("Encode", encodeSignpost) }
             func noteOutput(_ outcome: StreamDiagnosticsRecorder.EncodeOutcome, bytes: Int = 0, keyframe: Bool = false) {
                 guard diagnosticsOn else { return }
@@ -7615,6 +7738,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let keyframe = MacSender.isKeyframe(buffer)
             guard let data = MacSender.annexB(from: buffer, codec: sessionCodec) else { return noteOutput(.failed) }
             noteOutput(.sent, bytes: data.count, keyframe: keyframe)
+            // Colour metadata (#241), read-only: keyframes only, once per generation / format description.
+            if diagnosticsOn, keyframe, let fmt = CMSampleBufferGetFormatDescription(buffer) {
+                diagnostics.sampleColourEncoderOutput(fmt, generation: generation)
+            }
             let sndMs = Int64(Date().timeIntervalSince1970 * 1000)
             var framed = Data("{\"cap\":\(capturedAtMs),\"snd\":\(sndMs)}".utf8)
             framed.append(data)
@@ -8163,6 +8290,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             self.framesSent += 1
             self.bytesSent += frameByteCount
+            if channel == .video {
+                self.adaptive.noteVideoSent(bytes: frameByteCount, now: ProcessInfo.processInfo.systemUptime)
+            }
             #if DEBUG
             self.debugSendsCompletedWindow += 1
             if kind == "audio" {
@@ -8263,6 +8393,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         pipelineState.bumpCaptureGeneration()
         if discardingLastFrame {
             lastPixelBuffer = nil
+            diagnosticsLastCapturePTS = nil
             lastCaptureAt = .distantPast
         }
     }
@@ -8522,7 +8653,7 @@ extension MacSender {
         let (canvasW, canvasH) = windowCanvasSize(for: info)
         let hostID = TrustStore.shared.installID() ?? "mac"
         try await onQueue { sender in
-            let fps = sender.effectiveFPS(width: canvasW, height: canvasH).fps
+            let fps = sender.todayEffectiveFPS(width: canvasW, height: canvasH).fps
             sender.installWorkspaceEngine(hostID: hostID, canvas: CGSize(width: canvasW, height: canvasH), fps: fps)
         }
         try await startCapture(display: carrier, pixelsWide: canvasW, pixelsHigh: canvasH,
@@ -8768,6 +8899,9 @@ extension MacSender {
         guard mode == .window, workspaceEngine != nil, captureOwnership.liveStream != nil,
               captureStateSnapshot().phase == .running else { return }
         lastPixelBuffer = pixelBuffer
+        // A composed frame has no capture PTS: a replay of it is never
+        // matched against a display capture's timestamp.
+        diagnosticsLastCapturePTS = nil
         lastCaptureAt = Date()
         capFrames += 1
         guard transportController.isReady, videoEnabled, sessionAuthorization.isAdmitted else { return }
@@ -8787,6 +8921,7 @@ extension MacSender {
             sender.videoEncoder.invalidate()
             sender.capturePixelsWide = w
             sender.capturePixelsHigh = h
+            sender.adaptive.noteCaptureStarted(width: w, height: h, scale: sender.quality.scale)
             let fps = sender.effectiveFPS(width: w, height: h).fps
             do {
                 try sender.setupEncoder(width: w, height: h, fps: fps)
@@ -8907,6 +9042,67 @@ extension MacSender {
         let endedSession: Bool
     }
 
+    enum AudioCarrierContextForTesting: Equatable, Sendable {
+        case ready, starting, rebuilding, paused, resuming, stopped, startup
+    }
+
+    struct AudioCarrierProbe: Sendable {
+        let admitted: Bool
+        let requested: Bool
+        let phase: String
+        let recoveryScheduled: Bool
+    }
+
+    /// A live session with no carrier, without starting capture or timers.
+    func prepareAudioCarrierForTesting(_ context: AudioCarrierContextForTesting,
+                                      video: Bool = false) async throws {
+        try await onQueue { sender in
+            sender.videoEnabled = video
+            sender.audioEnabled = false
+            sender.desiredAudioEnabled = false
+            sender.suppressCaptureRecoveryTimerForTesting = true
+            if context == .startup {
+                _ = sender.updateCaptureState { $0 = CaptureLifecycleState(); return true }
+            } else {
+                _ = sender.updateCaptureState { $0.captureStarted() }
+            }
+            switch context {
+            case .starting: _ = sender.captureOwnership.reserveStart()
+            case .rebuilding: _ = sender.captureRebuild.requestGeometry()
+            case .paused:
+                _ = sender.updateCaptureState { $0.requestPause() }
+                _ = sender.updateCaptureState { $0.pauseCompleted() }
+            case .resuming:
+                _ = sender.updateCaptureState { $0.requestPause() }
+                _ = sender.updateCaptureState { $0.pauseCompleted() }
+                _ = sender.updateCaptureState { $0.requestResume() }
+            case .stopped: _ = sender.updateCaptureState { $0.stop(); return true }
+            case .ready, .startup: break
+            }
+        }
+    }
+
+    var audioCarrierProbeForTesting: AudioCarrierProbe {
+        get async throws {
+            try await onQueue { sender in
+                AudioCarrierProbe(admitted: sender.sessionAuthorization.isAdmitted,
+                                  requested: sender.desiredAudioEnabled,
+                                  phase: sender.captureStateSnapshot().phase.rawValue,
+                                  recoveryScheduled: sender.captureRecoveryScheduled)
+            }
+        }
+    }
+
+    /// Models the suppressed timer returning after both media kinds were
+    /// disabled; the live timer clears its flag before checking that guard.
+    func expireUnwantedAudioCarrierRecoveryForTesting() async throws {
+        try await onQueue { sender in
+            precondition(sender.suppressCaptureRecoveryTimerForTesting
+                         && !sender.videoEnabled && !sender.desiredAudioEnabled)
+            sender.captureRecoveryScheduled = false
+        }
+    }
+
     /// Exercises failed-round bookkeeping without starting a capture or
     /// scheduling a real retry. Tests call this on a fresh, never-started sender.
     func failedCaptureRecoveryRoundsForTesting(video: Bool, audio: Bool, interactive: Bool,
@@ -8925,6 +9121,45 @@ extension MacSender {
                     endedSession: sender.goneReported)
             }
         }
+    }
+
+    /// What the adaptive raster re-check did at its real call sites (#123 F1/F7).
+    struct AdaptiveRecheckProbe: Sendable {
+        var restartRequested: Bool
+        var deferred: AdaptiveApplyPath
+        var hasManagedRaster: Bool
+        var work: AdaptiveStreamingCoordinator.WorkCounters
+    }
+
+    /// Runs, on `queue`: the hello's data policy when `saveData` is given
+    /// (`helloAccepted`, as on a real hello), then the capture-start note
+    /// `prepareCaptureStart` makes for a capture started at
+    /// `pixelsWide`×`pixelsHigh` on `displayID`, then `commitCaptureStart`'s
+    /// raster re-check, optionally while the lock screen view is shown.
+    func adaptiveCaptureStartRecheckForTesting(
+        displayID: CGDirectDisplayID, displayWidth: Int, displayHeight: Int, pixelsWide: Int, pixelsHigh: Int,
+        saveData: NetworkCost.DataPreference? = nil, lockScreenShown: Bool = false
+    ) async throws -> AdaptiveRecheckProbe {
+        try await onQueue { sender in
+            if let saveData {
+                sender.adaptive.helloAccepted(AdaptiveHelloFields(saveData: saveData),
+                                              now: ProcessInfo.processInfo.systemUptime)
+            }
+            sender.noteAdaptiveCaptureStart(displayID: displayID, displayWidth: displayWidth,
+                                            displayHeight: displayHeight, pixelsWide: pixelsWide,
+                                            pixelsHigh: pixelsHigh)
+            let wasShown = sender.lockScreenActive
+            if lockScreenShown { sender.lockScreenActive = true }
+            let requested = sender.recheckAdaptiveRasterAfterCaptureStart()
+            sender.lockScreenActive = wasShown
+            return AdaptiveRecheckProbe(restartRequested: requested, deferred: sender.adaptiveLockScreenDeferral.pending,
+                                        hasManagedRaster: sender.adaptive.hasManagedRaster, work: sender.adaptive.work)
+        }
+    }
+
+    /// The adaptive change held for the end of the lock screen view.
+    var adaptiveLockScreenDeferralForTesting: AdaptiveApplyPath {
+        get async throws { try await onQueue { $0.adaptiveLockScreenDeferral.pending } }
     }
 
     var hasInputGrantForTesting: Bool { sessionAuthorization.hasInputGrant }
@@ -9008,3 +9243,358 @@ extension MacSender {
 #endif
 
 private struct WindowAudioStreamBox: @unchecked Sendable { let stream: SCStream }
+
+// MARK: - Adaptive Automatic (#123, phase 2)
+//
+// Every change goes through a path this sender already had, and only ever
+// touches this receiver's own pipeline (one `MacSender` per receiver).
+
+extension MacSender: AdaptiveStreamingApplying {
+    static func adaptiveMode(_ mode: CaptureMode) -> RefreshNegotiation.DisplayMode {
+        switch mode {
+        case .mirror: return .mirror
+        case .extend: return .extend
+        case .window: return .window
+        }
+    }
+
+    /// The physical display's active mode refresh; ProMotion and some
+    /// panels report 0 there, so the screen's maximum is the fallback.
+    static func physicalRefreshHz(_ displayID: CGDirectDisplayID, mode: CGDisplayMode?) -> Int? {
+        if let rate = mode?.refreshRate,
+           let hz = PeerNumber.int(rate.rounded(), in: AdaptiveStreamingCoordinator.minimumSourceRefreshHz...1000) {
+            return hz
+        }
+        let screen = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+        }
+        guard let fps = screen?.maximumFramesPerSecond, fps > 0 else { return nil }
+        return fps
+    }
+
+    /// What the receiver shows the stream on, for the readability floor.
+    /// Peer-supplied: the scale is range-checked before it divides anything,
+    /// and the point sizes go through `PeerNumber` (#123 F1), so a hello with
+    /// `"scale":1e-300` (or NaN, or a huge size) reads as absent, never traps.
+    static let adaptiveReceiverScaleRange = 0.5...8.0
+    static let adaptiveReceiverPointsRange = 1...100_000
+
+    static func adaptiveReceiverDisplay(_ info: PhoneInfo) -> AdaptiveReceiverDisplay? {
+        guard info.scale.isFinite, adaptiveReceiverScaleRange.contains(info.scale),
+              info.pixelsWide > 0, info.pixelsHigh > 0,
+              let pointsWide = PeerNumber.int(Double(info.pixelsWide) / info.scale, in: adaptiveReceiverPointsRange,
+                                              integral: false),
+              let pointsHigh = PeerNumber.int(Double(info.pixelsHigh) / info.scale, in: adaptiveReceiverPointsRange,
+                                              integral: false) else { return nil }
+        let sizeClass: AdaptiveReceiverDisplay.SizeClass
+        switch info.device {
+        case "iPhone": sizeClass = .phone
+        case "iPad": sizeClass = .tablet
+        case "Mac": sizeClass = .desktop
+        default: return nil
+        }
+        return AdaptiveReceiverDisplay(pointsWide: pointsWide, pointsHigh: pointsHigh,
+                                       scale: info.scale, sizeClass: sizeClass)
+    }
+
+    /// `queue` only: the live media connection's own cost evidence (the
+    /// coordinator ignores an epoch it has seen). Also called on hello, so
+    /// the Mac's Low Data Mode is known before the first capture is
+    /// configured whenever the path already is.
+    fileprivate func adaptiveRefreshSenderPath(now: TimeInterval) {
+        // An epoch the coordinator has seen changes nothing: skip the report.
+        let epoch = transportController.routeEpoch
+        guard epoch > adaptive.routeEpoch, let report = transportController.pathCostReport else { return }
+        adaptive.senderPathChanged(report, epoch: epoch, now: now)
+    }
+
+    /// `queue` only: an accepted hello's optional adaptive keys (#123),
+    /// after the Mac's own path. Absent keys = today's behaviour.
+    fileprivate func adaptiveHelloAccepted(_ object: [String: Any],
+                                           now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        adaptiveRefreshSenderPath(now: now)
+        adaptive.helloAccepted(AdaptiveHelloFields.parse(object), now: now)
+    }
+
+    /// `queue` only, once per ping window. With the switch off and no data
+    /// saving the coordinator returns at once: the inputs and the window are
+    /// autoclosures it never evaluates then.
+    fileprivate func adaptiveTick(capturedFrames: Int, drops: (enc: Int, net: Int),
+                                  now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let windowStart = adaptiveWindowStart
+        adaptiveWindowStart = now
+        adaptiveRefreshSenderPath(now: now)
+        let encodeLatency = adaptiveMeasuresEncodeLatency ? pipelineState.drainAdaptiveEncodeLatencyMs() : nil
+        adaptive.tick(
+            generation: activeConnectionGeneration, mode: Self.adaptiveMode(mode),
+            inputs: lastHello.map { info in
+                AdaptiveStreamingCoordinator.Inputs(
+                    mode: Self.adaptiveMode(mode), profile: streamingProfile, customFPS: customFPS,
+                    receiverMaxFPS: info.maxFPS, userMaxFPS: receiverMaxFPSPreference.userCeilingFPS,
+                    codec: activeCodec, receiver: Self.adaptiveReceiverDisplay(info))
+            },
+            window: AdaptiveStreamingCoordinator.SenderWindow(
+                start: windowStart, end: now, capturedFrames: capturedFrames,
+                encoderDrops: drops.enc, networkDrops: drops.net,
+                thermal: AdaptiveThermalLevel(ProcessInfo.processInfo.thermalState),
+                lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, encodeLatencyMs: encodeLatency),
+            now: now)
+    }
+
+    /// `queue` only: tells the coordinator how the starting capture was
+    /// sized (#123 A4/A5). The source size and decode ceiling are read here
+    /// the same way the capture paths read them, so the coordinator can
+    /// check which plan the started size really matches.
+    fileprivate func noteAdaptiveCaptureStart(displayID: CGDirectDisplayID, displayWidth: Int, displayHeight: Int,
+                                              pixelsWide: Int, pixelsHigh: Int) {
+        let source: (width: Double, height: Double)
+        switch mode {
+        case .window:
+            adaptive.noteCaptureStarted(width: pixelsWide, height: pixelsHigh, scale: quality.scale)
+            return
+        case .mirror:
+            let displayMode = CGDisplayCopyDisplayMode(displayID)
+            source = (Double(displayMode?.pixelWidth ?? displayWidth), Double(displayMode?.pixelHeight ?? displayHeight))
+        case .extend:
+            guard let vd = virtualDisplay else {
+                adaptive.noteCaptureStarted(width: pixelsWide, height: pixelsHigh, scale: captureScale)
+                return
+            }
+            source = (Double(vd.pointsWide) * 2, Double(vd.pointsHigh) * 2)
+        }
+        let ceiling: (width: Int?, height: Int?) = lastHello.map {
+            CodecDecodeCeiling.applicable(codec: .h264, legacyMaxEncodeWide: $0.maxEncodeWide,
+                                          legacyMaxEncodeHigh: $0.maxEncodeHigh)
+        } ?? (nil, nil)
+        adaptive.noteCaptureStarted(
+            sizing: AdaptiveCaptureSizing(sourceWidth: source.width, sourceHeight: source.height,
+                                          todayScale: quality.scale, maxWide: ceiling.width, maxHigh: ceiling.height),
+            width: pixelsWide, height: pixelsHigh)
+    }
+
+    /// `queue` only, after a capture start committed: if the started size is
+    /// not what the plan now asks for (a raster change arrived while it was
+    /// starting, or its restart was skipped with no live stream), restart
+    /// once more through the arbiter (#123 A5). Off: one locked compare, and
+    /// never a restart, a log line or a deferral, because no plan has ever
+    /// asked for another raster (#123 F1). During the lock screen view the
+    /// restart is held, not lost (#123 F7). Returns whether it asked for one.
+    @discardableResult
+    fileprivate func recheckAdaptiveRasterAfterCaptureStart() -> Bool {
+        guard mode != .window, adaptive.captureNeedsRasterRestart(today: quality.scale) else { return false }
+        guard !lockScreenActive else {
+            adaptiveLockScreenDeferral.record(.captureRestart)
+            Log.info("adaptive: raster re-check deferred while the lock screen is shown")
+            return false
+        }
+        Log.info("adaptive: the capture started at an older raster — restarting at the planned one")
+        let selfBox = self.selfBox
+        Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
+        return true
+    }
+
+    /// `queue` only: what waited for the lock screen view to end (#123 A7).
+    fileprivate func applyAdaptiveChangesDeferredByLockScreen() {
+        let path = adaptiveLockScreenDeferral.take()
+        guard path != .none, !stopped else { return }
+        Log.info("adaptive: applying \(path.rawValue) deferred by the lock screen view")
+        adaptiveApply(path)
+    }
+
+    /// `queue` only (the coordinator calls it from its queue-confined inputs).
+    func adaptiveApply(_ path: AdaptiveApplyPath) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        // The lock screen view's frames are validated at the encoder; leave
+        // that pipeline alone. The change is kept and applied when the view
+        // ends (`stopLockScreenView`), never dropped.
+        guard !lockScreenActive else {
+            adaptiveLockScreenDeferral.record(path)
+            Log.info("adaptive: \(path.rawValue) deferred while the lock screen is shown")
+            return
+        }
+        switch path {
+        case .none:
+            return
+        case .liveFPSUpdate:
+            applyEffectiveFPSChange()
+        case .encoderRebuild:
+            applyEffectiveFPSChange(rebuildEncoder: true)
+        case .captureRestart:
+            guard mode != .window, captureOwnership.liveStream != nil,
+                  adaptive.captureNeedsRasterRestart(today: quality.scale) else {
+                // No raster in Window view; no live stream to restart (the
+                // capture start in progress or the next one uses the new
+                // size, and `recheckAdaptiveRasterAfterCaptureStart` catches
+                // one that started with the old size); or the running capture
+                // already has the planned size. Bitrate/FPS now.
+                applyEffectiveFPSChange(rebuildEncoder: true)
+                return
+            }
+            let selfBox = self.selfBox
+            Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
+        }
+    }
+
+    /// Restart-class raster change (rate-limited by the controller): the
+    /// same release/stop/start sequence as a rotation, without touching the
+    /// virtual display, the mirrored display choice or the connection.
+    private func restartCaptureForAdaptiveRaster() async {
+        let began = (try? await onQueue { sender -> Bool in
+            guard !sender.stopped, !sender.lockScreenActive, sender.mode != .window,
+                  sender.captureOwnership.liveStream != nil,
+                  sender.captureStateSnapshot().phase == .running,
+                  sender.adaptive.captureNeedsRasterRestart(today: sender.quality.scale) else {
+                // While the lock screen view is shown the restart waits for
+                // it to end instead of being lost (#123 A7).
+                if sender.lockScreenActive { sender.adaptiveLockScreenDeferral.record(.captureRestart) }
+                // A turn handed over by `finish` that will not run is released.
+                if sender.captureRebuild.owner == .adaptiveRaster, sender.captureRebuild.reserved {
+                    sender.finishCaptureRebuild()
+                }
+                return false
+            }
+            // Deferred (not lost) while a rotation or another rebuild runs.
+            guard sender.captureRebuild.requestAdaptiveRaster() else { return false }
+            // Whatever asked for it (a plan change, the re-check after a
+            // start, the lock screen view ending, a rebuild finishing), the
+            // limits count from the restart that really runs (#123 F6).
+            sender.adaptive.noteAdaptiveRestartBegan(now: ProcessInfo.processInfo.systemUptime)
+            return true
+        }) ?? false
+        guard began else { return }
+        let selfBox = self.selfBox
+        defer { queue.async { selfBox.currentOnQueue()?.finishCaptureRebuild() } }
+        // On `queue`, where the old stream's frames still land (#123 A10).
+        if let retired = try? await onQueue({ sender -> SCStream? in
+            // The cached frame is the old size: never replay it into the new encoder.
+            sender.invalidateCapturePipeline(discardingLastFrame: true)
+            return sender.releaseCaptureStream()
+        }) {
+            try? await retired.stopCapture()
+        }
+        _ = try? await onQueue { sender in
+            sender.videoEncoder.invalidate()
+            sender.needsKeyframe = true
+        }
+        do {
+            switch mode {
+            case .mirror: try await rebuildMirrorCapturePipeline()
+            case .extend: try await reattachExtendCapture()
+            case .window: return
+            }
+        } catch is CancellationError {
+            return
+        } catch let error as NSError where error.domain == "MacSender" && error.code == 6 {
+            // Capture recovery, the lock screen view, Video On or a Mirror
+            // display change restarted capture in the gap (they do not go
+            // through `CaptureRebuildArbiter`). That start is live and owns
+            // the pipeline; its commit re-checks the raster
+            // (`recheckAdaptiveRasterAfterCaptureStart`), so this restart
+            // must not also enter recovery and tear it down (#123 A7).
+            Log.info("adaptive: raster restart found capture already restarted by another path — leaving it")
+        } catch {
+            guard updateCaptureState({ $0.unexpectedStop() }) else { return }
+            Log.info("adaptive: raster restart failed: \(error) — entering capture recovery")
+            scheduleCaptureRecovery()
+        }
+    }
+
+    /// `queue` only: the current capture rebuild ended; run whatever waited
+    /// for it (#123 F3). Geometry first, for the latest hello; a deferred
+    /// adaptive restart only if the running capture still has the old raster.
+    fileprivate func finishCaptureRebuild() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let next = captureRebuild.finish()
+        guard !stopped else { return }
+        let selfBox = self.selfBox
+        switch next {
+        case .none:
+            return
+        case .geometry:
+            // The turn is reserved for this rebuild; give it back if it can't run.
+            guard let hello = lastHello else { return finishCaptureRebuild() }
+            Log.info("reconfigure: running the rotation queued behind an adaptive restart")
+            Task { await selfBox.resolve()?.reconfigure(hello) }
+        case .adaptiveRaster:
+            guard mode != .window, adaptive.captureNeedsRasterRestart(today: quality.scale) else {
+                return finishCaptureRebuild()
+            }
+            Log.info("adaptive: running the raster restart deferred by a capture rebuild")
+            Task { await selfBox.resolve()?.restartCaptureForAdaptiveRaster() }
+        }
+    }
+}
+
+#if DEBUG
+// MARK: - Adaptive call-site harness (#123 churn)
+//
+// Drives the real hello step, ping-window tick and lock screen view end of
+// this sender's adaptive coordinator with an injected clock, so tests can
+// cover the data-policy dwell and the switch-off state at the call sites.
+extension MacSender {
+    struct AdaptiveCallSiteState: Equatable, Sendable {
+        var plan: AdaptiveStreamingPlan?
+        var desiredPlan: AdaptiveStreamingPlan?
+        /// What the evidence asks for.
+        var requestedDataPolicy: NetworkCost.DataPolicy
+        var appliedDataPolicy: NetworkCost.DataPolicy
+        var hasManagedRaster: Bool
+        var work: AdaptiveStreamingCoordinator.WorkCounters
+        var deferred: AdaptiveApplyPath
+        var monitorWrites: Int
+    }
+
+    /// A hello's optional adaptive keys through `adaptiveHelloAccepted` at `now`.
+    func adaptiveHelloForTesting(_ json: Data, now: TimeInterval) async throws {
+        try await onQueue { sender in
+            let object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
+            sender.adaptiveHelloAccepted(object, now: now)
+        }
+    }
+
+    /// One ping window (`adaptiveTick`) at `now`; `lockScreenShown` starts the
+    /// view's flag first (end it with `endLockScreenViewForTesting`).
+    func adaptiveTickForTesting(now: TimeInterval, lockScreenShown: Bool = false) async throws {
+        try await onQueue { sender in
+            if lockScreenShown { sender.lockScreenActive = true }
+            sender.adaptiveTick(capturedFrames: 120, drops: (0, 0), now: now)
+        }
+    }
+
+    /// The `ping` JSON `schedulePing` sends for one window (`buildPingJSON`,
+    /// which also ends the window), on `queue`, with the window's input
+    /// latencies set to `inputLatencies` first.
+    func pingJSONForTesting(inputLatencies: [Double] = []) async throws -> String {
+        try await onQueue { sender in
+            sender.inputLatencies = inputLatencies
+            return sender.buildPingJSON()
+        }
+    }
+
+    /// Ends the lock screen view the sender's own way (`stopLockScreenView`),
+    /// which applies what the view held.
+    func endLockScreenViewForTesting() async throws {
+        try await onQueue { sender in _ = sender.stopLockScreenView() }
+    }
+
+    /// The live connection's path changed (what `adaptiveRefreshSenderPath`
+    /// passes on for a new route epoch).
+    func adaptiveRouteChangeForTesting(_ report: NetworkCost.EndpointReport, epoch: UInt64,
+                                       now: TimeInterval) async throws {
+        try await onQueue { sender in _ = sender.adaptive.senderPathChanged(report, epoch: epoch, now: now) }
+    }
+
+    var adaptiveCallSiteStateForTesting: AdaptiveCallSiteState {
+        get async throws {
+            try await onQueue { sender in
+                let a = sender.adaptive
+                return AdaptiveCallSiteState(
+                    plan: a.plan, desiredPlan: a.desiredPlan, requestedDataPolicy: a.dataPolicy.policy,
+                    appliedDataPolicy: a.appliedDataPolicy, hasManagedRaster: a.hasManagedRaster, work: a.work,
+                    deferred: sender.adaptiveLockScreenDeferral.pending, monitorWrites: a.monitor.writeCount)
+            }
+        }
+    }
+}
+#endif

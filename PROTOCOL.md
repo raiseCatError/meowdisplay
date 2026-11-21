@@ -620,7 +620,7 @@ Coordinates use the conventions of section 7.
 
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
-| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, receiver UI fields? | Identify the panel; (re)sent on connect, rotation, or receiver UI preference change |
+| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, receiver UI fields?, `effHz`?, `adaptiveTelemetry`?, `cost`?, `saveData`?, `saveDataAnswer`? | Identify the panel; (re)sent on connect, rotation, receiver UI preference change, or a change of the adaptive keys (section 6.20) |
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
@@ -641,7 +641,7 @@ Coordinates use the conventions of section 7.
 | `sessionInviteResponse` | pv 21 | `id`, `result` | Answer a `sessionInvite` (section 6.9) |
 | `keyboardState` | additive (welcome feature `textCaret`) | `open` (bool) | The on-screen keyboard opened or closed, so the sender can follow the text caret (section 6.11) |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
-| `stats` | pv 1 | free-form, `diag`? | Receiver-side telemetry for the sender's log |
+| `stats` | pv 1 | free-form, `diag`?, adaptive telemetry keys? | Receiver-side telemetry for the sender's log and, while announced, the adaptive controller (section 6.20) |
 | `sleeping` | pv 2 | none | Device locked; session ends, reconnect on wake expected |
 | `closing` | pv 2 | none | App quit; session ends for good |
 
@@ -890,7 +890,8 @@ diagnosable from one log file. The official receiver sends it every ~5 s
 with fields like `transport`, `fps`, `mbps`, `e2e50`, `e2e95`, `enc50`,
 `rtt`, `stalls`, `dec50`, `ph50`, `ph95`, `offsetKnown`. No field is
 normative; senders MUST accept any object. While streaming diagnostics are
-on, the official receiver adds `diag` (section 6.2.1).
+on, the official receiver adds `diag` (section 6.2.1). While the Mac announces
+adaptive mode, it sends `stats` every ~2 s with the telemetry keys of section 6.20.
 
 **`sleeping`** and **`closing`** let the
 sender distinguish "device locked, it will come back" (keep listening for a
@@ -917,7 +918,7 @@ section 4.
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
 | `pong` | pv 1 | `t`, `mt` | Clock-sync reply |
-| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`?, `diag`? | Liveness + sender health |
+| `ping` | pv 1 | `drops`?, `encDrops`?, `netDrops`?, `pending`?, `inp50`?, `inp95`?, `capFps`?, `diag`?, `adaptive`? | Liveness + sender health; `adaptive` announces section 6.20 |
 | `cursor` | pv 1 | `x`?, `y`?, `v` | Cursor position/visibility |
 | `cursorImg` | pv 1 | `nw`, `nh`, `ax`, `ay`, `png` | Cursor sprite |
 | `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
@@ -957,28 +958,54 @@ sender's does not.
 Optional and additive: no `pv` bump, no welcome feature. An end with
 streaming diagnostics switched on (docs/performance/diagnostics.md) adds a
 `diag` object to messages it already sends: the sender to its `ping`
-(every ~2 s), the receiver to its `stats` (every ~5 s). A peer that does not
+(every ~2 s), the receiver to its `stats` (every ~5 s, ~2 s under adaptive streaming). A peer that does not
 know it ignores it; absence means "no diagnostics" and changes nothing. It
 never affects trust, input, capture, encoding or presentation; it only feeds
 the other end's diagnostics view and its bottleneck classifier.
 
 `diag` is `{"v":1, ...}` with numbers only (rounded to 0.1), all optional,
-describing the sender's last 5 s window. Unknown `v` or keys are ignored;
-values are clamped to 0…1,000,000 and anything that is not a number is
-dropped.
+describing the sending end's last completed 5 s window (until the first
+window completes, the window so far: then `wseq` is absent). Unknown `v` or
+keys are ignored; values are clamped to 0…1,000,000 and anything that is not
+a number is dropped.
 
+- Both ends: `wseq` (the window's number, 1, 2, … per recorder, never
+  reused below the 1,000,000 value ceiling: a recorder that runs past it,
+  about 58 days of 5 s windows, sends 1,000,000 for every later window, as it
+  does in `wps`; absent while the window is partial). The receiver sends its
+  `stats` every ~5 s, or every ~2 s while the Mac announces adaptive mode
+  (6.20). At ~2 s the same window is usually reported two or three times
+  (count it once); at ~5 s about once, and because the two cadences drift
+  a window is sometimes never reported.
 - In the sender's `ping`: `tgt` (target FPS), `capU` (complete capture
-  frames/s), `idle` (share of capture callbacks reporting idle), `hz`
-  (source refresh, when known), `sub` (encoder submissions/s), `dup`
-  (duplicate submissions/s), `enc50`/`enc95` (encode ms), `age95` (source age
-  at submit, ms), `snd95` (send completion ms), `busy` (encoder-busy share of
-  admitted frames), `bp` (send-backpressure share), `cmp95` (Window view
-  compose ms), `cmpFps` (composites/s).
-- In the receiver's `stats`: `arrFps`, `arr50`/`arr95` (frame arrival
-  interval ms), `gap250` (arrival gaps over 250 ms), `enqFps` (frames
-  enqueued for presentation/s), `qAge95` (presenter queue age ms), `qMax`
-  (presenter queue depth), `dec95`/`decN` (decode ms and samples, Metal path
-  only), `rtt`, `jit` (control round trip and its jitter, ms).
+  frames/s; absent without display capture, e.g. Window view), `idle` (share
+  of capture callbacks reporting idle), `hz` (source refresh, when known),
+  `sub` (encoder submissions/s), `enc95` (encode ms), `snd95` (send
+  completion ms), `busy` (encoder-busy share of admitted frames), `bp`
+  (send-backpressure share), `cmp95` (Window view compose ms), `cmpFps`
+  (composites/s).
+- In the receiver's `stats`: `wid` (a random number per receiver session:
+  with `wseq` it names one window), `wps` (the sender `wseq` the receiver had
+  last received when this window began; absent if none had arrived: a
+  sender `wseq` the sender completed at or after some moment proves, by
+  causality alone, that the receiver window began after that moment),
+  `arrFps`, `arr50`/`arr95` (frame arrival interval ms), `gap250` (arrival
+  gaps over 250 ms), `enqFps` (frames enqueued for presentation/s), `qAge95`
+  (presenter queue age ms), `dec95`/`decN` (decode ms and samples, Metal path
+  only), `rtt` (control round trip p50, ms) and `jit` (its jitter, ms: a
+  session value, not a window value, sent only after 8 RTT samples); and,
+  only while the receiver reads or searches for the Performance Lab
+  fixture's frame-ID strip (docs/performance/performance-lab.md): `fidU`
+  (source-unique fixture frames/s), `fidDup`, `fidSkip` (duplicate and
+  provably missing IDs; these three only in a window where a strip was read),
+  `fidBad` (unreadable strips), `fidUnx` (frames not examined while the
+  reader searched for a lost strip) and `fid95` (interval between unique
+  fixture frames, p95 ms).
+
+Removed (nothing read them): `dup`, `enc50`, `age95` (sender) and `qMax`,
+`fidN` (receiver). A peer that still sends them is ignored as before; an
+older peer that sends no `wseq`/`wid`/`wps` is still understood (its
+summaries just cannot be counted once per window or tied to a moment).
 
 The frame header fields `cap`/`snd` are unchanged.
 
@@ -2685,3 +2712,116 @@ Detection (macOS 27, no public API says so): a window owned by WindowManager or 
 a whole display (CGWindowList) gates an Accessibility check for WindowManager's `mc.display`
 group or the Dock's `mc` group. Polled twice a second only while a Window-mode session is live.
 Older Macs never send the field; older receivers ignore it and see paused panes as before.
+
+### 6.20 Adaptive Automatic and "Use less data" (#123)
+
+Optional and additive: no `pv` bump, no welcome feature, no new message type. Every key below
+rides on a message that already exists. A peer that does not know a key ignores it; absence means
+today's behaviour. Garbage or out-of-range values read as absent: every number is range-checked as
+a double before the Mac converts it, so `1e300`, `-1e300`, NaN, infinities, a string, a bool or an
+object in a number's place is simply absent, never a crash. The hello's existing `scale` is used for
+the readability floor only inside 0.5…8. Numbers are JSON numbers; a JSON bool is never accepted
+where a number is expected (and the reverse). Thresholds and the real-world
+effect are untuned and PENDING HARDWARE (docs/performance/adaptive-streaming.md).
+
+**Receiver `hello`** (re-sent when a value the Mac uses changes: `effHz`, `adaptiveTelemetry`, the
+`cost` class or confidence, `saveData` or `saveDataAnswer`. A change of the `iface` kind alone does
+not re-send. The official receivers check on their ~2 s ping tick and re-send at most once per 5 s
+since the last hello, carrying the latest values, so a flapping value cannot cause a hello storm.
+A hello sent for another reason carries the current values and resets that interval):
+
+- `effHz` (int 1…240): the screen's current effective refresh. iOS: the screen's
+  `maximumFramesPerSecond`, at most 60 while Low Power Mode is on. Mac Receiver: the main
+  `NSScreen.maximumFramesPerSecond`. Absent: the Mac negotiates FPS exactly as before
+  (`maxFPS` only).
+- `adaptiveTelemetry` (int, `1`; a later version up to 10000 also counts): the receiver adds the telemetry keys below to `stats` while the
+  Mac announces adaptive mode. Only honoured together with a valid `effHz`; the official receivers
+  always send both or neither. Absent: the Mac keeps its fixed Automatic policy for this receiver.
+- `cost` (object): a cost hint for the receiver's own media connection path,
+  `{"cost":C,"conf":F,"iface":I}`. C is `unmetered`, `expensive`, `constrained` (Low Data Mode) or
+  `unknown`; F is `low`, `medium` or `high` (high = the connection's own path); I is `wifi`,
+  `wired`, `cellular`, `tunnel` or `unknown`. A tunnel (Tailscale) is never reported as cellular;
+  through a tunnel "not expensive" is `unknown`. Class and flags only: never an SSID, address,
+  interface name or carrier. Missing or invalid `cost`/`conf`: the hint is ignored; an invalid
+  `iface` reads as `unknown`.
+- `saveData` (`"off"`, `"on"` or `"auto"`): the receiver's "Use less data" setting. iOS and the Mac
+  Receiver send it (Automatic until the user picks another value). Absent (a build that predates the
+  setting, Android) = today's behaviour (never data-saving).
+- `saveDataAnswer` (`"saveData"` or `"keepQuality"`): the remembered answer to the one-time
+  suggestion, or the explicit full-quality choice in Settings. Absent: not answered. Only iOS sends
+  it: the Mac Receiver has no mobile-data suggestion, so in Automatic it saves data only on clear Low
+  Data Mode (at either end).
+
+**Mac `ping`**: `"adaptive":1` while the Mac runs the adaptive controller for this session (the
+Mac's Adaptive Automatic (Beta) switch is on and its Streaming Mode is Automatic). Any other value
+or absence means not announced. A receiver that sees it sends `stats` every ~2 s instead of every
+~5 s and adds the keys below; a ping without it, or no ping for 6 s, returns to the old cadence and
+the old `stats` content.
+
+**Receiver `stats`** while announced (window = the time since the previous `stats`):
+
+| Key | Meaning |
+| --- | --- |
+| `win` | window length in seconds (0.5…30); required for the others to be read |
+| `deliveredFps` | frames that reached the presentation hand-off, per second |
+| `decodedFps`, `enqFps` | decoded / enqueued frames per second (defined; the official receivers do not send them yet) |
+| `dec95` | decode time p95 in ms (Metal path only) |
+| `presAge`, `late` | presenter queue age (ms) and late drops (defined; not sent yet) |
+| `jit` | mean change between consecutive control round trips in the window, ms (`rtt` is the existing key) |
+
+`rtt` keeps its meaning and its whole-millisecond rounding: the last control round trip, so 0 means
+under 0.5 ms (Thunderbolt, the same Mac) or no `pong` yet. The Mac's controller treats one 0 as
+unknown and three 0 samples in a row as a 0 ms baseline, so a sub-millisecond link can still show
+network headroom.
+| `thermal` | 0 nominal, 1 fair, 2 serious, 3 critical |
+| `lowPower` | bool, Low Power Mode |
+
+**What the Mac does with them.** Custom mode: exactly today's behaviour. With the Beta switch off,
+old receivers (no keys) get exactly today's behaviour. With the Beta switch on, a receiver that
+sends `effHz` + `adaptiveTelemetry` gets a per-receiver controller: FPS changes take the live
+capture update (which also recreates the encoder at the new rate), bitrate changes recreate the
+encoder session (with a keyframe), and raster changes restart that receiver's capture. Rate limits,
+per receiver and whatever caused the change (the controller, a data-policy change, a thermal or
+policy clamp, a reset on reconnect, or a receiver switching between sending the telemetry keys and
+not): at most one raster raise per 20 s after the previous adaptive capture restart (counted from
+when that restart really ran), and at most one bitrate change per 4 s. The controller's own lower
+raster (a severe step down or a failed probe's revert) is not held. A change inside its limit waits
+and the latest wanted point applies when the limit has passed; the parts of a change that are not
+limited (FPS, and bitrate outside its own limit) apply at once. After 30 s without receiver `stats`
+telemetry, the receiver gets today's fixed point again, through the same limits, until telemetry
+resumes. A raster step whose captured size equals the current one
+(the receiver's decode ceiling, `maxEncodeWide/High`) is not a restart. The bitrate never goes above
+the Best target (18 Mbps). **Source cap (switch on only):** the Mac never captures above the
+source's own refresh in Mirror (the mirrored display's refresh) and Extend (the virtual display's),
+for every receiver, old receivers without the keys included (they otherwise keep today's fixed
+point). A reading below 24 Hz counts as unknown (no cap). Window view has no source cap.
+
+**Leaving data saving (Automatic only, per receiver).** A data-policy change toward saving (from
+`saveData`, `cost`, `saveDataAnswer` or the Mac's own Low Data Mode, described next) applies at once.
+A change back to full quality applies only once saving has been in effect for 20 s, and then as one
+step: if it restarts capture, it also waits for the 20 s restart limit (at most one more 20 s), so
+its FPS and bitrate normally do not return ahead of its raster (after 40 s the return no longer
+waits, and a raster still inside the restart limit follows later). Until then the Mac keeps saving and keeps the
+latest request; a request to save again cancels it, and the last request always wins. Saving set
+before the first capture starts is left at once. A receiver that flips the preference or its cost
+hint on every hello therefore costs at most one capture restart and about three capture or encoder
+updates in all per 20 s, not one update per hello. With the Adaptive Automatic switch on and a
+receiver that sends telemetry, turning saving on can lower a raster the controller raised a moment
+before, so there the bound is two capture restarts per 20 s. Old receivers (no `saveData`) and Custom are not
+affected.
+
+"Use less data" works with the switch off too: in Automatic, the Mac uses a conservative point
+(Balanced raster and bitrate, at most 60 FPS) for that receiver when `saveData` is `on`, or `auto`
+with clear Low Data Mode evidence, or `auto` with clear metered evidence and
+`saveDataAnswer:"saveData"`. Evidence from both ends counts, with one limit on the Mac's side: Low
+Data Mode set on the Mac (its media connection's `isConstrained`) counts like the receiver's own;
+a metered Mac path (`isExpensive`) alone never changes quality. The Mac reads its own path before
+the first capture is configured whenever the path is already known. `saveData:"off"` is full
+quality always, Low Data Mode included (a deliberate, reversible override). `keepQuality` (the "No"
+answer, or Full Quality under On Mobile Data) only means "don't save on mobile data": with
+`saveData:"auto"`, Low Data Mode at either end still saves. A capture restart caused by a data-policy
+change (not by the controller) happens at most once per 20 s per receiver; a raster that changes
+again inside that time waits, and the latest one applies when the 20 s have passed, so a flapping
+path or hint cannot restart capture repeatedly. A change that needs no restart (FPS, bitrate)
+applies at once. Saving data never stops or refuses a stream. Android sends none of these keys yet
+(parity gap).

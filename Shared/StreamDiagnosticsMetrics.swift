@@ -22,6 +22,9 @@ enum StreamDiagnosticsSide: String, Codable, Sendable, CaseIterable {
 enum StreamDiagnosticsTimebase: String, Codable, Sendable {
     /// `DispatchTime` uptime on the measuring device (monotonic, stops in sleep).
     case localMonotonic
+    /// Wall-clock milliseconds (`Date`) on the measuring device: one device,
+    /// but not monotonic, so a clock step during a sample skews it.
+    case localWallClock
     /// ScreenCaptureKit sample PTS (host time clock) against the same host clock.
     case senderHostClock
     /// Both ends of the span are sender wall-clock milliseconds carried in the
@@ -61,6 +64,7 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
     case send
     case compose
     case composeInterval
+    case restartSubmitGap
     // Receiver
     case arrivalInterval
     case wireSubmitToSend
@@ -70,12 +74,16 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
     case presentationEnqueueInterval
     case observedSubmitToGlass
     case rtt
+    case restartArrivalGap
+    // Performance Lab frame-ID reader (receiver, Metal path only)
+    case frameIDUniqueInterval
 
     /// Stages that are intervals between successive events: they also count
     /// gaps over 100/250/500 ms.
     var isInterval: Bool {
         switch self {
-        case .captureInterval, .submitInterval, .composeInterval, .arrivalInterval, .presentationEnqueueInterval:
+        case .captureInterval, .submitInterval, .composeInterval, .arrivalInterval, .presentationEnqueueInterval,
+             .frameIDUniqueInterval:
             return true
         default:
             return false
@@ -93,7 +101,7 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
             return .init(id: "sender.source_age_at_submit_ms", unit: "ms", side: .sender,
                          source: "MacSender.encode: host clock now minus the ScreenCaptureKit sample PTS of the pixels being submitted",
                          timebase: .senderHostClock,
-                         caveat: "Includes the rate limiter's trailing-edge hold and any replay delay. Window view frames are stamped at composition, so this is composition-to-submit there.")
+                         caveat: "Includes the rate limiter's trailing-edge hold and any replay delay. Display capture only: Window view composites have no capture PTS, so nothing is recorded there.")
         case .encode:
             return .init(id: "sender.encode_ms", unit: "ms", side: .sender,
                          source: "VTCompressionSession submit (MacSender.encode) to its output callback",
@@ -119,6 +127,11 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
                          source: "Successive composites in WindowWorkspaceEngine.composeTick",
                          timebase: .localMonotonic,
                          caveat: "The engine composes only when a pane changed, plus about one resend per second when static.")
+        case .restartSubmitGap:
+            return .init(id: "sender.restart.frame_gap_ms", unit: "ms", side: .sender,
+                         source: "Last encoder submission of the previous capture generation to the first submission of the new one (StreamDiagnosticsRecorder.noteGeneration)",
+                         timebase: .localMonotonic,
+                         caveat: "One sample per restart (reconnect, retune, mode change). The interval stages restart their baselines at a restart, so this gap is not in them.")
         case .arrivalInterval:
             return .init(id: "receiver.arrival_interval_ms", unit: "ms", side: .receiver,
                          source: "StreamReceiver.presentDecodedSample: successive complete video frames off the wire",
@@ -133,7 +146,7 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
             return .init(id: "receiver.wire.submit_to_receive_ms", unit: "ms", side: .receiver,
                          source: "Receiver wall clock (mapped with the ping/pong offset) minus cap at presentDecodedSample",
                          timebase: .wallClockMapped,
-                         caveat: "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A/V delay, queueing, decode or display. Offset error is up to about half the best round trip.")
+                         caveat: "The performance overlay labels this \"latency\". It starts at encoder submission (not capture) and ends when the frame is handed to the presenter, before any A/V delay, queueing, decode or display. Offset error is up to about half the best round trip. Values outside -50 to 5000 ms are dropped (clock mapping not settled), so p99 and max under-report a pathological latency.")
         case .decode:
             return .init(id: "receiver.decode_ms", unit: "ms", side: .receiver,
                          source: "ReceiverVideoDecoder decode duration (experimental Metal path only)",
@@ -153,12 +166,22 @@ enum DiagnosticsStage: Int, CaseIterable, Sendable {
             return .init(id: "receiver.presentation.observed_submit_to_glass_ms", unit: "ms", side: .receiver,
                          source: "Metal drawable presented handler (StreamReceiver.recordPresented) minus cap",
                          timebase: .wallClockMapped,
-                         caveat: "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon.")
+                         caveat: "Experimental Metal path only, which itself changes timing. Starts at encoder submission, not capture. Not capture-to-photon. Values outside -50 to 5000 ms are dropped, so p99 and max under-report a pathological latency.")
         case .rtt:
             return .init(id: "receiver.rtt_ms", unit: "ms", side: .receiver,
                          source: "Receiver ping to sender pong on the control channel",
+                         timebase: .localWallClock,
+                         caveat: "Control-message round trip; it rides behind any queued video on the same connection. Both ends of the span are this device's wall clock (the ping time also feeds the clock offset), so a clock step during a round trip skews one sample; samples outside 0-2000 ms are dropped.")
+        case .restartArrivalGap:
+            return .init(id: "receiver.restart.frame_gap_ms", unit: "ms", side: .receiver,
+                         source: "Last frame arrival before a presentation generation change to the first arrival after it (StreamDiagnosticsRecorder.noteGeneration)",
                          timebase: .localMonotonic,
-                         caveat: "Control-message round trip; it rides behind any queued video on the same connection.")
+                         caveat: "One sample per resync inside a session. A full reconnect resets the receiver's recorder and records no sample. The arrival interval restarts its baseline at a resync, so this gap is not in it.")
+        case .frameIDUniqueInterval:
+            return .init(id: "receiver.frame_id.unique_interval_ms", unit: "ms", side: .receiver,
+                         source: "PerformanceLabFrameIDProbe: successive decoded frames carrying a new Performance Lab fixture frame ID (ReceiverVideoPresenter.presentDecoded)",
+                         timebase: .localMonotonic,
+                         caveat: "Only while the Performance Lab fixture is on screen and only on the experimental Metal path, which itself changes timing. Measured at the decoded-frame handoff, not on glass.")
         }
     }
 }
@@ -202,6 +225,7 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
     // Both
     case routeChanges
     case generationResets
+    case colourSamples
     // Receiver
     case arrivedFrames
     case arrivedBytes
@@ -209,6 +233,14 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
     case presenterStaleDiscarded
     case observedPresentations
     case displayLayerFlushes
+    // Performance Lab frame-ID reader (receiver, Metal path only)
+    case frameIDRead
+    case frameIDUnique
+    case frameIDDuplicate
+    case frameIDSkipped
+    case frameIDUnreadable
+    case frameIDUnexamined
+    case frameIDDiscontinuity
 
     var definition: StreamDiagnosticsMetricDefinition {
         let s = StreamDiagnosticsSide.sender, r = StreamDiagnosticsSide.receiver
@@ -288,6 +320,10 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
             return .init(id: "session.route_changes", unit: "events", side: nil, source: "Route class changed between samples", timebase: .none, caveat: "Sampled about every 2 s.")
         case .generationResets:
             return .init(id: "session.generation_resets", unit: "events", side: nil, source: "Capture or presentation generation changed; interval baselines restart", timebase: .none, caveat: "")
+        case .colourSamples:
+            return .init(id: "session.colour_samples", unit: "events", side: nil,
+                         source: "A colour metadata extraction (pixel buffer attachments, format description extensions, SPS VUI), taken once per stream generation or format change",
+                         timebase: .none, caveat: "Counts extractions, not frames. Never per frame; the Colour metadata group reports what they found.")
         case .arrivedFrames:
             return .init(id: "receiver.arrival.frames", unit: "frames", side: r, source: "Complete video frames at presentDecodedSample", timebase: .none, caveat: "")
         case .arrivedBytes:
@@ -303,6 +339,27 @@ enum DiagnosticsCounter: Int, CaseIterable, Sendable {
                          caveat: "Experimental Metal path only. The only presentation this app can observe.")
         case .displayLayerFlushes:
             return .init(id: "receiver.presentation.layer_flushes", unit: "events", side: r, source: "Display layer failed and was flushed", timebase: .none, caveat: "")
+        case .frameIDRead:
+            return .init(id: "receiver.frame_id.read", unit: "frames", side: r, source: "Decoded frames whose Performance Lab frame-ID strip was read", timebase: .none,
+                         caveat: "Experimental Metal path only; only while the lab fixture is visible.")
+        case .frameIDUnique:
+            return .init(id: "receiver.frame_id.unique", unit: "frames", side: r, source: "Read frame IDs that differ from the previous read ID", timebase: .none,
+                         caveat: "Source-unique fixture frames that reached the decoded-frame handoff.")
+        case .frameIDDuplicate:
+            return .init(id: "receiver.frame_id.duplicate", unit: "frames", side: r, source: "Read frame IDs equal to the previous read ID", timebase: .none,
+                         caveat: "The same source frame handed over again (replay, static resend or re-encode).")
+        case .frameIDSkipped:
+            return .init(id: "receiver.frame_id.skipped", unit: "frames", side: r, source: "IDs provably missing between two successive read IDs: the ID difference minus one, minus the frames that arrived in between but could not be read", timebase: .none,
+                         caveat: "A lower bound on fixture frames drawn on the Mac that never reached this point (an unread frame may have carried a missing ID). Rate limiting at a lower target FPS skips frames by design. Counted only while the reader follows a strip.")
+        case .frameIDUnreadable:
+            return .init(id: "receiver.frame_id.unreadable", unit: "frames", side: r, source: "Decoded frames where a located strip failed its guard or checksum", timebase: .none,
+                         caveat: "Blended, partially updated or heavily compressed frames; also the fixture leaving the screen.")
+        case .frameIDUnexamined:
+            return .init(id: "receiver.frame_id.unexamined", unit: "frames", side: r, source: "Decoded frames the reader did not read while it searched for a lost strip again (it probes one frame in 30)", timebase: .none,
+                         caveat: "Not counted as skipped: the reader re-baselines when it finds the strip again.")
+        case .frameIDDiscontinuity:
+            return .init(id: "receiver.frame_id.discontinuity", unit: "events", side: r, source: "Read ID went backwards or jumped by more than half the counter range", timebase: .none,
+                         caveat: "Fixture restarted; counting starts again from the new ID.")
         }
     }
 }
@@ -343,13 +400,15 @@ enum DiagnosticsGauge: Int, CaseIterable, Sendable {
 // MARK: - Dictionary
 
 enum StreamDiagnosticsMetricDictionary {
-    /// Bump when an id is renamed or its meaning changes.
-    static let version = 1
+    /// Bump when an id is renamed or its meaning changes. 2: frame-ID
+    /// skipped is a lower bound, RTT is wall-clock, restart gaps and
+    /// unexamined frame IDs added.
+    static let version = 2
 
     /// Metrics that are not a stage, counter or gauge.
     static let derived: [StreamDiagnosticsMetricDefinition] = [
-        .init(id: "receiver.rtt_jitter_ms", unit: "ms", side: .receiver, source: "Smoothed absolute difference of successive RTT samples (RFC 3550 style, gain 1/16)",
-              timebase: .localMonotonic, caveat: "Control-channel jitter, not video arrival jitter."),
+        .init(id: "receiver.rtt_jitter_ms", unit: "ms", side: .receiver, source: "Smoothed absolute difference of successive RTT samples (RFC 3550: starts at 0, gain 1/16), over the session",
+              timebase: .localWallClock, caveat: "Control-channel jitter, not video arrival jitter. A session value, not a window value; reported only after \(StreamBottleneckClassifier.minimumRTTSamples) RTT samples (one per receiver ping, about every 2 s)."),
         .init(id: "resource.process_cpu_percent", unit: "% of one core", side: nil, source: "getrusage(RUSAGE_SELF) user+system time delta over wall time between samples",
               timebase: .sampled, caveat: "Whole process, sampled once per window (5 s). Not GPU, encoder or decoder hardware load."),
         .init(id: "resource.memory_footprint_mb", unit: "MB", side: nil, source: "task_info TASK_VM_INFO phys_footprint",

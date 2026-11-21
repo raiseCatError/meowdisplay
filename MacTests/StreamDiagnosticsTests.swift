@@ -95,10 +95,12 @@ final class StreamDiagnosticsTests: XCTestCase {
         XCTAssertEqual(completed.windowSeconds, 5.1, accuracy: 0.001)
         XCTAssertEqual(completed.rate(.arrivedFrames), 180 / 5.1, accuracy: 0.01)
 
-        // A long quiet spell: the last window really was empty.
+        // A long quiet spell: the window completes with its real length.
+        // Changed with the B5 fix: it used to be reported as a fresh empty
+        // 5 s window, hiding how long the silence lasted.
         let quiet = r.snapshot(at: 30_000)
         XCTAssertEqual(quiet.count(.arrivedFrames), 0)
-        XCTAssertEqual(quiet.windowSeconds, 5, accuracy: 0.001)
+        XCTAssertEqual(quiet.windowSeconds, 24.9, accuracy: 0.001)
         XCTAssertEqual(quiet.sessionCounters[DiagnosticsCounter.arrivedFrames.definition.id], 180)
     }
 
@@ -119,6 +121,27 @@ final class StreamDiagnosticsTests: XCTestCase {
         // The same generation again changes nothing.
         r.noteGeneration(2, at: 2_050)
         XCTAssertEqual(r.snapshot(at: 2_060).count(.generationResets), 1)
+    }
+
+    /// A generation change after a silence longer than a window (no hook,
+    /// no read) completes that window with its data first; it used to be
+    /// cleared, losing a whole window.
+    func testGenerationChangeAfterASilenceKeepsTheFullWindow() throws {
+        let (r, _) = makeRecorder()
+        r.noteGeneration(1, at: 0)
+        for t in stride(from: 100.0, through: 2_000, by: 100) { r.recordCapture(.complete, at: t) }
+        r.noteGeneration(2, at: 7_000)
+        r.recordCapture(.complete, at: 7_100)
+        let w = try XCTUnwrap(r.completedWindowForLab(at: 7_200), "the window that began at 0 completed")
+        XCTAssertEqual(w.sequence, 1)
+        XCTAssertEqual(w.startMs, 0)
+        XCTAssertEqual(w.durationMs, 7_000)
+        XCTAssertEqual(w.snapshot.count(.captureComplete), 20)
+        XCTAssertEqual(w.snapshot.count(.generationResets), 0, "the restart belongs to the new window")
+        let current = r.snapshot(at: 12_100)
+        XCTAssertEqual(current.windowSequence, 2)
+        XCTAssertEqual(current.count(.generationResets), 1)
+        XCTAssertEqual(current.count(.captureComplete), 1)
     }
 
     func testResetClearsSessionState() {
@@ -283,7 +306,9 @@ final class StreamDiagnosticsTests: XCTestCase {
         r.presenterCommandProcessed(stamp: b)
         r.presenterCommandProcessed(stamp: d)
         let s = r.snapshot()
-        // Depth samples: 1, 2 (a, b), then 2 again for d (b still queued).
+        // Depth samples: 1, 2 (a, b); switching back on restarts the window
+        // (B5), so this window holds 2 for d (b still queued).
+        XCTAssertEqual(s.gauge(.presenterQueueDepth)?.samples, 1)
         XCTAssertEqual(s.gauge(.presenterQueueDepth)?.max, 2)
         XCTAssertEqual(s.gauge(.presenterQueueDepth)?.last, 2)
         XCTAssertEqual(s.stage(.presenterQueueAge)?.count, 2, "ages recorded only while on")
