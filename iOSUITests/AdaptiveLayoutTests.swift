@@ -209,9 +209,9 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertTrue(app.buttons["exploreDemo"].waitForExistence(timeout: 5))
     }
 
-    /// Upside-down portrait is not available on iPhones without a Home button (a system rule),
-    /// and the app does not fight it: it tolerates either outcome, and in every orientation the
-    /// controls stay inside the window.
+    /// The Duo outer display follows ordinary iPhone rules. The inner display supports
+    /// all four orientations. A requested device pose alone does not establish the scene
+    /// orientation; this test checks control reachability in the resulting window.
     @MainActor
     func testControlsStayInsideTheWindowThroughEveryOrientationIncludingUpsideDown() {
         let app = launchIntoDemo()
@@ -239,7 +239,7 @@ final class AdaptiveLayoutTests: XCTestCase {
 
     // MARK: - Synthetic fold (DEBUG seam `MEOW_UITEST_FOLD`, iOS/UITestFoldSeam.swift)
     //
-    // The simulator never reports a fold (no posture control), so these tests ask the app for a
+    // The hosted job does not change the Duo pose in Device Hub. These tests ask the app for a
     // synthetic one: a 24 pt `.division` band at the window's centre, vertical (a book) or
     // horizontal (tabletop), fed through the same `ControlReservedRegion.active(in:)` as a real
     // hinge. The app exposes the band as the element `uitestFoldBand`.

@@ -5,8 +5,8 @@
 // - `MEOW_UITEST_FOLD=vertical|horizontal` (optional `MEOW_UITEST_FOLD_WIDTH`, points, default 24):
 //   a synthetic fold. `ControlReservedRegion.active(in:)` adds one `.division` region where an
 //   iPhone Duo's hinge would be: a full-height band at the window's horizontal centre (held like a
-//   book) or a full-width band at its vertical centre (tabletop). The simulator reports no fold and
-//   cannot fold, so without this the fold avoidance never runs on CI. The band is also exposed as an
+//   book) or a full-width band at its vertical centre (tabletop). The CI job leaves the simulator
+//   in its initial pose, so this seam exercises fold avoidance there. The band is also exposed as an
 //   accessibility element, `uitestFoldBand`, so XCUITest can read where it is.
 
 #if DEBUG
