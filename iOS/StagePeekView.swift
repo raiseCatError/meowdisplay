@@ -43,6 +43,8 @@ struct StagePeekOverlay: View {
     var inputAllowed = false
     /// A display card was tapped (Full Desktop or another Mac display).
     let onDisplay: (CatalogDisplayItem?) -> Void
+    /// UI tests (Demo's `-demoStagePeek`): open as VoiceOver's activate does, without the hold.
+    var opensOnAppearForTesting = false
 
     @State private var machine = StagePeekMachine()
     @State private var query = ""
@@ -99,7 +101,10 @@ struct StagePeekOverlay: View {
     var body: some View {
         let cards = revealShifted(layout())
         ZStack(alignment: .topLeading) {
-            if machine.isVisible {
+            // All Apps replaces the whole peek while it's open (`StagePeekAllAppsLayering`): hidden in
+            // place, its apps bar cells and buttons stayed in the accessibility tree (hosted UI test,
+            // runs 43729529563-43742243552). Rows, search and filter live here, so Back keeps them.
+            if machine.isVisible, !launchpad {
                 backdrop
                     .contentShape(Rectangle())
                     .gesture(openGesture(cards: cards))
@@ -183,10 +188,14 @@ struct StagePeekOverlay: View {
                 .onChange(of: g.frame(in: .global)) { overlayOrigin = $0.origin; model.desktopPictureGlobal = $0 }
         })
         .coordinateSpace(name: "stagePeek")
-        .accessibilityAction(.escape) { finish(machine.dismiss()) }
+        // Escape (VoiceOver's scrub) leaves All Apps first, then the peek.
+        .accessibilityAction(.escape) { if launchpad { closeLaunchpad() } else { finish(machine.dismiss()) } }
         .position(x: frame.midX, y: frame.midY)
         .ignoresSafeArea(.keyboard)   // the search keyboard never resizes (or closes) the peek
-        .onAppear { machine.naturalScrolling = naturalScrolling; syncItems(); playHint() }
+        .onAppear {
+            machine.naturalScrolling = naturalScrolling; syncItems(); playHint()
+            if opensOnAppearForTesting { finish(machine.openDirectly()) }
+        }
         .onChange(of: naturalScrolling) { machine.naturalScrolling = $0 }
         // Every new opening starts unfiltered: all windows, no app selected, no search; the
         // Compact/Normal and layout preferences are kept. Dismissal clears them too.
@@ -206,7 +215,11 @@ struct StagePeekOverlay: View {
         .onChange(of: searchFocused) { focused in if focused, machine.isVisible, !machine.expanded { animate { machine.expand() } } }
         .onChange(of: query) { q in if !q.isEmpty, machine.isVisible, !machine.expanded { animate { machine.expand() } } }
         .onChange(of: machine.isVisible) { visible in if !visible { searchFocused = false; model.thumbnailPriority = [] } }
-        .onChange(of: launchpad) { open in model.launchpadOpen = open }
+        .onChange(of: launchpad) { open in
+            model.launchpadOpen = open
+            // VoiceOver moves into All Apps, and back to the peek.
+            UIAccessibility.post(notification: .screenChanged, argument: nil)
+        }
         // Rotation, fold, Split View, Stage Manager resize: a width change. A keyboard only changes the height.
         // A screen opened from the gallery (overview, arrangement editor) keeps the peek open under it.
         .onChange(of: frame.size.width) { _ in
@@ -508,42 +521,60 @@ struct StagePeekOverlay: View {
             .zIndex(5)
     }
 
+    /// All Apps takes the peek's place (`StagePeekAllAppsLayering`): a dense frost of the Mac
+    /// picture that keeps every touch, with the grid inside the safe area. Close, Escape, or a
+    /// swipe up from its bottom handle goes back to the peek as it was.
     private var launchpadView: some View {
-        ZStack {
-            Color.black.opacity(reduceTransparency ? 0.7 : 0.5).ignoresSafeArea()
-                .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
+        ZStack(alignment: .topLeading) {
+            launchpadBackground
+                .frame(width: frame.width, height: frame.height)
+                // A touch between icons used to close All Apps; now it stays here and reaches
+                // nothing underneath (the peek, the controls, the Mac).
+                .contentShape(Rectangle())
+                .onTapGesture {}
+                .accessibilityHidden(true)
             StagePeekLaunchpad(model: model, inputAllowed: inputAllowed,
                                onPick: { app in
-                                   withAnimation(.easeOut(duration: 0.2)) { launchpad = false }
+                                   closeLaunchpad()
                                    if !machine.isVisible { finish(machine.openDirectly()) }
                                    tapApp(app, forceFilter: true)
                                },
                                onClose: { closeLaunchpad() },
                                onFullscreen: { app in openFullscreen(app) })
                 .frame(width: safe.width, height: safe.height)
+                .position(x: safe.midX, y: safe.midY)
             // Swipe up from the bottom edge: back to the peek (owner, 2026-10-31).
-            VStack {
-                Spacer()
-                Capsule().fill(Color.white.opacity(0.5)).frame(width: 120, height: 5)
-                    .frame(maxWidth: .infinity).frame(height: 34)
-                    .contentShape(Rectangle())
-                    .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
-                    .gesture(DragGesture(minimumDistance: 10).onEnded { d in
-                        if d.translation.height < -30 || d.predictedEndTranslation.height < -80 {
-                            withAnimation(.easeOut(duration: 0.2)) { launchpad = false }
-                        }
-                    })
-                    .accessibilityElement()
-                    .accessibilityLabel(String(localized: "Close All Apps"))
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityAction { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
-            }
-            .frame(width: safe.width, height: safe.height)
+            Capsule().fill(Color.white.opacity(0.5)).frame(width: 120, height: 5)
+                .frame(width: safe.width, height: 34)
+                .contentShape(Rectangle())
+                .onTapGesture { closeLaunchpad() }
+                .gesture(DragGesture(minimumDistance: 10).onEnded { d in
+                    if d.translation.height < -30 || d.predictedEndTranslation.height < -80 { closeLaunchpad() }
+                })
+                // The Close button says the same to VoiceOver: one stop is enough.
+                .accessibilityHidden(true)
+                .position(x: safe.midX, y: safe.maxY - 17)
         }
-        .frame(width: frame.width, height: frame.height)
+        .frame(width: frame.width, height: frame.height, alignment: .topLeading)
         .position(x: frame.width / 2, y: frame.height / 2)
         .environment(\.colorScheme, .dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityIdentifier("stagePeekAllApps")
         .zIndex(40)
+    }
+
+    /// Frosted Mac picture under a black dense enough for white text on a white window (7:1);
+    /// Reduce Transparency or Increase Contrast: no frost, nearly opaque.
+    @ViewBuilder private var launchpadBackground: some View {
+        if reduceTransparency || colorSchemeContrast == .increased {
+            Color.black.opacity(StagePeekAllAppsLayering.denseScrimOpacity)
+        } else {
+            ZStack {
+                Rectangle().fill(.thinMaterial)
+                Color.black.opacity(StagePeekAllAppsLayering.scrimOpacity)
+            }
+        }
     }
 
     private func closeLaunchpad() { withAnimation(.easeOut(duration: 0.2)) { launchpad = false } }
@@ -1054,4 +1085,23 @@ private struct RemoteFinderHost: View {
         }
         .animation(.easeOut(duration: 0.2), value: files.isOpen)
     }
+}
+
+/// Hidden, untouchable and skipped by VoiceOver while Stage Peek's All Apps is open
+/// (`StagePeekAllAppsLayering`), yet still laid out: nothing under All Apps moves. For views
+/// without scrolling cells (the peek's buttons, the receiver's controls); the apps bar and gallery
+/// are left out of the hierarchy instead (see `body`).
+struct StepsAsideForAllApps: ViewModifier {
+    let allAppsOpen: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(allAppsOpen ? 0 : 1)
+            .allowsHitTesting(!allAppsOpen)
+            .accessibilityHidden(allAppsOpen)
+    }
+}
+
+extension View {
+    func stepsAside(forAllApps open: Bool) -> some View { modifier(StepsAsideForAllApps(allAppsOpen: open)) }
 }

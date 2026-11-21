@@ -58,10 +58,14 @@ struct UITestOverviewFixtureHost: View {
                 .accessibilityIdentifier("uitestOpenOverview")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Combined QA only until #283 and #286 both land: the fold band (iOS/UITestFoldSeam.swift)
+        // inside the overview, for testOverviewChromeSplitsAroundAVerticalFold.
+        .uiTestFoldBandMarker()
         .onAppear { presented = true }
         .fullScreenCover(isPresented: $presented) {
             DisplayOverviewScreen(model: model, displayScale: displayScale,
                                   onShowInPane: { _ in }, onAddAsNewPane: { _ in })
+                .uiTestFoldBandMarker()
         }
     }
 }
