@@ -13,10 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: before
-            source: 09a56c5137a48c8b620fb993fe269b38a24bd8ab
           - label: after
-            source: aa1488133f63ebbd751852c3cdab81872e10c60c
+            source: 5acf6ba8c9cbc231e13b0bd30c562adf7db50e5b
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
