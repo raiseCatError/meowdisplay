@@ -140,12 +140,38 @@ struct OverviewInteraction: Equatable {
                 ?? visible.first(where: { $0.id == model.selected })
                 ?? visible.first else { return nil }
         let sourceSide = max(display.frame.width, display.frame.height)
-        let sourceScale = display.scale ?? Self.defaultDisplayPixelsPerPoint
-        let needed = sourceSide * min(camera.scale * viewDisplayScale, sourceScale)
+        let density = min(camera.scale * viewDisplayScale, display.scale ?? Self.defaultDisplayPixelsPerPoint)
+        let needed = sourceSide * density
         guard needed.isFinite, needed > 700 else { return nil }
         let sizes = OverviewDisplayDetailRequest.sizes
-        let side = sizes.first(where: { Double($0) >= needed }) ?? sizes[sizes.count - 1]
-        return OverviewDisplayDetailRequest(id: display.id, maxSide: side)
+        let maximum = sizes[sizes.count - 1]
+        let region = needed > Double(maximum) ? detailRegion(for: display) : nil
+        let crop = region?.rect(in: display.frame) ?? display.frame
+        let pixels = max(crop.width, crop.height) * density
+        let side = sizes.first(where: { Double($0) >= pixels }) ?? maximum
+        return OverviewDisplayDetailRequest(id: display.id, maxSide: side, region: region)
+    }
+
+    private func detailRegion(for display: OverviewDisplay) -> OverviewDisplayDetailRequest.Region? {
+        // A gutter keeps some detail on screen while the next crop is on its way.
+        let view = CGRect(origin: .zero, size: viewport).insetBy(dx: -80, dy: -80)
+            .intersection(viewRect(of: display))
+        guard !view.isEmpty else { return nil }
+        let a = camera.worldPoint(view: CGPoint(x: view.minX, y: view.minY), viewport: viewport)
+        let b = camera.worldPoint(view: CGPoint(x: view.maxX, y: view.maxY), viewport: viewport)
+        guard a.x.isFinite, a.y.isFinite, b.x.isFinite, b.y.isFinite else { return nil }
+        let frame = display.frame
+        let units = Double(OverviewDisplayDetailRequest.Region.units)
+        func grid(_ value: Double, origin: Double, length: Double, roundDown: Bool) -> Int {
+            let bounded = min(max((value - origin) / length, 0), 1) * units
+            return Int(bounded.rounded(roundDown ? .down : .up))
+        }
+        let edges = [grid(min(a.x, b.x), origin: frame.minX, length: frame.width, roundDown: true),
+                     grid(min(a.y, b.y), origin: frame.minY, length: frame.height, roundDown: true),
+                     grid(max(a.x, b.x), origin: frame.minX, length: frame.width, roundDown: false),
+                     grid(max(a.y, b.y), origin: frame.minY, length: frame.height, roundDown: false)]
+        guard edges != [0, 0, Int(units), Int(units)] else { return nil }
+        return OverviewDisplayDetailRequest.Region(edges)
     }
 
     /// The selected display is real, so the pane actions apply to it.

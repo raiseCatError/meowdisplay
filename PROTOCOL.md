@@ -1575,11 +1575,13 @@ with `reason` `offscreen` (minimized, hidden) or `failed`. `ids` may hold 48,
 `max` is 64–640, `icons` 48, and optional `displays` (display ids) are
 answered with `displayThumbnail {id, jpeg}` (MeowDisplay's own windows are
 never in a display still). Receivers bound ordinary stills at 256 KiB base64.
-A zoomed Overview may add `detail: {id, maxSide}` with one real display ID
-and a requested longest side of 960, 1280, or 1600 pixels. The Mac captures it
-first in the same rate-limited batch and echoes the requested side as
-`detail` in its `displayThumbnail`. Detailed stills are bounded at 700,000
-base64 characters and the display's native pixel size. Older Macs ignore the
+A zoomed Overview may add `detail: {id, maxSide, region?}` with one real display
+ID and a requested longest side of 960, 1280, or 1600 pixels. Deep zoom may
+specify `region` as four ordered, integral edges from 0 to 64 of the display's
+width and height. The Mac captures that region first in the same rate-limited
+batch and echoes the requested side as `detail` and the edges as `detailRegion`
+in its `displayThumbnail`. Detailed stills are bounded at 700,000 base64
+characters and the sampled region's native pixel size. Older Macs ignore the
 extra request field and continue sending the ordinary still.
 `appCatalogRequest {rev?}` is answered with `appCatalog {rev, apps}` — every
 launchable app the Mac finds (Spotlight's index of the app folders, a folder

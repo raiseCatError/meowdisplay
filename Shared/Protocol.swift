@@ -240,15 +240,47 @@ enum WindowWorkspaceWire {
 struct OverviewDisplayDetailRequest: Equatable, Sendable {
     static let sizes = [960, 1280, 1600]
     static let maxBase64 = 700_000
+    struct Region: Equatable, Sendable {
+        // Bucket a view's edges so small finger motions don't keep invalidating in-flight stills.
+        static let units = 64
+        let edges: [Int]  // left, top, right, bottom, from the display's own top-left
+
+        init?(_ edges: [Int]) {
+            guard edges.count == 4, edges.allSatisfy({ (0...Self.units).contains($0) }),
+                  edges[0] < edges[2], edges[1] < edges[3] else { return nil }
+            self.edges = edges
+        }
+
+        var unitRect: CGRect {
+            let scale = CGFloat(Self.units)
+            return CGRect(x: CGFloat(edges[0]) / scale, y: CGFloat(edges[1]) / scale,
+                          width: CGFloat(edges[2] - edges[0]) / scale, height: CGFloat(edges[3] - edges[1]) / scale)
+        }
+
+        func rect(in display: CGRect) -> CGRect {
+            let r = unitRect
+            return CGRect(x: display.minX + r.minX * display.width, y: display.minY + r.minY * display.height,
+                          width: r.width * display.width, height: r.height * display.height)
+        }
+    }
+
     let id: UInt32
     let maxSide: Int
+    var region: Region? = nil
 
-    var wire: [String: Int] { ["id": Int(id), "maxSide": maxSide] }
+    var wire: [String: Any] {
+        var message: [String: Any] = ["id": Int(id), "maxSide": maxSide]
+        if let region { message["region"] = region.edges }
+        return message
+    }
 
     static func parse(_ value: Any?) -> Self? {
-        guard let fields = value as? [String: Int], let id = fields["id"].flatMap({ UInt32(exactly: $0) }),
-              id != 0, let side = fields["maxSide"], sizes.contains(side) else { return nil }
-        return Self(id: id, maxSide: side)
+        guard let fields = value as? [String: Any], let rawID = fields["id"] as? Int,
+              let id = UInt32(exactly: rawID), id != 0, let side = fields["maxSide"] as? Int,
+              sizes.contains(side) else { return nil }
+        let region = (fields["region"] as? [Int]).flatMap(Region.init)
+        guard fields["region"] == nil || region != nil else { return nil }
+        return Self(id: id, maxSide: side, region: region)
     }
 }
 
