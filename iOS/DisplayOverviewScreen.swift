@@ -315,7 +315,7 @@ struct DisplayOverviewScreen: View {
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
     private var showTitle: String {
-        model.replacingTile != nil ? String(localized: "Use in This Pane") : String(localized: "Show in Pane")
+        model.replacingTile != nil ? String(localized: "Use Display") : String(localized: "Show in Pane")
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {
@@ -324,41 +324,71 @@ struct DisplayOverviewScreen: View {
 
     /// A display source cannot float on iOS, so there is no float action here.
     private func actionBar(fold: OverviewChromeFold.Split?) -> some View {
-        FoldAwareBar(fold: fold, horizontalPadding: 16) {
-            actionPrimary
-        } trailing: {
-            actionSecondary
-        }
-        .frame(maxWidth: .infinity, minHeight: 60)
-        .padding(.vertical, 8)
-    }
-
-    @ViewBuilder private var actionPrimary: some View {
-        if selectedItem != nil, interaction.selectionCanBeShown {
-            Button(showTitle) { showSelected() }
-                .buttonStyle(.borderedProminent).tint(meowAccent)
-                .accessibilityIdentifier("displayOverviewShowInPane")
-        } else {
-            Text("A MeowDisplay screen can't be shown in a pane.")
-                .font(.footnote).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
-        }
-    }
-
-    private var actionSecondary: some View {
-        HStack(spacing: 12) {
+        Group {
             if let item = selectedItem, interaction.selectionCanBeShown {
-                if canAddPane(item) {
-                    Button("Add as New Pane") { dismiss(); onAddAsNewPane(item) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("displayOverviewAddPane")
+                if let fold {
+                    FoldAwareBar(fold: fold, horizontalPadding: 16) {
+                        actionPrimary
+                    } trailing: {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) { secondaryActions(item) }.fixedSize(horizontal: true, vertical: false)
+                            VStack(spacing: 4) { secondaryActions(item) }
+                        }
+                    }
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            actionPrimary
+                            secondaryActions(item)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        VStack(spacing: 4) {
+                            actionPrimary
+                            secondaryActions(item)
+                        }
+                    }
+                    .padding(.horizontal, 16)
                 }
-                if model.canUseDisplayActions, model.canControlMac {
-                    // Explicit only: selecting a display never moves the Mac cursor.
-                    Button("Move Cursor Here") { model.moveCursor(to: item) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("displayOverviewMoveCursor")
-                }
+            } else {
+                Text("A MeowDisplay screen can’t be shown in a pane.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .accessibilityIdentifier("displayOverviewUnavailable")
             }
+        }
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.vertical, 4)
+    }
+
+    private var actionPrimary: some View {
+        Button(action: showSelected) {
+            Text(showTitle)
+                .multilineTextAlignment(.center)
+                .frame(minHeight: 44)
+        }
+        .buttonStyle(.borderedProminent).tint(meowAccent)
+        .accessibilityHint(model.replacingTile == nil ? Text("Opens the selected display.") : Text("Replaces the display in this pane."))
+        .accessibilityIdentifier("displayOverviewShowInPane")
+    }
+
+    @ViewBuilder private func secondaryActions(_ item: CatalogDisplayItem) -> some View {
+        if canAddPane(item) {
+            Button { dismiss(); onAddAsNewPane(item) } label: {
+                Text("New Pane").frame(minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Add as New Pane")
+            .accessibilityIdentifier("displayOverviewAddPane")
+        }
+        if model.canUseDisplayActions, model.canControlMac {
+            Button { model.moveCursor(to: item) } label: {
+                Text("Move Cursor").frame(minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Move Cursor Here")
+            .accessibilityIdentifier("displayOverviewMoveCursor")
         }
     }
 

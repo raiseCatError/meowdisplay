@@ -683,6 +683,8 @@ final class AdaptiveLayoutTests: XCTestCase {
         let show = app.buttons["displayOverviewShowInPane"]
         XCTAssertTrue(fitAll.waitForExistence(timeout: 5))
         XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(show.frame.height, 44, "the primary action has a comfortable tap target")
+        XCTAssertLessThan(show.frame.width, window.width / 2, "the primary action stays compact")
         for name in Self.leadingChrome + Self.trailingChrome where app.buttons[name].exists {
             XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(app.buttons[name].frame),
                           "\(name) \(app.buttons[name].frame) is inside the window \(window)")
