@@ -6553,10 +6553,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
              WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor,
-             DisplayActionsWire.overviewCursorWatch:
+             DisplayActionsWire.overviewCursorWatch,
+             WireMessage.windowAction where obj["action"] as? String == "activate" && obj["ifOffscreen"] as? Bool == true:
             // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
-            // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
-            // Launching still needs control (checked by the service).
+            // Peek can restore a listed window without changing the display mode.
+            // Launching and restoring still need control (checked by the service).
             guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
             // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
             let phase = captureStateSnapshot().phase

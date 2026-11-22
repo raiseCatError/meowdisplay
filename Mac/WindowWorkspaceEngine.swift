@@ -1805,13 +1805,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         case "activate":
             guard stillAllowed(), let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            if obj["ifOffscreen"] as? Bool == true {
-                guard entry.availability == .offscreen else { return }
-                DispatchQueue.main.async {
-                    Self.restoreOffscreen(entry, stillAllowed: stillAllowed)
-                }
-                refreshSoon()
-            } else if entry.availability == .offscreen {
+            if entry.availability == .offscreen {
                 // Show on Mac for a minimized or hidden window: bring it back first, then forward.
                 let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                 DispatchQueue.main.async {
@@ -2384,7 +2378,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     /// Resolve the original window again after the consent round trip, before touching AX.
-    private static func restoreOffscreen(_ target: WindowCatalogEntry, stillAllowed: () -> Bool) {
+    static func restoreOffscreen(_ target: WindowCatalogEntry, stillAllowed: () -> Bool) {
         guard stillAllowed(), AXIsProcessTrusted(),
               let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], target.windowID) as? [[String: Any]])?
                 .first(where: { ($0[kCGWindowNumber as String] as? UInt32) == target.windowID }),

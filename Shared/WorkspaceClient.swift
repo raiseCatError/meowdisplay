@@ -965,9 +965,12 @@ final class WorkspaceModel: ObservableObject {
             // A float picked up before its still arrived is lifted now.
             if floatGesture == tile, liftWanted.contains(tile) { liftFloat(tile) }
         case .mode(let window):
+            if window != windowMode {
+                cancelWindowShow(message: String(localized: "The display mode changed."), withdraw: true)
+            }
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
-            if !window { remote = nil; cancelWindowShow(message: String(localized: "Window mode ended."), withdraw: true) }
+            if !window { remote = nil }
             if window { awaitingCatalogToSend = true; requestCatalog() }
             // Open Fullscreen's Window view started; or Window view ended another way (Settings,
             // the Mac, a refused switch): its pane is gone and Exit must never ask for an old mode.
@@ -1721,7 +1724,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func windowShowTargetIsValid(_ target: PendingWindowShow) -> Bool {
-        guard available, windowMode, inputAllowed(), !macLocked, !missionControlOpen,
+        guard available, windowMode || supportsOffscreenRestore, inputAllowed(), !macLocked, !missionControlOpen,
               host == target.host, let catalog, !catalog.unavailable,
               target.window.minimized, target.window.generation != 0,
               catalog.windows.contains(where: {
