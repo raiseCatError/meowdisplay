@@ -6632,7 +6632,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Log.info("workspace: \(type) before Window mode started — ignored")
                 return
             }
-            engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed()) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case WireMessage.displayModeRequest
             where (obj["mode"] as? String) == WindowWorkspaceWire.mode:
             guard let info = lastHello, info.supportsWindowWorkspace, WindowStreamingPolicy.isAllowed(),
@@ -8050,7 +8054,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// `welcome.features`: what this Mac offers beyond its `pv`. A receiver
-    /// reads at most 16 entries, so keep the list short. Window-mode features,
+    /// reads at most 17 entries; older receivers read the first 16. Window-mode features,
     /// Fill/Restore on Mac (`windowFrame`) among them, only while Window mode is allowed.
     static func welcomeFeatures(windowStreamingAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
@@ -8071,6 +8075,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         features.append(ExactKeyModifiersWire.welcomeFeature)
         features.append(MacLockWire.welcomeFeature)
         features.append(LockScreenWire.welcomeFeature)
+        if windowStreamingAllowed { features.append(WindowWorkspaceWire.restoreOffscreenFeature) }
         return features
     }
 

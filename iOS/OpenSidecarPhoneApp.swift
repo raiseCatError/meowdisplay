@@ -468,16 +468,19 @@ struct ReceiverScreen: View {
         }
     }
 
-    private func requestInputFromPrompt() {
+    @discardableResult
+    private func requestInputFromPrompt() -> Bool {
         withAnimation(.easeOut(duration: 0.2)) {
             performPromptEffects(inputPrompt.requestTapped(now: uptime))
         }
     }
 
-    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) {
-        guard effects.contains(.sendRequest) else { return }
+    @discardableResult
+    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) -> Bool {
+        guard effects.contains(.sendRequest) else { return false }
         controlStore.noteInputTurnedOffByUser(false)
         model.receiver.requestAllowInput(true)
+        return true
     }
 
     @ViewBuilder
@@ -774,7 +777,7 @@ struct ReceiverScreen: View {
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76),
                             size: CGSize(width: 260, height: 44), container: geo.size,
                             regions: reservedRegions)
-                        InputPromptButton(kind: kind) { requestInputFromPrompt() }
+                        InputPromptButton(kind: kind) { _ = requestInputFromPrompt() }
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                             // Stage Peek has its own Request Control; this one drew under its
@@ -827,7 +830,7 @@ struct ReceiverScreen: View {
                                 else { return }
                                 model.receiver.requestMirrorDisplaySelection(entry.uuid)
                             })
-                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
                     }
                     if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
                        !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown, !model.workspace.launchpadOpen {
@@ -875,6 +878,7 @@ struct ReceiverScreen: View {
         }
         .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
         .statusBarHidden(fullScreenSurface)
+        .overlay(alignment: .bottom) { WorkspaceWindowShowStatus(model: model.workspace) }
         .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
         .overlay {
             if route == .sessionHome {
@@ -990,7 +994,7 @@ struct ReceiverScreen: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
-        .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { _ = requestInputFromPrompt() }))
         .modifier(WorkspaceDragGuard(model: model.workspace))
         // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
         .overlay {
@@ -1205,7 +1209,8 @@ struct ReceiverScreen: View {
             inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput)
             // Actions the Mac carries out (Stage Manager, Lock Mac) follow its confirmed decision.
             model.workspace.controlState = { [weak controlStore] in controlStore?.sessionInputState ?? .off }
-            model.workspace.requestControl = { requestInputFromPrompt() }
+            model.workspace.requestControl = { _ = requestInputFromPrompt() }
+            model.workspace.requestControlForWindowShow = { requestInputFromPrompt() }
         }
         .onChange(of: model.receiver.session.allowsLiveInput) { live in
             withAnimation { inputPrompt.setSessionLive(live) }
@@ -1294,8 +1299,9 @@ struct ReceiverScreen: View {
             // always wins over whatever this receiver had stored, so there
             // is exactly one source of truth once connected. See
             // `ReceiverControlStore.applySessionInputState`.
-            model.receiver.onAllowInputStateChange = { state in
+            model.receiver.onAllowInputStateChange = { [weak workspace = model.workspace] state in
                 controlStore.applySessionInputState(state)
+                workspace?.windowShowControlChanged(state)
             }
             // Control is the Mac's decision for one session: never restored from a previous
             // launch (the stored preference said Allowed while the Mac would drop the input).

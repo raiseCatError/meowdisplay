@@ -640,10 +640,9 @@ struct WorkspaceChromeView: View {
                         }
                     }
                     if let s = model.tileState(id)?.status, s == .offscreen || (s == .paused && model.tileState(id)?.inStageStrip != true),
-                       inputAllowed, !model.missionControlOpen {
-                        // Explicit only: un-minimizes or unhides the window on the Mac and brings it forward.
+                       let action = model.showOnMacTitle(id) {
                         Button { model.showOnMac(id) } label: {
-                            Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                            Label(action, systemImage: "macwindow").font(.callout.weight(.semibold))
                                 .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
                                 .background(workspaceChip, in: Capsule())
                         }
@@ -653,7 +652,8 @@ struct WorkspaceChromeView: View {
                     #if os(iOS)
                     // Showing it on the Mac (or reopening a closed window) needs control: ask in place.
                     if !inputAllowed, let s = model.tileState(id)?.status,
-                       s == .closed || (!model.missionControlOpen && (s == .paused || s == .offscreen)) {
+                       s == .closed || (!model.missionControlOpen && (s == .paused || s == .offscreen)
+                           && model.minimizedPaneWindow(id) == nil) {
                         RequestControlInline()
                     }
                     #endif
@@ -976,6 +976,16 @@ struct WorkspaceChromeView: View {
             }
             if isWindow, model.menus.available, inputAllowed {
                 menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
+            }
+            if let window = model.minimizedPaneWindow(m.tile, tab: m.tab),
+               let action = model.minimizedWindowAction(window) {
+                menuRow(LocalizedStringKey(action.title), "macwindow") {
+                    if let tab = m.tab {
+                        model.showMinimizedTab(window, pane: m.tile, index: tab)
+                    } else {
+                        model.showMinimizedWindow(window, pane: m.tile)
+                    }
+                }
             }
             if isWindow {
                 Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
@@ -1437,11 +1447,17 @@ struct WindowOverviewView: View {
                     if !windows.isEmpty, !results.apps.isEmpty { sectionHeader("Open Windows") }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(windows) { w in
-                            OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
-                                         current: model.layout.tiles.values.contains { $0.source?.windowID == w.id },
-                                         onPick: { model.choose(w, asNewTile: false) },
-                                         onAdd: model.replacingTile == nil && (1..<max(model.capacity, 1)).contains(model.layout.tiles.count)
-                                             ? { model.choose(w, asNewTile: true) } : nil)
+                            VStack(spacing: 6) {
+                                OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
+                                             current: model.layout.tiles.values.contains { $0.source?.windowID == w.id },
+                                             onPick: { model.choose(w, asNewTile: false) },
+                                             onAdd: model.replacingTile == nil && (1..<max(model.capacity, 1)).contains(model.layout.tiles.count)
+                                                 ? { model.choose(w, asNewTile: true) } : nil)
+                                if let action = model.minimizedWindowAction(w) {
+                                    Button(action.title) { model.showMinimizedWindow(w) }
+                                        .buttonStyle(.bordered)
+                                }
+                            }
                         }
                     }
                     appSection(results, searching: searching)
@@ -2394,6 +2410,29 @@ struct WorkspacePlacementRing: View {
 
 /// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
 /// Shown at the bottom of the pane or float the item was chosen on.
+struct WorkspaceWindowShowStatus: View {
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        if model.windowShowPending || model.windowShowNotice != nil {
+            HStack(spacing: 12) {
+                if model.windowShowPending {
+                    Text("Waiting for approval on the Mac…")
+                    Button("Cancel") { model.cancelWindowShow() }
+                } else if let notice = model.windowShowNotice {
+                    Text(notice)
+                    Button("Dismiss") { model.dismissWindowShowNotice() }
+                }
+            }
+            .font(.callout)
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding()
+            .accessibilityIdentifier("windowShowStatus")
+        }
+    }
+}
+
 struct WorkspaceWindowFrameStatus: View {
     @ObservedObject var model: WorkspaceModel
     let id: String

@@ -854,7 +854,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Messages from the receiver (admitted session only; MacSender gates)
 
-    func handle(type: String, message obj: [String: Any], inputGranted: Bool) {
+    func handle(type: String, message obj: [String: Any], inputGranted: Bool,
+                stillAllowed: @escaping @Sendable () -> Bool = { true }) {
         queue.async { [self] in
             // Paused, Video Off or no admitted receiver: no titles, stills or changes.
             guard running, !stopped else { return }
@@ -880,7 +881,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     Log.info("workspace: window action \(obj["action"] as? String ?? "?") ignored: this session has no control")
                     return
                 }
-                performWindowAction(obj)
+                performWindowAction(obj, stillAllowed: stillAllowed)
             case WireMessage.menuRequest:
                 // A pane's app menus: a control feature (reading them alone is of no use, and
                 // Open Recent lists file names), so only with this session's input grant.
@@ -1764,7 +1765,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Window actions (need this session's input grant)
 
-    private func performWindowAction(_ obj: [String: Any]) {
+    private func performWindowAction(_ obj: [String: Any], stillAllowed: @escaping @Sendable () -> Bool) {
         guard let action = obj["action"] as? String else { return }
         switch action {
         case "stageManager":
@@ -1802,12 +1803,19 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 }
             }
         case "activate":
-            guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
+            guard stillAllowed(), let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            if entry.availability == .offscreen {
+            if obj["ifOffscreen"] as? Bool == true {
+                guard entry.availability == .offscreen else { return }
+                DispatchQueue.main.async {
+                    Self.restoreOffscreen(entry, stillAllowed: stillAllowed)
+                }
+                refreshSoon()
+            } else if entry.availability == .offscreen {
                 // Show on Mac for a minimized or hidden window: bring it back first, then forward.
                 let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                 DispatchQueue.main.async {
+                    guard stillAllowed() else { return }
                     Self.restoreQuietly(pid: pid, frame: frame, title: title)
                     Self.raise(pid: pid, frame: frame)
                 }
@@ -2373,6 +2381,43 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         NSRunningApplication(processIdentifier: pid)?.activate()
         return window != nil
+    }
+
+    /// Resolve the original window again after the consent round trip, before touching AX.
+    private static func restoreOffscreen(_ target: WindowCatalogEntry, stillAllowed: () -> Bool) {
+        guard stillAllowed(), AXIsProcessTrusted(),
+              let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], target.windowID) as? [[String: Any]])?
+                .first(where: { ($0[kCGWindowNumber as String] as? UInt32) == target.windowID }),
+              (info[kCGWindowOwnerPID as String] as? Int32) == target.pid,
+              (info[kCGWindowIsOnscreen as String] as? Bool) != true,
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: bounds),
+              framesMatch(frame, target.frame) else { return }
+
+        let axApp = AXUIElementCreateApplication(target.pid)
+        AXUIElementSetMessagingTimeout(axApp, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return }
+        let matches = windows.filter { window in
+            guard let candidate = axFrame(window), framesMatch(candidate, frame) else { return false }
+            var title: CFTypeRef?
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title)
+            return target.title.isEmpty || (title as? String) == target.title
+        }
+        guard matches.count == 1, let window = matches.first,
+              let app = NSRunningApplication(processIdentifier: target.pid),
+              app.bundleIdentifier == target.bundleID else { return }
+        var minimized: CFTypeRef?
+        let canUnminimize = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success
+            && minimized as? Bool == true
+        guard (canUnminimize || app.isHidden), stillAllowed() else { return }
+        if canUnminimize,
+           AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success { return }
+        if app.isHidden { app.unhide() }
+        guard stillAllowed() else { return }
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        app.activate()
     }
 
     /// Only an unambiguous match: one AX window with this frame (and title).

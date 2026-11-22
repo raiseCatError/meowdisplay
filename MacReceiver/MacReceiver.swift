@@ -204,9 +204,16 @@ final class ReceiverController: ObservableObject {
         // View Only those buttons looked available and the Mac dropped what they sent.
         receiver.onAllowInputStateChange = { [weak self, weak windowWorkspace] state in
             self?.sessionInputState = state
+            windowWorkspace?.windowShowControlChanged(state)
             windowWorkspace?.objectWillChange.send()
         }
         windowWorkspace.controlState = { [weak self] in self?.sessionInputState ?? .off }
+        windowWorkspace.requestControl = { [weak receiver] in receiver?.requestAllowInput(true) }
+        windowWorkspace.requestControlForWindowShow = { [weak receiver] in
+            guard let receiver, receiver.session.allowsLiveInput else { return false }
+            receiver.requestAllowInput(true)
+            return true
+        }
         input?.localOverlayActive = { windowWorkspace.overviewOpen || windowWorkspace.arranging }
         input?.onOpenWindowOverview = { if windowWorkspace.available { windowWorkspace.openOverview() } }
         receiver.$connected
@@ -1127,6 +1134,7 @@ struct MacWorkspaceOverlay: View {
                                    onExtend: { receiver.requestDisplayMode(.extend) })
             }
             .modifier(WorkspaceLeaveExtendConfirmation(model: model))
+            .overlay(alignment: .bottom) { WorkspaceWindowShowStatus(model: model) }
         }
     }
 }

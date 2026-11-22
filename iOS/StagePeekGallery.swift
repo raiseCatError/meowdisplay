@@ -896,6 +896,18 @@ struct StagePeekGallery: View {
                 }
                 .offset(x: dx)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if dx == 0, let action = model.minimizedWindowAction(w) {
+                Button { model.showMinimizedWindow(w) } label: {
+                    Image(systemName: action == .show ? "macwindow" : "hand.raised")
+                        .font(.caption.weight(.semibold))
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel(Text(action.title))
+                .accessibilityIdentifier("stagePeekShowOnMac")
+            }
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: revealed)
         .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
         .onDisappear { visible.removeAll { $0 == w.id }; if revealed == w.id { revealed = nil } }

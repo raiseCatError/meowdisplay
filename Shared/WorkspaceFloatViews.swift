@@ -481,9 +481,9 @@ struct WorkspaceFloatLayer: View {
         VStack(spacing: 8) {
             Text("\(app.isEmpty ? "This window" : app) is minimized, hidden or in another Space on the Mac")
                 .font(.callout.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
-            if inputAllowed, !model.missionControlOpen {
+            if let action = model.showOnMacTitle(id) {
                 Button { model.showOnMac(id) } label: {
-                    Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                    Label(action, systemImage: "macwindow").font(.callout.weight(.semibold))
                         .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
                         .background(Color.white.opacity(0.18), in: Capsule())
                 }
@@ -797,8 +797,8 @@ struct WorkspaceFloatLayer: View {
         // The real window on the Mac: needs control, and says so.
         let off: UIMenuElement.Attributes = inputAllowed ? [] : [.disabled]
         var mac: [UIMenuElement] = []
-        if model.tileState(id)?.status == .offscreen {
-            mac.append(act(String(localized: "Show on Mac"), "macwindow", off) { model.showOnMac(id) })
+        if model.tileState(id)?.status == .offscreen, let title = model.showOnMacTitle(id) {
+            mac.append(act(title, "macwindow") { model.showOnMac(id) })
         }
         if model.offersWindowFrameOnMac(id) {
             // The real Mac window, not this float's view: only from these items, never a gesture.
