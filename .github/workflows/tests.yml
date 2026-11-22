@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - label: after
-            source: 5acf6ba8c9cbc231e13b0bd30c562adf7db50e5b
+            source: c1bf5ba66da6f8655f04a61a09247156e5a2e424
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -42,7 +42,7 @@ jobs:
           xcodebuild test-without-building -project MeowDisplay.xcodeproj -scheme OpenSidecariOS \
             -destination "id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/overview" \
             -resultBundlePath "$RUNNER_TEMP/Overview.xcresult" \
-            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests/testOverviewChromeKeepsOneLineWithoutAFold \
+            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests/testOverviewWithControlKeepsTwoPaneActions \
             -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180
       - name: Export simulator screenshot attachments
         if: always()
