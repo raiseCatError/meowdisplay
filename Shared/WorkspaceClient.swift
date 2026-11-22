@@ -1791,19 +1791,32 @@ final class WorkspaceModel: ObservableObject {
         choose(overviewWindow, asNewTile: false)
     }
 
-    /// Keep the current panes and their view settings. Select an existing Overview wherever
-    /// it's already saved, so opening it again neither moves it nor creates another copy.
-    func addOverviewTab(to id: String) {
-        guard windowMode, offersOverviewPane, let host, layout.tiles[id]?.source != nil else { return }
-        if let holder = saved.tile(holding: host, windowID: WorkspaceSource.overviewKey) {
-            if let index = layout.tiles[holder]?.tabs.firstIndex(where: \.isOverview) {
-                edit { $0.switchingTab(of: holder, to: index) }
-            }
-            if layout.tiles[holder] != nil { focus(holder, raise: false) }
-            return
+    /// The Displays section adds Overview to the focused nonempty Window pane.
+    var overviewTabTarget: String? {
+        guard windowMode, offersOverviewPane else { return nil }
+        let candidates = [requestedFocus, active, lastFocusedPane].compactMap { $0 } + layout.orderedTileIDs
+        return candidates.first { id in
+            guard let tile = layout.tiles[id], !layout.isFloat(id) else { return false }
+            return tile.windows.contains { !$0.isOverview }
         }
-        guard let source = source(for: overviewWindow) else { return }
-        edit { $0.addingTab(source, to: id) }
+    }
+
+    /// Reuse a saved Overview tab. If Overview was its own pane, turn it into a tab in the
+    /// requested pane and keep that pane's other sources and their settings.
+    func addOverviewTab(to id: String) {
+        guard windowMode, offersOverviewPane, let source = source(for: overviewWindow),
+              layout.tiles[id]?.windows.contains(where: { !$0.isOverview }) == true else { return }
+        if let holder = saved.tile(holding: source.host, windowID: source.windowID) {
+            guard let tile = layout.tiles[holder] else { return }
+            if let index = tile.tabs.firstIndex(where: \.isOverview) {
+                edit { $0.switchingTab(of: holder, to: index) }
+                focus(holder, raise: false)
+                return
+            }
+            edit { Self.detach(source, from: holder, in: $0).addingTab(source, to: id) }
+        } else {
+            edit { $0.addingTab(source, to: id) }
+        }
         focus(id, raise: false)
     }
 
