@@ -118,6 +118,35 @@ final class CursorTargetingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(events.posted.last).location, here)
     }
 
+    func testDesktopTrackpadDragCrossesDisplaysAndRevocationReleasesIt() throws {
+        let left = CGRect(x: 0, y: 0, width: 100, height: 80)
+        let right = CGRect(x: 100, y: -20, width: 200, height: 120)
+        let cursor = CGPoint(x: 95, y: 40)
+        let injector = makeInjector(cursor: cursor)
+        injector.desktopDisplayBounds = { point in
+            [left, right].first { $0.contains(point) }
+        }
+
+        injector.handlePointerDown(button: .left, clickCount: 1, desktopTrackpad: true)
+        injector.handlePointerMoveRelative(dx: 10, dy: 10, trackpadPoints: true, desktopTrackpad: true)
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseDragged])
+        XCTAssertEqual(events.posted.last?.location, CGPoint(x: 105, y: 50))
+
+        grant.set(false)
+        injector.cancelActiveInput()
+        injector.handlePointerMoveRelative(dx: 10, dy: 10, trackpadPoints: true, desktopTrackpad: true)
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseDragged, .leftMouseUp])
+    }
+
+    func testDesktopTrackpadDoesNotJumpIntoAGapInTheDisplayArrangement() {
+        let display = CGRect(x: -100, y: 0, width: 100, height: 100)
+        let cursor = CGPoint(x: -4, y: 20)
+        let bounds: (CGPoint) -> CGRect? = { display.contains($0) ? display : nil }
+        XCTAssertEqual(InputCoordinateMapper.desktopRelativePoint(from: cursor, dx: 20, dy: 10, displayAt: bounds),
+                       CGPoint(x: -1, y: 30))
+        XCTAssertNil(InputCoordinateMapper.desktopRelativePoint(from: cursor, dx: .infinity, dy: 0, displayAt: bounds))
+    }
+
     func testAPressWithTheCursorElsewhereNeverClicksAnotherDisplay() throws {
         try XCTSkipIf(display.isEmpty, "needs a display")
         let injector = makeInjector(cursor: elsewhere)

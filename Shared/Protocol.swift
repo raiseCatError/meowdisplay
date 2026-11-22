@@ -11,7 +11,9 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 22
+    static let version = 23
+    /// Apple Trackpad motion in Quartz points, with optional desktop-wide routing.
+    static let trackpadPointsWireVersion = 23
 
     /// The pairing protocol's own version, decoupled from `version` (the
     /// media/streaming wire protocol above). Pairing and media evolve on

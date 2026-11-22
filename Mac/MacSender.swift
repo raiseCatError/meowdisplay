@@ -3936,6 +3936,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    private func usesTrackpadPoints(_ message: [String: Any]) -> Bool {
+        (lastHello?.protocolVersion ?? 0) >= WireProtocol.trackpadPointsWireVersion
+            && (message["trackpadPoints"] as? Bool) == true
+    }
+
+    private func allowsDesktopTrackpad(_ message: [String: Any]) -> Bool {
+        guard usesTrackpadPoints(message), privacyGate.allowsInput else { return false }
+        return !videoEnabled || (mode != .window && (message["confined"] as? Bool) != true)
+    }
+
     /// Side-effect-free recheck immediately before a deferred Window or Overview action.
     /// These controls require the original connection's grant, an unlocked desktop and the
     /// Mac's Window streaming permission even if all three were present at request time.
@@ -6362,7 +6372,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "scroll":
             guard receiverInputIsAllowed() else { return }
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                inputInjector?.handleScroll(dx: dx, dy: dy)
+                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: allowsDesktopTrackpad(obj))
             }
         case "pointer":
             // M7: absolute/relative cursor movement decoupled from button
@@ -6383,11 +6393,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 case "moveRelative":
                     if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
+                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy,
+                                                                 trackpadPoints: usesTrackpadPoints(obj),
+                                                                 desktopTrackpad: allowsDesktopTrackpad(obj))
                     }
                 case "down":
                     if let button = PointerButton.parse(obj["button"]) {
-                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1,
+                                                         desktopTrackpad: allowsDesktopTrackpad(obj))
                     }
                 case "up":
                     if let button = PointerButton.parse(obj["button"]) {

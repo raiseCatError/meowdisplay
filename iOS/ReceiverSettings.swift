@@ -374,6 +374,11 @@ private struct DisplaySettingsPage: View {
                     SettingNote("When the Mac pointer is somewhere you can't see, such as another display, an arrow at the edge points to it.")
                 }
                 .settingsAnchor("cursorLocator")
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep Pointer on Receiver Display", isOn: preferenceBinding(controlStore, \.keepPointerOnReceiverDisplay))
+                    SettingNote("Applies to Trackpad while showing a single display. With video off, Trackpad can move across the Mac desktop.")
+                }
+                .settingsAnchor("keepPointerOnReceiverDisplay")
             }
             Section {
                 VStack(alignment: .leading, spacing: 4) {

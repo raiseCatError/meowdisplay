@@ -2384,6 +2384,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 | 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |
+| 23 | Trackpad `pointer` messages may carry `trackpadPoints: true` and `confined: true/false`. Relative motion then uses Quartz points. The sender honours confinement only with video on and a single display source, and applies its existing authorization to every event. Trackpad presses and scrolls follow the desktop cursor when confinement is off. Older peers retain the video-pixel path. |
 
 ---
 

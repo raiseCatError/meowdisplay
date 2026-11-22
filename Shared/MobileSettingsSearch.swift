@@ -124,6 +124,8 @@ enum MobileSettingsSearchIndex {
         .init("smartTouch", "Smart Touch", .input, keywords: ["scroll", "one finger", "title bar", "window"]),
         .init("smartTouchHaptics", String(localized: "Smart Touch Haptics"), .input, keywords: ["vibration"]),
         .init("trackpadSensitivity", String(localized: "Trackpad Sensitivity"), .input, keywords: ["speed", "pointer"]),
+        .init("keepPointerOnReceiverDisplay", String(localized: "Keep Pointer on Receiver Display"), .display,
+              keywords: ["trackpad", "cursor", "confine"]),
         .init("scrollDirection", String(localized: "Natural Vertical Scrolling"), .input, keywords: ["natural horizontal scrolling", "invert vertical scrolling", "invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
         .init("zoomWhileTyping", String(localized: "Zoom While Typing"), .input, keywords: ["keyboard"]),
         // Gestures
