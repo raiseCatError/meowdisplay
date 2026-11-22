@@ -461,14 +461,7 @@ struct StagePeekOverlay: View {
                 .frame(width: width)
             StagePeekDock(model: model, apps: barApps, selected: appFilter,
                           onApp: { a in if searching { query = ""; searchFocused = false }; tapApp(a) },
-                          onAddOverviewTab: {
-                             guard let pane = model.overviewTabTarget else { return }
-                             model.addOverviewTab(to: pane)
-                             haptics.play(.select, enabled: hapticsEnabled)
-                             animate { machine.cancelAll() }
-                             model.stagePeekOpen = false
-                         },
-                         onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
+                          onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
                           onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } },
                           wide: $dockWide, rows: $dockRows, width: barWidth, maxHeight: room - 52,
                           noMatch: searching && barApps.isEmpty ? String(localized: "No apps match “\(query)”.") : nil)
@@ -480,6 +473,14 @@ struct StagePeekOverlay: View {
         .onChange(of: machine.isVisible) { visible in if !visible { dockWide = false; dockRows = 1 } }
         .environment(\.colorScheme, .dark)
         .zIndex(30)
+    }
+
+    private func addOverviewTabFromDisplays() {
+        guard let pane = model.overviewTabTarget else { return }
+        model.addOverviewTab(to: pane)
+        haptics.play(.select, enabled: hapticsEnabled)
+        animate { machine.cancelAll() }
+        model.stagePeekOpen = false
     }
 
     /// Expanded Stage Peek: every window (and display) as a vertical gallery, as many columns as
@@ -500,6 +501,7 @@ struct StagePeekOverlay: View {
                              model.stagePeekOpen = false
                              model.choose(w, asNewTile: true)
                          },
+                         onAddOverviewTab: addOverviewTabFromDisplays,
                          onDragEnded: { dropped in
                              // Dropped on a pane: done. Dropped nowhere: the peek comes back as it was.
                              if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false }
