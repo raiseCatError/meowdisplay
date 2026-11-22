@@ -40,10 +40,10 @@ final class WorkspaceClientTests: XCTestCase {
         m.requestControlForWindowShow = { requests += 1; return true }
         m.apply(.connected(peerID: "mac-a"))
         m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
-        m.apply(.mode(window: true))
         m.apply(restoreCatalog())
         let window = try XCTUnwrap(m.catalog?.windows.first)
 
+        XCTAssertFalse(m.windowMode, "Stage Peek can restore directly from Mirror")
         XCTAssertEqual(m.minimizedWindowAction(window), .request)
         m.showMinimizedWindow(window)
         m.showMinimizedWindow(window)

@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 // Browsing for one receiver session, in EVERY display mode: Stage Peek, search
 // and Launchpad open over Mirror and Extend without switching to Window mode,
 // so the Mac must list windows, displays and apps (and send stills) there too.
-// Read-only, except `launch`, which needs the session's input grant. The Window
-// mode engine shares this service's identity ledger, so a window keeps one
+// Launch, close, and restore use the session's input grant. The Window mode
+// engine shares this service's identity ledger, so a window keeps one
 // `gen` across modes and a tile picked in Mirror is accepted in Window mode.
 
 /// What the thumbnail scheduler should do with one request, given the cache.
@@ -308,6 +308,8 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
             case WireMessage.windowClose:
                 closeWindow(obj, inputGranted: inputGranted)
+            case WireMessage.windowAction:
+                restoreListedWindow(obj, inputGranted: inputGranted, controlStillAllowed: controlStillAllowed)
             case DisplayActionsWire.identify:
                 identifyDisplays()
             case DisplayActionsWire.moveCursor:
@@ -445,6 +447,20 @@ final class WindowBrowserService: @unchecked Sendable {
         WindowCloser.close(pid: entry.pid, frame: entry.frame, title: entry.title) { result in
             Log.info("workspace: close window \(id): \(result.rawValue)")
             reply(result)
+        }
+    }
+
+    private func restoreListedWindow(_ obj: [String: Any], inputGranted: Bool,
+                                     controlStillAllowed: @escaping @Sendable () -> Bool) {
+        guard inputGranted, obj["action"] as? String == "activate", obj["ifOffscreen"] as? Bool == true,
+              let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
+              let gen = (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }),
+              let entry = snapshot?.windows.first(where: { $0.windowID == id && $0.generation == gen }),
+              entry.availability == .offscreen, knows(windowID: id, generation: gen) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.knows(windowID: id, generation: gen), CGPreflightScreenCaptureAccess() else { return }
+            WindowWorkspaceEngine.restoreOffscreen(entry, stillAllowed: controlStillAllowed)
+            self.refresh(sendCatalog: true)
         }
     }
 
