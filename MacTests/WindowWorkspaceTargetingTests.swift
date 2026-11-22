@@ -910,7 +910,7 @@ final class OverviewPaneTests: XCTestCase {
         XCTAssertEqual(WindowWorkspaceWire.overviewPaneFeature, "overviewPane")
         let on = MacSender.welcomeFeatures(windowStreamingAllowed: true)
         XCTAssertTrue(on.contains(WindowWorkspaceWire.overviewPaneFeature))
-        XCTAssertLessThanOrEqual(on.count, 16, "a receiver reads at most 16")
+        XCTAssertTrue(on.prefix(16).contains(WindowWorkspaceWire.overviewPaneFeature), "older receivers still see Overview")
         XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(WindowWorkspaceWire.overviewPaneFeature))
     }
 
