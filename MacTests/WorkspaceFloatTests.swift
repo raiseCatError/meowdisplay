@@ -899,6 +899,18 @@ final class WorkspaceFloatTests: XCTestCase {
                        "the main flag tells identical displays apart")
     }
 
+    func testMirrorSelectionUsesDisplayIdentityEvenForIdenticalMonitors() {
+        let left = CatalogDisplayItem(id: 2, name: "Studio Display", width: 2560, height: 1440, isMain: false, isVirtual: false)
+        let right = CatalogDisplayItem(id: 3, name: "Studio Display", width: 2560, height: 1440, isMain: false, isVirtual: false)
+        let entry = MirrorDisplayEntry(uuid: "right", name: "Studio Display", isMain: false,
+                                       logicalWidth: 2560, logicalHeight: 1440, pixelWidth: 5120, pixelHeight: 2880,
+                                       likelyVirtual: false, displayID: 3)
+        XCTAssertEqual(WorkspaceModel.mirroredDisplay(in: [left, right], choice: entry)?.id, right.id)
+        XCTAssertEqual(WorkspaceModel.mirrorEntry(for: right, catalog: [left, right], entries: [entry])?.uuid, "right")
+        XCTAssertNil(WorkspaceModel.mirrorEntry(for: left, catalog: [left, right], entries: [entry]))
+        XCTAssertNil(WorkspaceModel.mirroredDisplay(in: [left], choice: entry), "a disconnected display is not replaced by its twin")
+    }
+
     // MARK: The Mac never undoes Minimize on Mac
 
     /// The Mac brings a minimized window back only when it was chosen for a tile while minimized,

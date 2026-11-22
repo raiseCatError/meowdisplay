@@ -859,9 +859,11 @@ struct MirrorDisplayEntry: Equatable {
     let pixelWidth: Int
     let pixelHeight: Int
     let likelyVirtual: Bool
+    /// Live ID shared with the Window catalog. The UUID is still the persisted choice.
+    let displayID: UInt32?
 
     init(uuid: String, name: String, isMain: Bool, logicalWidth: Int, logicalHeight: Int,
-        pixelWidth: Int, pixelHeight: Int, likelyVirtual: Bool) {
+        pixelWidth: Int, pixelHeight: Int, likelyVirtual: Bool, displayID: UInt32? = nil) {
         self.uuid = uuid
         self.name = name
         self.isMain = isMain
@@ -870,6 +872,7 @@ struct MirrorDisplayEntry: Equatable {
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
         self.likelyVirtual = likelyVirtual
+        self.displayID = displayID
     }
 
     init?(entry: [String: Any]) {
@@ -883,6 +886,7 @@ struct MirrorDisplayEntry: Equatable {
         pixelWidth = entry["pixelWidth"] as? Int ?? 0
         pixelHeight = entry["pixelHeight"] as? Int ?? 0
         likelyVirtual = entry["likelyVirtual"] as? Bool ?? false
+        displayID = (entry["displayID"] as? Int).flatMap(UInt32.init(exactly:))
     }
 }
 
