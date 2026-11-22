@@ -109,7 +109,7 @@ enum MobileSettingsSearchIndex {
         .init("video", String(localized: "Video"), .display, keywords: ["picture", "stream off"]),
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),
         .init("surfaceGrid", String(localized: "Show Surface Grid"), .display, keywords: ["video off", "dots"]),
-        .init("cursorLocator", String(localized: "Show Off-screen Cursor Locator"), .display,
+        .init("cursorLocator", String(localized: "Show Off-Screen Cursor Indicator"), .display,
               keywords: ["pointer", "mouse", "arrow", "find cursor", "other display"]),
         .init("pictureInPicture", String(localized: "Picture in Picture"), .display, keywords: ["pip", "floating window"]),
         .init("streamingProfile", String(localized: "Streaming Profile"), .display, keywords: ["quality", "frame rate", "bitrate", "fps"]),

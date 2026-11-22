@@ -370,7 +370,7 @@ private struct DisplaySettingsPage: View {
                 Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
                     .settingsAnchor("surfaceGrid")
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show Off-screen Cursor Locator", isOn: preferenceBinding(controlStore, \.showCursorLocator))
+                    Toggle("Show Off-Screen Cursor Indicator", isOn: preferenceBinding(controlStore, \.showCursorLocator))
                     SettingNote("When the Mac pointer is somewhere you can't see, such as another display, an arrow at the edge points to it.")
                 }
                 .settingsAnchor("cursorLocator")

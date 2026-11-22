@@ -11,7 +11,7 @@ final class InputDefaultsTests: XCTestCase {
 
     func testNewInstallsAreClassicWithTrackpadOnPhonesAndDirectTouchOnIPad() {
         XCTAssertEqual(ReceiverControlPreferences().touchStyle, .classic)
-        XCTAssertEqual(ReceiverControlPreferences.schemaVersion, 23)
+        XCTAssertEqual(ReceiverControlPreferences.schemaVersion, 24)
         XCTAssertEqual(ReceiverControlPreferences.initial(isPad: false).inputMode, .trackpad)
         XCTAssertEqual(ReceiverControlPreferences.initial(isPad: true).inputMode, .direct)
     }
