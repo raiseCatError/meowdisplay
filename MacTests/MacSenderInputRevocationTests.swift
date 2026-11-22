@@ -1101,13 +1101,15 @@ final class MacSenderInputRevocationTests: XCTestCase {
         let generation = try await admit(sender)
         let requested = expectation(description: "control reached the existing consent route")
         let withdrawn = expectation(description: "the waiting request was withdrawn")
+        let senderBox = MacSenderSelfBox()
+        senderBox.install(sender)
         await MainActor.run {
-            sender.onAllowInputRequest = { _, revision in
+            senderBox.resolve()?.onAllowInputRequest = { _, revision in
                 requested.fulfill()
-                sender.onAllowInputCancelled = {
-                    sender.grantSessionInput(generation: generation, requestRevision: revision)
+                senderBox.resolve()?.onAllowInputCancelled = {
+                    senderBox.resolve()?.grantSessionInput(generation: generation, requestRevision: revision)
                     withdrawn.fulfill()
-                    sender.onAllowInputCancelled = nil
+                    senderBox.resolve()?.onAllowInputCancelled = nil
                 }
             }
         }
@@ -1117,7 +1119,7 @@ final class MacSenderInputRevocationTests: XCTestCase {
         await fulfillment(of: [withdrawn], timeout: 5)
         try await sender.settleForTesting()
         XCTAssertFalse(sender.hasInputGrantForTesting)
-        await MainActor.run { sender.onAllowInputRequest = nil }
+        await MainActor.run { senderBox.resolve()?.onAllowInputRequest = nil }
     }
 
     // MARK: - Reconnect never inherits a grant
