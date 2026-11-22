@@ -246,8 +246,13 @@ struct DisplayOverviewScreen: View {
         let isSelected = interaction.model.selected == display.id
         let drawn = drawnRect(for: rect)
         let traits: AccessibilityTraits = isSelected ? [.isButton, .isSelected] : [.isButton]
+        let detail = model.overviewDetail(for: display.id).map { still in
+            let region = still.request.region?.rect(in: display.frame) ?? display.frame
+            let view = interaction.camera.viewRect(world: region, viewport: interaction.viewport)
+            return (image: still.image, frame: view.offsetBy(dx: -drawn.minX, dy: -drawn.minY))
+        }
         return ZStack {
-            OverviewDisplayTile(thumbnail: model.overviewImage(for: display.id), fullSize: rect.size,
+            OverviewDisplayTile(thumbnail: model.displayThumbnails[display.id], detail: detail, fullSize: rect.size,
                                 origin: CGPoint(x: rect.minX - drawn.minX, y: rect.minY - drawn.minY),
                                 isMain: display.isMain, isSelected: isSelected)
                 .frame(width: drawn.width, height: drawn.height)
@@ -437,6 +442,7 @@ private struct OverviewActionButton: View {
 /// never builds a layer as large as the zoomed display.
 private struct OverviewDisplayTile: View {
     let thumbnail: CGImage?
+    let detail: (image: CGImage, frame: CGRect)?
     /// The whole tile's size, view points.
     let fullSize: CGSize
     /// The tile's top-left relative to this view's top-left (zero or negative when cut off).
@@ -456,11 +462,18 @@ private struct OverviewDisplayTile: View {
     }
 
     @ViewBuilder private var picture: some View {
-        if let thumbnail, thumbnail.width > 0, thumbnail.height > 0 {
-            let size = fillSize(for: thumbnail)
-            Image(decorative: thumbnail, scale: 1).resizable().interpolation(.medium)
-                .frame(width: size.width, height: size.height)
-                .position(x: origin.x + fullSize.width / 2, y: origin.y + fullSize.height / 2)
+        ZStack {
+            if let thumbnail, thumbnail.width > 0, thumbnail.height > 0 {
+                let size = fillSize(for: thumbnail)
+                Image(decorative: thumbnail, scale: 1).resizable().interpolation(.medium)
+                    .frame(width: size.width, height: size.height)
+                    .position(x: origin.x + fullSize.width / 2, y: origin.y + fullSize.height / 2)
+            }
+            if let detail {
+                Image(decorative: detail.image, scale: 1).resizable().interpolation(.high)
+                    .frame(width: detail.frame.width, height: detail.frame.height)
+                    .position(x: detail.frame.midX, y: detail.frame.midY)
+            }
         }
     }
 

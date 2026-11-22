@@ -665,16 +665,22 @@ final class WindowBrowserService: @unchecked Sendable {
                 // No display still while the Mac asks for its password: it could show the prompt.
                 guard !PrivacyShieldWindows.isUnlocking else { continue }
                 let cfg = SCStreamConfiguration()
-                let detailSide = detail?.id == d.displayID ? detail?.maxSide : nil
-                let aspect = Double(max(d.height, 1)) / Double(max(d.width, 1))
-                if let detailSide {
-                    let nativeSide = max(CGDisplayPixelsWide(d.displayID), CGDisplayPixelsHigh(d.displayID))
-                    let side = Double(nativeSide > 0 ? min(nativeSide, detailSide) : detailSide)
+                let requestedDetail = detail?.id == d.displayID ? detail : nil
+                let display = CGRect(x: 0, y: 0, width: max(d.width, 1), height: max(d.height, 1))
+                if let requestedDetail {
+                    let crop = requestedDetail.region?.rect(in: display) ?? display
+                    if requestedDetail.region != nil { cfg.sourceRect = crop }
+                    let aspect = crop.height / crop.width
+                    let nativeWidth = CGFloat(CGDisplayPixelsWide(d.displayID)) * crop.width / display.width
+                    let nativeHeight = CGFloat(CGDisplayPixelsHigh(d.displayID)) * crop.height / display.height
+                    let nativeSide = max(nativeWidth, nativeHeight)
+                    let requestedSide = CGFloat(requestedDetail.maxSide)
+                    let side = nativeSide > 0 ? min(nativeSide, requestedSide) : requestedSide
                     cfg.width = max(Int(side / max(1, aspect)) & ~1, 2)
                     cfg.height = max(Int(side * min(1, aspect)) & ~1, 2)
                 } else {
                     cfg.width = width
-                    cfg.height = max(Int(Double(width) * aspect) & ~1, 2)
+                    cfg.height = max(Int(CGFloat(width) * display.height / display.width) & ~1, 2)
                 }
                 cfg.showsCursor = false
                 // MeowDisplay's own windows (prompts, privacy cover) never appear in a still.
@@ -682,13 +688,16 @@ final class WindowBrowserService: @unchecked Sendable {
                     .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
                 let filter = SCContentFilter(display: d, excludingApplications: own, exceptingWindows: [])
                 guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) else { continue }
-                let jpeg = detailSide == nil ? Self.jpeg(image, quality: 0.6) : Self.detailJPEG(image)
+                let jpeg = requestedDetail == nil ? Self.jpeg(image, quality: 0.6) : Self.detailJPEG(image)
                 guard let jpeg else { continue }
                 self.queue.async { [weak self] in
                     guard let self, self.active, !PrivacyShieldWindows.isUnlocking else { return }
                     var message: [String: Any] = ["type": WireMessage.displayThumbnail, "id": Int(d.displayID),
                                                   "jpeg": jpeg.base64EncodedString()]
-                    if let detailSide { message["detail"] = detailSide }
+                    if let requestedDetail {
+                        message["detail"] = requestedDetail.maxSide
+                        if let region = requestedDetail.region { message["detailRegion"] = region.edges }
+                    }
                     self.sendMessage?(message)
                 }
             }

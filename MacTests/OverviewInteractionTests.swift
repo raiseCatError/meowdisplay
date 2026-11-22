@@ -66,8 +66,17 @@ final class OverviewInteractionTests: XCTestCase {
         var interaction = makeInteraction()
         XCTAssertNil(interaction.detailRequest)
         let focal = viewPoint(interaction, world: CGPoint(x: 960, y: 540))
-        interaction.pinch(factor: 4, focal: focal)
-        XCTAssertEqual(interaction.detailRequest, OverviewDisplayDetailRequest(id: 1, maxSide: 1600))
+        interaction.pinch(factor: 8, focal: focal)
+        XCTAssertEqual(interaction.detailRequest?.id, 1)
+        let region = try? XCTUnwrap(interaction.detailRequest?.region)
+        XCTAssertNotNil(region, "deep zoom captures only the area in view")
+        let frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        if let region {
+            let crop = region.rect(in: frame)
+            XCTAssertTrue(frame.contains(crop))
+            XCTAssertTrue(crop.contains(CGPoint(x: 960, y: 540)))
+            XCTAssertLessThan(crop.width, frame.width)
+        }
         interaction.pan(byView: CGVector(dx: 80_000, dy: 80_000))
         XCTAssertNil(interaction.detailRequest)
         interaction.fitAll()
@@ -78,6 +87,11 @@ final class OverviewInteractionTests: XCTestCase {
         let request = OverviewDisplayDetailRequest(id: 7, maxSide: 1600)
         XCTAssertEqual(OverviewDisplayDetailRequest.parse(request.wire), request)
         XCTAssertNil(OverviewDisplayDetailRequest.parse(["id": 7, "maxSide": 32_000]))
+        XCTAssertNil(OverviewDisplayDetailRequest.parse(["id": 7, "maxSide": 1600, "region": [-1, 0, 20, 20]]))
+        XCTAssertNil(OverviewDisplayDetailRequest.parse(["id": 7, "maxSide": 1600, "region": [20, 0, 20, 20]]))
+        let region = OverviewDisplayDetailRequest.Region([2, 4, 32, 48])
+        XCTAssertEqual(OverviewDisplayDetailRequest.parse(["id": 7, "maxSide": 1600, "region": [2, 4, 32, 48]]),
+                       OverviewDisplayDetailRequest(id: 7, maxSide: 1600, region: region))
         let overBudget = String(repeating: "A", count: OverviewDisplayDetailRequest.maxBase64 + 4)
         XCTAssertNil(WorkspaceEvent.parse(type: WireMessage.displayThumbnail,
                                           ["id": 7, "detail": 1600, "jpeg": overBudget]))
