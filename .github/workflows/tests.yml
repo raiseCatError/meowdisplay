@@ -1,504 +1,60 @@
-name: Tests
+name: Overview screenshot verification
 
-# Nothing checked pull requests before this, so a branch that did not compile
-# (or a test target that could not build) only surfaced on someone's laptop.
-# Required checks (.github/rulesets): `mac`, `conventional` (pr-title.yml)
-# and `release-tooling`; `android` once the Android app is on the branch.
-on:
-  pull_request:
-  push:
-    branches: [main, dev, 'release/**']
-  # The complete suite, iPhone Duo UI tests included, on any branch, on request.
-  workflow_dispatch:
+on: workflow_dispatch
 
 permissions:
   contents: read
 
-# A superseded pull request or branch run tells us nothing, so it is cancelled.
-# Pushes to dev are the integration gate: a run in progress always finishes (so
-# a steady stream of merges can't keep cancelling it), and of the pushes that
-# arrive meanwhile only the newest waits, so a burst of merges is tested once,
-# as the combined result. Nothing is lost by skipping the pushes in between:
-# each job of a dev run is judged against its own anchor, the newest dev commit
-# on which it last passed, so it covers every change since then (see changes).
-concurrency:
-  group: tests-${{ github.ref }}
-  cancel-in-progress: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev') }}
-
 jobs:
-  # Decide which jobs this change needs from the files it changes, against
-  # the synthetic merge commit's first parent (the PR's base). Keep the test
-  # jobs present, since the dev/main/release rulesets require their exact
-  # check names; a skipped job reports success for branch protection.
-  # A push to dev is classified per job: each job against its anchor, the
-  # newest ancestor commit on which that job passed in an earlier dev run
-  # (scripts/ci/dev_anchors.py lists them from the Actions API). A job with no
-  # anchor runs, and so does every job when the anchors can't be read. Every
-  # other push (main, release/**) and every PR into main or release/* runs
-  # full CI.
-  #
-  # Each job runs only for the areas that can change its result: Mac sources
-  # and tests → mac; iOS → mac (its tests read iOS sources), the iOS build and
-  # ios-duo; iOS UI tests → ios-duo; Android → android; Shared/ (protocol,
-  # pairing, encryption) → every app job; fixtures/ → mac and android;
-  # project.yml and .xcode-version → every Apple job; release tooling →
-  # release-tooling, which (cheap, and it checks these rules) also runs for
-  # everything but documentation and media; documentation and press-kit media
-  # → nothing heavy. Everything else runs full CI: unknown paths, tests.yml
-  # and scripts/ci/.
-  # The rules, and tests that check them against project.yml, the Gradle build
-  # and the macOS tests' file reads, are scripts/ci/classify_pr_paths.py and
-  # test_classify_pr_paths.py; the base branch's copy decides, so a PR can't
-  # reclassify itself. Fail closed: a job is skipped only when the classifier
-  # said `false` for it, and every job runs whenever this job didn't succeed,
-  # so a broken classifier never turns into skipped (= passing) checks.
-  changes:
-    runs-on: ubuntu-latest
-    # actions: read lists the earlier dev runs whose jobs are the anchors.
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      mac: ${{ steps.classify.outputs.mac }}
-      ios_build: ${{ steps.classify.outputs.ios_build }}
-      ios_ui: ${{ steps.classify.outputs.ios_ui }}
-      android: ${{ steps.classify.outputs.android }}
-      release_tooling: ${{ steps.classify.outputs.release_tooling }}
-      press_kit: ${{ steps.classify.outputs.press_kit }}
-      ios_ui_tests: ${{ steps.classify.outputs.ios_ui_tests }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-          # A dev push needs the history to tell which anchors are its ancestors.
-          fetch-depth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/dev') && '0' || '2' }}
-      - name: Select the jobs this change needs
-        id: classify
-        shell: bash
-        env:
-          PUSH_BEFORE: ${{ github.event.before }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          full_ci() {
-            {
-              for job in mac ios_build ios_ui android release_tooling press_kit; do echo "$job=true"; done
-              echo "reason=$1"
-            } >> "$GITHUB_OUTPUT"
-            echo "Full CI: $1"
-          }
-          # If the PR merge ref/parent isn't available, run all tests.
-          if ! git rev-parse 'HEAD^1' >/dev/null 2>&1; then
-            full_ci "no base commit"
-            exit 0
-          fi
-          # Only pull requests and pushes to dev are ever classified; the
-          # classifier then checks the details (single commit, PR base).
-          if [[ "$GITHUB_EVENT_NAME" != "pull_request" && ! ( "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/dev" ) ]]; then
-            full_ci "not a pull request or a push to dev"
-            exit 0
-          fi
-          # The base branch's classifier (dev's before the push), never the change's own copy.
-          classifier="$RUNNER_TEMP/classify_pr_paths.py"
-          if ! git show 'HEAD^1:scripts/ci/classify_pr_paths.py' > "$classifier" 2>/dev/null; then
-            full_ci "the base branch has no classifier"
-            exit 0
-          fi
-          if ! grep -q -- '--github' "$classifier"; then
-            full_ci "the base branch's classifier predates per-job selection"
-            exit 0
-          fi
-          # Its UI test selection, beside it (a classifier that needs it fails without it).
-          git show 'HEAD^1:scripts/ci/ui_selection.py' > "$RUNNER_TEMP/ui_selection.py" 2>/dev/null || true
-          # It writes its selection only once it has one; any failure is full CI.
-          selection="$RUNNER_TEMP/selection"
-          args=(--github "$selection")
-          # A push to dev: earlier dev runs may have been cancelled, so the
-          # previous commit is no baseline. Judge each job against its anchor,
-          # with dev's own copies of both scripts; without them, full CI.
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            anchors_script="$RUNNER_TEMP/dev_anchors.py"
-            if ! grep -q -- '--anchors' "$classifier" \
-                || ! git show 'HEAD^1:scripts/ci/dev_anchors.py' > "$anchors_script" 2>/dev/null; then
-              full_ci "the base branch's classifier predates batched dev pushes"
-              exit 0
-            fi
-            if ! python3 -I "$anchors_script" "$RUNNER_TEMP/anchors.json"; then
-              echo "::warning::the earlier dev runs could not be read: running full CI"
-              full_ci "the anchors could not be read"
-              exit 0
-            fi
-            args+=(--anchors "$RUNNER_TEMP/anchors.json")
-          fi
-          if python3 -I "$classifier" "${args[@]}"; then
-            cat "$selection" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::the base branch's classifier failed: running full CI"
-            full_ci "the classifier failed"
-          fi
-
-  # Fast and first: the release and repository workflows stay fail-closed,
-  # and the release library behaves (scripts/release/test).
-  release-tooling:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.release_tooling != 'false') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1
-        with:
-          ruby-version: '3.3'
-      - name: Workflows stay fail-closed
-        run: ruby scripts/release/check-release-workflows.rb
-      - name: Release library, CLI, state branch and reference sync
-        run: ruby -Iscripts/release/lib -e 'Dir["scripts/release/test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
-      - name: Pull request classifier
-        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
-      - name: Shell scripts
-        run: |
-          set -euo pipefail
-          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 -n1 bash -n
-          git ls-files -z 'scripts/release/*.sh' 'scripts/reference/*.sh' 'scripts/ci/*.sh' | xargs -0 shellcheck -S warning
-
-  # Press-kit media and tooling: build.py verifies every file against the
-  # reviewed hashes in tools/press-kit/approved-assets.json and rebuilds the
-  # page, previews and ZIPs; README and preview images must decode. Not a
-  # required check; runs for press-kit changes, unclassified pushes and whenever classification failed.
-  press-kit:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.press_kit != 'false') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Install Pillow
-        run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet 'pillow==12.3.0'
-      - name: Build and verify the press kit
-        if: hashFiles('tools/press-kit/build.py') != ''
-        run: '"$RUNNER_TEMP/venv/bin/python" tools/press-kit/build.py'
-      - name: Images decode
-        run: |
-          set -euo pipefail
-          git ls-files -z assets/press-kit-preview.png 'assets/readme/*.png' 'assets/readme/*.jpg' 'assets/readme/*.jpeg' 'assets/readme/*.webp' 'assets/readme/*.gif' \
-            | xargs -0 -r "$RUNNER_TEMP/venv/bin/python" -c '
-          import sys
-          from PIL import Image
-          for path in sys.argv[1:]:
-              with Image.open(path) as image:
-                  image.load()
-          print(f"{len(sys.argv) - 1} images decode")'
-
-  # Runs on every branch; does real work only where the Android app exists.
-  android:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.android != 'false') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        if: hashFiles('AndroidReceiver/settings.gradle.kts') != ''
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-      - name: Tests, lint and an unsigned release bundle
-        if: hashFiles('AndroidReceiver/settings.gradle.kts') != ''
-        working-directory: AndroidReceiver
-        run: ./gradlew --no-daemon :core:test :app:testDebugUnitTest :app:lintRelease :app:bundleRelease
-      # The counts, so a review can see the suites really ran (Gradle prints none by itself).
-      - name: Test counts
-        if: always() && hashFiles('AndroidReceiver/settings.gradle.kts') != ''
-        working-directory: AndroidReceiver
-        run: |
-          ruby -rrexml/document -e '
-            totals = Hash.new { |h, k| h[k] = [0, 0, 0, 0] }
-            Dir["*/build/test-results/**/TEST-*.xml"].each do |f|
-              s = REXML::Document.new(File.read(f)).root
-              t = totals[f.split("/").first]
-              %w[tests failures errors skipped].each_with_index { |a, i| t[i] += s.attributes[a].to_i }
-            end
-            abort "no test results found" if totals.empty?
-            totals.each { |m, (n, f, e, s)| puts "#{m}: #{n} tests, #{f} failures, #{e} errors, #{s} skipped" }'
-
-  mac:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.mac != 'false') }}
+  overview-screenshots:
     runs-on: xcode-27
-    # A hung test must fail the job, not hold a runner for GitHub's six-hour default.
-    timeout-minutes: 60
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: before
+            source: 09a56c5137a48c8b620fb993fe269b38a24bd8ab
+          - label: after
+            source: aa1488133f63ebbd751852c3cdab81872e10c60c
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ matrix.source }}
           persist-credentials: false
-
-      - name: Select Xcode (.xcode-version)
+      - name: Select Xcode
         run: scripts/ci/select-xcode.sh
-      - name: Install XcodeGen
+      - name: Generate project
         run: |
           brew install xcodegen
-          xcodegen --version
-          xcodebuild -version
-
-      # Deliberately without DEVELOPMENT_TEAM: nothing built here is
-      # distributed, so an unsigned build is enough, and needing no secrets
-      # means this check also runs on pull requests from forks.
-      - name: Generate project
-        run: xcodegen generate
-
-      # Builds the Mac app as well as the test bundle, since the scheme covers
-      # both — so this is a compile check for the app on top of the tests.
-      # TLS, pinning and QUIC tests fail here instead of skipping when their setup (a
-      # temporary keychain, a loopback QUIC listener) can't run, so they can't pass by not
-      # running. xcodebuild hands TEST_RUNNER_* variables to the tests without the prefix.
-      - name: Run macOS tests
-        env:
-          TEST_RUNNER_MEOW_REQUIRE_SECURITY_TESTS: "1"
-        run: |
-          # Per-test time limits: a test that hangs fails by name instead of stalling the job.
-          xcodebuild test \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecarMac \
-            -destination 'platform=macOS' \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 120 \
-            -maximum-test-execution-time-allowance 600 \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-
-      # The receiver app has a much lower deployment target than the sender
-      # (issue #241); building it is what catches an API that only exists on
-      # newer macOS sneaking into Shared/ or the receiver.
-      - name: Build macOS receiver app
-        run: |
-          xcodebuild build \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecarMacReceiver \
-            -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-
-      # The iPhone/iPad receiver shares Shared/ with both Mac apps but was
-      # never compiled here, so an iOS-only break (or an API that exists only
-      # on macOS) could reach main unnoticed. A generic-device build needs no
-      # simulator runtime and no signing. Skipped (with the gate below) only
-      # when the classifier says nothing the iOS app compiles changed: Mac,
-      # MacReceiver and MacTests changes.
-      # build-for-testing: the receiver and its UI tests, so a pull request that
-      # breaks the UI tests' build fails here even when no UI test runs on it.
-      - name: Build iOS receiver app
-        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios_build != 'false' }}
-        run: |
-          xcodebuild build-for-testing \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecariOS \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/ios-receiver" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-
-      # `GeometryProxy.reservedRegions` (iPhone Duo fold/camera geometry)
-      # exists only in the iOS 27.1+ SDK, so the receiver compiles it in
-      # behind a compile-time gate. Prove which side of that gate this
-      # toolchain took: the built app must reference the symbol exactly when
-      # the SDK declares it — excluded on older SDKs, enabled on 27.1+.
-      - name: Check reserved-region SDK gate
-        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.ios_build != 'false' }}
-        run: |
-          xcodebuild -version
-          xcrun swiftc --version
-          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
-          app="$RUNNER_TEMP/ios-receiver/Build/Products/Debug-iphoneos/OpenSidecariOS.app"
-          interfaces=("$sdk"/System/Library/Frameworks/SwiftUICore.framework/Modules/SwiftUICore.swiftmodule/*.swiftinterface)
-          # A wrong path must fail here, never pass as "not referenced".
-          test -d "$app"
-          test -f "${interfaces[0]}"
-          if grep -q 'func reservedRegions(' "${interfaces[@]}"; then
-            declared=yes
-          else
-            declared=no
-          fi
-          if find "$app" -maxdepth 1 -type f \( -perm -u+x -o -name '*.dylib' \) -exec xcrun nm -u {} + 2>/dev/null \
-              | grep -q 'GeometryProxyV15reservedRegions'; then
-            referenced=yes
-          else
-            referenced=no
-          fi
-          echo "iOS SDK $(xcrun --sdk iphoneos --show-sdk-version): reservedRegions declared=$declared referenced=$referenced"
-          test "$declared" = "$referenced"
-
-  # iPhone Duo: the receiver's UI tests on the Duo simulator, so adaptive layouts (the
-  # window-sized Extend panel, size-class controls, safe areas) run on the form factor they
-  # were made for. Not a required check yet: the first runs establish it.
-  #
-  # The simulator boots before the build, so it has settled by the time the tests start. With
-  # the build first (#183), the tests began a few minutes after a fresh boot, while the Duo was
-  # still busy after `bootstatus`: about half of those runs then failed with "Timed out while
-  # evaluating UI query" or a test runner that crashed before starting. The build is slower with
-  # the Duo booted, but it stays a separate step so its time is visible.
-  ios-duo:
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.ios_ui != 'false') }}
-    runs-on: xcode-27
-    timeout-minutes: 60
-    outputs:
-      # The classes it ran: promotion-gate requires the complete suite.
-      classes: ${{ steps.select.outputs.classes }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      # Every class, except on a pull request into dev or a feature branch whose selection
-      # (ui_selection.py) names known classes: never narrower on the dev gate, on a pull
-      # request into or a push to main or release/*, on a manual run, or when the changes
-      # job failed.
-      - name: Choose the UI test classes
-        id: select
-        env:
-          CHANGES: ${{ needs.changes.result }}
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.base_ref }}
-          SELECTED: ${{ needs.changes.outputs.ios_ui_tests }}
-        run: |
-          set -euo pipefail
-          all_classes="DemoModeSmokeTests AdaptiveLayoutTests LocalCalculatorTourTests"
-          classes=$all_classes
-          if [[ "$CHANGES" == success && "$EVENT" == pull_request && "$BASE" != main && "$BASE" != release/* \
-                && -n "$SELECTED" ]]; then
-            known=true
-            for c in $SELECTED; do [[ " $all_classes " == *" $c "* ]] || known=false; done
-            if [[ "$known" == true ]]; then classes=$SELECTED; fi
-          fi
-          only=()
-          for c in $classes; do only+=("-only-testing:OpenSidecariOSUITests/$c"); done
-          echo "classes=$classes" >> "$GITHUB_OUTPUT"
-          echo "only=${only[*]}" >> "$GITHUB_OUTPUT"
-          echo "Duo UI test classes: $classes" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Select Xcode (.xcode-version)
-        run: scripts/ci/select-xcode.sh
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Generate project
-        run: xcodegen generate
-      - name: Create an iPhone Duo simulator
-        id: duo
-        # An assignment, so the step fails when the script does (never an error text as the UDID).
+          xcodegen generate
+      - name: Boot Duo simulator
+        id: simulator
         run: |
           udid=$(scripts/ci/duo-simulator.sh)
+          scripts/ci/duo-simulator.sh boot "$udid"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
-      - name: Boot the iPhone Duo simulator
-        run: scripts/ci/duo-simulator.sh boot "${{ steps.duo.outputs.udid }}"
-      - name: Build the receiver and its UI tests
+      - name: Build the simulator receiver
         run: |
-          xcodebuild build-for-testing \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecariOS \
-            -destination "id=${{ steps.duo.outputs.udid }}" \
-            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY=""
-      # No paired Mac is ever reachable here, so the live-Mac tests in DemoModeSmokeTests skip
-      # at once (MEOW_NO_LIVE_MAC) instead of first waiting out their connection timeouts.
-      - name: UI tests on iPhone Duo
-        env:
-          TEST_RUNNER_MEOW_NO_LIVE_MAC: "1"
-          CLASSES: ${{ steps.select.outputs.classes }}
-          ONLY: ${{ steps.select.outputs.only }}
+          xcodebuild build-for-testing -project MeowDisplay.xcodeproj -scheme OpenSidecariOS \
+            -destination "id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/overview" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+      - name: Test and capture the Overview
         run: |
-          set -uo pipefail
-          log="$RUNNER_TEMP/ui-tests.log"
-          # shellcheck disable=SC2086 # ONLY is one -only-testing argument per class
-          xcodebuild test-without-building \
-            -project MeowDisplay.xcodeproj \
-            -scheme OpenSidecariOS \
-            -destination "id=${{ steps.duo.outputs.udid }}" \
-            -derivedDataPath "$RUNNER_TEMP/ios-duo" \
-            $ONLY \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          # A class that ran nothing (renamed, removed, filtered out) fails, never passes.
-          for class in $CLASSES; do
-            if ! grep -q "Test Suite '$class' started" "$log" \
-                || ! grep -Eq "Test Case '-\[OpenSidecariOSUITests\.$class test[^]]*\]' passed" "$log"; then
-              echo "::error::$class ran no passing test"
-              status=1
-            fi
-          done
-          exit "$status"
-
-  # The integration gate's verdict, where people see it: a push to dev whose jobs failed
-  # opens (or adds to) one issue, and the first push on which they all pass again closes it.
-  # A failure can't be skipped past: the failed job's anchor stays where it last passed, so
-  # every later push to dev runs it again until it passes. Runs that were cancelled for a
-  # newer push say nothing either way.
-  integration-report:
-    needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      issues: write
-    steps:
-      - name: Open, update or close the dev integration issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RESULTS: ${{ toJSON(needs) }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          xcodebuild test-without-building -project MeowDisplay.xcodeproj -scheme OpenSidecariOS \
+            -destination "id=${{ steps.simulator.outputs.udid }}" -derivedDataPath "$RUNNER_TEMP/overview" \
+            -resultBundlePath "$RUNNER_TEMP/Overview.xcresult" \
+            -only-testing:OpenSidecariOSUITests/AdaptiveLayoutTests/testOverviewChromeKeepsOneLineWithoutAFold \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 180
+      - name: Export simulator screenshot attachments
+        if: always()
         run: |
-          set -euo pipefail
-          title="dev integration gate failing"
-          failed=$(jq -r 'to_entries | map(select(.value.result == "failure")) | map(.key) | join(", ")' <<< "$RESULTS")
-          cancelled=$(jq -r 'to_entries | map(select(.value.result == "cancelled")) | length' <<< "$RESULTS")
-          issue=$(gh issue list --state open --author 'app/github-actions' --search "\"$title\" in:title" \
-            --json number,title --jq "map(select(.title == \"$title\"))[0].number // empty")
-          if [[ -n "$failed" ]]; then
-            body="Tests failed on dev at $GITHUB_SHA: $failed. $RUN_URL"
-            if [[ -n "$issue" ]]; then
-              gh issue comment "$issue" --body "$body"
-            else
-              gh issue create --title "$title" --body "$body
-
-          Every later push to dev runs the failed jobs again (each job is judged against the commit it last passed on) until they pass; then this issue closes."
-            fi
-            echo "::error::dev integration gate failed: $failed"
-            exit 0
-          fi
-          if [[ "$cancelled" == 0 && -n "$issue" ]]; then
-            gh issue close "$issue" --comment "Every Tests job passed (or wasn't needed) on dev at $GITHUB_SHA. $RUN_URL"
-          fi
-
-  # The required check for main and release/* (.github/rulesets): every job above passed on
-  # this exact commit, ios-duo with the complete suite. It always runs, so it can't pass by
-  # being skipped the way a skipped required job does; a skipped, cancelled or failed job
-  # fails it. Anywhere else it passes and says so (scripts/ci/promotion_gate.py).
-  # release-publish.yml checks the same jobs again for the commit it publishes.
-  # Only a promotion reports the required check name. A dev push or a PR into dev runs on the
-  # same commit a dev -> main PR later has as its head, and GitHub matches required checks by
-  # name on that commit: a "not a promotion" pass there must never answer for main.
-  promotion-gate:
-    name: ${{ ((github.event_name == 'pull_request' && (github.base_ref == 'main' || startsWith(github.base_ref, 'release/'))) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')))) && 'promotion-gate' || 'promotion-gate (not a promotion)' }}
-    needs: [changes, release-tooling, press-kit, android, mac, ios-duo]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/Overview.xcresult" \
+            --output-path "$RUNNER_TEMP/overview-screenshots"
+          git rev-parse HEAD > "$RUNNER_TEMP/overview-screenshots/source.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
-          persist-credentials: false
-          sparse-checkout: scripts/ci
-      - name: Every job passed, the complete Duo UI suite included
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: python3 -I scripts/ci/promotion_gate.py job
+          name: overview-${{ matrix.label }}
+          path: ${{ runner.temp }}/overview-screenshots/
+          retention-days: 3
