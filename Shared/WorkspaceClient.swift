@@ -1714,7 +1714,7 @@ final class WorkspaceModel: ObservableObject {
         pendingWindowShow = target
         windowShowPending = true
         windowShowTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(60))
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
             guard !Task.isCancelled else { return }
             self?.cancelWindowShow(message: String(localized: "The request to show the window expired."), withdraw: true)
         }
