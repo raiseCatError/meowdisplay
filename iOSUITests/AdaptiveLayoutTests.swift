@@ -576,12 +576,13 @@ final class AdaptiveLayoutTests: XCTestCase {
     private static let leadingChrome = ["displayOverviewDone", "Previous Display", "Next Display",
                                         "displayOverviewShowInPane"]
     private static let trailingChrome = ["displayOverviewFitAll", "displayOverviewIdentify",
-                                         "displayOverviewAddPane", "displayOverviewMoveCursor"]
+                                         "displayOverviewAddPane"]
 
     @MainActor
-    private func launchOverviewFixture(fold: String? = nil) -> XCUIApplication {
+    private func launchOverviewFixture(fold: String? = nil, controlGranted: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["MEOW_UITEST_OVERVIEW"] = "1"
+        if controlGranted { app.launchEnvironment["MEOW_UITEST_OVERVIEW_CONTROL"] = "1" }
         if let fold { app.launchEnvironment["MEOW_UITEST_FOLD"] = fold }
         app.launch()
         XCTAssertTrue(app.buttons["displayOverviewDone"].waitForExistence(timeout: 10),
@@ -700,6 +701,19 @@ final class AdaptiveLayoutTests: XCTestCase {
         }
         XCTAssertLessThan(done.frame.maxY, show.frame.minY, "the toolbar is above the action bar")
         keep(app, "overview-no-fold")
+    }
+
+    @MainActor
+    func testOverviewWithControlKeepsTwoPaneActions() {
+        let app = launchOverviewFixture(controlGranted: true)
+        let show = app.buttons["displayOverviewShowInPane"]
+        let add = app.buttons["displayOverviewAddPane"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        XCTAssertEqual(add.label, "Add as New Pane")
+        XCTAssertFalse(app.buttons["displayOverviewMoveCursor"].exists)
+        XCTAssertLessThan(show.frame.maxX, add.frame.minX)
+        keep(app, "overview-control-actions")
     }
 
     /// Selection, zoom, pan, Fit All and double-tap in the overview, and taps that land on the
