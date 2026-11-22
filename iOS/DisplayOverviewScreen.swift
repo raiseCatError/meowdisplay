@@ -314,8 +314,12 @@ struct DisplayOverviewScreen: View {
 
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
-    private var showTitle: String {
-        model.replacingTile != nil ? String(localized: "Use Display") : String(localized: "Show in Pane")
+    private var showLabels: (visible: String, accessible: String) {
+        if model.replacingTile != nil {
+            let title = String(localized: "Use Display")
+            return (title, title)
+        }
+        return (String(localized: "Show"), String(localized: "Show in Pane"))
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {
@@ -363,32 +367,22 @@ struct DisplayOverviewScreen: View {
     }
 
     private var actionPrimary: some View {
-        Button(action: showSelected) {
-            Text(showTitle)
-                .multilineTextAlignment(.center)
-                .frame(minHeight: 44)
-        }
-        .buttonStyle(.borderedProminent).tint(meowAccent)
-        .accessibilityHint(model.replacingTile == nil ? Text("Opens the selected display.") : Text("Replaces the display in this pane."))
-        .accessibilityIdentifier("displayOverviewShowInPane")
+        OverviewActionButton(title: showLabels.visible, prominent: true, action: showSelected)
+            .accessibilityLabel(Text(showLabels.accessible))
+            .accessibilityHint(model.replacingTile == nil ? Text("Opens the selected display.") : Text("Replaces the display in this pane."))
+            .accessibilityIdentifier("displayOverviewShowInPane")
     }
 
     @ViewBuilder private func secondaryActions(_ item: CatalogDisplayItem) -> some View {
         if canAddPane(item) {
-            Button { dismiss(); onAddAsNewPane(item) } label: {
-                Text("New Pane").frame(minHeight: 44)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Add as New Pane")
-            .accessibilityIdentifier("displayOverviewAddPane")
+            OverviewActionButton(title: String(localized: "New Pane")) { dismiss(); onAddAsNewPane(item) }
+                .accessibilityLabel("Add as New Pane")
+                .accessibilityIdentifier("displayOverviewAddPane")
         }
         if model.canUseDisplayActions, model.canControlMac {
-            Button { model.moveCursor(to: item) } label: {
-                Text("Move Cursor").frame(minHeight: 44)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Move Cursor Here")
-            .accessibilityIdentifier("displayOverviewMoveCursor")
+            OverviewActionButton(title: String(localized: "Move Cursor")) { model.moveCursor(to: item) }
+                .accessibilityLabel("Move Cursor Here")
+                .accessibilityIdentifier("displayOverviewMoveCursor")
         }
     }
 
@@ -421,6 +415,27 @@ struct DisplayOverviewScreen: View {
 }
 
 // MARK: - Tile views
+
+private struct OverviewActionButton: View {
+    let title: String
+    var prominent = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .frame(minWidth: 44, minHeight: 44)
+                .foregroundStyle(prominent ? Color.white : meowAccent)
+                .background(prominent ? meowAccent : Color.white.opacity(0.14), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 /// One real display: its still filling the tile (aspect-fill), the main display's menu-bar strip
 /// and a border that is the accent colour while selected. Only the part of the tile that is on
