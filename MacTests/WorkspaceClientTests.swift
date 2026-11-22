@@ -702,8 +702,8 @@ final class OverviewPaneReceiverTests: XCTestCase {
     }
 
     private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true,
-                       sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
-        let m = WorkspaceModel(defaults: UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
+                       defaults: UserDefaults? = nil, sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
+        let m = WorkspaceModel(defaults: defaults ?? UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
         m.send = { sent($0); return true }
         m.inputAllowed = { true }
         m.apply(.connected(peerID: "mac-a"))
@@ -715,6 +715,37 @@ final class OverviewPaneReceiverTests: XCTestCase {
                                                  displays: displays)))
         m.updateSpace(WorkspaceSize(width: 1200, height: 800), hinge: nil)
         return m
+    }
+
+    func testOverviewTabKeepsTheCurrentLayoutAndRestoresFromDisk() throws {
+        let defaults = UserDefaults(suiteName: "OverviewTab-\(UUID().uuidString)")!
+        let m = model(displays: twoDisplays, defaults: defaults)
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        let first = try XCTUnwrap(m.layout.tiles[pane]?.source)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let otherPane = try XCTUnwrap(m.layout.orderedTileIDs.first { $0 != pane })
+        let other = m.layout.tiles[otherPane]
+        let root = m.layout.root
+        m.addOverviewTab(to: pane)
+        XCTAssertEqual(m.layout.root, root)
+        XCTAssertEqual(m.layout.tiles[otherPane], other)
+        XCTAssertEqual(m.layout.tiles[pane]?.windows.map(\.kind), [.display, .overview])
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.kind, .overview)
+
+        m.switchTab(pane, to: 0)
+        XCTAssertEqual(m.layout.tiles[pane]?.source, first)
+        m.addOverviewTab(to: otherPane)
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.kind, .overview)
+        XCTAssertEqual(m.layout.tiles[otherPane], other)
+        XCTAssertEqual(m.layout.tiles.values.flatMap(\.windows).filter(\.isOverview).count, 1)
+
+        let reloaded = model(displays: twoDisplays, defaults: defaults)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source?.kind, .overview)
+        reloaded.removeTab(pane, at: 1)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source, first)
+        XCTAssertEqual(reloaded.layout.tiles[otherPane], other)
+        XCTAssertEqual(reloaded.layout.root, root)
     }
 
     /// The pure table: in an Overview pane one finger is a trackpad whatever the setting, two

@@ -1791,6 +1791,22 @@ final class WorkspaceModel: ObservableObject {
         choose(overviewWindow, asNewTile: false)
     }
 
+    /// Keep the current panes and their view settings. Select an existing Overview wherever
+    /// it's already saved, so opening it again neither moves it nor creates another copy.
+    func addOverviewTab(to id: String) {
+        guard windowMode, offersOverviewPane, let host, layout.tiles[id]?.source != nil else { return }
+        if let holder = saved.tile(holding: host, windowID: WorkspaceSource.overviewKey) {
+            if let index = layout.tiles[holder]?.tabs.firstIndex(where: \.isOverview) {
+                edit { $0.switchingTab(of: holder, to: index) }
+            }
+            if layout.tiles[holder] != nil { focus(holder, raise: false) }
+            return
+        }
+        guard let source = source(for: overviewWindow) else { return }
+        edit { $0.addingTab(source, to: id) }
+        focus(id, raise: false)
+    }
+
     /// The catalog entry a pane source shows (a display's pseudo-window for displays).
     func windowItem(_ source: WorkspaceSource) -> CatalogWindowItem? {
         if source.isOverview { return overviewWindow }

@@ -949,6 +949,9 @@ struct WorkspaceChromeView: View {
             }
             if !isOverview { menuRow("Rotate", "rotate.right") { model.rotate(m.tile) } }
             menuRow(isDesktop || isOverview ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            if !isOverview, model.offersOverviewPane, tile.source != nil {
+                menuRow("Add Overview as Tab", "rectangle.on.rectangle") { model.addOverviewTab(to: m.tile) }
+            }
             if isOverview {
                 // Each display it shows, in a pane of its own (the display pane path).
                 ForEach(model.overviewPaneDisplays) { d in
