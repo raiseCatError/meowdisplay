@@ -283,6 +283,26 @@ private struct StagePeekDockScrollKey: PreferenceKey {
 
 // MARK: - Cards
 
+struct StagePeekRestoreButton: View {
+    @ObservedObject var model: WorkspaceModel
+    let window: CatalogWindowItem
+
+    var body: some View {
+        if let action = model.minimizedWindowAction(window) {
+            Button { model.showMinimizedWindow(window) } label: {
+                Image(systemName: action == .show ? "macwindow" : "hand.raised")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.65), in: Circle())
+            .accessibilityLabel(Text(action.title))
+            .accessibilityIdentifier("stagePeekShowOnMac")
+        }
+    }
+}
+
 struct StagePeekWindowCard: View {
     @ObservedObject var model: WorkspaceModel
     let window: CatalogWindowItem
@@ -849,6 +869,7 @@ struct StagePeekGallery: View {
         .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
         .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
         .accessibilityIdentifier("spatialWindowCard")
+        .overlay(alignment: .topTrailing) { StagePeekRestoreButton(model: model, window: w) }
     }
 
     private func grid(_ windows: [CatalogWindowItem], _ cols: [GridItem]) -> some View {
@@ -897,16 +918,7 @@ struct StagePeekGallery: View {
                 .offset(x: dx)
         }
         .overlay(alignment: .bottomTrailing) {
-            if dx == 0, let action = model.minimizedWindowAction(w) {
-                Button { model.showMinimizedWindow(w) } label: {
-                    Image(systemName: action == .show ? "macwindow" : "hand.raised")
-                        .font(.caption.weight(.semibold))
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel(Text(action.title))
-                .accessibilityIdentifier("stagePeekShowOnMac")
-            }
+            if dx == 0 { StagePeekRestoreButton(model: model, window: w) }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: revealed)
         .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }
