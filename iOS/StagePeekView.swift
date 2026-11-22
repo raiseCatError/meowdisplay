@@ -467,7 +467,14 @@ struct StagePeekOverlay: View {
                 .frame(width: width)
             StagePeekDock(model: model, apps: barApps, selected: appFilter,
                           onApp: { a in if searching { query = ""; searchFocused = false }; tapApp(a) },
-                          onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
+                          onAddOverviewTab: {
+                             guard let pane = model.overviewTabTarget else { return }
+                             model.addOverviewTab(to: pane)
+                             haptics.play(.select, enabled: hapticsEnabled)
+                             animate { machine.cancelAll() }
+                             model.stagePeekOpen = false
+                         },
+                         onDragEnded: { dropped in if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false } },
                           onLaunchpad: { searchFocused = false; withAnimation(.easeOut(duration: 0.2)) { launchpad = true } },
                           wide: $dockWide, rows: $dockRows, width: barWidth, maxHeight: room - 52,
                           noMatch: searching && barApps.isEmpty ? String(localized: "No apps match “\(query)”.") : nil)

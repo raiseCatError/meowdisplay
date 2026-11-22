@@ -934,6 +934,43 @@ final class OverviewPaneTests: XCTestCase {
         XCTAssertEqual(most[1]?.size, CGSize(width: 3024, height: 1964))
     }
 
+    func testMouseDownDragScrollAndReleaseAcrossDisplaysInTheOverview() throws {
+        let canvas = CGSize(width: 2000, height: 1000)
+        let pane = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        let view = OverviewPaneLayout(displays: [laptop, external],
+                                      pane: pane.scaled(to: WorkspaceSize(width: canvas.width, height: canvas.height)), zoom: 1)
+        let union = try XCTUnwrap(view.union)
+        let overview = WorkspaceTileAssignment(tileID: "o", rect: pane, windowID: WorkspaceSource.overviewKey,
+                                               windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
+                                               rotation: .none, fit: .fit, zoom: view.paneZoom,
+                                               assignmentGeneration: 1, isOverview: true)
+        var target = WorkspaceInputTargeting()
+        target.canvas = canvas
+        target.windowFrames[WorkspaceSource.overviewKey] = CGRect(x: union.x, y: union.y,
+                                                                 width: union.width, height: union.height)
+        _ = target.update(assignments: [overview])
+
+        func normalized(_ point: WorkspacePoint) -> WorkspacePoint {
+            let mapped = view.panePoint(fromGlobal: point)
+            return WorkspacePoint(x: mapped.x / canvas.width, y: mapped.y / canvas.height)
+        }
+        let builtIn = WorkspacePoint(x: 1400, y: 450)
+        let second = WorkspacePoint(x: 1900, y: 450)
+        _ = target.resolve(.move, at: normalized(builtIn))
+        let down = try XCTUnwrap(target.resolveAtPointer(.down))
+        XCTAssertEqual(down.point.x, builtIn.x, accuracy: 0.001)
+        XCTAssertFalse(down.activates)
+        let drag = try XCTUnwrap(target.resolve(.move, at: normalized(second)))
+        XCTAssertEqual(drag.point.x, second.x, accuracy: 0.001)
+        XCTAssertEqual(drag.tileID, down.tileID)
+        let release = try XCTUnwrap(target.resolveAtPointer(.up))
+        XCTAssertEqual(release.point.x, second.x, accuracy: 0.001)
+        let scroll = try XCTUnwrap(target.resolveAtPointer(.scroll))
+        XCTAssertEqual(scroll.point.x, second.x, accuracy: 0.001)
+        XCTAssertFalse(scroll.activates)
+        XCTAssertEqual(target.scrollTile?.isOverview, true)
+    }
+
     /// The real cursor is drawn by the receiver once, where it is in the Overview pane.
     func testTheCursorIsPlacedWhereItIsInTheOverviewPane() throws {
         let canvas = CGSize(width: 2000, height: 1000)

@@ -527,6 +527,7 @@ struct StagePeekGallery: View {
     let onDisplay: (CatalogDisplayItem) -> Void
     let onApp: (MacAppItem) -> Void
     let onAddTile: (CatalogWindowItem) -> Void
+    var onAddOverviewTab: (() -> Void)?
     /// A card was dropped (or the drag ended): the peek decides whether to close.
     var onDragEnded: (Bool) -> Void = { _ in }
     /// Search the Mac's approved folders for the query (Remote Finder), when the Mac offers it.
@@ -619,6 +620,13 @@ struct StagePeekGallery: View {
                 } else {
                     if let displays = model.catalog?.displays, !displays.isEmpty {
                         displaysHeader(displays)
+                        if model.overviewTabTarget != nil, let onAddOverviewTab {
+                            Button(action: onAddOverviewTab) {
+                                Label("Add Overview as Tab", systemImage: "rectangle.on.rectangle")
+                            }
+                            .accessibilityHint("Shows the live Mac displays as a tab in the current pane.")
+                            .accessibilityIdentifier("displayOverviewAddAsTab")
+                        }
                         displaysSection(displays, cols)
                     }
                     sectionTitle(String(localized: "Windows"))

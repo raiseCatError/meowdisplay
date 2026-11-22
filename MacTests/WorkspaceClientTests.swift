@@ -866,6 +866,20 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(reloaded.layout.root, root)
     }
 
+    func testDisplaysActionTurnsAStandaloneOverviewIntoATab() throws {
+        let m = model(displays: twoDisplays)
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let target = try XCTUnwrap(m.overviewTabTarget)
+        m.choose(m.overviewWindow, asNewTile: true)
+        XCTAssertEqual(m.layout.tiles.count, 2)
+
+        XCTAssertEqual(m.overviewTabTarget, target)
+        m.addOverviewTab(to: target)
+        XCTAssertEqual(m.layout.tiles.count, 1)
+        XCTAssertEqual(m.layout.tiles[target]?.windows.map(\.kind), [.display, .overview])
+        XCTAssertEqual(m.layout.tiles[target]?.source?.kind, .overview)
+    }
+
     /// The pure table: in an Overview pane one finger is a trackpad whatever the setting, two
     /// fingers scroll the Mac, a pinch zooms, and nothing moves the view. Other panes are as before.
     func testEachGestureRoutesInAnOverviewPaneAndInOtherPanes() {
