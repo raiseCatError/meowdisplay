@@ -278,7 +278,9 @@ final class WindowBrowserService: @unchecked Sendable {
                     let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
                     if !fresh.isEmpty { sendIcons(fresh) }
                 }
-                if let ds = obj["displays"] as? [Int] { sendDisplayStills(ds.compactMap { UInt32(exactly: $0) }.prefix(8), width: width) }
+                let ds = (obj["displays"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
+                let detail = OverviewDisplayDetailRequest.parse(obj["detail"])
+                if !ds.isEmpty || detail != nil { sendDisplayStills(ds, width: width, detail: detail) }
             case WireMessage.appCatalogRequest:
                 let rev = obj["rev"] as? Int
                 AppCatalog.shared.current { [weak self] apps, revision in
@@ -645,10 +647,14 @@ final class WindowBrowserService: @unchecked Sendable {
     private var lastDisplayStillsAt: TimeInterval = 0
 
     /// One display batch at a time, at most every 2 s (a display still is a full-screen capture).
-    private func sendDisplayStills(_ ids: ArraySlice<UInt32>, width: Int) {
+    private func sendDisplayStills(_ ids: [UInt32], width: Int, detail: OverviewDisplayDetailRequest?) {
         let now = ProcessInfo.processInfo.systemUptime
         guard !displayStillsBusy, now - lastDisplayStillsAt >= 2 else { return }
-        let wanted = ids.compactMap { scDisplays[$0] }
+        let detail = detail.flatMap { request in
+            displays.contains(where: { $0.displayID == request.id && !$0.isMeow && !$0.isOwn }) ? request : nil
+        }
+        let ordered = detail.map { request in [request.id] + ids.filter { $0 != request.id } } ?? ids
+        let wanted = ordered.prefix(8).compactMap { scDisplays[$0] }
         guard !wanted.isEmpty else { return }
         displayStillsBusy = true
         lastDisplayStillsAt = now
@@ -659,21 +665,42 @@ final class WindowBrowserService: @unchecked Sendable {
                 // No display still while the Mac asks for its password: it could show the prompt.
                 guard !PrivacyShieldWindows.isUnlocking else { continue }
                 let cfg = SCStreamConfiguration()
-                cfg.width = width
-                cfg.height = max(Int(Double(width) * Double(d.height) / Double(max(d.width, 1))) & ~1, 2)
+                let detailSide = detail?.id == d.displayID ? detail?.maxSide : nil
+                let aspect = Double(max(d.height, 1)) / Double(max(d.width, 1))
+                if let detailSide {
+                    let nativeSide = max(CGDisplayPixelsWide(d.displayID), CGDisplayPixelsHigh(d.displayID))
+                    let side = Double(nativeSide > 0 ? min(nativeSide, detailSide) : detailSide)
+                    cfg.width = max(Int(side / max(1, aspect)) & ~1, 2)
+                    cfg.height = max(Int(side * min(1, aspect)) & ~1, 2)
+                } else {
+                    cfg.width = width
+                    cfg.height = max(Int(Double(width) * aspect) & ~1, 2)
+                }
                 cfg.showsCursor = false
                 // MeowDisplay's own windows (prompts, privacy cover) never appear in a still.
                 let own = (try? await ShareableContent.content())?
                     .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
                 let filter = SCContentFilter(display: d, excludingApplications: own, exceptingWindows: [])
-                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg),
-                      let jpeg = Self.jpeg(image, quality: 0.6) else { continue }
+                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) else { continue }
+                let jpeg = detailSide == nil ? Self.jpeg(image, quality: 0.6) : Self.detailJPEG(image)
+                guard let jpeg else { continue }
                 self.queue.async { [weak self] in
-                    guard let self, self.active else { return }
-                    self.sendMessage?(["type": WireMessage.displayThumbnail, "id": Int(d.displayID), "jpeg": jpeg.base64EncodedString()])
+                    guard let self, self.active, !PrivacyShieldWindows.isUnlocking else { return }
+                    var message: [String: Any] = ["type": WireMessage.displayThumbnail, "id": Int(d.displayID),
+                                                  "jpeg": jpeg.base64EncodedString()]
+                    if let detailSide { message["detail"] = detailSide }
+                    self.sendMessage?(message)
                 }
             }
         }
+    }
+
+    private static func detailJPEG(_ image: CGImage) -> Data? {
+        for quality in [0.78, 0.60, 0.45] {
+            if let data = jpeg(image, quality: quality),
+               (data.count + 2) / 3 * 4 <= OverviewDisplayDetailRequest.maxBase64 { return data }
+        }
+        return nil
     }
 
     private func isActive() async -> Bool {

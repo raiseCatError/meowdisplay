@@ -71,7 +71,11 @@ struct DisplayOverviewScreen: View {
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
         // Display stills keep refreshing while the overview is open, whatever Stage Peek does underneath.
-        .onAppear { model.displayOverviewOpen = true }
+        .onAppear {
+            model.displayOverviewOpen = true
+            model.setOverviewDetail(interaction.detailRequest)
+        }
+        .onChange(of: interaction.detailRequest) { model.setOverviewDetail($0) }
         .onDisappear { model.displayOverviewOpen = false }
         .onChange(of: model.catalog?.displays) { displays in refreshModel(displays) }
         .onChange(of: environmentDisplayScale) { scale in interaction.setViewDisplayScale(Double(scale)) }
@@ -243,7 +247,7 @@ struct DisplayOverviewScreen: View {
         let drawn = drawnRect(for: rect)
         let traits: AccessibilityTraits = isSelected ? [.isButton, .isSelected] : [.isButton]
         return ZStack {
-            OverviewDisplayTile(thumbnail: model.displayThumbnails[display.id], fullSize: rect.size,
+            OverviewDisplayTile(thumbnail: model.overviewImage(for: display.id), fullSize: rect.size,
                                 origin: CGPoint(x: rect.minX - drawn.minX, y: rect.minY - drawn.minY),
                                 isMain: display.isMain, isSelected: isSelected)
                 .frame(width: drawn.width, height: drawn.height)

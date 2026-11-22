@@ -130,6 +130,24 @@ struct OverviewInteraction: Equatable {
         model.selected.flatMap { model.display(withID: $0) }
     }
 
+    /// The one visible display whose still needs more pixels at the current zoom.
+    var detailRequest: OverviewDisplayDetailRequest? {
+        let visible = model.drawnDisplays.filter {
+            !model.isPlaceholder($0.id) && !visibleRect(of: viewRect(of: $0)).isEmpty
+        }
+        let center = CGPoint(x: viewport.width / 2, y: viewport.height / 2)
+        guard let display = visible.first(where: { viewRect(of: $0).contains(center) })
+                ?? visible.first(where: { $0.id == model.selected })
+                ?? visible.first else { return nil }
+        let sourceSide = max(display.frame.width, display.frame.height)
+        let sourceScale = display.scale ?? Self.defaultDisplayPixelsPerPoint
+        let needed = sourceSide * min(camera.scale * viewDisplayScale, sourceScale)
+        guard needed.isFinite, needed > 700 else { return nil }
+        let sizes = OverviewDisplayDetailRequest.sizes
+        let side = sizes.first(where: { Double($0) >= needed }) ?? sizes[sizes.count - 1]
+        return OverviewDisplayDetailRequest(id: display.id, maxSide: side)
+    }
+
     /// The selected display is real, so the pane actions apply to it.
     var selectionCanBeShown: Bool {
         guard let id = model.selected else { return false }

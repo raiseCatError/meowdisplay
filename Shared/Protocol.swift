@@ -240,6 +240,22 @@ enum WindowWorkspaceWire {
     static let mode = "window"
 }
 
+/// Optional sharper still for one display in the full-screen Overview.
+struct OverviewDisplayDetailRequest: Equatable, Sendable {
+    static let sizes = [960, 1280, 1600]
+    static let maxBase64 = 700_000
+    let id: UInt32
+    let maxSide: Int
+
+    var wire: [String: Int] { ["id": Int(id), "maxSide": maxSide] }
+
+    static func parse(_ value: Any?) -> Self? {
+        guard let fields = value as? [String: Int], let id = fields["id"].flatMap({ UInt32(exactly: $0) }),
+              id != 0, let side = fields["maxSide"], sizes.contains(side) else { return nil }
+        return Self(id: id, maxSide: side)
+    }
+}
+
 /// Remote Finder (PROTOCOL.md 6.12): folders the Mac's owner approved for this device.
 /// Offered only when the Mac lists `welcomeFeature`; every request also needs the owner's
 /// grant on the Mac, and each write, upload or transfer needs that grant's capability.
