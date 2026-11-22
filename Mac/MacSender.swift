@@ -8139,6 +8139,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     guard let uuid = candidate.persistentID else { return nil }
                     return [
                         "uuid": uuid, "name": candidate.name, "isMain": candidate.isMain,
+                        "displayID": Int(candidate.displayID),
                         "logicalWidth": Int(candidate.logicalSize.width),
                         "logicalHeight": Int(candidate.logicalSize.height),
                         "pixelWidth": Int(candidate.pixelSize.width),

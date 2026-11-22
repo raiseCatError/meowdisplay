@@ -1805,14 +1805,26 @@ final class WorkspaceModel: ObservableObject {
         return mainDisplay
     }
 
-    /// The listed display a manual Mirror choice names (the two lists share names and point
-    /// sizes, not ids). Nil for Automatic, or when no single display matches.
+    /// The listed display a manual Mirror choice names. Older senders omit the live ID.
     nonisolated static func mirroredDisplay(in displays: [CatalogDisplayItem], choice: MirrorDisplayEntry?) -> CatalogDisplayItem? {
         guard let choice else { return nil }
+        if let id = choice.displayID { return displays.first { $0.id == id } }
         let matches = displays.filter { $0.name == choice.name && $0.width == choice.logicalWidth && $0.height == choice.logicalHeight }
         if matches.count == 1 { return matches[0] }
         let main = matches.filter { $0.isMain == choice.isMain }
         return main.count == 1 ? main[0] : nil
+    }
+
+    nonisolated static func mirrorEntry(for display: CatalogDisplayItem, catalog: [CatalogDisplayItem],
+                                       entries: [MirrorDisplayEntry]) -> MirrorDisplayEntry? {
+        guard !display.isVirtual, display.overview?.isOwn != true, display.overview?.isMeow != true else { return nil }
+        let physical = entries.filter { !$0.likelyVirtual }
+        let exact = physical.filter { $0.displayID == display.id }
+        if !exact.isEmpty { return exact.count == 1 ? exact[0] : nil }
+        let legacy = physical.filter {
+            $0.displayID == nil && mirroredDisplay(in: catalog, choice: $0)?.id == display.id
+        }
+        return legacy.count == 1 ? legacy[0] : nil
     }
 
     /// Mirror/Extend: the picture is one pane showing the desktop, so a window dragged onto it

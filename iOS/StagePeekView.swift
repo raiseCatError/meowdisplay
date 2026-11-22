@@ -623,8 +623,7 @@ struct StagePeekOverlay: View {
         model.switchTo(w)
     }
 
-    /// A display card: in Window mode the desktop goes into the pane (Full Desktop is a tile
-    /// source, never a mode switch); in Mirror/Extend it already shows.
+    /// A display card: Window puts it in a pane; Mirror asks the Mac to select that source.
     private func pickDisplay(_ d: CatalogDisplayItem?) {
         haptics.play(.select, enabled: hapticsEnabled)
         searchFocused = false

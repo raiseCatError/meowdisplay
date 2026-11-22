@@ -819,9 +819,13 @@ struct ReceiverScreen: View {
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             dock: controlStore.preferences.stagePeekDock,
                             inputAllowed: inputReachesMac,
-                            onDisplay: { _ in
-                                // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts
-                                // the desktop in a pane; "View Full Screen" is in a desktop pane's menu.)
+                            onDisplay: { display in
+                                guard model.receiver.confirmedDisplayMode == .mirror, let display,
+                                      let state = model.receiver.mirrorDisplayState,
+                                      let entry = WorkspaceModel.mirrorEntry(for: display,
+                                          catalog: model.workspace.catalog?.displays ?? [], entries: state.displays)
+                                else { return }
+                                model.receiver.requestMirrorDisplaySelection(entry.uuid)
                             })
                         .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
                     }

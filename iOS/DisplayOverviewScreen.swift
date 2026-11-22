@@ -315,7 +315,8 @@ struct DisplayOverviewScreen: View {
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
     private var showTitle: String {
-        model.replacingTile != nil ? String(localized: "Use in This Pane") : String(localized: "Show in Pane")
+        if model.mirroring() { return String(localized: "Mirror Display") }
+        return model.replacingTile != nil ? String(localized: "Use in This Pane") : String(localized: "Show in Pane")
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {

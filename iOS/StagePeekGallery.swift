@@ -711,13 +711,13 @@ struct StagePeekGallery: View {
             ForEach(displays) { d in
                 let source = model.displayWindow(d)
                 StagePeekDisplayCard(model: model, display: d,
-                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
+                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : model.desktopDisplay?.id == d.id)
                     .scaleEffect(held == source.id ? 1.04 : 1)
                     // The desktop is a pane source too: hold and drag it onto a pane.
                     .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onDisplay(d) }
-                    .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+                    .accessibilityAction(named: model.mirroring() ? Text("Mirror This Display") : Text("Show in Pane")) { onDisplay(d) }
             }
         }
     }
@@ -758,7 +758,7 @@ struct StagePeekGallery: View {
             thumbnail: model.displayThumbnails[d.id], name: d.name,
             label: mirrored ? String(localized: "\(name), mirrored") : name,
             isMain: tile.isMain, isMirrored: mirrored,
-            current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain,
+            current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : model.desktopDisplay?.id == d.id,
             showsName: tile.rect.height >= 28)
             .frame(width: tile.rect.width, height: tile.rect.height)
             .scaleEffect(held == source.id ? 1.04 : 1)
@@ -766,7 +766,7 @@ struct StagePeekGallery: View {
             .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onDisplay(d) }
-            .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+            .accessibilityAction(named: model.mirroring() ? Text("Mirror This Display") : Text("Show in Pane")) { onDisplay(d) }
             .offset(x: tile.rect.minX, y: tile.rect.minY)
     }
 
