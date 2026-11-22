@@ -567,6 +567,28 @@ final class AdaptiveLayoutTests: XCTestCase {
         keep(app, "overview-pane-display-shown")
     }
 
+    @MainActor
+    func testLiveOverviewTabOpensDirectlyFromDisplays() {
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK"] = "1"
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK_PANES"] = "1"
+        app.launch()
+        XCTAssertTrue(workspacePane(app, "Full Desktop").waitForExistence(timeout: 10))
+
+        openStagePeekFromTheEdge(app)
+        let expand = app.buttons["stagePeekExpand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 3))
+        if expand.label != "Compact" { expand.tap() }
+        XCTAssertTrue(waitUntil(5) { expand.label == "Compact" })
+        let add = app.buttons["displayOverviewAddAsTab"]
+        for _ in 0..<6 where !(add.exists && add.isHittable) { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(add.exists && add.isHittable)
+        add.tap()
+        XCTAssertTrue(workspacePane(app, "Overview").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil(5) { !app.buttons["stagePeekClose"].exists })
+        keep(app, "overview-tab-from-displays")
+    }
+
     // MARK: - Multi-Display Overview fixture (DEBUG seam `MEOW_UITEST_OVERVIEW`)
     //
     // The overview needs a Mac's display catalog, which the demo has not got, so the app opens it
