@@ -115,6 +115,31 @@ final class WorkspaceClientTests: XCTestCase {
         XCTAssertEqual(activations, 1)
     }
 
+    func testExpiredShowWithdrawsTheOutstandingControlRequest() throws {
+        var now: TimeInterval = 1
+        var control = SessionInputWireState.off
+        var withdrawals = 0
+        var activations = 0
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+        m.clock = { now }
+        m.controlState = { control }
+        m.requestControlForWindowShow = { true }
+        m.withdrawControlForWindowShow = { withdrawals += 1 }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(.mode(window: true))
+        m.apply(restoreCatalog())
+        m.showMinimizedWindow(try XCTUnwrap(m.catalog?.windows.first))
+        control = .requesting
+        m.windowShowControlChanged(control)
+        now += 61
+        control = .allowed
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(withdrawals, 1)
+        XCTAssertEqual(activations, 0)
+        XCTAssertFalse(m.windowShowPending)
+    }
+
     private func catalogWithDisplay(_ windows: [(UInt32, UInt64, String)]) -> WorkspaceEvent {
         WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
             "type": WireMessage.windowCatalog, "host": "mac-a",

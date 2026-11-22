@@ -214,6 +214,7 @@ final class ReceiverController: ObservableObject {
             receiver.requestAllowInput(true)
             return true
         }
+        windowWorkspace.withdrawControlForWindowShow = { [weak receiver] in receiver?.requestAllowInput(false) }
         input?.localOverlayActive = { windowWorkspace.overviewOpen || windowWorkspace.arranging }
         input?.onOpenWindowOverview = { if windowWorkspace.available { windowWorkspace.openOverview() } }
         receiver.$connected

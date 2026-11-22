@@ -3119,12 +3119,14 @@ final class SenderController: ObservableObject {
             guard let self, let session, self.owns(session) else { return }
             self.requestMode(.window, for: session)
         }
-        sender.onAllowInputRequest = { [weak self, weak session] generation in
-            // A request for control, from the connection with this
-            // generation; a release is applied by `MacSender` itself and
-            // never reaches here.
+        sender.onAllowInputRequest = { [weak self, weak session] generation, revision in
             guard let self, let session, self.owns(session) else { return }
-            self.handleInputControlRequested(session: session, connectionGeneration: generation)
+            self.handleInputControlRequested(session: session, connectionGeneration: generation, requestRevision: revision)
+        }
+        sender.onAllowInputCancelled = { [weak self, weak session] in
+            guard let self, let session, self.owns(session) else { return }
+            session.inputControlRequest.invalidatePending()
+            self.inputControlPrompt.cancelForEndedSession(id: session.id)
         }
         sender.onFilesConsentRequest = { [weak self, weak session] generation, capabilities in
             // Remote Finder: the device's stored policy answers, or the Mac owner does (per session).
@@ -4180,7 +4182,7 @@ final class SenderController: ObservableObject {
     /// `connectionGeneration` is the connection that asked; any grant this
     /// decides applies to that connection only (see
     /// `MacSender.grantSessionInput(generation:)`).
-    func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64) {
+    private func handleInputControlRequested(session: DeviceSession, connectionGeneration: UInt64, requestRevision: UInt64) {
         guard let peerID = session.deviceID else { return }
         let policy = ReceiverInputAuthorizationStore.policy(peerID: peerID)
         let screenLocked = !MacPrivacyGate.shared.allowsInput
@@ -4206,16 +4208,18 @@ final class SenderController: ObservableObject {
         case .deny(let state):
             session.sender.denySessionInput(state: state)
         case .grant:
-            session.sender.grantSessionInput(generation: connectionGeneration)
+            session.sender.grantSessionInput(generation: connectionGeneration, requestRevision: requestRevision)
         case .ask:
-            presentInputControlPrompt(session: session, peerID: peerID, connectionGeneration: connectionGeneration)
+            presentInputControlPrompt(session: session, peerID: peerID, connectionGeneration: connectionGeneration,
+                                      requestRevision: requestRevision)
         }
     }
 
     /// Not Now / timeout cooldowns per device, across its sessions.
     private var inputControlCooldowns = InputControlRequestCooldowns()
 
-    private func presentInputControlPrompt(session: DeviceSession, peerID: String, connectionGeneration: UInt64) {
+    private func presentInputControlPrompt(session: DeviceSession, peerID: String, connectionGeneration: UInt64,
+                                           requestRevision: UInt64) {
         // A device declined (or left unanswered) recently can't reconnect for a new prompt.
         guard !inputControlCooldowns.isCoolingDown(peerID: peerID) else { return }
         guard let generation = session.inputControlRequest.beginRequest() else {
@@ -4231,18 +4235,19 @@ final class SenderController: ObservableObject {
             let decision = await self?.inputControlPrompt.request(request) ?? .notNow
             guard let self, let session else { return }
             self.resolveInputControlRequest(session: session, peerID: peerID, generation: generation,
-                                            connectionGeneration: connectionGeneration, decision: decision)
+                                            connectionGeneration: connectionGeneration, requestRevision: requestRevision, decision: decision)
         }
     }
 
     private func resolveInputControlRequest(session: DeviceSession, peerID: String, generation: Int,
-                                             connectionGeneration: UInt64,
+                                             connectionGeneration: UInt64, requestRevision: UInt64,
                                              decision: InputControlRequestDecision) {
         guard session.inputControlRequest.resolve(generation: generation, decision: decision) else {
             // Stale: this generation was already superseded (session ended
             // and a replacement began, or a duplicate resolution raced in).
             return
         }
+        guard session.sender.inputRequestIsCurrent(generation: connectionGeneration, revision: requestRevision) else { return }
         inputControlCooldowns.record(decision, peerID: peerID)
         // `InputControlRequestPlan` fixes a real ordering bug: persisting
         // BEFORE granting means `.alwaysAllowDevice`'s widening is judged
@@ -4265,7 +4270,7 @@ final class SenderController: ObservableObject {
             }
         }
         if plan.grantSession {
-            session.sender.grantSessionInput(generation: connectionGeneration)
+            session.sender.grantSessionInput(generation: connectionGeneration, requestRevision: requestRevision)
         } else if let denyState = plan.denyState {
             session.sender.denySessionInput(state: denyState)
         }

@@ -1206,6 +1206,9 @@ struct ReceiverScreen: View {
             model.workspace.controlState = { [weak controlStore] in controlStore?.sessionInputState ?? .off }
             model.workspace.requestControl = { _ = requestInputFromPrompt() }
             model.workspace.requestControlForWindowShow = { requestInputFromPrompt() }
+            model.workspace.withdrawControlForWindowShow = { [weak receiver = model.receiver] in
+                receiver?.requestAllowInput(false)
+            }
         }
         .onChange(of: model.receiver.session.allowsLiveInput) { live in
             withAnimation { inputPrompt.setSessionLive(live) }

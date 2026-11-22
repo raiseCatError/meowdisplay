@@ -967,7 +967,7 @@ final class WorkspaceModel: ObservableObject {
         case .mode(let window):
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
-            if !window { remote = nil; cancelWindowShow() }
+            if !window { remote = nil; cancelWindowShow(message: String(localized: "Window mode ended."), withdraw: true) }
             if window { awaitingCatalogToSend = true; requestCatalog() }
             // Open Fullscreen's Window view started; or Window view ended another way (Settings,
             // the Mac, a refused switch): its pane is gone and Exit must never ask for an old mode.
@@ -992,7 +992,7 @@ final class WorkspaceModel: ObservableObject {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
             }
             if let pendingWindowShow, s.gone.contains(where: { $0.window == pendingWindowShow.window.id && $0.generation == pendingWindowShow.window.generation }) {
-                cancelWindowShow(message: String(localized: "That window closed."))
+                cancelWindowShow(message: String(localized: "That window closed."), withdraw: true)
             }
             if !s.gone.isEmpty { windowsClosedOnMac(s.gone) }
         case .thumbnail(let id, _, let data, let stale):
@@ -1667,6 +1667,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     var requestControlForWindowShow: () -> Bool = { false }
+    var withdrawControlForWindowShow: () -> Void = {}
     private var supportsOffscreenRestore = false
     private var pendingWindowShow: PendingWindowShow?
     private var windowShowTimeout: Task<Void, Never>?
@@ -1712,7 +1713,7 @@ final class WorkspaceModel: ObservableObject {
         windowShowTimeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
             guard !Task.isCancelled else { return }
-            self?.cancelWindowShow(message: String(localized: "The request to show the window expired."))
+            self?.cancelWindowShow(message: String(localized: "The request to show the window expired."), withdraw: true)
         }
         if !requestControlForWindowShow() {
             cancelWindowShow(message: String(localized: "Can’t request control right now. Try again shortly."))
@@ -1734,14 +1735,14 @@ final class WorkspaceModel: ObservableObject {
 
     private func validatePendingWindowShow() {
         if let pendingWindowShow, !windowShowTargetIsValid(pendingWindowShow) {
-            cancelWindowShow(message: String(localized: "The window is no longer available to show."))
+            cancelWindowShow(message: String(localized: "The window is no longer available to show."), withdraw: true)
         }
     }
 
     func windowShowControlChanged(_ state: SessionInputWireState) {
         guard var pending = pendingWindowShow else { return }
         guard clock() < pending.deadline else {
-            cancelWindowShow(message: String(localized: "The request to show the window expired."))
+            cancelWindowShow(message: String(localized: "The request to show the window expired."), withdraw: true)
             return
         }
         switch state {
@@ -1761,16 +1762,17 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func cancelWindowShow() {
-        cancelWindowShow(message: String(localized: "Showing the window was cancelled."))
+        cancelWindowShow(message: String(localized: "Showing the window was cancelled."), withdraw: true)
     }
 
-    private func cancelWindowShow(message: String?) {
+    private func cancelWindowShow(message: String?, withdraw: Bool = false) {
         guard pendingWindowShow != nil else { return }
         pendingWindowShow = nil
         windowShowTimeout?.cancel()
         windowShowTimeout = nil
         windowShowPending = false
         windowShowNotice = message
+        if withdraw, inputAllowed() { withdrawControlForWindowShow() }
     }
 
     func dismissWindowShowNotice() { windowShowNotice = nil }

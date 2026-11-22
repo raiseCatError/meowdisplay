@@ -1096,6 +1096,30 @@ final class MacSenderInputRevocationTests: XCTestCase {
         XCTAssertEqual(events.take(), [])
     }
 
+    func testWithdrawingControlRequestRejectsAPromptAnswerAlreadyInFlight() async throws {
+        let sender = try XCTUnwrap(sender)
+        let generation = try await admit(sender)
+        let requested = expectation(description: "control reached the existing consent route")
+        let withdrawn = expectation(description: "the waiting request was withdrawn")
+        await MainActor.run {
+            sender.onAllowInputRequest = { _, revision in
+                requested.fulfill()
+                sender.onAllowInputCancelled = {
+                    sender.grantSessionInput(generation: generation, requestRevision: revision)
+                    withdrawn.fulfill()
+                    sender.onAllowInputCancelled = nil
+                }
+            }
+        }
+        try await receive(sender, ["type": WireMessage.allowInputRequest, "allowed": true])
+        await fulfillment(of: [requested], timeout: 5)
+        try await receive(sender, ["type": WireMessage.allowInputRequest, "allowed": false])
+        await fulfillment(of: [withdrawn], timeout: 5)
+        try await sender.settleForTesting()
+        XCTAssertFalse(sender.hasInputGrantForTesting)
+        await MainActor.run { sender.onAllowInputRequest = nil }
+    }
+
     // MARK: - Reconnect never inherits a grant
 
     func testLostConnectionReleasesHeldInputAndReconnectStartsWithoutControl() async throws {
