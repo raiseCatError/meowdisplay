@@ -993,6 +993,9 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// this receiver isn't showing (another display, or zoomed or panned out of view). It
     /// never stands for the pointer itself and never affects input.
     var showCursorLocator = true
+    /// Constrain Trackpad motion while showing a single display. The video-off
+    /// Trackpad always acts on the desktop.
+    var keepPointerOnReceiverDisplay = false
     var pinchTarget = ReceiverGestureTarget.viewport
     /// Defaults to Disabled (schema 16): an accidental twist while pinching
     /// should never tilt the Mac display. Viewport rotation stays one
@@ -1146,6 +1149,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
         // Absent (added 2026-11-15): on, like a new install. No schema bump.
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
+        keepPointerOnReceiverDisplay = try value(.keepPointerOnReceiverDisplay, fallback.keepPointerOnReceiverDisplay)
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
         rotateTarget = try value(.rotateTarget, fallback.rotateTarget)
         snapRotation = try value(.snapRotation, fallback.snapRotation)

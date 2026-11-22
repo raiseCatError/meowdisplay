@@ -72,6 +72,7 @@ final class InputInjector {
     // same clickState, matching the CGEvent convention AppKit/WebKit expect
     // across one press.
     private var pointerHeldButton: CGMouseButton?
+    private var pointerHeldOnDesktop = false
     private var pointerHeldClickCount: Int64 = 1
     // A real event source (vs nil) plus non-zero clickState on down/up: menu
     // tracking treats sourceless/zero-click synthetic clicks as malformed — menus
@@ -120,6 +121,7 @@ final class InputInjector {
     private var reentry = DisplayReentryPoint()
     /// Tests only: where the Mac cursor is. Nil: the real cursor.
     var cursorLocator: (() -> CGPoint)?
+    var desktopDisplayBounds: ((CGPoint) -> CGRect?)?
 
     /// Install or remove the window-workspace mapper. Held input is released
     /// first: nothing pressed under one mapping is released under another.
@@ -195,6 +197,7 @@ final class InputInjector {
                 event.setIntegerValueField(.mouseEventClickState, value: pointerHeldClickCount)
                 eventSink.post(event)
                 pointerHeldButton = nil
+                pointerHeldOnDesktop = false
             }
         }
 
@@ -303,12 +306,15 @@ final class InputInjector {
 
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
     /// Scroll events take points, so convert via the display's pixel scale.
-    func handleScroll(dx: Double, dy: Double) {
+    func handleScroll(dx: Double, dy: Double, desktopTrackpad: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
         let whole: (dx: Int32, dy: Int32)
-        if let mapper = targetMapper {
+        if desktopTrackpad {
+            let g = displayGeometry()
+            whole = scrollRemainder.take(dxPoints: dx / g.scale, dyPoints: dy / g.scale)
+        } else if let mapper = targetMapper {
             // The tile under the workspace pointer, only where its window is
             // frontmost; the Mac pointer moves onto it first (no focus change).
             guard let p = mapper.mapPointer(phase: .scroll, x: nil, y: nil, dx: 0, dy: 0) else { return }
@@ -361,15 +367,20 @@ final class InputInjector {
         postPointerMotion(to: point)
     }
 
-    /// Relative cursor move (`PointerCommand.moveRelative`) — `dx`/`dy` in
-    /// video pixels, same convention as `handleScroll`. Moves from the
-    /// Mac's own current cursor position, never the touch location — while
-    /// that is on this display; otherwise from this session's re-entry point
-    /// there (`DisplayReentryPoint`). The result stays on this display.
-    func handlePointerMoveRelative(dx: Double, dy: Double) {
+    /// Native Trackpad motion uses desktop points. Legacy relative input and a
+    /// confined Trackpad use the selected display's re-entry point.
+    func handlePointerMoveRelative(dx: Double, dy: Double, trackpadPoints: Bool = false, desktopTrackpad: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(.pointerMove) else { return }
+        guard dx.isFinite, dy.isFinite else { return }
+        if desktopTrackpad {
+            guard let point = InputCoordinateMapper.desktopRelativePoint(
+                from: currentCursor(), dx: dx, dy: dy, displayAt: desktopDisplayBounds ?? Self.activeDisplayBounds
+            ) else { return }
+            postPointerMotion(to: point)
+            return
+        }
         if let mapper = targetMapper {
             // The workspace pointer moves freely across tiles; the Mac pointer
             // follows only where that is safe (see WorkspaceInputTargeting).
@@ -379,10 +390,20 @@ final class InputInjector {
         }
         let g = displayGeometry()
         guard let start = reentry.origin(cursor: currentCursor(), in: g.bounds, pixelScale: g.scale) else { return }
-        let point = InputCoordinateMapper.clamp(CGPoint(x: start.point.x + dx / g.scale, y: start.point.y + dy / g.scale),
+        let divisor = trackpadPoints ? 1 : g.scale
+        let point = InputCoordinateMapper.clamp(CGPoint(x: start.point.x + dx / divisor, y: start.point.y + dy / divisor),
                                                 into: g.bounds, pixelScale: g.scale)
         reentry.note(point, in: g.bounds)
         postPointerMotion(to: point)
+    }
+
+    private static func activeDisplayBounds(at point: CGPoint) -> CGRect? {
+        var display = CGDirectDisplayID()
+        var count: UInt32 = 0
+        guard CGGetDisplaysWithPoint(point, 1, &display, &count) == .success,
+              count > 0, CGDisplayIsActive(display) != 0 else { return nil }
+        let bounds = CGDisplayBounds(display)
+        return bounds.contains(point) ? bounds : nil
     }
 
     /// A plain move with no button, bringing the cursor onto this display before a press or
@@ -419,7 +440,7 @@ final class InputInjector {
     /// cursor"). Mirror/Extend: only on this display. With the cursor on
     /// another display it is first moved to this session's re-entry point,
     /// so a click never lands on a display the receiver isn't showing.
-    func handlePointerDown(button: PointerButton, clickCount: Int) {
+    func handlePointerDown(button: PointerButton, clickCount: Int, desktopTrackpad: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(.pointerButton(button)) else { return }
@@ -427,7 +448,9 @@ final class InputInjector {
         let cgButton: CGMouseButton = button == .left ? .left : .right
         let type: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
         let point: CGPoint
-        if let mapper = targetMapper {
+        if desktopTrackpad {
+            point = currentCursor()
+        } else if let mapper = targetMapper {
             guard let mapped = mapper.mapPointer(phase: .down, x: nil, y: nil, dx: 0, dy: 0) else { return }
             point = mapped
         } else {
@@ -451,6 +474,7 @@ final class InputInjector {
         eventSink.post(event)
         pointerHeldButton = cgButton
         pointerHeldClickCount = clickState
+        pointerHeldOnDesktop = desktopTrackpad
     }
 
     /// Releases `button` at the Mac's current cursor position.
@@ -463,7 +487,7 @@ final class InputInjector {
         let cgButton: CGMouseButton = button == .left ? .left : .right
         // Window mode: the release always ends the workspace's drag binding,
         // even when its press was refused (nothing was pressed on the Mac).
-        let mapped = targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
+        let mapped = pointerHeldOnDesktop ? nil : targetMapper?.mapPointer(phase: .up, x: nil, y: nil, dx: 0, dy: 0)
         // Only the episode that pressed it releases it (an unlock in between released it already).
         guard releaseIsAllowed() else { return }
         guard pointerHeldButton == cgButton else { return }   // no matching down (already released)
@@ -475,6 +499,7 @@ final class InputInjector {
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         eventSink.post(event)
         pointerHeldButton = nil
+        pointerHeldOnDesktop = false
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {

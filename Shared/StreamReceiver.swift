@@ -3423,9 +3423,14 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
-    @MainActor func sendScroll(dx: Double, dy: Double) {
+    @MainActor func sendScroll(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendUIControl(["type": "scroll", "dx": dx, "dy": dy])
+        var message: [String: Any] = ["type": "scroll", "dx": dx, "dy": dy]
+        if trackpad {
+            message["trackpadPoints"] = true
+            message["confined"] = confined
+        }
+        sendUIControl(message)
     }
 
     /// Send a semantic gesture without changing the meaning of touch/scroll input.
@@ -3445,19 +3450,28 @@ final class StreamReceiver: ObservableObject {
         sendTaggedInput(["type": "pointer", "action": "move", "x": x, "y": y])
     }
 
-    /// Relative cursor move: `dx`/`dy` in video pixels (same convention as
-    /// `scroll`), no button implied.
-    @MainActor func sendPointerMoveRelative(dx: Double, dy: Double) {
+    /// Relative movement in video pixels, or Quartz points on a Trackpad peer.
+    @MainActor func sendPointerMoveRelative(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendTaggedInput(["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy])
+        var message: [String: Any] = ["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy]
+        if trackpad {
+            message["trackpadPoints"] = true
+            message["confined"] = confined
+        }
+        sendTaggedInput(message)
     }
 
     /// Presses `button` down at the Mac's current cursor position with the
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
-    @MainActor func sendPointerDown(button: PointerButton, clickCount: Int) {
+    @MainActor func sendPointerDown(button: PointerButton, clickCount: Int, trackpad: Bool = false, confined: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
-        sendTaggedInput(["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount])
+        var message: [String: Any] = ["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount]
+        if trackpad {
+            message["trackpadPoints"] = true
+            message["confined"] = confined
+        }
+        sendTaggedInput(message)
     }
 
     /// Releases `button`. Every `down` a receiver sends MUST be followed by

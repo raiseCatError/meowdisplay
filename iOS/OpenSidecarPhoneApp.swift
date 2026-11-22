@@ -583,6 +583,7 @@ struct ReceiverScreen: View {
                                    // and control both unavailable, nothing suggests a working pad.
                                    showSurfaceGrid: controlStore.preferences.showSurfaceGrid && inputReachesMac,
                                    showCursorLocator: controlStore.preferences.showCursorLocator,
+                                   keepPointerOnReceiverDisplay: controlStore.preferences.keepPointerOnReceiverDisplay,
                                    pinchTarget: controlStore.preferences.pinchTarget,
                                    rotateTarget: controlStore.preferences.rotateTarget,
                                    snapRotation: controlStore.preferences.snapRotation,
@@ -3146,6 +3147,7 @@ struct VideoLayerView: UIViewRepresentable {
     let showSurfaceGrid: Bool
     /// An arrow at the picture's edge pointing at a Mac pointer that is out of view.
     let showCursorLocator: Bool
+    let keepPointerOnReceiverDisplay: Bool
     let pinchTarget: ReceiverGestureTarget
     let rotateTarget: ReceiverGestureTarget
     let snapRotation: Bool
@@ -3226,6 +3228,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.workspaceOverviewFocused = workspaceOverviewFocused
         view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         view.setCursorLocatorEnabled(showCursorLocator)
+        view.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                reservedDivisions: reservedDivisions)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
@@ -3382,6 +3385,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.workspaceOverviewFocused = workspaceOverviewFocused
         uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
         uiView.setCursorLocatorEnabled(showCursorLocator)
+        uiView.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
                                  reservedDivisions: reservedDivisions)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
@@ -3643,6 +3647,7 @@ struct VideoLayerView: UIViewRepresentable {
         static let resumeMarkerSize = CGSize(width: 18, height: 18)
         private var cursorOffDisplay: CursorLocatorTarget?
         private var cursorLocatorEnabled = true
+        var keepPointerOnReceiverDisplay = false
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
@@ -3958,7 +3963,14 @@ struct VideoLayerView: UIViewRepresentable {
             let directed = ScrollDirectionPolicy.apply(dx: Double(dx), dy: Double(dy),
                                                        invertVertical: invertVerticalScroll,
                                                        invertHorizontal: invertHorizontalScroll)
-            receiver?.sendScroll(dx: directed.dx, dy: directed.dy)
+            guard let receiver else { return }
+            receiver.sendScroll(dx: directed.dx, dy: directed.dy, trackpad: usesTrackpadPoints(receiver),
+                                confined: keepPointerOnReceiverDisplay)
+        }
+
+        private func usesTrackpadPoints(_ receiver: StreamReceiver) -> Bool {
+            pointerEngine.inputMode == .trackpad && receiver.macProtocolVersion >= WireProtocol.trackpadPointsWireVersion
+                && (!videoEnabled || receiver.confirmedDisplayMode != .window)
         }
 
         // MARK: - Local View Navigation
@@ -5875,21 +5887,22 @@ struct VideoLayerView: UIViewRepresentable {
             }
             #endif
             guard !commands.isEmpty, let receiver else { return }
-            // Only `.moveRelative` needs a valid video size (to convert
-            // through the viewport scale) — button down/up MUST still post
-            // even if it's momentarily unknown, so this isn't a guard on
-            // the whole function (a dropped mouseUp would leave the Mac
-            // with a stuck button).
             let video = receiver.videoSize
+            let trackpad = usesTrackpadPoints(receiver)
             for command in commands {
                 switch command {
                 case .moveAbsolute(let x, let y):
                     receiver.sendPointerMove(x: x, y: y)
                 case .moveRelative(let dx, let dy):
-                    guard let scale = pointsPerRemotePixel(video: video) else { continue }
-                    receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+                    if trackpad {
+                        receiver.sendPointerMoveRelative(dx: dx, dy: dy, trackpad: true,
+                                                         confined: keepPointerOnReceiverDisplay)
+                    } else if let scale = pointsPerRemotePixel(video: video) {
+                        receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+                    }
                 case .mouseDown(let button, let clickCount):
-                    receiver.sendPointerDown(button: button, clickCount: clickCount)
+                    receiver.sendPointerDown(button: button, clickCount: clickCount, trackpad: trackpad,
+                                             confined: keepPointerOnReceiverDisplay)
                     if button == .right {
                         // Preempt the legacy scroll/pinch recognizer from
                         // also claiming these same two touches — see
