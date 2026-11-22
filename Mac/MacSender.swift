@@ -394,9 +394,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the Mac owner prompt, and the session-grant decision — this instance
     /// never grants itself, and `grantSessionInput(generation:)` ignores a
     /// decision for any connection but the live admitted one. A release is
-    /// applied immediately by `denySessionInput` at the call site in
-    /// `handleControl` and never reaches here.
-    @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
+    /// applied immediately in the wire handler. The request revision lets
+    /// the owner’s decision fail closed if the receiver withdraws it.
+    @MainActor var onAllowInputRequest: ((_ generation: UInt64, _ revision: UInt64) -> Void)?
+    @MainActor var onAllowInputCancelled: (() -> Void)?
     /// Remote Finder: this connection asks to browse the approved folders; answer with
     /// `resolveFilesConsent(_:generation:)` after the owner decides.
     @MainActor var onFilesConsentRequest: ((_ generation: UInt64, _ capabilities: Set<FilesCapability>?) -> Void)?
@@ -984,6 +985,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // controller's own migration), so the receiver must ask again on the
     // new connection.
     private let sessionInputGrant = SessionInputGrantBox()
+    private let inputRequestRevision = OSAllocatedUnfairLock(initialState: UInt64(0))
     private var nativeAppGestureState = NativeAppGestureSessionState()
     private var loggedNativeGestureLimitation = false
 
@@ -1670,10 +1672,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `resolveInputControlRequest`), never directly from a wire handler.
     /// Inert when that connection is no longer the live admitted one — a
     /// decision made for connection A never grants connection B.
-    func grantSessionInput(generation: UInt64) {
+    func grantSessionInput(generation: UInt64, requestRevision: UInt64? = nil) {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
+            if let requestRevision, !self.inputRequestIsCurrent(generation: generation, revision: requestRevision) { return }
             // A decision that raced a Fast User Switch out of this login
             // session grants nothing (`InputControlRequestRoute`).
             guard LoginSessionConsole.shared.isOnConsole else {
@@ -1691,6 +1694,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let sink = self.statusSink
             Task { @MainActor in sink.publishSessionInputGrantChanged(true) }
         }
+    }
+
+    func inputRequestIsCurrent(generation: UInt64, revision: UInt64) -> Bool {
+        sessionAuthorization.isAdmitted(generation: generation)
+            && inputRequestRevision.withLock { $0 == revision }
     }
 
     /// Which lock state this sender reads (tests set their own; the app keeps `.shared` current).
@@ -6705,14 +6713,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // The decision is bound to THIS connection's generation.
                     let allowInputSelfBox = self.selfBox
                     let requestGeneration = activeConnectionGeneration
+                    let revision = inputRequestRevision.withLock { $0 }
                     Task { @MainActor in
-                        guard let self = allowInputSelfBox.resolve() else { return }
-                        self.onAllowInputRequest?(requestGeneration)
+                        guard let self = allowInputSelfBox.resolve(),
+                              self.inputRequestIsCurrent(generation: requestGeneration, revision: revision) else { return }
+                        self.onAllowInputRequest?(requestGeneration, revision)
                     }
                 }
             } else {
-                // Releasing this session's own grant is always safe/
-                // immediate — narrowing never needs a decision.
+                // An answer to a withdrawn prompt must never grant control.
+                let revision = inputRequestRevision.withLock { current in
+                    current &+= 1
+                    return current
+                }
+                let generation = activeConnectionGeneration
+                let selfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = selfBox.resolve(),
+                          self.inputRequestIsCurrent(generation: generation, revision: revision) else { return }
+                    self.onAllowInputCancelled?()
+                }
                 denySessionInput(state: .off)
             }
         case WireMessage.videoRequest:
