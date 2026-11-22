@@ -68,7 +68,7 @@ final class OverviewInteractionTests: XCTestCase {
         let focal = viewPoint(interaction, world: CGPoint(x: 960, y: 540))
         interaction.pinch(factor: 4, focal: focal)
         XCTAssertEqual(interaction.detailRequest, OverviewDisplayDetailRequest(id: 1, maxSide: 1600))
-        interaction.pan(byView: CGPoint(x: 80_000, y: 80_000))
+        interaction.pan(byView: CGVector(dx: 80_000, dy: 80_000))
         XCTAssertNil(interaction.detailRequest)
         interaction.fitAll()
         XCTAssertNil(interaction.detailRequest)
