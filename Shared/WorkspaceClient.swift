@@ -232,6 +232,7 @@ enum WorkspaceEvent: Sendable {
     case thumbnail(windowID: UInt32, generation: UInt64, data: Data?, stale: Bool = false)
     case icon(bundleID: String, data: Data)
     case displayThumbnail(displayID: UInt32, data: Data)
+    case displayDetail(OverviewDisplayDetailRequest, data: Data)
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
     case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
@@ -327,8 +328,14 @@ enum WorkspaceEvent: Sendable {
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
             return .thumbnail(windowID: id, generation: u64(obj, "gen") ?? 0, data: data, stale: obj["stale"] as? Bool ?? false)
         case WireMessage.displayThumbnail:
-            guard let id = u32(obj, "id"), let jpeg = obj["jpeg"] as? String, jpeg.count <= maxBase64,
-                  let data = Data(base64Encoded: jpeg) else { return nil }
+            guard let id = u32(obj, "id"), let jpeg = obj["jpeg"] as? String else { return nil }
+            if let side = obj["detail"] as? Int {
+                guard OverviewDisplayDetailRequest.sizes.contains(side),
+                      jpeg.count <= OverviewDisplayDetailRequest.maxBase64,
+                      let data = Data(base64Encoded: jpeg) else { return nil }
+                return .displayDetail(OverviewDisplayDetailRequest(id: id, maxSide: side), data: data)
+            }
+            guard jpeg.count <= maxBase64, let data = Data(base64Encoded: jpeg) else { return nil }
             return .displayThumbnail(displayID: id, data: data)
         case WireMessage.appCatalog:
             guard let rev = obj["rev"] as? Int else { return nil }
@@ -412,10 +419,12 @@ enum WorkspaceRequests {
         return m
     }
 
-    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String], displays: [UInt32] = []) -> [String: Any] {
+    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String], displays: [UInt32] = [],
+                           detail: OverviewDisplayDetailRequest? = nil) -> [String: Any] {
         var m: [String: Any] = ["type": WireMessage.windowThumbnailRequest, "ids": ids.prefix(24).map { Int($0) }, "max": maxWidth]
         if !icons.isEmpty { m["icons"] = Array(icons.prefix(48)) }
         if !displays.isEmpty { m["displays"] = displays.prefix(8).map { Int($0) } }
+        if let detail { m["detail"] = detail.wire }
         return m
     }
 
@@ -636,6 +645,7 @@ final class WorkspaceModel: ObservableObject {
     @Published var displayOverviewOpen = false {
         didSet {
             if displayOverviewOpen, !oldValue { startRefreshing() }
+            if !displayOverviewOpen, oldValue { setOverviewDetail(nil) }
             if displayOverviewOpen != oldValue { overviewCursorWatchChanged() }
         }
     }
@@ -656,6 +666,8 @@ final class WorkspaceModel: ObservableObject {
     /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
     @Published private(set) var unavailableThumbnails: Set<UInt32> = []
     @Published private(set) var displayThumbnails: [UInt32: CGImage] = [:]
+    private var overviewDetailRequest: OverviewDisplayDetailRequest?
+    @Published private var overviewDetailImage: CGImage?
     @Published private(set) var icons: [String: CGImage] = [:]
     /// Which icons to ask the Mac for, and when to ask again (once per connection, with backoff).
     private var iconPlanner = AppIconRequestPlanner()
@@ -1020,6 +1032,10 @@ final class WorkspaceModel: ObservableObject {
         case .displayThumbnail(let id, let data):
             guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
             displayThumbnails[id] = image
+        case .displayDetail(let request, let data):
+            guard displayOverviewOpen, request == overviewDetailRequest,
+                  let image = WorkspaceImageDecoder.image(data, maxSide: request.maxSide) else { return }
+            overviewDetailImage = image
         case .appCatalog(let rev, let list):
             inventory.answered(now: clock())
             appRevision = rev
@@ -1196,10 +1212,23 @@ final class WorkspaceModel: ObservableObject {
         let displays = (stagePeekOpen || overviewOpen || displayOverviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
         // Stage Peek's gallery shows large cards: sharp stills.
-        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320,
+                                              icons: wantedIcons, displays: displays, detail: overviewDetailRequest)) {
             iconPlanner.unsent(wantedIcons)
         }
         scheduleIconRetry()
+    }
+
+    func setOverviewDetail(_ request: OverviewDisplayDetailRequest?) {
+        guard overviewDetailRequest != request else { return }
+        if overviewDetailRequest?.id != request?.id { overviewDetailImage = nil }
+        overviewDetailRequest = request
+        if request != nil, displayOverviewOpen { requestThumbnails() }
+    }
+
+    func overviewImage(for id: UInt32) -> CGImage? {
+        if overviewDetailRequest?.id == id, let overviewDetailImage { return overviewDetailImage }
+        return displayThumbnails[id]
     }
 
     /// The displays worth a live thumbnail: MeowDisplay virtual displays (this session's or another's)

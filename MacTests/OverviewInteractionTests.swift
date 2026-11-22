@@ -62,6 +62,27 @@ final class OverviewInteractionTests: XCTestCase {
         XCTAssertFalse(interaction.showsRecovery)
     }
 
+    func testOverviewRequestsOneBoundedSharpStillOnlyAtHigherZoom() {
+        var interaction = makeInteraction()
+        XCTAssertNil(interaction.detailRequest)
+        let focal = viewPoint(interaction, world: CGPoint(x: 960, y: 540))
+        interaction.pinch(factor: 4, focal: focal)
+        XCTAssertEqual(interaction.detailRequest, OverviewDisplayDetailRequest(id: 1, maxSide: 1600))
+        interaction.pan(byView: CGPoint(x: 80_000, y: 80_000))
+        XCTAssertNil(interaction.detailRequest)
+        interaction.fitAll()
+        XCTAssertNil(interaction.detailRequest)
+    }
+
+    func testDetailThumbnailWireRejectsUnboundedImagesAndUnknownSizes() {
+        let request = OverviewDisplayDetailRequest(id: 7, maxSide: 1600)
+        XCTAssertEqual(OverviewDisplayDetailRequest.parse(request.wire), request)
+        XCTAssertNil(OverviewDisplayDetailRequest.parse(["id": 7, "maxSide": 32_000]))
+        let overBudget = String(repeating: "A", count: OverviewDisplayDetailRequest.maxBase64 + 4)
+        XCTAssertNil(WorkspaceEvent.parse(type: WireMessage.displayThumbnail,
+                                          ["id": 7, "detail": 1600, "jpeg": overBudget]))
+    }
+
     // MARK: Pinch
 
     func testPinchKeepsTheWorldPointUnderTheFocalPoint() {
