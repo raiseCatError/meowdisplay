@@ -22,6 +22,99 @@ final class WorkspaceClientTests: XCTestCase {
         return m
     }
 
+    private func restoreCatalog(generation: Int? = 5, minimized: Bool = true) -> WorkspaceEvent {
+        let windows: [[String: Any]] = generation.map {
+            [["id": 10, "gen": $0, "bundle": "dev.zed.Zed", "app": "Zed",
+              "title": "Original", "state": minimized ? "offscreen" : "visible"]]
+        } ?? []
+        return WorkspaceEvent.parse(type: WireMessage.windowCatalog,
+                                    ["host": "mac-a", "windows": windows, "apps": []])!
+    }
+
+    func testShowMinimizedWindowRequestsControlAndRestoresOnceAfterMacApproval() throws {
+        var sent: [[String: Any]] = []
+        var requests = 0
+        var control = SessionInputWireState.off
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { sent.append($0) } }
+        m.controlState = { control }
+        m.requestControlForWindowShow = { requests += 1; return true }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(.mode(window: true))
+        m.apply(restoreCatalog())
+        let window = try XCTUnwrap(m.catalog?.windows.first)
+
+        XCTAssertEqual(m.minimizedWindowAction(window), .request)
+        m.showMinimizedWindow(window)
+        m.showMinimizedWindow(window)
+        XCTAssertEqual(requests, 1)
+        XCTAssertTrue(sent.isEmpty)
+        control = .requesting
+        m.windowShowControlChanged(control)
+        control = .allowed
+        m.windowShowControlChanged(control)
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?["window"] as? Int, 10)
+        XCTAssertEqual(sent.first?["gen"] as? Int, 5)
+        XCTAssertEqual(sent.first?["ifOffscreen"] as? Bool, true)
+        XCTAssertEqual(m.minimizedWindowAction(window), .show)
+    }
+
+    func testPendingShowRejectsDenialCancellationChangedTargetAndReconnection() throws {
+        let interruptions: [(WorkspaceModel) -> Void] = [
+            { $0.windowShowControlChanged(.notAllowed) },
+            { $0.windowShowControlChanged(.off) },
+            { $0.cancelWindowShow() },
+            { $0.apply(self.restoreCatalog(generation: nil)) },
+            { $0.apply(self.restoreCatalog(generation: 6)) },
+            { $0.apply(self.restoreCatalog(minimized: false)) },
+            { $0.apply(.mode(window: false)) },
+            { $0.apply(.connected(peerID: "mac-a")) },
+            { $0.apply(.disconnected) },
+        ]
+        for interrupt in interruptions {
+            var activations = 0
+            var control = SessionInputWireState.off
+            let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+            m.controlState = { control }
+            m.apply(.connected(peerID: "mac-a"))
+            m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+            m.apply(.mode(window: true))
+            m.apply(restoreCatalog())
+            m.requestControlForWindowShow = { true }
+            XCTAssertFalse(m.windowShowPending)
+            m.showMinimizedWindow(try XCTUnwrap(m.catalog?.windows.first))
+            XCTAssertTrue(m.windowShowPending)
+            control = .requesting
+            m.windowShowControlChanged(control)
+            interrupt(m)
+            control = .allowed
+            m.windowShowControlChanged(control)
+            XCTAssertEqual(activations, 0)
+            XCTAssertFalse(m.windowShowPending)
+        }
+    }
+
+    func testMinimizedRestoreRequiresPromptForDeferredActionAndAllowsExplicitShowWithControl() throws {
+        var activations = 0
+        var control = SessionInputWireState.off
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+        m.controlState = { control }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(.mode(window: true))
+        m.apply(restoreCatalog())
+        let window = try XCTUnwrap(m.catalog?.windows.first)
+        m.requestControlForWindowShow = { true }
+        m.showMinimizedWindow(window)
+        control = .allowed
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(activations, 0)
+        m.showMinimizedWindow(window)
+        XCTAssertEqual(activations, 1)
+    }
+
     private func catalogWithDisplay(_ windows: [(UInt32, UInt64, String)]) -> WorkspaceEvent {
         WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
             "type": WireMessage.windowCatalog, "host": "mac-a",

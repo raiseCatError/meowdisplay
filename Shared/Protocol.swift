@@ -232,6 +232,8 @@ enum WindowWorkspaceWire {
     /// `display`) shows every Mac display in its arrangement, live, and moves the real cursor
     /// across them. Without it the receiver never sends one (an older Mac refuses it as `unavailable`).
     static let overviewPaneFeature = "overviewPane"
+    static let restoreOffscreenFeature = "restoreOffscreenWindow"
+    static let welcomeFeatureLimit = 17
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }

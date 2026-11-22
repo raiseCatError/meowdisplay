@@ -906,6 +906,7 @@ final class WorkspaceModel: ObservableObject {
     func apply(_ event: WorkspaceEvent) {
         switch event {
         case .connected(let peer):
+            cancelWindowShow(message: String(localized: "The Mac session changed."))
             if peer != host { load(for: peer) }
             // A new connection: every app shown here gets its icon asked for again if it's missing
             // (this device may have restarted while the Mac kept its session).
@@ -931,6 +932,8 @@ final class WorkspaceModel: ObservableObject {
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             canShowOverviewPane = f.contains(WindowWorkspaceWire.overviewPaneFeature)
+            supportsOffscreenRestore = f.contains(WindowWorkspaceWire.restoreOffscreenFeature)
+            validatePendingWindowShow()
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
@@ -964,7 +967,7 @@ final class WorkspaceModel: ObservableObject {
         case .mode(let window):
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
-            if !window { remote = nil }
+            if !window { remote = nil; cancelWindowShow() }
             if window { awaitingCatalogToSend = true; requestCatalog() }
             // Open Fullscreen's Window view started; or Window view ended another way (Settings,
             // the Mac, a refused switch): its pane is gone and Exit must never ask for an old mode.
@@ -987,6 +990,9 @@ final class WorkspaceModel: ObservableObject {
             let duplicates = s.rejected.filter { $0.value == "duplicateWindow" }.map(\.key).filter { layout.tiles[$0]?.source != nil }
             if !duplicates.isEmpty {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
+            }
+            if let pendingWindowShow, s.gone.contains(where: { $0.window == pendingWindowShow.window.id && $0.generation == pendingWindowShow.window.generation }) {
+                cancelWindowShow(message: String(localized: "That window closed."))
             }
             if !s.gone.isEmpty { windowsClosedOnMac(s.gone) }
         case .thumbnail(let id, _, let data, let stale):
@@ -1049,6 +1055,7 @@ final class WorkspaceModel: ObservableObject {
             // Only while the overview watches: a late message after it closed shows nothing.
             if displayOverviewOpen, overviewCursor != cursor { overviewCursor = cursor }
         case .disconnected:
+            cancelWindowShow(message: String(localized: "The Mac disconnected."))
             overviewCursor = nil
             overviewCursorRenewal?.cancel(); overviewCursorRenewal = nil
             sendTask?.cancel()
@@ -1070,6 +1077,7 @@ final class WorkspaceModel: ObservableObject {
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canShowOverviewPane = false
+            supportsOffscreenRestore = false
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
             windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
@@ -1095,6 +1103,7 @@ final class WorkspaceModel: ObservableObject {
     /// locked screen. The layout is kept. Unlocked: the window list is asked for again, and
     /// stills come back as they're asked for.
     private func macLockChanged(locked: Bool) {
+        if locked { cancelWindowShow(message: String(localized: "The Mac locked.")) }
         guard locked != macLocked else { return }
         macLocked = locked
         guard locked else {
@@ -1147,6 +1156,7 @@ final class WorkspaceModel: ObservableObject {
         Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
         if c.starting { return }
         catalog = c
+        validatePendingWindowShow()
         if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
         if !c.unavailable, var s = appFirst, s.listed(running: c.apps) { appFirst = s }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -1637,8 +1647,155 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    enum MinimizedWindowAction: Equatable {
+        case show, request
+
+        var title: String {
+            switch self {
+            case .show: return String(localized: "Show on Mac")
+            case .request: return String(localized: "Request Control & Show")
+            }
+        }
+    }
+
+    private struct PendingWindowShow {
+        let host: String
+        let window: CatalogWindowItem
+        let pane: String?
+        let deadline: TimeInterval
+        var sawPrompt = false
+    }
+
+    var requestControlForWindowShow: () -> Bool = { false }
+    private var supportsOffscreenRestore = false
+    private var pendingWindowShow: PendingWindowShow?
+    private var windowShowTimeout: Task<Void, Never>?
+    @Published private(set) var windowShowPending = false
+    @Published private(set) var windowShowNotice: String?
+
+    func minimizedWindowAction(_ window: CatalogWindowItem) -> MinimizedWindowAction? {
+        guard let host, windowShowTargetIsValid(.init(host: host, window: window, pane: nil, deadline: .infinity)) else { return nil }
+        switch controlState() {
+        case .allowed: return .show
+        case .off, .notAllowed: return supportsOffscreenRestore && !windowShowPending ? .request : nil
+        case .requesting, .requestsDisabled: return nil
+        }
+    }
+
+    func minimizedPaneWindow(_ id: String, tab: Int? = nil) -> CatalogWindowItem? {
+        guard let pane = layout.tiles[id] else { return nil }
+        if let tab, !pane.tabs.indices.contains(tab) { return nil }
+        let source = tab.map { pane.tabs[$0] } ?? pane.source
+        guard let source, source.host == host, source.kind == .window,
+              let window = windowItem(source), window.minimized else { return nil }
+        return window
+    }
+
+    func showMinimizedTab(_ window: CatalogWindowItem, pane: String, index: Int) {
+        guard minimizedPaneWindow(pane, tab: index) == window else { return }
+        edit { $0.switchingTab(of: pane, to: index) }
+        focus(pane, raise: false)
+        showMinimizedWindow(window, pane: pane)
+    }
+
+    func showMinimizedWindow(_ window: CatalogWindowItem, pane: String? = nil) {
+        guard let host, let action = minimizedWindowAction(window) else { return }
+        let target = PendingWindowShow(host: host, window: window, pane: pane, deadline: clock() + 60)
+        guard windowShowTargetIsValid(target) else { return }
+        windowShowNotice = nil
+        if action == .show {
+            activateMinimizedWindow(target)
+            return
+        }
+        pendingWindowShow = target
+        windowShowPending = true
+        windowShowTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            guard !Task.isCancelled else { return }
+            self?.cancelWindowShow(message: String(localized: "The request to show the window expired."))
+        }
+        if !requestControlForWindowShow() {
+            cancelWindowShow(message: String(localized: "Can’t request control right now. Try again shortly."))
+        }
+    }
+
+    private func windowShowTargetIsValid(_ target: PendingWindowShow) -> Bool {
+        guard available, windowMode, inputAllowed(), !macLocked, !missionControlOpen,
+              host == target.host, let catalog, !catalog.unavailable,
+              target.window.minimized, target.window.generation != 0,
+              catalog.windows.contains(where: {
+                  $0.id == target.window.id && $0.generation == target.window.generation
+                      && $0.bundleID == target.window.bundleID && $0.minimized
+              }) else { return false }
+        guard let pane = target.pane else { return true }
+        return layout.tiles[pane]?.source?.windowID == target.window.id
+            && layout.tiles[pane]?.source?.host == target.host
+    }
+
+    private func validatePendingWindowShow() {
+        if let pendingWindowShow, !windowShowTargetIsValid(pendingWindowShow) {
+            cancelWindowShow(message: String(localized: "The window is no longer available to show."))
+        }
+    }
+
+    func windowShowControlChanged(_ state: SessionInputWireState) {
+        guard var pending = pendingWindowShow else { return }
+        guard clock() < pending.deadline else {
+            cancelWindowShow(message: String(localized: "The request to show the window expired."))
+            return
+        }
+        switch state {
+        case .requesting:
+            pending.sawPrompt = true
+            pendingWindowShow = pending
+        case .allowed:
+            cancelWindowShow(message: nil)
+            guard supportsOffscreenRestore, pending.sawPrompt, windowShowTargetIsValid(pending) else {
+                windowShowNotice = String(localized: "Choose Show on Mac to restore the window.")
+                return
+            }
+            activateMinimizedWindow(pending)
+        case .notAllowed, .requestsDisabled, .off:
+            cancelWindowShow(message: String(localized: "The window stayed minimized. Control was not approved."))
+        }
+    }
+
+    func cancelWindowShow() {
+        cancelWindowShow(message: String(localized: "Showing the window was cancelled."))
+    }
+
+    private func cancelWindowShow(message: String?) {
+        guard pendingWindowShow != nil else { return }
+        pendingWindowShow = nil
+        windowShowTimeout?.cancel()
+        windowShowTimeout = nil
+        windowShowPending = false
+        windowShowNotice = message
+    }
+
+    func dismissWindowShowNotice() { windowShowNotice = nil }
+
+    private func activateMinimizedWindow(_ target: PendingWindowShow) {
+        guard canControlMac, windowShowTargetIsValid(target) else { return }
+        var request = WorkspaceRequests.activateWindow(target.window.id, generation: target.window.generation)
+        if supportsOffscreenRestore { request["ifOffscreen"] = true }
+        if !send(request) {
+            windowShowNotice = String(localized: "Couldn’t send the request to show the window.")
+        }
+    }
+
+    func showOnMacTitle(_ id: String) -> String? {
+        if let window = minimizedPaneWindow(id) { return minimizedWindowAction(window)?.title }
+        return canControlMac && !missionControlOpen ? String(localized: "Show on Mac") : nil
+    }
+
     func showOnMac(_ id: String) {
-        guard let source = layout.tiles[id]?.source, !source.isDisplay, let gen = generation(source) else { return }
+        if let window = minimizedPaneWindow(id) {
+            showMinimizedWindow(window, pane: id)
+            return
+        }
+        guard canControlMac, let source = layout.tiles[id]?.source, source.kind == .window,
+              let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.activateWindow(source.windowID, generation: gen))
     }
 
@@ -1904,7 +2061,9 @@ final class WorkspaceModel: ObservableObject {
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
         saved = stacked.isEmpty ? next : updated
         refreshMissing()
-        persist(); publish(); scheduleSend()
+        persist(); publish()
+        validatePendingWindowShow()
+        scheduleSend()
     }
 
     func undo() {

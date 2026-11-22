@@ -2974,7 +2974,7 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
-            let macFeatures = Set((obj["features"] as? [String] ?? []).prefix(16).map { String($0.prefix(32)) })
+            let macFeatures = Set((obj["features"] as? [String] ?? []).prefix(WindowWorkspaceWire.welcomeFeatureLimit).map { String($0.prefix(32)) })
             workspaceEvents.emit(.features(macFeatures))
             macTakesRemoteEndpoints = macFeatures.contains(RemoteEndpointsWire.welcomeFeature)
             sendRemoteEndpointsIfSupported()
