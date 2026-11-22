@@ -314,12 +314,8 @@ struct DisplayOverviewScreen: View {
 
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
-    private var showLabels: (visible: String, accessible: String) {
-        if model.replacingTile != nil {
-            let title = String(localized: "Use Display")
-            return (title, title)
-        }
-        return (String(localized: "Show"), String(localized: "Show in Pane"))
+    private var showTitle: String {
+        model.replacingTile != nil ? String(localized: "Use Display") : String(localized: "Show in Pane")
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {
@@ -367,22 +363,15 @@ struct DisplayOverviewScreen: View {
     }
 
     private var actionPrimary: some View {
-        OverviewActionButton(title: showLabels.visible, prominent: true, action: showSelected)
-            .accessibilityLabel(Text(showLabels.accessible))
+        OverviewActionButton(title: showTitle, prominent: true, action: showSelected)
             .accessibilityHint(model.replacingTile == nil ? Text("Opens the selected display.") : Text("Replaces the display in this pane."))
             .accessibilityIdentifier("displayOverviewShowInPane")
     }
 
     @ViewBuilder private func secondaryActions(_ item: CatalogDisplayItem) -> some View {
         if canAddPane(item) {
-            OverviewActionButton(title: String(localized: "New Pane")) { dismiss(); onAddAsNewPane(item) }
-                .accessibilityLabel("Add as New Pane")
+            OverviewActionButton(title: String(localized: "Add as New Pane")) { dismiss(); onAddAsNewPane(item) }
                 .accessibilityIdentifier("displayOverviewAddPane")
-        }
-        if model.canUseDisplayActions, model.canControlMac {
-            OverviewActionButton(title: String(localized: "Move Cursor")) { model.moveCursor(to: item) }
-                .accessibilityLabel("Move Cursor Here")
-                .accessibilityIdentifier("displayOverviewMoveCursor")
         }
     }
 

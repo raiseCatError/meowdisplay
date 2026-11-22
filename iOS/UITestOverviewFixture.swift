@@ -35,7 +35,9 @@ enum UITestOverviewFixture {
         let suite = "uitest.overviewFixture"
         UserDefaults.standard.removePersistentDomain(forName: suite)
         let model = WorkspaceModel(defaults: UserDefaults(suiteName: suite) ?? .standard)
-        // Identify Displays shows (it sends nothing here); Move Cursor needs control, never held.
+        // Some tests give the offline view the same state as a receiver with control.
+        let controlGranted = ProcessInfo.processInfo.environment["MEOW_UITEST_OVERVIEW_CONTROL"] == "1"
+        model.inputAllowed = { controlGranted }
         model.apply(.features([DisplayArrangeWire.welcomeFeature]))
         model.apply(.catalog(WorkspaceCatalogMessage(host: nil, windows: [], apps: [], installed: [],
                                                      unavailable: false, displays: displays)))

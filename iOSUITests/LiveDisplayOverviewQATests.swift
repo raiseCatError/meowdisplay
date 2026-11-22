@@ -8,7 +8,6 @@ import XCTest
 ///                                   virtual display the owner approved); without it the test
 ///                                   checks the single-display fallback instead.
 ///   MEOW_LIVE_ALLOW_IDENTIFY=1      Identify Displays (numbers drawn on the Mac's displays).
-///   MEOW_LIVE_ALLOW_CURSOR_MOVE=1   Move Cursor Here (moves the Mac pointer once).
 ///   MEOW_LIVE_REQUEST_CONTROL=1     the editor test taps Request Control and waits up to 120 s for the
 ///                                   owner to approve on the Mac (it never approves anything itself).
 /// The Mac arrangement is never edited here.
@@ -73,17 +72,6 @@ final class LiveDisplayOverviewQATests: XCTestCase {
             sleep(2)
             snapshot(app, "overview-05-identify")
         }
-        if on("MEOW_LIVE_ALLOW_CURSOR_MOVE") {
-            let move = app.buttons["displayOverviewMoveCursor"]
-            if move.waitForExistence(timeout: 3) {
-                move.tap()
-                sleep(2)
-                snapshot(app, "overview-06-cursor-moved")
-            } else {
-                XCTFail("Move Cursor Here is missing although control was expected")
-            }
-        }
-
         // Show in Pane closes the overview and streams that display in a pane.
         showInPane.tap()
         XCTAssertTrue(waitUntil(8) { !done.exists }, "Show in Pane closes the overview")
