@@ -3970,7 +3970,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         private func usesTrackpadPoints(_ receiver: StreamReceiver) -> Bool {
             pointerEngine.inputMode == .trackpad && receiver.macProtocolVersion >= WireProtocol.trackpadPointsWireVersion
-                && (!videoEnabled || receiver.confirmedDisplayMode != .window)
+                && (!videoEnabled || !receiver.windowModeActive)
         }
 
         // MARK: - Local View Navigation
