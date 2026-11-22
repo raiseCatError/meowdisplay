@@ -125,6 +125,12 @@ struct StagePeekOverlay: View {
                     .animation(.spring(response: 0.3, dampingFraction: 0.85), value: machine.closeRevealed)
                     if machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
                         title(for: focus)
+                        if machine.closeRevealed == nil, let window = window(at: focus.index) {
+                            StagePeekRestoreButton(model: model, window: window)
+                                .position(x: focus.center.x + max(0, focus.size.width / 2 - 26),
+                                          y: focus.center.y + max(0, focus.size.height / 2 - 26))
+                                .zIndex(9)
+                        }
                     }
                     if machine.expansion < 0.5, model.drag == nil, let id = machine.closeRevealed,
                        let i = machine.ids.firstIndex(of: id), let card = cards.first(where: { $0.index == i }),
