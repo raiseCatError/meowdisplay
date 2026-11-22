@@ -27,6 +27,8 @@ object ClipboardWire {
     const val MAX_FILES = 2_000
     const val MAX_DEPTH = 32
     const val MAX_ORIGIN = 128
+    /** Shared with Swift: wire counters must be exactly representable in JSON. */
+    const val MAX_COUNTER = 1L shl 53
     /** Hard caps on declared sizes, so totals never overflow. */
     const val MAX_REP_BYTES = 200_000_000
     const val MAX_FILE_BYTES = 1L shl 40
@@ -132,13 +134,13 @@ data class ClipEvent(val header: ClipHeader, val at: Long, val items: List<ClipI
         /** Bounded, defensive: null for anything malformed (unsafe file names drop the event). */
         fun parse(o: JsonObject): ClipEvent? {
             val origin = o.str("o")?.takeIf { it.isNotEmpty() && it.length <= ClipboardWire.MAX_ORIGIN } ?: return null
-            val seq = o.long("s")?.takeIf { it > 0 } ?: return null
-            val lc = o.long("lc")?.takeIf { it > 0 } ?: return null
+            val seq = o.long("s")?.takeIf { it in 1..ClipboardWire.MAX_COUNTER } ?: return null
+            val lc = o.long("lc")?.takeIf { it in 1..ClipboardWire.MAX_COUNTER } ?: return null
             val ch = o.str("ch")?.takeIf { it.length <= 64 } ?: return null
             val context = mutableMapOf<String, Long>()
             (o["vv"] as? JsonObject)?.entries?.take(64)?.forEach { (k, v) ->
                 val n = (v as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull ?: return null
-                if (k.length > ClipboardWire.MAX_ORIGIN || n < 0) return null
+                if (k.length > ClipboardWire.MAX_ORIGIN || n !in 0..ClipboardWire.MAX_COUNTER) return null
                 context[k] = n
             }
             context[origin] = maxOf(context[origin] ?: 0, seq)
@@ -188,7 +190,9 @@ class ClipboardSync(val origin: String, seq: Long = 0, lamport: Long = 0) {
     enum class Decision(val wire: String) { Apply("apply"), Alternative("alternative"), Duplicate("duplicate"), Echo("echo"), Older("older") }
 
     var seq: Long = seq; private set
-    var lamport: Long = lamport; private set
+    // Older versions may have persisted a peer's unbounded counter. Match
+    // Swift's migration so the next local copy cannot wrap signed Long.
+    var lamport: Long = minOf(lamport, ClipboardWire.MAX_COUNTER); private set
     private val seenMap = mutableMapOf<String, Long>().apply { if (seq > 0) put(origin, seq) }
     val seen: Map<String, Long> get() = seenMap
     var current: ClipHeader? = null; private set
