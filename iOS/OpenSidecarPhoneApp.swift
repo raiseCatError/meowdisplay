@@ -3642,7 +3642,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// The ring is 14 pt across; the extra 4 pt holds the outline's outer half.
         static let resumeMarkerSize = CGSize(width: 18, height: 18)
         private var cursorOffDisplay: CursorLocatorTarget?
-        private var cursorLocatorEnabled = true
+        private var cursorLocatorEnabled = false
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?

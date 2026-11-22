@@ -889,7 +889,7 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
 }
 
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 23
+    static let schemaVersion = 24
 
     var version = schemaVersion
     var trayEnabled = true
@@ -992,7 +992,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// An arrow at the edge of the picture pointing at the Mac pointer while it is somewhere
     /// this receiver isn't showing (another display, or zoomed or panned out of view). It
     /// never stands for the pointer itself and never affects input.
-    var showCursorLocator = true
+    var showCursorLocator = false
     var pinchTarget = ReceiverGestureTarget.viewport
     /// Defaults to Disabled (schema 16): an accidental twist while pinching
     /// should never tilt the Mac display. Viewport rotation stays one
@@ -1144,7 +1144,6 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
-        // Absent (added 2026-11-15): on, like a new install. No schema bump.
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
         rotateTarget = try value(.rotateTarget, fallback.rotateTarget)
@@ -1424,6 +1423,12 @@ struct ReceiverControlPreferencesRepository {
         if value.version < 23 {
             value.profiles = value.profiles.map { $0.addingQuitToUntouchedCommandPalette() }
             value.version = 23
+        }
+        if value.version < 24 {
+            // Every older save encoded the previous default. A stored true
+            // cannot establish an opt-in, so offer the setting off once.
+            value.showCursorLocator = false
+            value.version = 24
         }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the

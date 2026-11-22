@@ -324,6 +324,33 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(migrated.showSurfaceGrid)
     }
 
+    func testCursorLocatorStartsOffAndOptInSurvivesRelaunch() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+
+        var preferences = repository.load()
+        XCTAssertFalse(preferences.showCursorLocator)
+        preferences.showCursorLocator = true
+        repository.save(preferences)
+        XCTAssertTrue(ReceiverControlPreferencesRepository(defaults: defaults).load().showCursorLocator)
+    }
+
+    func testLegacyCursorLocatorDefaultDoesNotBecomeAnOptIn() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        let legacy = Data(#"{"version":23,"showCursorLocator":true,"showSurfaceGrid":false}"#.utf8)
+        defaults.set(legacy, forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertFalse(migrated.showCursorLocator)
+        XCTAssertFalse(migrated.showSurfaceGrid)
+    }
+
     func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {
         var preferences = ReceiverControlPreferences()
         XCTAssertTrue(preferences.trayCanBeShown)
