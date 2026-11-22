@@ -155,7 +155,10 @@ Folding resizes the app mid-session, so every capability stays reachable in both
 
 On a fold (iPhone Duo) the roomy rails skip over the crease (a vertical crease across a top or bottom rail, a horizontal one across a side rail) and Custom controls placed on it move wholly onto one half, so no control straddles it. Controls stay inside the safe area, including the trailing system area. Geometry is unit-tested only; not yet run on a real Duo.
 
-**Upside-down portrait is not available on iPhones without a Home button.** That is a system rule, not a setting here, and the app does not work around it with a transform. Use landscape either way.
+**Upside-down portrait depends on which Duo display is active.** The folded outer display follows ordinary iPhone orientation rules. On the unfolded inner display, UIKit navigation controllers support all four orientations. MeowDisplay declares all four for the receiver and leaves rotation of the interface, including Settings and controls, to the system. Rotation Lock can affect what you see. [Apple’s navigation controller orientation guidance](https://developer.apple.com/documentation/uikit/uinavigationcontroller)
+
+For larger text in Extend, open receiver Settings and choose **Desktop Size → Larger Text** or **Largest Text**. A compatible Mac sender advertises this setting and applies it to the virtual desktop. **Extend Shape** controls the aspect ratio.
+
 ## Keyboard and haptics
 
 | Control | iPhone | iPad | Android | Mac Receiver |
