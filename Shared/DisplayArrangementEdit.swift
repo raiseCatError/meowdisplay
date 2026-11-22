@@ -79,7 +79,7 @@ struct DisplayArrangementEdit: Equatable, Sendable {
     static let defaultSnapDistance: CGFloat = 96
 
     /// The arrangement the edit started from (drawn displays, reading order).
-    let original: [ArrangementDisplay]
+    private(set) var original: [ArrangementDisplay]
     /// The proposed arrangement (same displays and order as `original`).
     private(set) var displays: [ArrangementDisplay]
     /// Mirror member id -> the drawn display it folds into.
@@ -140,6 +140,17 @@ struct DisplayArrangementEdit: Equatable, Sendable {
     /// The first reason the proposed arrangement can't be applied, nil when it can.
     func validate() -> DisplayArrangementProblem? {
         Self.problem(in: displays, original: original)
+    }
+
+    /// Keep confirms the Mac saved these normalized positions. Start the next edit from them
+    /// even when the new catalog arrived while the consent flow was still busy.
+    mutating func acceptKeptArrangement() {
+        let origins = normalizedOrigins
+        for index in displays.indices {
+            let id = displays[index].id
+            if let origin = origins[id] { displays[index].frame.origin = origin }
+        }
+        original = displays
     }
 
     // MARK: Editing

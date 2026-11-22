@@ -37,6 +37,22 @@ final class DisplayArrangementEditTests: XCTestCase {
         XCTAssertTrue(edit.isChanged)
     }
 
+    func testKeptEditBecomesBaselineForAnotherApplyWithoutACatalogRefresh() {
+        var edit = pair
+        edit.move(1, to: point(2000, 0), snapDistance: 0)
+        edit.acceptKeptArrangement()
+        XCTAssertFalse(edit.isChanged)
+        XCTAssertEqual(edit.display(withID: 1)?.frame.origin, .zero)
+        XCTAssertEqual(edit.display(withID: 2)?.frame.origin, point(-1000, 0))
+
+        edit.move(2, to: point(0, 600), snapDistance: 0)
+        XCTAssertNil(edit.validate())
+        XCTAssertEqual(edit.changedOrigins, [2: point(0, 600)])
+        edit.reset()
+        XCTAssertFalse(edit.isChanged)
+        XCTAssertEqual(edit.display(withID: 2)?.frame.origin, point(-1000, 0))
+    }
+
     func testResetPutsEveryDisplayBack() {
         var edit = pair
         edit.move(2, to: point(-1000, 0), snapDistance: 0)
