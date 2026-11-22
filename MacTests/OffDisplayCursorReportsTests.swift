@@ -126,15 +126,15 @@ final class OffDisplayCursorReportsTests: XCTestCase {
         XCTAssertEqual(p, CGPoint(x: -CursorOffDisplayReport.limit, y: CursorOffDisplayReport.limit))
     }
 
-    func testTheLocatorIsOnForNewAndExistingInstalls() throws {
-        XCTAssertTrue(ReceiverControlPreferences().showCursorLocator)
+    func testTheLocatorIsOffByDefaultAndAnOptInRoundTrips() throws {
+        XCTAssertFalse(ReceiverControlPreferences().showCursorLocator)
         var saved = ReceiverControlPreferences()
-        saved.showCursorLocator = false
+        saved.showCursorLocator = true
         let data = try JSONEncoder().encode(saved)
-        XCTAssertFalse(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).showCursorLocator)
+        XCTAssertTrue(try JSONDecoder().decode(ReceiverControlPreferences.self, from: data).showCursorLocator)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         object.removeValue(forKey: "showCursorLocator")
         let older = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertTrue(try JSONDecoder().decode(ReceiverControlPreferences.self, from: older).showCursorLocator)
+        XCTAssertFalse(try JSONDecoder().decode(ReceiverControlPreferences.self, from: older).showCursorLocator)
     }
 }
