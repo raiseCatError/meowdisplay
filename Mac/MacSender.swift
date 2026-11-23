@@ -5800,9 +5800,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         var ids = [CGDirectDisplayID](repeating: 0, count: limit)
         var count: UInt32 = 0
         let ok = CGGetActiveDisplayList(UInt32(limit), &ids, &count) == .success
-        let virtual = VirtualDisplayRegistry.shared.displayIDs
         let displays: [TrackpadDisplayGeometry] = ok ? ids.prefix(Int(count)).sorted().compactMap { id in
-            guard id != 0, !virtual.contains(id), CGDisplayMirrorsDisplay(id) == 0 else { return nil }
+            // The relative desktop can also reach a retained Extend display.
+            guard id != 0, CGDisplayMirrorsDisplay(id) == 0 else { return nil }
             let bounds = CGDisplayBounds(id)
             return bounds.isEmpty ? nil : .init(id: id, bounds: bounds)
         } : []

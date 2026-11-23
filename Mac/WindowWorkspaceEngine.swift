@@ -2029,7 +2029,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         defer { inputLock.unlock() }
         let p = WorkspacePoint(x: x ?? 0, y: y ?? 0)
         if phase == .hover || phase == .drag { pointerDriven = x == nil }
-        if phase == .scroll, let a = overviewScrollAssignment, let layout = overviewLayout(a) {
+        if phase == .scroll, pointerDriven, let a = overviewScrollAssignment, let layout = overviewLayout(a) {
             let g = overviewCursorPoint(layout)
             return CGPoint(x: g.x, y: g.y)
         }
@@ -2051,16 +2051,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard var target else { return nil }
         if target.windowID == WorkspaceSource.overviewKey, let a = targeting.assignment(target.tileID), let layout = overviewLayout(a) {
-            let point = WorkspacePoint(x: target.point.x, y: target.point.y)
+            var point = WorkspacePoint(x: target.point.x, y: target.point.y)
             if phase == .drag || phase == .up {
                 guard let g = layout.clampToDisplays(point) else { return nil }
-                return CGPoint(x: g.x, y: g.y)
+                point = g
             }
             guard layout.containsDisplayPoint(point) else {
                 if phase == .down { targeting.cancelBinding() }
                 return nil
             }
-            return target.point
+            overviewCursor = (point, ProcessInfo.processInfo.systemUptime)
+            return CGPoint(x: point.x, y: point.y)
         }
         if phase == .up { return target.point }   // a release always goes through
         if WorkspaceSource.isDisplayKey(target.windowID) {
@@ -2099,11 +2100,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // Bounded wait for the window to come to the front, so the press
             // that activated it is delivered once, to it.
             let deadline = ProcessInfo.processInfo.systemUptime + 0.25
-            while !isTopmost(target.windowID, at: target.point, cached: false), ProcessInfo.processInfo.systemUptime < deadline {
+            while ProcessInfo.processInfo.systemUptime < deadline,
+                  (NSWorkspace.shared.frontmostApplication?.processIdentifier != target.pid
+                   || !isTopmost(target.windowID, at: target.point, cached: false)) {
                 usleep(10_000)
             }
         }
-        guard isTopmost(target.windowID, at: target.point, cached: phase == .hover || phase == .drag) else {
+        guard phase != .down || NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+              isTopmost(target.windowID, at: target.point, cached: phase == .hover || phase == .drag) else {
             // Something covers the window here (another app, a panel): send
             // nothing rather than click into the wrong window.
             if phase == .down { targeting.cancelBinding() }
