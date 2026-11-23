@@ -165,6 +165,9 @@ struct RemoteTileItem: Equatable, Sendable {
     var isFloat = false
     /// The Mac can put this window back to its size before Fill Window on Mac (`restore`).
     var restorable = false
+    /// Applied camera and request revision for the live Overview pane.
+    var overviewZoom: WorkspacePaneZoom? = nil
+    var overviewViewEpoch: Int? = nil
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -305,7 +308,9 @@ enum WorkspaceEvent: Sendable {
                                       app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
                                       attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false,
                                       isFloat: t["layer"] as? String == "float",
-                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false)
+                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false,
+                                      overviewZoom: u32(t, "window") == WorkspaceSource.overviewKey ? WorkspacePaneZoom(wire: t["zoom"]) : nil,
+                                      overviewViewEpoch: (t["view"] as? Int).flatMap { (0...Int(Int32.max)).contains($0) ? $0 : nil })
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -1343,8 +1348,8 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, start: WorkspacePaneZoom?, rect: WorkspaceRect, drawn: WorkspaceRect?,
-                              rotation: WorkspaceRotation, turnFrom: Double?)?
+    private var zoomGesture: (tile: String, source: WorkspaceSource, start: WorkspacePaneZoom?, rect: WorkspaceRect,
+                              overviewSize: WorkspaceSize?, rotation: WorkspaceRotation, turnFrom: Double?)?
 
     /// A twist this large (degrees) starts turning the pane, so a pinch's natural wobble never
     /// turns it; the turn then follows the fingers from there, without a jump.
@@ -1393,24 +1398,34 @@ final class WorkspaceModel: ObservableObject {
             let f = frames
             guard let id = f.hitTest(initial), let rect = f.tiles[id],
                   let tile = layout.tiles[id], let shown = tile.source else { zoomGesture = nil; zoomPreview = nil; return false }
-            // An Overview pane only zooms (on the Mac, about its cursor); nothing moves its view here.
+            let overview = shown.isOverview ? overviewViewport(tile, rect: rect) : nil
+            let px = rect.scaled(to: size)
+            let start = WorkspacePoint(x: initial.x * size.width, y: initial.y * size.height)
             let owned = shown.isOverview
-                ? OverviewPaneInput.route(isPinch ? .pinch : .twoFingerDrag, kind: .overview, preferred: .trackpad,
-                                          inputReachesMac: true, moveViewActive: false) == .zoomPane
+                ? overview.map { isPinch || !inputAllowed() || !$0.containsDisplayPoint($0.globalPoint(fromPane: start)) } ?? false
                 : (isPinch || tile.zoom != nil || effectiveFit(id) == .fill) && windowSize(tile) != nil
-            guard owned else { zoomGesture = nil; zoomPreview = nil; return false }
-            zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
+            guard owned, px.width > 0, px.height > 0 else { zoomGesture = nil; zoomPreview = nil; return false }
+            let overviewSize = overview?.union.map { WorkspaceSize(width: $0.width, height: $0.height) }
+            zoomGesture = (id, shown, overview?.paneZoom ?? tile.zoom, rect, overviewSize, tile.rotation, nil)
             zoomPreview = nil
             if active != id { focus(id, raise: false) }   // zooming is this device's view only
             requestBackdrop(id)
         }
-        guard var g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
-        if tile.source?.isOverview == true { return overviewPinch(g.tile, from: g.start, ratio: scale, ended: ended) }
-        guard let source = windowSize(tile) else { return false }
+        guard var g = zoomGesture, let tile = layout.tiles[g.tile], tile.source == g.source else {
+            zoomGesture = nil
+            zoomPreview = nil
+            return false
+        }
         let pane = WorkspaceSize(width: g.rect.width * size.width, height: g.rect.height * size.height)
         func inPane(_ p: WorkspacePoint) -> WorkspacePoint {
             WorkspacePoint(x: (p.x - g.rect.x) / max(g.rect.width, 1e-6), y: (p.y - g.rect.y) / max(g.rect.height, 1e-6))
         }
+        if let source = g.overviewSize {
+            let zoom = WorkspaceZoom.pinched(g.start, tile: pane, source: source, rotation: .none,
+                                             fit: effectiveFit(g.tile), ratio: scale, from: inPane(initial), to: inPane(current))
+            return updateOverviewViewport(g.tile, zoom: zoom, ended: ended)
+        }
+        guard let source = windowSize(tile) else { return false }
         if isPinch, g.turnFrom == nil, turn.isFinite, abs(turn) >= Self.turnDeadZone {
             g.turnFrom = turn
             zoomGesture = g
@@ -1443,11 +1458,21 @@ final class WorkspaceModel: ObservableObject {
         return true
     }
 
-    /// An Overview pane's pinch: its zoom is the person's scale (1x-8x), sent as it changes; the Mac
-    /// centres the view on its cursor and moves it from there. No local preview and no still: the
-    /// Mac's live picture shows the new view.
-    private func overviewPinch(_ id: String, from start: WorkspacePaneZoom?, ratio: Double, ended: Bool) -> Bool {
-        let next = saved.zooming(id, to: OverviewPaneInput.zoom(from: start, ratio: ratio))
+    private func overviewViewport(_ tile: WorkspaceTile, rect: WorkspaceRect) -> OverviewPaneLayout? {
+        let displays = OverviewPaneInput.viewportDisplays(catalog?.displays ?? [])
+        guard !displays.isEmpty else { return nil }
+        // Begin from the picture on screen, which may have followed the Mac cursor.
+        // Until the Mac accepts a newer request, prefer the local view.
+        let state = tileState(tile.id)
+        let sent = viewSignatures[tile.id] == viewSignature(tile, rect: rect)
+        let applied = sent && state?.overviewViewEpoch == viewEpochs[tile.id] ? state?.overviewZoom : nil
+        return OverviewPaneLayout(displays: displays, pane: rect.scaled(to: size),
+                                  zoom: applied ?? tile.zoom ?? .identity, fit: effectiveFit(tile.id))
+    }
+
+    /// Overview stays on live frames throughout the gesture, including when zoomed in.
+    private func updateOverviewViewport(_ id: String, zoom: WorkspacePaneZoom?, ended: Bool) -> Bool {
+        let next = saved.zooming(id, to: zoom)
         if next != saved {
             saved = next
             publish(); scheduleThrottledSend()
@@ -1459,16 +1484,6 @@ final class WorkspaceModel: ObservableObject {
             sendNow()
         }
         return true
-    }
-
-    /// Where the pane draws its whole source (picture-normalized; larger than the pane when
-    /// filled or zoomed in, smaller when zoomed out), as the Mac composes it.
-    private func drawnSourceRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
-        guard let w = windowSize(tile), size.width > 0, size.height > 0 else { return nil }
-        let c = TileContentTransform(tile: WorkspaceRect(x: rect.x * size.width, y: rect.y * size.height,
-                                                         width: rect.width * size.width, height: rect.height * size.height),
-                                     source: w, rotation: tile.rotation, fit: tile.fit, zoom: tile.zoom ?? .identity).contentRect
-        return WorkspaceRect(x: c.x / size.width, y: c.y / size.height, width: c.width / size.width, height: c.height / size.height)
     }
 
     private func windowSize(_ tile: WorkspaceTile) -> WorkspaceSize? {
@@ -1498,13 +1513,17 @@ final class WorkspaceModel: ObservableObject {
         return b
     }
 
+    private func viewSignature(_ tile: WorkspaceTile, rect r: WorkspaceRect?) -> String {
+        let z = tile.zoom ?? .identity
+        let liveDisplay = tile.source.flatMap(display(for:))?.id ?? 0
+        // A released float waits for the frame that draws it again.
+        return "\(tile.source?.tabKey ?? "")|\(liveDisplay)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(tile.id))"
+    }
+
     /// Bumps a pane's view epoch when what the Mac must draw for it changed.
     private func noteViews(_ layout: WorkspaceLayout, frames: WorkspaceFrames) {
         for (id, tile) in layout.tiles {
-            let r = frames.tiles[id]
-            let z = tile.zoom ?? .identity
-            // Lifted or not is part of the view: a float let go of waits for the frame that draws it again.
-            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(id))"
+            let sig = viewSignature(tile, rect: frames.tiles[id])
             if viewSignatures[id] != sig {
                 viewSignatures[id] = sig
                 viewEpochs[id] = nextViewEpoch

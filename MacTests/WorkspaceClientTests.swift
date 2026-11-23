@@ -819,7 +819,7 @@ final class OverviewPaneReceiverTests: XCTestCase {
         [display(1, "Built-in Display", main: true, x: 0), display(2, "Studio Display", x: 1920)]
     }
 
-    private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true,
+    private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true, inWindowMode: Bool = true,
                        defaults: UserDefaults? = nil, sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
         let m = WorkspaceModel(defaults: defaults ?? UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
         m.send = { sent($0); return true }
@@ -828,7 +828,7 @@ final class OverviewPaneReceiverTests: XCTestCase {
         var features: Set<String> = [WindowWorkspaceWire.welcomeFeature]
         if overviewFeature { features.insert(WindowWorkspaceWire.overviewPaneFeature) }
         m.apply(.features(features))
-        m.apply(.mode(window: true))
+        m.apply(.mode(window: inWindowMode))
         m.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false,
                                                  displays: displays)))
         m.updateSpace(WorkspaceSize(width: 1200, height: 800), hinge: nil)
@@ -881,7 +881,7 @@ final class OverviewPaneReceiverTests: XCTestCase {
     }
 
     /// The pure table: in an Overview pane one finger is a trackpad whatever the setting, two
-    /// fingers scroll the Mac, a pinch zooms, and nothing moves the view. Other panes are as before.
+    /// fingers scroll over the displays with control, and pan the view when local navigation owns the gesture.
     func testEachGestureRoutesInAnOverviewPaneAndInOtherPanes() {
         func route(_ g: OverviewPaneInput.Gesture, _ kind: WorkspaceSource.Kind, _ preferred: PointerInputMode = .direct,
                    input: Bool = true, moveView: Bool = false) -> OverviewPaneInput.Route {
@@ -890,8 +890,8 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(route(.oneFinger, .overview, .direct), .pointer(.trackpad), "a trackpad even with Direct Touch chosen")
         XCTAssertEqual(route(.oneFinger, .overview, .trackpad), .pointer(.trackpad))
         XCTAssertEqual(route(.twoFingerDrag, .overview), .scrollMac)
-        XCTAssertEqual(route(.twoFingerDrag, .overview, input: false), .none, "View Only: the view still never moves")
-        XCTAssertEqual(route(.twoFingerDrag, .overview, moveView: true), .none, "Move View moves nothing in the Overview")
+        XCTAssertEqual(route(.twoFingerDrag, .overview, input: false), .movePane)
+        XCTAssertEqual(route(.twoFingerDrag, .overview, moveView: true), .movePane)
         XCTAssertEqual(route(.pinch, .overview), .zoomPane)
         for kind in [WorkspaceSource.Kind.window, .display] {
             XCTAssertEqual(route(.oneFinger, kind, .direct), .pointer(.direct), "\(kind) keeps the person's pointer model")
@@ -904,16 +904,6 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .overview), .trackpad)
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .display), .direct)
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: nil), .direct, "outside every pane")
-    }
-
-    /// A pinch's zoom is the person's scale, 1x to 8x, with the centre left to the Mac.
-    func testOverviewZoomIsTheScaleOneToEight() {
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 1), "1x is no zoom")
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 0.5), "never below 1x")
-        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 2), WorkspacePaneZoom(scale: 2, centerX: 0.5, centerY: 0.5))
-        XCTAssertEqual(OverviewPaneInput.zoom(from: WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5), ratio: 2)?.scale, 6)
-        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 100)?.scale, 8)
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: .nan))
     }
 
     /// Offered only with the Mac's `overviewPane` and two or more displays it would show (never
@@ -960,32 +950,59 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertNil(tile["display"])
     }
 
-    /// A pinch zooms the Overview pane 1x-8x and is sent; it never asks for a still and a
-    /// two-finger drag never moves it (that scrolls the Mac).
-    func testPinchZoomsTheOverviewWithoutAStillAndNothingPansIt() throws {
+    func testOverviewPanAndZoomPersistPerTabAndRestoreFromDisk() throws {
+        let defaults = UserDefaults(suiteName: "OverviewViewport-\(UUID().uuidString)")!
         var sent: [[String: Any]] = []
-        let m = model(displays: twoDisplays) { sent.append($0) }
-        m.choose(m.overviewWindow, asNewTile: false)
+        let m = model(displays: twoDisplays, defaults: defaults) { sent.append($0) }
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
         let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
-        let c = WorkspacePoint(x: 0.5, y: 0.5)
-        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1),
-                       "a two-finger drag isn't the pane's")
-        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
-        XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: WorkspacePoint(x: 0.7, y: 0.6),
-                              scale: 2.5, turn: 40))
-        XCTAssertEqual(m.layout.tiles[id]?.zoom, WorkspacePaneZoom(scale: 2.5, centerX: 0.5, centerY: 0.5),
-                       "the scale only: the Mac centres it on the cursor")
-        XCTAssertEqual(m.layout.tiles[id]?.rotation, WorkspaceRotation.none, "never turned")
-        XCTAssertNil(m.zoomPreview, "no local preview: the live picture shows the new view")
-        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 50))
-        XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale, 8)
-        // Zoomed in, a two-finger drag still isn't the pane's (the Mac's camera follows the cursor).
-        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1))
-        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
-        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 0.01))
-        XCTAssertNil(m.layout.tiles[id]?.zoom, "back to 1x: everything fits")
+        m.addOverviewTab(to: id)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let other = try XCTUnwrap(m.layout.orderedTileIDs.first { $0 != id })
+        let untouched = m.layout.tiles[other]
+        for space in [WorkspaceSize(width: 1200, height: 800), WorkspaceSize(width: 450, height: 800)] {
+            m.updateSpace(space, hinge: nil)
+            m.resetView(id)
+            let frame = try XCTUnwrap(m.frames.tiles[id])
+            let c = WorkspacePoint(x: frame.midX, y: frame.midY)
+            let moved = WorkspacePoint(x: c.x + frame.width * 0.18, y: c.y + frame.height * 0.2)
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: true, initial: c, current: c, scale: 0.4, turn: 40))
+            XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale, 0.7)
+            XCTAssertEqual(m.layout.tiles[id]?.rotation, WorkspaceRotation.none)
+            XCTAssertFalse(m.pinch(began: true, ended: true, isPinch: false, initial: c, current: moved, scale: 1),
+                           "a two-finger drag over a live display still scrolls with control")
+            m.inputAllowed = { false }
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: false, initial: c, current: moved, scale: 1))
+            XCTAssertLessThan(try XCTUnwrap(m.layout.tiles[id]?.zoom?.centerX), 0.5)
+            XCTAssertLessThan(try XCTUnwrap(m.layout.tiles[id]?.zoom?.centerY), 0.5)
+            m.inputAllowed = { true }
+            let blank = WorkspacePoint(x: frame.maxX - frame.width * 0.01, y: frame.y + frame.height * 0.01)
+            let dragFromBlank = WorkspacePoint(x: blank.x - frame.width * 0.06, y: blank.y + frame.height * 0.05)
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: false, initial: blank, current: dragFromBlank, scale: 1),
+                          "the empty canvas pans even while control is granted")
+            XCTAssertEqual(m.layout.tiles[other], untouched)
+        }
+        let viewport = try XCTUnwrap(m.layout.tiles[id]?.zoom)
+        m.switchTab(id, to: 0)
+        XCTAssertNil(m.layout.tiles[id]?.zoom)
+        m.switchTab(id, to: 1)
+        XCTAssertEqual(m.layout.tiles[id]?.zoom, viewport)
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.overviewPaneFeature]))
+        m.apply(.mode(window: true))
+        m.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [],
+                                                 unavailable: false, displays: twoDisplays)))
+        XCTAssertEqual(m.layout.tiles[id]?.zoom, viewport)
+        let reloaded = model(displays: twoDisplays, defaults: defaults)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.zoom, viewport)
+        reloaded.toggleFit(id)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.fit, .fill)
+        reloaded.resetView(id)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.fit, .fit)
+        XCTAssertNil(reloaded.layout.tiles[id]?.zoom)
         m.requestBackdrop(id, refresh: true)
-        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest }, "no still is ever asked for")
+        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest })
     }
 
     /// Its menu's "Show <display> in a Pane": the display pane source, in a new pane when there's

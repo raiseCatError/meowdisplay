@@ -916,7 +916,7 @@ struct WorkspaceChromeView: View {
 
     private func paneMenuRows(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
         let full = model.localFullscreen == m.tile
-        // The Overview (every display) is neither a desktop nor a window: never turned or filled.
+        // The Overview combines every physical display and stays upright.
         let isOverview = tile.source?.isOverview == true
         let isDesktop = tile.source?.isDisplay == true && !isOverview
         let isWindow = tile.source != nil && !isDesktop && !isOverview
@@ -938,11 +938,10 @@ struct WorkspaceChromeView: View {
                 // The only way from a desktop pane back to the plain full-screen desktop (Mirror/Extend).
                 menuRow("View Full Screen", "display") { onViewFullScreen() }
             }
-            if !isOverview {
-                menuRow(model.effectiveFit(m.tile) == .fill ? (isDesktop ? "Show Whole Desktop" : "Show Whole Window") : "Fill Pane",
-                        model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
-                    model.toggleFit(m.tile)
-                }
+            let fitLabel: LocalizedStringKey = isOverview ? "Fit Displays" : isDesktop ? "Show Whole Desktop" : "Show Whole Window"
+            menuRow(model.effectiveFit(m.tile) == .fill ? fitLabel : "Fill Pane",
+                    model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
+                model.toggleFit(m.tile)
             }
             if tile.zoom != nil || tile.rotation != .none || tile.fit == .fill {
                 menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
@@ -1051,7 +1050,9 @@ struct WorkspaceChromeView: View {
         if let id = model.localFullscreen, stripVisible || voiceOver {
             HStack(spacing: 4) {
                 stripButton("Exit Fullscreen", "arrow.down.right.and.arrow.up.left") { model.exitLocalFullscreen() }
-                stripButton(model.effectiveFit(id) == .fill ? "Show Whole Window" : "Fill Pane",
+                stripButton(model.effectiveFit(id) == .fill
+                                ? (model.layout.tiles[id]?.source?.isOverview == true ? "Fit Displays" : "Show Whole Window")
+                                : "Fill Pane",
                             model.effectiveFit(id) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
                     model.toggleFit(id)
                 }

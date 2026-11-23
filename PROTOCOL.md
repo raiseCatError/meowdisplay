@@ -1856,12 +1856,13 @@ every Mac display (except MeowDisplay's own virtual displays and mirrors)
 where it sits in the Mac's arrangement, each from its own live display
 capture at the pixels it covers in the pane. At most one per layout (a second
 is `duplicateWindow`); with no listed display it is `unavailable`, as it is
-on a Mac without the feature (no `window`). `rotation` and `fit` are ignored.
-`zoom`'s scale is the person's, 1 to 8 (1 fits every display); its centre is
-the Mac's: a new scale centres the view on the cursor, and above 1 the view
-moves only when the cursor comes within 12% of the pane's shorter side of an
-edge. `workspaceState` echoes `overview: true` and the camera as `zoom`
-(`[scale, cx, cy]`, the centre normalized to the arrangement's bounds). Input
+on a Mac without the feature (no `window`). Overview stays upright and uses
+the pane's `fit` and `zoom` fields. The entire arrangement is the source,
+with a zoom range of 0.7 to 8 and its centre normalized to the arrangement
+bounds. Manual pan can expose empty canvas. Pointer motion may move the
+live view to keep the cursor in view. `workspaceState` echoes `overview: true`,
+the applied camera as `zoom: [scale, cx, cy]`, and the accepted request's
+`view` epoch for newer senders. Input
 while the pane is focused: `pointer` `moveRelative` moves the real cursor by
 `dx`/`dy` canvas pixels divided by the camera's scale, across displays and
 kept on one (a gap lands on the nearest display); `down`/`up` click at the

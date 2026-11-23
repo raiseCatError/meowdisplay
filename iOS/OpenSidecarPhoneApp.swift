@@ -4057,14 +4057,14 @@ struct VideoLayerView: UIViewRepresentable {
             let turn = pinch && rotateTarget != .disabled ? recognizer.rotationDelta * 180 / .pi : 0
             switch recognizer.state {
             case .began:
-                // A plain two-finger drag scrolls the Mac while this device controls it, even over a
-                // zoomed or filled pane (owner report 2026-10-31: it only panned). It moves the pane
-                // only in View Only (pan stays local), with Move View on, or as part of a pinch.
-                if WorkspaceTwoFingerPolicy.scrollsMac(isPinch: pinch, inputReachesMac: allowsInput, moveViewActive: moveViewActive) {
+                // An Overview drag may pan from its empty canvas even with control.
+                let start = norm(recognizer.initialMidpoint)
+                if workspacePaneKind?(start) != .overview,
+                   WorkspaceTwoFingerPolicy.scrollsMac(isPinch: pinch, inputReachesMac: allowsInput, moveViewActive: moveViewActive) {
                     workspaceGestureOwned = false
                     return false
                 }
-                workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                workspaceGestureOwned = workspacePinch(true, false, pinch, start, norm(recognizer.midpoint),
                                                        pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
                 if workspaceGestureOwned { updateZoomPreview(base: base, began: true, ended: false) }
                 return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
