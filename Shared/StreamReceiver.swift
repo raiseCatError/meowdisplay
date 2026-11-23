@@ -4115,6 +4115,10 @@ final class StreamReceiver: ObservableObject {
         if message[TrackpadStagePeekWire.tokenKey] != nil {
             guard canBrowseTrackpadStagePeek else { return false }
         }
+        if message["type"] as? String == WorkspaceExtendedDisplayWire.request {
+            guard videoEnabled, macLock == nil, trackpadLayoutControlGranted,
+                  session.allowsLiveInput, remoteInputMayLeave() else { return false }
+        }
         sendUIControl(message)
         return true
     }

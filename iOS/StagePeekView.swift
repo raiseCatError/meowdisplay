@@ -669,7 +669,7 @@ struct StagePeekOverlay: View {
                              model.stagePeekOpen = false
                              model.openFloating(w)
                          },
-                         onFullscreen: { app in openFullscreen(app) })
+                         onFullscreen: { app in openFullscreen(app) }, receiverSize: safe.size)
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)

@@ -564,7 +564,7 @@ final class WindowBrowserService: @unchecked Sendable {
                 frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual,
                 pixelWidth: mode?.pixelWidth ?? 0, refreshHz: mode?.refreshRate ?? 0,
                 mirrorOf: mirror == kCGNullDirectDisplay ? nil : mirror, meowIDs: meowIDs, ownIDs: ownIDs)
-            if !entry.isVirtual && !entry.isMeow {
+            if (!entry.isVirtual && !entry.isMeow) || ownIDs.contains(d.displayID) {
                 entry.displayUUID = MirrorDisplayIdentity.uuidString(for: d.displayID)
             }
             return entry

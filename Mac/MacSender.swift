@@ -976,6 +976,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var trackpadPeekBrowser: WindowBrowserService?
     private var trackpadPeekToken: UUID?
     private let trackpadPeekAuthority = OSAllocatedUnfairLock<UUID?>(initialState: nil)
+    private var workspaceExtendedDisplay: VirtualDisplay?
+    private var workspaceExtendedDisplayOperationInFlight = false
     /// Remote Finder for this session (created on its first request; `queue` only).
     private var fileBrowser: RemoteFileBrowser?
     /// Display arrangement editing for this session (created on its first request; `queue` only).
@@ -3759,6 +3761,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         mirrorDisplayTopologyObserver = nil
         virtualDisplay = nil   // releasing it removes the display
+        workspaceExtendedDisplay = nil
     }
 
     private func stopOnQueue() {
@@ -6705,6 +6708,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 displayArrangement?.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
                                            controlStillAllowed: stillAllowed)
             }
+        case WorkspaceExtendedDisplayWire.request:
+            handleWorkspaceExtendedDisplay(obj)
         case WireMessage.filesRequest:
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
@@ -7179,6 +7184,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func connectionAuthorityEnded(dropped: Bool) {
         textCaretFollower.stop()
         stopTrackpadPeek()
+        workspaceExtendedDisplay = nil
         // Display arrangement belongs to the connection that asked: its prompt goes and an
         // arrangement it hasn't kept is put back (a new connection must ask again).
         displayArrangement?.sessionEnded()
@@ -8179,7 +8185,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let windowStreaming = WindowStreamingPolicy.isAllowed()
         welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: windowStreaming)
         if windowStreaming {
-            welcome["workspaceFeatures"] = [TrackpadStagePeekWire.welcomeFeature]
+            welcome["workspaceFeatures"] = [TrackpadStagePeekWire.welcomeFeature, WorkspaceExtendedDisplayWire.feature]
         }
         sendJSONObject(welcome)
         // Connected while locked (Wake & Connect, a reconnect): said at once, before anything else.
@@ -9039,6 +9045,97 @@ extension MacSender {
         trackpadPeekBrowser?.stop()
         trackpadPeekBrowser = nil
         trackpadPeekToken = nil
+    }
+
+    /// Window mode can capture the added display through its existing display-source path.
+    /// The session owns the extra monitor separately from its carrier and ordinary Extend.
+    private func handleWorkspaceExtendedDisplay(_ message: [String: Any]) {
+        guard let request = (message["request"] as? String).flatMap(UUID.init(uuidString:)),
+              let action = message["action"] as? String,
+              action == "create" || action == "remove" else { return }
+        let generation = activeConnectionGeneration
+        guard mode == .window, videoEnabled, let engine = workspaceEngine,
+              receiverInputIsAllowed(), controlStillAllowed(generation: generation),
+              CGPreflightScreenCaptureAccess(), !workspaceExtendedDisplayOperationInFlight,
+              let info = lastHello else {
+            sendJSONObject(["type": WorkspaceExtendedDisplayWire.state, "request": request.uuidString,
+                            "status": "unavailable"])
+            return
+        }
+        let setup = WorkspaceExtendedDisplayWire.Setup(message)
+        guard action == "remove" || setup != nil else { return }
+        let plan = setup?.plan(maximumReceiverEdge: max(info.pixelsWide, info.pixelsHigh))
+        let fps = plan.map { todayEffectiveFPS(width: $0.wide * 2, height: $0.high * 2).fps } ?? 60
+        let serial = displaySerial
+        let productID: UInt32 = 0x5753  // "WS": Window mode's additional monitor
+        let owner = ObjectIdentifier(self)
+        let engineID = ObjectIdentifier(engine)
+        let name = String(localized: "MeowDisplay — Extended Display")
+        let queue = self.queue
+        let selfBox = self.selfBox
+        workspaceExtendedDisplayOperationInFlight = true
+        Task { @MainActor in
+            guard let sender = selfBox.resolve() else { return }
+            var existing: VirtualDisplay?
+            var canCreate = false
+            var result = "unavailable"
+            sender.onQueueSync {
+                guard sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID) else { return }
+                if action == "remove" {
+                    sender.workspaceExtendedDisplay = nil
+                    result = "removed"
+                } else if let current = sender.workspaceExtendedDisplay,
+                          DisplayUsability.evaluate(DisplayHealth.reading(for: current.displayID)) == .usable {
+                    existing = current
+                    canCreate = true
+                } else {
+                    sender.workspaceExtendedDisplay = nil
+                    canCreate = true
+                }
+            }
+            var ready: (id: UInt32, uuid: String)?
+            if canCreate, let plan, sender.controlStillAllowed(generation: generation), CGPreflightScreenCaptureAccess() {
+                let candidate = existing ?? VirtualDisplay(
+                    name: name, pointsWide: plan.wide, pointsHigh: plan.high,
+                    sizeInMillimeters: ExtendPhysicalSize.millimetres(pointsWide: plan.unscaledWide, pointsHigh: plan.unscaledHigh),
+                    serialNum: serial, productID: productID, refreshRate: fps,
+                    reservedPointsPerAxis: plan.reservedPointsPerAxis, owner: owner)
+                if let candidate {
+                    ShareableContent.invalidate()
+                    let id = candidate.displayID
+                    let listed = try? await sender.findSCDisplay(id: id, budget: .seconds(10)) {
+                        !sender.controlStillAllowed(generation: generation)
+                    }
+                    sender.onQueueSync {
+                        guard listed != nil, sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID),
+                              DisplayUsability.evaluate(DisplayHealth.reading(for: id)) == .usable,
+                              let uuid = MirrorDisplayIdentity.uuidString(for: id) else { return }
+                        sender.workspaceExtendedDisplay = candidate
+                        ready = (id, uuid)
+                    }
+                }
+            }
+            let status = ready == nil ? result : "ready"
+            let display = ready
+            queue.async {
+                guard let sender = selfBox.currentOnQueue() else { return }
+                sender.workspaceExtendedDisplayOperationInFlight = false
+                guard sender.sessionAuthorization.isAdmitted(generation: generation) else { return }
+                var reply: [String: Any] = ["type": WorkspaceExtendedDisplayWire.state,
+                                            "request": request.uuidString, "status": status]
+                if let display {
+                    reply["display"] = Int(display.id)
+                    reply["uuid"] = display.uuid
+                }
+                sender.sendJSONObject(reply)
+                sender.windowBrowser?.refresh(sendCatalog: true)
+            }
+        }
+    }
+
+    private func workspaceExtendedDisplayAllowed(generation: UInt64, engineID: ObjectIdentifier) -> Bool {
+        videoEnabled && workspaceEngine.map(ObjectIdentifier.init) == engineID
+            && controlStillAllowed(generation: generation) && CGPreflightScreenCaptureAccess()
     }
 
     /// This browser is never attached to the compositor and never accepts still requests.

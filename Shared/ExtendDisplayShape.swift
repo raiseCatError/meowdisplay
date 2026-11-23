@@ -204,6 +204,40 @@ enum ExtendDisplaySizing {
     }
 }
 
+enum WorkspaceExtendedDisplayWire {
+    static let feature = "workspaceExtendedDisplay"
+    static let request = "workspaceExtendedDisplayRequest"
+    static let state = "workspaceExtendedDisplayState"
+
+    struct Setup {
+        let width: Int
+        let height: Int
+        let shape: ExtendDisplayShape
+        let size: ExtendDesktopSize
+
+        init?(_ message: [String: Any]) {
+            guard let width = message["width"] as? Int, (64...8192).contains(width),
+                  let height = message["height"] as? Int, (64...8192).contains(height),
+                  let shape = (message["shape"] as? String).flatMap(ExtendDisplayShape.init(rawValue:)),
+                  let size = (message["size"] as? String).flatMap(ExtendDesktopSize.init(rawValue:))
+            else { return nil }
+            self.width = width
+            self.height = height
+            self.shape = shape
+            self.size = size
+        }
+
+        func plan(maximumReceiverEdge: Int) -> ExtendDisplayPlan {
+            let scale = min(1, Double(maximumReceiverEdge) / Double(max(width, height)))
+            let width = max(2, Int(Double(width) * scale))
+            let height = max(2, Int(Double(height) * scale))
+            return ExtendDisplayPlan.resolve(receiverPixelsWide: width, receiverPixelsHigh: height,
+                                             aspect: shape.explicitAspect ?? Double(width) / Double(height),
+                                             desktopSize: size)
+        }
+    }
+}
+
 /// The points a Mac creates/reserves for one Extend display. Pure, so the
 /// rule "the declared size and the resize reservation always come from the
 /// UNSCALED (Default) points" is testable.

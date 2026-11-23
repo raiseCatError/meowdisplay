@@ -516,6 +516,57 @@ struct StagePeekArrangementPlaceholderTile: View {
 
 // MARK: - Expanded gallery
 
+private struct ExtendedDisplaySetup: View {
+    @ObservedObject var model: WorkspaceModel
+    let size: CGSize
+    let scale: CGFloat
+    @State private var shape = ExtendDisplayShape.automatic
+    @State private var desktopSize = ExtendDesktopSize.standard
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Aspect Ratio", selection: $shape) {
+                    Text("Match Receiver").tag(ExtendDisplayShape.automatic)
+                    Text(ExtendDisplayShape.r16x10.title).tag(ExtendDisplayShape.r16x10)
+                    Text(ExtendDisplayShape.r16x9.title).tag(ExtendDisplayShape.r16x9)
+                    Text(ExtendDisplayShape.r4x3.title).tag(ExtendDisplayShape.r4x3)
+                }
+                Picker("Resolution", selection: $desktopSize) {
+                    Text("Automatic").tag(ExtendDesktopSize.standard)
+                    Text(ExtendDesktopSize.larger.title).tag(ExtendDesktopSize.larger)
+                    Text(ExtendDesktopSize.largest.title).tag(ExtendDesktopSize.largest)
+                }
+                Text("The Mac adds the display as a tab. The display stays available while this Window session is connected.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if model.extendedDisplayBusy {
+                    ProgressView("Adding Extended Display…")
+                }
+                if let notice = model.extendedDisplayNotice { Text(notice).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Add Extended Display")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(model.extendedDisplayBusy)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        model.requestExtendedDisplay(size: size, scale: scale,
+                                                     shape: shape, desktopSize: desktopSize)
+                    }
+                    .disabled(model.extendedDisplayBusy || model.controlState() != .allowed)
+                }
+            }
+        }
+        .interactiveDismissDisabled(model.extendedDisplayBusy)
+        .onChange(of: model.extendedDisplayBusy) { busy in
+            if !busy, model.extendedDisplayNotice == nil, model.extendedDisplayID != nil { dismiss() }
+        }
+    }
+}
+
 struct StagePeekGallery: View {
     @ObservedObject var model: WorkspaceModel
     let query: String
@@ -544,6 +595,7 @@ struct StagePeekGallery: View {
     var onFloat: ((CatalogWindowItem) -> Void)?
     /// Open Fullscreen for the app shown (its header, its empty state; nil: not offered).
     var onFullscreen: ((MacAppItem) -> Void)? = nil
+    var receiverSize: CGSize = .zero
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -560,6 +612,9 @@ struct StagePeekGallery: View {
     @State private var cardGestureClock = CardGestureClock()
     /// The arrangement the Arrange… editor opened with (nil: closed).
     @State private var arrangeOverview: DisplayOverviewModel?
+    @State private var showExtendedDisplaySetup = false
+    @State private var confirmRemoveExtendedDisplay = false
+    @Environment(\.displayScale) private var displayScale
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
     @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
@@ -630,6 +685,9 @@ struct StagePeekGallery: View {
                         }
                         displaysSection(displays, cols)
                     }
+                    if model.windowMode, model.extendedDisplaySupported, receiverSize.width > 0 {
+                        extendedDisplayAction
+                    }
                     sectionTitle(String(localized: "Windows"))
                     if allWindows.isEmpty {
                         emptyText(model.catalog?.unavailable == true ? String(localized: "The Mac can't list its windows right now.")
@@ -679,6 +737,36 @@ struct StagePeekGallery: View {
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
         .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangeOverview))
+        .sheet(isPresented: $showExtendedDisplaySetup) {
+            ExtendedDisplaySetup(model: model, size: receiverSize, scale: displayScale)
+        }
+        .confirmationDialog("Remove Extended Display?", isPresented: $confirmRemoveExtendedDisplay) {
+            Button("Remove Extended Display", role: .destructive) { model.removeExtendedDisplay() }
+        }
+    }
+
+    private var extendedDisplayAction: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if inputAllowed {
+                if model.extendedDisplayID != nil {
+                    Button(role: .destructive) { confirmRemoveExtendedDisplay = true } label: {
+                        Label("Remove Extended Display…", systemImage: "minus.rectangle")
+                    }
+                } else {
+                    Button { showExtendedDisplaySetup = true } label: {
+                        Label("Add Extended Display", systemImage: "plus.rectangle")
+                    }
+                    .accessibilityIdentifier("stagePeekAddExtendedDisplay")
+                }
+            } else {
+                MoreActionsNeedControl(detail: String(localized: "Request control to add an extended display."))
+            }
+            if model.extendedDisplayBusy, !showExtendedDisplaySetup { ProgressView() }
+            if let notice = model.extendedDisplayNotice, !showExtendedDisplaySetup {
+                Text(notice).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(model.extendedDisplayBusy)
     }
 
     /// The Mac's displays: in their real arrangement when the Mac sent it for two or more of them,

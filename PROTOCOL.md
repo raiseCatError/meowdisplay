@@ -1669,6 +1669,17 @@ has control. Catalog replies echo the UUID. Neither still requests nor
 workspace layout changes belong to this exchange. A receiver discards replies
 from any other opening or after it loses control.
 
+**Extended display in Window mode.** `welcome.workspaceFeatures` can include
+`workspaceExtendedDisplay`. An admitted receiver with control can ask for
+`workspaceExtendedDisplayRequest {request, action, width?, height?, shape?,
+size?}` in video-enabled Window mode. `request` is a UUID. `create` supplies
+usable receiver dimensions in pixels, an Extend shape and a Desktop Size;
+`remove` releases the session's added display. The Mac replies with
+`workspaceExtendedDisplayState {request, status, display?, uuid?}` where `status`
+is `ready`, `removed` or `unavailable`. The ready display becomes an ordinary
+display-source tab after it appears in the catalog as a display owned by
+that session. The monitor is released when the Window session ends.
+
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
 normalized `x y w h` in the canvas (non-overlapping, inside it, at least

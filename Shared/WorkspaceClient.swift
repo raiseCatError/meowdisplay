@@ -241,6 +241,7 @@ enum WorkspaceEvent: Sendable {
     case appCatalog(revision: Int, apps: [MacAppItem]?)
     case trackpadCatalog(UUID, WorkspaceCatalogMessage)
     case trackpadApps(UUID, revision: Int, apps: [MacAppItem]?)
+    case extendedDisplay(UUID, status: String, display: UInt32?, uuid: String?)
     case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
@@ -275,6 +276,11 @@ enum WorkspaceEvent: Sendable {
         func u32(_ o: [String: Any], _ k: String) -> UInt32? { (o[k] as? Int).flatMap { UInt32(exactly: $0) } }
         func u64(_ o: [String: Any], _ k: String) -> UInt64? { (o[k] as? Int).flatMap { UInt64(exactly: $0) } }
         switch type {
+        case WorkspaceExtendedDisplayWire.state:
+            guard let request = str(obj, "request", 36).flatMap(UUID.init(uuidString:)),
+                  let status = str(obj, "status", 32) else { return nil }
+            let uuid = str(obj, "uuid", 36).flatMap(UUID.init(uuidString:))?.uuidString
+            return .extendedDisplay(request, status: status, display: u32(obj, "display"), uuid: uuid)
         case MacLockWire.type:
             return MacLockNotice(message: obj).map { .macLock($0) }
         case WireMessage.windowCatalog:
@@ -655,6 +661,15 @@ final class WorkspaceModel: ObservableObject {
     private var trackpadPeekToken: UUID?
     private var trackpadPeekAppsRevision: Int?
     var trackpadPeekAllowed: () -> Bool = { false }
+    @Published private(set) var extendedDisplaySupported = false
+    @Published private(set) var extendedDisplayID: UInt32?
+    @Published private(set) var extendedDisplayBusy = false
+    @Published private(set) var extendedDisplayNotice: String?
+    private var extendedDisplayRequest: UUID?
+    private var extendedDisplaySource: WorkspaceSource?
+    private var extendedDisplayPlacement: (display: UInt32, uuid: String, pane: String?)?
+    private var extendedDisplayPane: String?
+    private var extendedDisplayTimeout: Task<Void, Never>?
     /// The Mac's screen is locked (or switched to another user): nothing of it is kept or shown
     /// here until it unlocks (`macLockState`). The layout itself is kept.
     @Published private(set) var macLocked = false
@@ -977,6 +992,7 @@ final class WorkspaceModel: ObservableObject {
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
             trackpadPeekSupported = f.contains(TrackpadStagePeekWire.welcomeFeature)
+            extendedDisplaySupported = f.contains(WorkspaceExtendedDisplayWire.feature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -1007,6 +1023,9 @@ final class WorkspaceModel: ObservableObject {
         case .mode(let window):
             if window != windowMode {
                 cancelWindowShow(message: String(localized: "The display mode changed."), withdraw: true)
+                finishExtendedDisplayOperation()
+                extendedDisplayID = nil
+                extendedDisplaySource = nil
             }
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
@@ -1026,6 +1045,29 @@ final class WorkspaceModel: ObservableObject {
             guard token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
             trackpadPeekAppsRevision = revision
             if let apps { trackpadPeekApps = apps }
+        case .extendedDisplay(let request, let status, let display, let uuid):
+            guard extendedDisplayRequest == request, windowMode else { return }
+            switch status {
+            case "ready":
+                guard let display, let uuid, let host else { finishExtendedDisplayOperation(failed: true); return }
+                extendedDisplayID = display
+                extendedDisplaySource = WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(display), displayUUID: uuid)
+                extendedDisplayPlacement = (display, uuid, extendedDisplayPane)
+                if let catalog { placeExtendedDisplay(from: catalog) }
+                if extendedDisplayBusy { requestCatalog() }
+            case "removed":
+                if let source = extendedDisplaySource, let holder = saved.tile(holding: source) {
+                    saved = Self.detach(source, from: holder, in: saved)
+                    persist()
+                    publish()
+                    scheduleSend()
+                }
+                extendedDisplayID = nil
+                extendedDisplaySource = nil
+                finishExtendedDisplayOperation()
+                requestCatalog()
+            default: finishExtendedDisplayOperation(failed: true)
+            }
         case .state(let s):
             remote = s
             validatePendingWindowShow()
@@ -1110,6 +1152,10 @@ final class WorkspaceModel: ObservableObject {
             // Only while the overview watches: a late message after it closed shows nothing.
             if displayOverviewOpen, overviewCursor != cursor { overviewCursor = cursor }
         case .disconnected:
+            extendedDisplaySupported = false
+            extendedDisplayID = nil
+            extendedDisplaySource = nil
+            finishExtendedDisplayOperation()
             trackpadPeekSupported = false
             clearTrackpadPeek()
             cancelWindowShow(message: String(localized: "The Mac disconnected."))
@@ -1254,6 +1300,7 @@ final class WorkspaceModel: ObservableObject {
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
         else if windowMode, displayAssignmentsChanged { scheduleSend(immediately: true) }
+        placeExtendedDisplay(from: c)
         requestTuckedStills()
         requestThumbnails()
         advanceAppOpening()
@@ -1340,6 +1387,73 @@ final class WorkspaceModel: ObservableObject {
     /// Windows, running apps and displays. Apps to open come from `appCatalog` (`requestApps`):
     /// current Macs don't answer the listing's old `installed` flag.
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
+
+    func requestExtendedDisplay(size: CGSize, scale: CGFloat, shape: ExtendDisplayShape,
+                                desktopSize: ExtendDesktopSize) {
+        guard windowMode, extendedDisplaySupported, !extendedDisplayBusy,
+              controlState() == .allowed, inputAllowed(),
+              size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              scale.isFinite, scale > 0 else { return }
+        extendedDisplayPane = active.flatMap { layout.isFloat($0) ? nil : $0 } ?? layout.orderedTileIDs.first
+        startExtendedDisplayOperation([
+            "action": "create", "width": Int(min(8192, size.width * scale)),
+            "height": Int(min(8192, size.height * scale)),
+            "shape": shape.rawValue, "size": desktopSize.rawValue,
+        ])
+    }
+
+    func removeExtendedDisplay() {
+        guard windowMode, extendedDisplayID != nil, !extendedDisplayBusy,
+              controlState() == .allowed, inputAllowed() else { return }
+        startExtendedDisplayOperation(["action": "remove"])
+    }
+
+    private func startExtendedDisplayOperation(_ action: [String: Any]) {
+        let request = UUID()
+        var message = action
+        message["type"] = WorkspaceExtendedDisplayWire.request
+        message["request"] = request.uuidString
+        extendedDisplayNotice = nil
+        guard send(message) else { finishExtendedDisplayOperation(failed: true); return }
+        extendedDisplayRequest = request
+        extendedDisplayBusy = true
+        extendedDisplayTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, self?.extendedDisplayRequest == request else { return }
+            self?.finishExtendedDisplayOperation(failed: true)
+        }
+    }
+
+    private func placeExtendedDisplay(from catalog: WorkspaceCatalogMessage) {
+        guard let pending = extendedDisplayPlacement,
+              let display = catalog.displays.first(where: {
+                  $0.id == pending.display && $0.displayUUID == pending.uuid && $0.overview?.isOwn == true
+              }),
+              let source = source(for: displayWindow(display)) else { return }
+        if let holder = saved.tile(holding: source) {
+            if let tab = layout.tiles[holder]?.tabs.firstIndex(where: { $0.matches(source) }) {
+                edit { $0.switchingTab(of: holder, to: tab) }
+            }
+            focus(holder, raise: false)
+        } else if let pane = pending.pane.flatMap({ layout.orderedTileIDs.contains($0) ? $0 : nil })
+            ?? layout.orderedTileIDs.first {
+            edit { $0.addingTab(source, to: pane) }
+            focus(pane, raise: false)
+        } else {
+            choose(displayWindow(display), asNewTile: false)
+        }
+        finishExtendedDisplayOperation()
+    }
+
+    private func finishExtendedDisplayOperation(failed: Bool = false) {
+        extendedDisplayTimeout?.cancel()
+        extendedDisplayTimeout = nil
+        extendedDisplayRequest = nil
+        extendedDisplayPlacement = nil
+        extendedDisplayPane = nil
+        if extendedDisplayBusy { extendedDisplayBusy = false }
+        extendedDisplayNotice = failed ? String(localized: "The Mac couldn’t update the extended display.") : nil
+    }
 
     func refreshTrackpadPeek() {
         guard trackpadPeekSupported, trackpadPeekAllowed(), !macLocked else { clearTrackpadPeek(); return }

@@ -1101,6 +1101,46 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertNil(m.trackpadPeekCatalog)
     }
 
+    func testExtendedDisplayWaitsForMatchingOwnedCatalogAndRemovesWithoutCatalog() throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WorkspaceExtendedDisplayWire.feature]))
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let previous = m.layout.tiles.values.flatMap(\.windows)
+        m.requestExtendedDisplay(size: CGSize(width: 400, height: 760), scale: 2, shape: .automatic, desktopSize: .standard)
+        let message = try XCTUnwrap(sent.last { $0["type"] as? String == WorkspaceExtendedDisplayWire.request })
+        let request = try XCTUnwrap((message["request"] as? String).flatMap(UUID.init(uuidString:)))
+        let plan = try XCTUnwrap(WorkspaceExtendedDisplayWire.Setup(message)).plan(maximumReceiverEdge: 1800)
+        XCTAssertEqual(plan.wide, 400)
+        XCTAssertEqual(plan.high, 760)
+        let uuid = UUID().uuidString
+        m.apply(.extendedDisplay(UUID(), status: "ready", display: 3, uuid: uuid))
+        XCTAssertNil(m.extendedDisplayID)
+        m.apply(.extendedDisplay(request, status: "ready", display: 3, uuid: uuid))
+        XCTAssertTrue(m.extendedDisplayBusy, "waits for the catalog")
+        let virtual = CatalogDisplayItem(id: 3, name: "Extended Display", width: 400, height: 760,
+                                         isMain: false, isVirtual: true,
+                                         overview: OverviewDisplay(id: 3, frame: CGRect(x: 3840, y: 0, width: 400, height: 760),
+                                                                    isVirtual: true, isOwn: true), displayUUID: uuid)
+        let catalog = WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false,
+                                               displays: twoDisplays + [virtual])
+        m.apply(.catalog(catalog))
+        XCTAssertFalse(m.extendedDisplayBusy)
+        XCTAssertEqual(m.layout.orderedTileIDs.count, 2)
+        XCTAssertTrue(previous.allSatisfy { m.layout.tiles.values.flatMap(\.windows).contains($0) })
+        XCTAssertEqual(m.layout.tiles.values.flatMap(\.windows).filter { $0.displayUUID == uuid }.count, 1)
+        m.removeExtendedDisplay()
+        let remove = try XCTUnwrap(sent.last { $0["type"] as? String == WorkspaceExtendedDisplayWire.request })
+        let removal = try XCTUnwrap((remove["request"] as? String).flatMap(UUID.init(uuidString:)))
+        m.apply(.catalog(.init(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false, displays: twoDisplays)))
+        m.apply(.extendedDisplay(removal, status: "removed", display: nil, uuid: nil))
+        let remaining = m.layout.tiles.values.flatMap(\.windows)
+        XCTAssertEqual(remaining.count, previous.count)
+        XCTAssertTrue(previous.allSatisfy { remaining.contains($0) })
+        XCTAssertNil(m.extendedDisplayID)
+    }
+
     func testOverviewPanAndZoomPersistPerTabAndRestoreFromDisk() throws {
         let defaults = UserDefaults(suiteName: "OverviewViewport-\(UUID().uuidString)")!
         var sent: [[String: Any]] = []
