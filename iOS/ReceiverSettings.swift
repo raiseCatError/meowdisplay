@@ -369,6 +369,7 @@ private struct DisplaySettingsPage: View {
                 if receiver.videoEnabled { displayModeRows }
                 Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
                     .settingsAnchor("trackpadDots")
+                Toggle("Trackpad Border", isOn: preferenceBinding(controlStore, \.showTrackpadBorder))
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.trackpadDisplayLayoutOptIn))
                     SettingNote("Shows the Mac pointer and display outlines with video off. Surface dots stay outside the outlines.")
@@ -831,8 +832,28 @@ private struct InputSettingsPage: View {
                 Toggle("Natural Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
                     .settingsAnchor("scrollDirection")
                 Toggle("Natural Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
-                Toggle("Right-Edge Scroll Strip", isOn: preferenceBinding(controlStore, \.showRightScrollStrip))
-                    .settingsAnchor("rightScrollStrip")
+                Picker("Edge Scrolling", selection: preferenceBinding(controlStore, \.edgeScrolling)) {
+                    ForEach(EdgeScrolling.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .settingsAnchor("rightScrollStrip")
+                if controlStore.preferences.edgeScrolling == .manual {
+                    Toggle("Vertical Scrollbar", isOn: preferenceBinding(controlStore, \.verticalEdgeScrolling))
+                    if controlStore.preferences.verticalEdgeScrolling {
+                        Picker("Vertical Position", selection: preferenceBinding(controlStore, \.verticalScrollEdge)) {
+                            Text("Left").tag(VerticalScrollEdge.left)
+                            Text("Right").tag(VerticalScrollEdge.right)
+                        }
+                    }
+                    Toggle("Horizontal Scrollbar", isOn: preferenceBinding(controlStore, \.horizontalEdgeScrolling))
+                    if controlStore.preferences.horizontalEdgeScrolling {
+                        Picker("Horizontal Position", selection: preferenceBinding(controlStore, \.horizontalScrollEdge)) {
+                            Text("Top").tag(HorizontalScrollEdge.top)
+                            Text("Bottom").tag(HorizontalScrollEdge.bottom)
+                        }
+                    }
+                }
+                Toggle("Scroll Momentum", isOn: preferenceBinding(controlStore, \.scrollMomentumEnabled))
+                Toggle("Scroll Motion Feedback", isOn: preferenceBinding(controlStore, \.scrollMotionFeedback))
             } header: {
                 Text("Scrolling")
             } footer: {

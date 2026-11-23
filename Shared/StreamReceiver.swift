@@ -774,6 +774,12 @@ final class StreamReceiverSelfBox: @unchecked Sendable {
     }
 }
 
+final class TrackpadCursorPresentation: ObservableObject {
+    @Published var location: CGPoint?
+
+    init(location: CGPoint? = nil) { self.location = location }
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -802,10 +808,14 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var displayState = DisplayState.running
     @MainActor @Published private(set) var videoEnabled = true
     @MainActor @Published private(set) var trackpadDisplayGeometry: [TrackpadDisplayGeometry] = []
-    @MainActor @Published private(set) var trackpadCursorLocation: CGPoint?
+    @MainActor let trackpadCursor = TrackpadCursorPresentation()
     @MainActor private var trackpadLayoutSupported = false
     @MainActor private var trackpadLayoutWatching = false
     @MainActor private var trackpadLayoutControlGranted = false
+    @MainActor var canBrowseTrackpadStagePeek: Bool {
+        connected && !videoEnabled && macLock == nil && trackpadLayoutControlGranted
+            && session.allowsLiveInput && remoteInputMayLeave()
+    }
     /// Queue-confined copy used to distinguish an idempotent state push from
     /// an actual off/on transition that must retire decoder state.
     private var receivedVideoEnabled = true
@@ -2986,7 +2996,10 @@ final class StreamReceiver: ObservableObject {
             // old Mac can't diagnose that itself, so we surface it here.
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
-            let macFeatures = Set((obj["features"] as? [String] ?? []).prefix(WindowWorkspaceWire.welcomeFeatureLimit).map { String($0.prefix(32)) })
+            var macFeatures = Set((obj["features"] as? [String] ?? []).prefix(WindowWorkspaceWire.welcomeFeatureLimit).map { String($0.prefix(32)) })
+            if macFeatures.contains(WindowWorkspaceWire.welcomeFeature) {
+                macFeatures.formUnion((obj["workspaceFeatures"] as? [String] ?? []).prefix(8).map { String($0.prefix(32)) })
+            }
             let supportsTrackpadLayout = macFeatures.contains(TrackpadLayoutWire.welcomeFeature)
             DispatchQueue.main.async { uiSink.publishTrackpadLayoutSupport(supportsTrackpadLayout) }
             workspaceEvents.emit(.features(macFeatures))
@@ -3120,8 +3133,8 @@ final class StreamReceiver: ObservableObject {
             }
             DispatchQueue.main.async { uiSink.publishVideoState(width: update.width, height: update.height, enabled: update.enabled) }
         case TrackpadLayoutWire.state:
-            guard !receivedVideoEnabled, sessionAdmission.admitted,
-                  let sample = TrackpadLayoutWire.Sample.parse(obj) else { return }
+            guard !receivedVideoEnabled, sessionAdmission.admitted else { return }
+            let sample = TrackpadLayoutWire.Sample.parse(obj) ?? .init(displays: [], cursor: nil)
             DispatchQueue.main.async { uiSink.publishTrackpadLayout(sample) }
         case WireMessage.audioState:
             guard let update = AudioStateUpdate(message: obj) else { return }
@@ -3717,7 +3730,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor private func clearTrackpadLayout() {
         trackpadLayoutWatching = false
         if !trackpadDisplayGeometry.isEmpty { trackpadDisplayGeometry = [] }
-        if trackpadCursorLocation != nil { trackpadCursorLocation = nil }
+        if trackpadCursor.location != nil { trackpadCursor.location = nil }
     }
 
     /// Requests a Mac-side streaming profile over the existing authenticated
@@ -4099,6 +4112,9 @@ final class StreamReceiver: ObservableObject {
     @discardableResult
     func sendWorkspace(_ message: [String: Any]) -> Bool {
         guard connected else { return false }
+        if message[TrackpadStagePeekWire.tokenKey] != nil {
+            guard canBrowseTrackpadStagePeek else { return false }
+        }
         sendUIControl(message)
         return true
     }
@@ -6562,7 +6578,7 @@ final class StreamReceiver: ObservableObject {
         guard connected, !videoEnabled, macLock == nil, trackpadLayoutWatching,
               trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
         if trackpadDisplayGeometry != sample.displays { trackpadDisplayGeometry = sample.displays }
-        if trackpadCursorLocation != sample.cursor { trackpadCursorLocation = sample.cursor }
+        if trackpadCursor.location != sample.cursor { trackpadCursor.location = sample.cursor }
     }
 
     @MainActor func applyVideoStateUpdate(width: Int?, height: Int?, enabled: Bool) {

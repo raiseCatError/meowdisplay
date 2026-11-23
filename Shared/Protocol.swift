@@ -9,6 +9,13 @@ import CoreGraphics
 struct TrackpadDisplayGeometry: Equatable, Identifiable, Sendable {
     let id: UInt32
     let bounds: CGRect
+    let name: String?
+
+    init(id: UInt32, bounds: CGRect, name: String? = nil) {
+        self.id = id
+        self.bounds = bounds
+        self.name = name.flatMap { $0.isEmpty ? nil : String($0.prefix(128)) }
+    }
 }
 
 /// Optional, leased geometry and cursor telemetry for Video Off.
@@ -17,6 +24,7 @@ enum TrackpadLayoutWire {
     static let watch = "trackpadLayoutWatch"
     static let state = "trackpadLayoutState"
     static let displayLimit = 16
+    static let sampleInterval: TimeInterval = 1.0 / 30
 
     struct Sample: Equatable, Sendable {
         let displays: [TrackpadDisplayGeometry]
@@ -26,8 +34,12 @@ enum TrackpadLayoutWire {
             var message: [String: Any] = [
                 "type": TrackpadLayoutWire.state,
                 "displays": displays.map {
-                    ["id": Int($0.id), "x": Double($0.bounds.minX), "y": Double($0.bounds.minY),
-                     "w": Double($0.bounds.width), "h": Double($0.bounds.height)] as [String: Any]
+                    var display: [String: Any] = [
+                        "id": Int($0.id), "x": Double($0.bounds.minX), "y": Double($0.bounds.minY),
+                        "w": Double($0.bounds.width), "h": Double($0.bounds.height),
+                    ]
+                    if let name = $0.name { display["name"] = name }
+                    return display
                 },
             ]
             if let cursor { message["cursor"] = ["x": Double(cursor.x), "y": Double(cursor.y)] }
@@ -45,7 +57,8 @@ enum TrackpadLayoutWire {
                       let origin = Self.point(record),
                       let width = record["w"] as? Double, width > 0, width <= 100_000,
                       let height = record["h"] as? Double, height > 0, height <= 100_000 else { return nil }
-                displays.append(.init(id: id, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height))))
+                displays.append(.init(id: id, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height)),
+                                      name: record["name"] as? String))
             }
             let cursor = (message["cursor"] as? [String: Any]).flatMap(Self.point)
                 .flatMap { point in displays.contains(where: { $0.bounds.contains(point) }) ? point : nil }
@@ -57,6 +70,16 @@ enum TrackpadLayoutWire {
                   abs(x) <= 1_000_000, abs(y) <= 1_000_000 else { return nil }
             return CGPoint(x: x, y: y)
         }
+    }
+}
+
+/// A distinct request ID keeps catalog replies out of the saved Window workspace.
+enum TrackpadStagePeekWire {
+    static let welcomeFeature = "trackpadStagePeek"
+    static let tokenKey = "trackpadStagePeek"
+
+    static func token(in message: [String: Any]) -> UUID? {
+        (message[tokenKey] as? String).flatMap(UUID.init(uuidString:))
     }
 }
 

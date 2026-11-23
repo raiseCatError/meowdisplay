@@ -130,7 +130,7 @@ enum MobileSettingsSearchIndex {
         .init("keepPointerOnReceiverDisplay", String(localized: "Keep Pointer on Receiver Display"), .display,
               keywords: ["trackpad", "cursor", "confine"]),
         .init("scrollDirection", String(localized: "Natural Vertical Scrolling"), .input, keywords: ["natural horizontal scrolling", "invert vertical scrolling", "invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
-        .init("rightScrollStrip", String(localized: "Right-Edge Scroll Strip"), .input,
+        .init("rightScrollStrip", String(localized: "Edge Scrolling"), .input,
               keywords: ["scroll bar", "right edge", "one finger"]),
         .init("zoomWhileTyping", String(localized: "Zoom While Typing"), .input, keywords: ["keyboard"]),
         // Gestures

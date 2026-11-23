@@ -334,11 +334,12 @@ enum VideoOffSurfaceGeometry {
 
 enum TrackpadDisplayGuideGeometry {
     static let dotRadius: CGFloat = 1.1
+    static let stretchedDotRadius: CGFloat = dotRadius * 1.6
 
     static func dotCenters(in surface: CGRect, excluding outlines: [CGRect]) -> [CGPoint] {
         let spacing: CGFloat = 28
         guard !surface.isNull, !surface.isEmpty, surface.width.isFinite, surface.height.isFinite else { return [] }
-        let excluded = outlines.map { $0.insetBy(dx: -dotRadius, dy: -dotRadius) }
+        let excluded = outlines.map { $0.insetBy(dx: -stretchedDotRadius, dy: -stretchedDotRadius) }
         return stride(from: surface.minY + spacing / 2, to: surface.maxY, by: spacing).flatMap { y in
             stride(from: surface.minX + spacing / 2, to: surface.maxX, by: spacing).compactMap { x in
                 let point = CGPoint(x: x, y: y)
@@ -389,9 +390,27 @@ enum TrackpadDisplayGuideGeometry {
     }
 }
 
-enum RightEdgeScrollStripGeometry {
-    /// Keep a usable vertical segment at the right edge, leaving the surrounding
-    /// content and controls available. Only obstacles across the hit area count.
+enum EdgeScrollStripGeometry {
+    static func frame(on edge: ScrollStripEdge, in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
+        func transpose(_ rect: CGRect) -> CGRect {
+            CGRect(x: rect.minY, y: rect.minX, width: rect.height, height: rect.width)
+        }
+        func reflect(_ rect: CGRect) -> CGRect {
+            CGRect(x: -rect.maxX, y: rect.minY, width: rect.width, height: rect.height)
+        }
+        func toRightEdge(_ rect: CGRect) -> CGRect {
+            let vertical = edge.isVertical ? rect : transpose(rect)
+            return edge == .left || edge == .top ? reflect(vertical) : vertical
+        }
+        guard !safeArea.isEmpty, !safeArea.isNull,
+              let segment = frame(in: toRightEdge(safeArea),
+                                  avoiding: obstacles.filter { !$0.isEmpty && !$0.isNull }.map(toRightEdge))
+        else { return nil }
+        let vertical = edge == .left || edge == .top ? reflect(segment) : segment
+        return edge.isVertical ? vertical : transpose(vertical)
+    }
+
+    /// Find the longest uninterrupted strip in the nearest usable column.
     static func frame(in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
         let edgeGap: CGFloat = 8
         let targetWidth: CGFloat = 32
@@ -413,8 +432,7 @@ enum RightEdgeScrollStripGeometry {
             let crossing = clearances.filter { !$0.intersection(rail).isEmpty }
             guard let segment = ControlPlacementArea.segments(of: rail, removing: crossing, horizontal: false)
                 .max(by: { $0.height < $1.height }), segment.height >= minimumHeight else { continue }
-            let height = min(128, segment.height)
-            return CGRect(x: segment.minX, y: segment.midY - height / 2, width: segment.width, height: height)
+            return segment
         }
         return nil
     }

@@ -1,6 +1,135 @@
 import SwiftUI
 import UIKit
 
+/// Video Off uses the same edge affordance, with a metadata-only list over the Trackpad.
+struct TrackpadStagePeek: View {
+    @ObservedObject var model: WorkspaceModel
+    @Binding var open: Bool
+    let inputAllowed: Bool
+    let strip: CGRect?
+    let safe: CGRect
+    let canvas: CGRect
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if open {
+                Color.black.opacity(0.55)
+                    .contentShape(Rectangle())
+                    .onTapGesture { setOpen(false) }
+                    .accessibilityHidden(true)
+                if !safe.isEmpty, !safe.isNull {
+                    panel
+                        .frame(width: min(400, max(1, safe.width - 24)),
+                               height: min(480, max(1, safe.height - 24)))
+                        .position(x: safe.midX, y: safe.midY)
+                }
+            } else if let strip {
+                Button { setOpen(true) } label: {
+                    Capsule()
+                        .fill(.white.opacity(0.42))
+                        .frame(width: 4, height: min(40, strip.height * 0.4))
+                        .frame(maxWidth: .infinity, alignment: strip.midX < canvas.width / 2 ? .leading : .trailing)
+                        .padding(.horizontal, 3)
+                        .frame(width: strip.width, height: strip.height)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .position(x: strip.midX, y: strip.midY)
+                .accessibilityLabel("Stage Peek")
+                .accessibilityIdentifier("trackpadStagePeekStrip")
+            }
+        }
+        .frame(width: canvas.width, height: canvas.height)
+        .position(x: canvas.midX, y: canvas.midY)
+        .task(id: open && inputAllowed && model.trackpadPeekSupported) {
+            guard open, inputAllowed, model.trackpadPeekSupported else { model.clearTrackpadPeek(); return }
+            while !Task.isCancelled {
+                model.refreshTrackpadPeek()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+        .onDisappear { open = false; model.clearTrackpadPeek() }
+    }
+
+    private var panel: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Stage Peek").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button { setOpen(false) } label: {
+                    Image(systemName: "xmark").frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+            }
+            .padding(.leading, 16)
+            Divider()
+            if !inputAllowed {
+                MoreActionsNeedControl(detail: String(localized: "Request control to browse windows and apps."))
+                    .frame(maxHeight: .infinity)
+                    .padding()
+            } else if !model.trackpadPeekSupported {
+                Text("Update MeowDisplay on the Mac to use Stage Peek with video off.")
+                    .frame(maxHeight: .infinity).padding()
+            } else if let catalog = model.trackpadPeekCatalog {
+                catalogList(catalog)
+            } else {
+                ProgressView().frame(maxHeight: .infinity)
+            }
+        }
+        .foregroundStyle(.white)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
+        .preferredColorScheme(.dark)
+        .accessibilityAction(.escape) { setOpen(false) }
+        .accessibilityIdentifier("trackpadStagePeek")
+    }
+
+    private func catalogList(_ catalog: WorkspaceCatalogMessage) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                Text("Windows").font(.subheadline.weight(.semibold)).padding(.vertical, 8)
+                if catalog.windows.isEmpty {
+                    Text(catalog.unavailable ? "Windows unavailable" : "No windows")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                ForEach(catalog.windows, id: \.id) { window in
+                    row(window.title.isEmpty ? window.app : window.title, icon: "macwindow") {
+                        var action = WorkspaceRequests.activateWindow(window.id, generation: window.generation)
+                        action["ifOffscreen"] = true
+                        model.sendTrackpadPeek(action)
+                        setOpen(false)
+                    }
+                }
+                if !model.trackpadPeekApps.isEmpty {
+                    Text("Apps").font(.subheadline.weight(.semibold)).padding(.vertical, 8)
+                    ForEach(model.trackpadPeekApps) { app in
+                        row(app.name, icon: "app") {
+                            model.sendTrackpadPeek(WorkspaceRequests.appLaunch(app.bundleID, reveal: true))
+                            setOpen(false)
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private func row(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label { Text(verbatim: title).lineLimit(1) } icon: { Image(systemName: icon) }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func setOpen(_ value: Bool) {
+        if !value { model.clearTrackpadPeek() }
+        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { open = value }
+    }
+}
+
 /// MeowDisplay blue: the Stage Peek focus ring.
 private let stagePeekAccent = meowAccent
 
@@ -882,7 +1011,7 @@ struct StagePeekOverlay: View {
             }
             .onEnded { v in
                 stripDown = false
-                end("strip", v.location, v.time.timeIntervalSinceReferenceDate, cards: cards)
+                end("strip", v, cards: cards)
             }
     }
 
@@ -921,7 +1050,7 @@ struct StagePeekOverlay: View {
                     }
                     return
                 }
-                end("open\(openTouch)", v.location, v.time.timeIntervalSinceReferenceDate, cards: cards)
+                end("open\(openTouch)", v, cards: cards)
             }
     }
 
@@ -973,10 +1102,15 @@ struct StagePeekOverlay: View {
         perform(effects)
     }
 
-    private func end(_ id: String, _ p: CGPoint, _ t: TimeInterval, cards: [StagePeekCard]) {
+    private func end(_ id: String, _ drag: DragGesture.Value, cards: [StagePeekCard]) {
         pollTask?.cancel()
         var effects: [StagePeekEffect] = []
-        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion, fade: hitFade) }) }
+        let projection = reduceMotion ? 0 : drag.predictedEndTranslation.height - drag.translation.height
+        animate {
+            effects = machine.touchEnded(id: id, at: drag.location, time: drag.time.timeIntervalSinceReferenceDate,
+                                         projectedVerticalTravel: projection,
+                                         cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion, fade: hitFade) })
+        }
         finish(effects)
     }
 

@@ -257,7 +257,7 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.allowInput = false
         preferences.inputMode = .trackpad
         preferences.showSurfaceGrid = false
-        preferences.showRightScrollStrip = false
+        preferences.edgeScrolling = .off
         preferences.trackpadDisplayLayoutOptIn = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
@@ -344,7 +344,7 @@ final class ReceiverControlsTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
         XCTAssertTrue(decoded.showSurfaceGrid)
         XCTAssertFalse(decoded.trackpadDisplayLayoutOptIn, "the QA default did not record an explicit opt-in")
-        XCTAssertTrue(decoded.showRightScrollStrip)
+        XCTAssertEqual(decoded.edgeScrolling, .automatic)
         var customized = decoded
         customized.showSurfaceGrid = false
         customized.trackpadDisplayLayoutOptIn = true
@@ -410,20 +410,57 @@ final class ReceiverControlsTests: XCTestCase {
                      CGSize(width: 175, height: 180)] {
             let safe = CGRect(origin: CGPoint(x: 15, y: 10), size: size)
             let controls = CGRect(x: safe.maxX - 45, y: safe.maxY - 60, width: 45, height: 60)
-            let strip = try XCTUnwrap(RightEdgeScrollStripGeometry.frame(in: safe, avoiding: [controls]))
+            let strip = try XCTUnwrap(EdgeScrollStripGeometry.frame(in: safe, avoiding: [controls]))
             XCTAssertTrue(safe.contains(strip))
             XCTAssertFalse(strip.intersects(controls))
             XCTAssertEqual(strip.maxX, safe.maxX - 8)
             XCTAssertGreaterThanOrEqual(strip.height, 44)
+            XCTAssertGreaterThan(strip.height, safe.height * 0.55)
         }
         let landscape = CGRect(x: 0, y: 0, width: 700, height: 350)
         let verticalTray = CGRect(x: 650, y: 0, width: 50, height: 350)
-        let besideTray = try XCTUnwrap(RightEdgeScrollStripGeometry.frame(in: landscape, avoiding: [verticalTray]))
+        let besideTray = try XCTUnwrap(EdgeScrollStripGeometry.frame(in: landscape, avoiding: [verticalTray]))
         XCTAssertEqual(besideTray.maxX, verticalTray.minX - 4)
         XCTAssertFalse(besideTray.intersects(verticalTray))
         let narrow = CGRect(x: 0, y: 0, width: 60, height: 190)
         let blockedEdge = CGRect(x: 34, y: 0, width: 26, height: 190)
-        XCTAssertNil(RightEdgeScrollStripGeometry.frame(in: narrow, avoiding: [blockedEdge]))
+        XCTAssertNil(EdgeScrollStripGeometry.frame(in: narrow, avoiding: [blockedEdge]))
+    }
+
+    func testEdgeScrollStripSupportsOppositeAndPerpendicularEdges() throws {
+        let safe = CGRect(x: 10, y: 20, width: 390, height: 780)
+        let left = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .left, in: safe, avoiding: []))
+        XCTAssertEqual(left.minX, safe.minX + 8)
+        XCTAssertEqual(left.height, safe.height - 16)
+        let bottom = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .bottom, in: safe, avoiding: [left]))
+        XCTAssertEqual(bottom.maxY, safe.maxY - 8)
+        XCTAssertFalse(bottom.intersects(left))
+        let top = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .top, in: safe, avoiding: []))
+        XCTAssertEqual(top.minY, safe.minY + 8)
+        XCTAssertEqual(top.width, safe.width - 16)
+    }
+
+    func testEdgeScrollingPreservesLegacyOffAndManualConfiguration() throws {
+        let legacy = Data(#"{"showRightScrollStrip":false,"showSurfaceGrid":false}"#.utf8)
+        var preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertEqual(preferences.edgeScrolling, .off)
+        XCTAssertFalse(preferences.showSurfaceGrid)
+        XCTAssertTrue(preferences.showTrackpadBorder)
+        XCTAssertTrue(preferences.scrollMomentumEnabled)
+        XCTAssertTrue(preferences.scrollMotionFeedback)
+        preferences.edgeScrolling = .manual
+        preferences.verticalScrollEdge = .left
+        preferences.horizontalEdgeScrolling = true
+        preferences.horizontalScrollEdge = .top
+        preferences.showTrackpadBorder = false
+        let data = try JSONEncoder().encode(preferences)
+        preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
+        XCTAssertEqual(preferences.activeScrollEdges, [.left, .top])
+        XCTAssertFalse(preferences.showTrackpadBorder)
+        preferences.edgeScrolling = .automatic
+        XCTAssertEqual(preferences.activeScrollEdges, [.right])
+        preferences.edgeScrolling = .manual
+        XCTAssertEqual(preferences.activeScrollEdges, [.left, .top])
     }
 
     func testLegacyCursorLocatorDefaultDoesNotBecomeAnOptIn() throws {

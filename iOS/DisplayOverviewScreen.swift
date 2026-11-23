@@ -34,6 +34,7 @@ struct DisplayOverviewScreen: View {
     let onAddAsNewPane: (CatalogDisplayItem) -> Void
 
     @State private var interaction: OverviewInteraction
+    @State private var arrangement: DisplayOverviewModel?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSize
@@ -70,6 +71,7 @@ struct DisplayOverviewScreen: View {
         }
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangement))
         // Display stills keep refreshing while the overview is open, whatever Stage Peek does underneath.
         .onAppear {
             model.displayOverviewOpen = true
@@ -107,6 +109,14 @@ struct DisplayOverviewScreen: View {
 
     private var toolbarTools: some View {
         HStack(spacing: 8) {
+            if model.canArrangeDisplays, model.inputAllowed(), model.controlState() == .allowed,
+               interaction.model.hasArrangement, interaction.model.drawnDisplays.count >= 2 {
+                Button { arrangement = interaction.model } label: {
+                    Image(systemName: "rectangle.2.swap").padding(8)
+                }
+                .accessibilityLabel("Arrange Displays")
+                .accessibilityIdentifier("displayOverviewArrange")
+            }
             if model.canUseDisplayActions {
                 // Labels on the Mac's own screens, to match these tiles with the desk.
                 Button { model.identifyDisplays() } label: {

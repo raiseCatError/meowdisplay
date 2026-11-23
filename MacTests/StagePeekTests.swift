@@ -234,6 +234,25 @@ final class StagePeekTests: XCTestCase {
         XCTAssertEqual(m.phase, .open)
     }
 
+    func testCompactFlickSettlesPastTheReleasePointWithoutSelecting() {
+        var m = machine()
+        _ = opened(&m)
+        _ = m.touchEnded(id: 1, at: CGPoint(x: 8, y: 430), time: 0.5, cardAt: cardAt(m))
+        let start = cards(m).first { $0.highlighted }!.center
+        let end = CGPoint(x: start.x, y: start.y - 60)
+        _ = m.touchBegan(id: 2, at: start, time: 1, onStrip: false)
+        _ = m.touchMoved(id: 2, to: end, time: 1.1, edge: .left)
+        let positionAtRelease = m.position
+        let effects = m.touchEnded(id: 2, at: end, time: 1.2,
+                                   projectedVerticalTravel: -StagePeekConfig.scrubPitch, cardAt: { _ in 0 })
+        XCTAssertEqual(effects, [])
+        XCTAssertGreaterThan(m.position, positionAtRelease)
+        XCTAssertEqual(m.phase, .open)
+        _ = m.touchBegan(id: 3, at: start, time: 2, onStrip: false)
+        let next = m.touchMoved(id: 3, to: CGPoint(x: start.x, y: start.y - 12), time: 2.1, edge: .left)
+        XCTAssertFalse(next.contains(.haptic(.tick)))
+    }
+
     // MARK: Expansion
 
     func testInwardDragExpandsOnlyPastTheDeliberateThreshold() {

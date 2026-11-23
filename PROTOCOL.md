@@ -1654,6 +1654,15 @@ origins (`reverted` with `requested`, `timeout`, `control` or
 most 32 characters; receivers show unknown ones as a generic failure. After
 `kept` or `reverted` the receiver asks for `windowCatalog` again.
 
+**Stage Peek with video off.** `welcome.workspaceFeatures` can include
+`trackpadStagePeek`. Older peers keep reading their original `features` list.
+Requests for a window catalog, app catalog, app launch or window activation
+carry a `trackpadStagePeek` UUID for that opening. A separate metadata-only
+browser accepts them while video is off and the currently admitted connection
+has control. Catalog replies echo the UUID. Neither still requests nor
+workspace layout changes belong to this exchange. A receiver discards replies
+from any other opening or after it loses control.
+
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
 normalized `x y w h` in the canvas (non-overlapping, inside it, at least
@@ -2403,7 +2412,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 | 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |
 | 23 | Trackpad `pointer` messages may carry `trackpadPoints: true` and `confined: true/false`. Relative motion then uses Quartz points. The sender honours confinement only with video on and a single display source, and applies its existing authorization to every event. Trackpad presses and scrolls follow the desktop cursor when confinement is off. Older peers retain the video-pixel path. |
-| 23 (additive) | `welcome.features: ["trackpadLayout"]` allows a receiver to send `trackpadLayoutWatch` with `on: true` while video is off, renewing the five-second subscription as needed, or `on: false` to stop. The Mac sends `trackpadLayoutState` on changes at up to 10 Hz with at most 16 active desktop display records excluding mirrored copies (`id`, `x`, `y`, `w`, `h`) and an optional measured `cursor` (`x`, `y`). The records can include an active Extend display that remains reachable by the pointer. Positions are global Quartz points. The Mac checks admission, control and desktop privacy before sending, and uses no video capture for this data. |
+| 23 (additive) | `welcome.features: ["trackpadLayout"]` allows a receiver to send `trackpadLayoutWatch` with `on: true` while video is off, renewing the five-second subscription as needed, or `on: false` to stop. The Mac sends `trackpadLayoutState` on changes at up to 30 Hz with at most 16 active desktop display records excluding mirrored copies (`id`, `x`, `y`, `w`, `h`, optional `name`) and an optional measured `cursor` (`x`, `y`). The records can include an active Extend display that remains reachable by the pointer. Positions are global Quartz points. The Mac checks admission, control and desktop privacy before sending, and uses no video capture for this data. |
 | 23 (additive) | `welcome.features: ["scrollAtCursor"]` allows the receiver to send `scroll` with `scrollAtCursor: true`. Deltas are receiver points. The Mac scrolls at the actual cursor without moving it, including in Window mode. The normal input grant and privacy gates still apply. |
 | 23 (additive) | An absolute hardware pointer press in Window mode may include normalized workspace `x` and `y` with the existing `pointer` `down`. The Mac verifies the target and sends the press once. Relative Trackpad presses still follow the actual cursor. Older peers ignore the additional fields and use the preceding move. |
 

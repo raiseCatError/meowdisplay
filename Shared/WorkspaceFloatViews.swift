@@ -774,25 +774,33 @@ struct WorkspaceFloatLayer: View {
             act(String(localized: "Tuck Left"), "sidebar.left") { tuck(id, .left) },
             act(String(localized: "Tuck Right"), "sidebar.right") { tuck(id, .right) },
         ])
-        let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: [
+        let isOverview = model.layout.tiles[id]?.source?.isOverview == true
+        let resetView = act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) }
+        let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: isOverview ? [resetView] : [
             filled ? act(String(localized: "Whole Window"), "rectangle.arrowtriangle.2.inward") { model.toggleFit(id) }
                    : act(String(localized: "Fill Viewport"), "rectangle.arrowtriangle.2.outward") { model.toggleFit(id) },
             act(String(localized: "Rotate"), "rotate.right") { model.rotate(id) },
-            act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) },
+            resetView,
         ])
         var local: [UIMenuElement] = []
         if !front {
             local.append(act(String(localized: "Bring to Front"), "square.3.layers.3d.top.filled") { model.raiseFloat(id); model.focus(id, raise: false) })
         }
         local.append(act(String(localized: "Add to Layout"), "rectangle.split.2x1") { model.addFloatToLayout(id) })
-        local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"), children: [
+        var sizes = [
             act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.45 : 0.3) },
             act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.65 : 0.45) },
             act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.9 : 0.65) },
-            act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) },
-        ]))
+        ]
+        if !isOverview {
+            sizes.append(act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) })
+        }
+        local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"),
+                            children: sizes))
         local.append(act(String(localized: "Change Window…"), "macwindow.on.rectangle") { model.openOverview(replacing: id) })
         local.append(act(String(localized: "Remove from This Device"), "rectangle.badge.minus") { model.removeFloat(id) })
+        let localMenu = UIMenu(title: "", options: .displayInline, children: local)
+        if isOverview { return [placement, view, localMenu] }
 
         // The real window on the Mac: needs control, and says so.
         let off: UIMenuElement.Attributes = inputAllowed ? [] : [.disabled]
@@ -813,7 +821,7 @@ struct WorkspaceFloatLayer: View {
         let onMac = UIMenu(title: String(localized: "On Your Mac"), image: UIImage(systemName: "desktopcomputer"), children: mac)
         onMac.subtitle = inputAllowed ? String(localized: "Changes the real window") : String(localized: "Needs control of the Mac")
 
-        return [placement, view, UIMenu(title: "", options: .displayInline, children: local),
+        return [placement, view, localMenu,
                 UIMenu(title: "", options: .displayInline, children: [onMac])]
     }
 

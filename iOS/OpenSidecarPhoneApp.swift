@@ -54,6 +54,8 @@ struct ReceiverScreen: View {
     @StateObject private var model = ReceiverModel()
     @StateObject private var versionGate = VersionGate()
     @StateObject private var controlStore = ReceiverControlStore()
+    @State private var scrollFeedback = TrackpadScrollFeedback()
+    @State private var trackpadPeekOpen = false
     @State private var showSettings = false
     @State private var showPairedToast = false
     @State private var showOnboarding = false
@@ -574,12 +576,18 @@ struct ReceiverScreen: View {
             let canvas = canvas(in: geo.size)
             let workspaceVisible = videoEnabled && !lockScreenShowing
             let workspaceEditing = workspaceVisible && (model.workspace.drag != nil || model.workspace.arranging)
-            let workspaceOverlayOpen = workspaceVisible &&
-                (model.workspace.overviewOpen || model.workspace.stagePeekOpen || model.workspace.launchpadOpen)
+            let workspaceOverlayOpen = trackpadPeekOpen || (workspaceVisible &&
+                (model.workspace.overviewOpen || model.workspace.stagePeekOpen || model.workspace.launchpadOpen))
             let safeCanvas = effectiveSafeInsets.safeRect(in: geo.size).intersection(canvas)
             let visibleCanvas = shownKeyboardRect.map { $0.offsetBy(dx: canvas.minX, dy: canvas.minY) } ?? canvas
             let padArea = safeCanvas.intersection(visibleCanvas)
             let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+            let peekSafe = safeCanvas.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+            let peekAvoiding = (occupiedControlFrames + divisions)
+                .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
+            let peekStrip = controlStore.preferences.windowSwitcher == .stagePeek && model.workspace.available
+                ? StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding)
+                : nil
             let padPieces = VideoOffSurfaceGeometry.usablePieces(of: padArea, removing: divisions)
             let guideArea = VideoOffSurfaceGeometry.usablePiece(of: padArea, removing: divisions)
             let choiceArea = VideoOffSurfaceGeometry.choicePiece(of: padArea, removing: divisions)
@@ -616,9 +624,7 @@ struct ReceiverScreen: View {
                                    safeSurface: safeCanvas.offsetBy(dx: -canvas.minX, dy: -canvas.minY),
                                    // Controls report screen coordinates; the
                                    // surface may sit beside a Strip rail.
-                                   occupiedControlFrames: occupiedControlFrames.map {
-                                       $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
-                                   },
+                                   occupiedControlFrames: peekAvoiding + (peekStrip.map { [$0] } ?? []),
                                    reservedDivisions: ControlReservedRegion.frames(of: .division, in: reservedRegions)
                                     .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
                                    onRotationSnap: { haptics.play(.selection) },
@@ -633,6 +639,7 @@ struct ReceiverScreen: View {
                                        controlStore.noteSurfaceTouch()
                                    },
                                    onActivityEnded: { controlStore.scheduleAutoHide() },
+                                   onEdgeScrollBegan: { controlStore.beginAutoHideActivity() },
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
                                    moveViewActive: videoEnabled && controlStore.moveViewActive,
                                    viewportResetGeneration: controlStore.viewportResetGeneration,
@@ -660,11 +667,14 @@ struct ReceiverScreen: View {
                                        ? { model.workspace.activeIsOverview } : nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
-                                   rightScrollStripEnabled: model.receiver.macSupportsScrollAtCursor
+                                   scrollEdges: model.receiver.macSupportsScrollAtCursor
                                        && inputReachesMac && !lockScreenShowing && !showSettings
                                        && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
                                        && !controlStore.moveViewActive && !controlStore.autoHidden
-                                       && controlStore.preferences.showRightScrollStrip,
+                                       ? controlStore.preferences.activeScrollEdges : [],
+                                   scrollMomentumEnabled: controlStore.preferences.scrollMomentumEnabled,
+                                   scrollFeedback: !videoEnabled && controlStore.preferences.scrollMotionFeedback
+                                       && controlStore.preferences.showSurfaceGrid ? scrollFeedback : nil,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
                                    threeFingerHoldEnabled: workspaceVisible && model.workspace.available,
                                    onThreeFingerHold: { model.workspace.openOverview() },
@@ -690,10 +700,12 @@ struct ReceiverScreen: View {
                     if videoOffStatusShown, !padPieces.isEmpty {
                         TrackpadSurfaceDecoration(
                             showDots: controlStore.preferences.showSurfaceGrid,
+                            showBorder: controlStore.preferences.showTrackpadBorder,
                             dotAreas: padPieces.map { $0.offsetBy(dx: -padArea.minX, dy: -padArea.minY) },
                             guideArea: guideArea.offsetBy(dx: -padArea.minX, dy: -padArea.minY),
                             displays: showsTrackpadGuide ? model.receiver.trackpadDisplayGeometry : [],
-                            cursor: showsTrackpadGuide ? model.receiver.trackpadCursorLocation : nil)
+                            cursor: model.receiver.trackpadCursor,
+                            feedback: scrollFeedback)
                             .frame(width: padArea.width, height: padArea.height)
                             .position(x: padArea.midX, y: padArea.midY)
                             .allowsHitTesting(false)
@@ -769,12 +781,6 @@ struct ReceiverScreen: View {
                     let picture = workspacePicture(canvas: canvas)
                     // Stage Peek's safe area and what it keeps clear of (overlay coordinates): the
                     // same values place its edge handle and reserve it from tucked floats' handles.
-                    let peekSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
-                                          width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
-                                          height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
-                        .intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY)
-                    let peekAvoiding = (occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                        .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
                     let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
                                                                      peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
                     // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
@@ -890,6 +896,12 @@ struct ReceiverScreen: View {
                                 else { return }
                                 model.receiver.requestMirrorDisplaySelection(entry.uuid)
                             })
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
+                    }
+                    if !videoEnabled, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                        TrackpadStagePeek(model: model.workspace, open: $trackpadPeekOpen, inputAllowed: inputReachesMac,
+                                          strip: peekStrip, safe: guideArea.offsetBy(dx: -canvas.minX, dy: -canvas.minY),
+                                          canvas: canvas)
                         .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
                     }
                     if workspaceVisible, model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
@@ -1280,6 +1292,7 @@ struct ReceiverScreen: View {
                      + "displayState=\(model.receiver.displayState)")
             #endif
             if !allowed { keyboardActive = false }
+            if !allowed { model.workspace.clearTrackpadPeek() }
         }
         .onAppear {
             inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput)
@@ -1381,6 +1394,7 @@ struct ReceiverScreen: View {
             model.receiver.onAllowInputStateChange = { [weak workspace = model.workspace] state in
                 controlStore.applySessionInputState(state)
                 workspace?.windowShowControlChanged(state)
+                if state != .allowed { workspace?.clearTrackpadPeek() }
             }
             // Control is the Mac's decision for one session: never restored from a previous
             // launch (the stored preference said Allowed while the Mac would drop the input).
@@ -2932,6 +2946,7 @@ final class ReceiverModel: ObservableObject {
         workspace.requestWindowMode = { [weak receiver] in receiver?.requestWindowMode() ?? false }
         workspace.requestDisplayMode = { [weak receiver] mode in receiver?.requestDisplayMode(mode) ?? false }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        workspace.trackpadPeekAllowed = { [weak receiver] in receiver?.canBrowseTrackpadStagePeek ?? false }
         workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
         workspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
         workspace.mirrorChoice = { [weak receiver] in
@@ -3257,6 +3272,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// reveal from any receiver-surface interaction, not only a tray touch.
     let onActivityBegan: () -> Void
     let onActivityEnded: () -> Void
+    var onEdgeScrollBegan: (() -> Void)?
     /// Prefer MeowDisplay Gestures — see `ReceiverEditingInteractionPolicy`.
     var preferMeowDisplayGestures = true
     /// Move View: the surface navigates the local viewport instead of
@@ -3283,7 +3299,9 @@ struct VideoLayerView: UIViewRepresentable {
     var workspaceOverviewFocused: (() -> Bool)?
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
-    var rightScrollStripEnabled = false
+    var scrollEdges: [ScrollStripEdge] = []
+    var scrollMomentumEnabled = true
+    var scrollFeedback: TrackpadScrollFeedback?
     /// See `VideoView.onBlockedInputAttempt`.
     var onBlockedInputAttempt: @MainActor () -> Void = {}
     /// Window mode: three fingers held still open the window overview.
@@ -3322,7 +3340,8 @@ struct VideoLayerView: UIViewRepresentable {
         view.setCursorLocatorEnabled(showCursorLocator)
         view.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         view.setSurfaceContext(safeSurface: safeSurface, occupiedControlFrames: occupiedControlFrames,
-                               reservedDivisions: reservedDivisions, rightScrollStripEnabled: rightScrollStripEnabled)
+                               reservedDivisions: reservedDivisions, scrollEdges: scrollEdges)
+        view.setScrollOptions(momentum: scrollMomentumEnabled, feedback: scrollFeedback)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
@@ -3330,6 +3349,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
+        view.onEdgeScrollBegan = onEdgeScrollBegan
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         view.preferMeowDisplayGestures = preferMeowDisplayGestures
         view.onBlockedInputAttempt = onBlockedInputAttempt
@@ -3479,7 +3499,8 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setCursorLocatorEnabled(showCursorLocator)
         uiView.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         uiView.setSurfaceContext(safeSurface: safeSurface, occupiedControlFrames: occupiedControlFrames,
-                                 reservedDivisions: reservedDivisions, rightScrollStripEnabled: rightScrollStripEnabled)
+                                 reservedDivisions: reservedDivisions, scrollEdges: scrollEdges)
+        uiView.setScrollOptions(momentum: scrollMomentumEnabled, feedback: scrollFeedback)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
@@ -3487,6 +3508,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
+        uiView.onEdgeScrollBegan = onEdgeScrollBegan
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         uiView.preferMeowDisplayGestures = preferMeowDisplayGestures
         uiView.onBlockedInputAttempt = onBlockedInputAttempt
@@ -3686,12 +3708,16 @@ struct VideoLayerView: UIViewRepresentable {
         // view's black background — no mirrored, blurred letterbox fill.
         private let videoContentView = UIView()
         private var videoLayer: CALayer?
-        private let rightScrollStrip = RightEdgeScrollStrip()
+        private let scrollStrips = [ScrollStripEdge.left, .right, .top, .bottom].map { EdgeScrollStrip(edge: $0) }
+        private weak var scrollFeedback: TrackpadScrollFeedback?
+        private var scrollMomentumEnabled = true
+        private var momentumEdge: ScrollStripEdge?
+        private var touchesBlockedByStrip: Set<ObjectIdentifier> = []
         private var videoEnabled = true
         private var safeSurface = CGRect.zero
         private var occupiedControlFrames: [CGRect] = []
         private var reservedDivisions: [CGRect] = []
-        private var rightScrollStripEnabled = false
+        private var scrollEdges: [ScrollStripEdge] = []
         private var surfaceAdmission = SurfaceTouchAdmission<ObjectIdentifier>()
         private var pinchTarget = ReceiverGestureTarget.viewport
         private var rotateTarget = ReceiverGestureTarget.viewport
@@ -3862,6 +3888,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// actually over, not after each individual finger in a multi-touch
         /// gesture.
         var onActivityEnded: (() -> Void)?
+        var onEdgeScrollBegan: (() -> Void)?
         // Most recent meaningful primary interaction, in normalized
         // remote-display coordinates — the typing-focus anchor. Never
         // updated from multi-finger/system gestures, Pencil hover, the
@@ -3947,17 +3974,36 @@ struct VideoLayerView: UIViewRepresentable {
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
-            addSubview(rightScrollStrip)
-            rightScrollStrip.isHidden = true
-            rightScrollStrip.onBegan = { [weak self] in
-                self?.cancelScrollMomentum()
-                self?.onActivityBegan?()
+            for strip in scrollStrips {
+                let edge = strip.edge
+                addSubview(strip)
+                strip.isHidden = true
+                strip.mayBegin = { [weak self] in
+                    guard let self else { return false }
+                    return self.allowsInput && self.activeFingerTouchIDs.isEmpty
+                        && !self.inputEngine.hasActivePen && !self.scrollStrips.contains(where: \.isTracking)
+                }
+                strip.onBegan = { [weak self] in
+                    guard let self else { return }
+                    self.cancelScrollMomentum()
+                    self.scrollVelocityTracker.reset()
+                    self.scrollVelocityTracker.record(dx: 0, dy: 0, at: CACurrentMediaTime())
+                    (self.onEdgeScrollBegan ?? self.onActivityBegan)?()
+                }
+                strip.onDelta = { [weak self] delta in
+                    guard let self, self.allowsInput, self.scrollEdges.contains(edge) else { return }
+                    let dx = edge.isVertical ? 0 : delta
+                    let dy = edge.isVertical ? delta : 0
+                    self.sendRemoteScroll(dx: dx, dy: dy, atCurrentCursor: true)
+                    self.recordScroll(dx: dx, dy: dy)
+                }
+                strip.onEnded = { [weak self] released in
+                    guard let self else { return }
+                    if released { self.beginScrollMomentum(edge: edge) }
+                    if self.scrollMomentumSession == nil { self.scrollFeedback?.stop() }
+                    self.onActivityEnded?()
+                }
             }
-            rightScrollStrip.onDelta = { [weak self] delta in
-                guard let self, self.allowsInput, self.rightScrollStripEnabled else { return }
-                self.sendRemoteScroll(dx: 0, dy: delta, atCurrentCursor: true)
-            }
-            rightScrollStrip.onEnded = { [weak self] in self?.onActivityEnded?() }
             addGestureRecognizer(threeFingerHoldRecognizer)
             addGestureRecognizer(pointerHoverRecognizer)
             addGestureRecognizer(pointerScrollRecognizer)
@@ -4461,6 +4507,28 @@ struct VideoLayerView: UIViewRepresentable {
                     return true
                 })
             }
+            if allowsInput {
+                if let strip = scrollStrips.first(where: { $0.edge.isVertical && !$0.isHidden }) {
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Up")) { _ in
+                        strip.accessibilityDecrement()
+                        return true
+                    })
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Down")) { _ in
+                        strip.accessibilityIncrement()
+                        return true
+                    })
+                }
+                if let strip = scrollStrips.first(where: { !$0.edge.isVertical && !$0.isHidden }) {
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Left")) { _ in
+                        strip.accessibilityDecrement()
+                        return true
+                    })
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Right")) { _ in
+                        strip.accessibilityIncrement()
+                        return true
+                    })
+                }
+            }
             accessibilityCustomActions = actions.isEmpty ? nil : actions
         }
 
@@ -4607,19 +4675,23 @@ struct VideoLayerView: UIViewRepresentable {
         func setSurfaceContext(safeSurface: CGRect,
                                occupiedControlFrames: [CGRect],
                                reservedDivisions: [CGRect],
-                               rightScrollStripEnabled: Bool) {
+                               scrollEdges: [ScrollStripEdge]) {
             guard safeSurface != self.safeSurface || occupiedControlFrames != self.occupiedControlFrames
                     || reservedDivisions != self.reservedDivisions
-                    || rightScrollStripEnabled != self.rightScrollStripEnabled else { return }
+                    || scrollEdges != self.scrollEdges else { return }
             self.safeSurface = safeSurface
             self.occupiedControlFrames = occupiedControlFrames
             self.reservedDivisions = reservedDivisions
-            self.rightScrollStripEnabled = rightScrollStripEnabled
-            if !rightScrollStripEnabled {
-                rightScrollStrip.cancelScroll()
-                rightScrollStrip.isHidden = true
-            }
+            self.scrollEdges = scrollEdges
+            if let momentumEdge, !scrollEdges.contains(momentumEdge) { cancelScrollMomentum() }
             setNeedsLayout()
+        }
+
+        func setScrollOptions(momentum: Bool, feedback: TrackpadScrollFeedback?) {
+            scrollMomentumEnabled = momentum
+            if !momentum, scrollMomentumSession != nil { cancelScrollMomentum() }
+            if scrollFeedback !== feedback { scrollFeedback?.stop(immediately: true) }
+            scrollFeedback = feedback
         }
 
         func setGesturePreferences(pinchTarget: ReceiverGestureTarget,
@@ -4708,7 +4780,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         func clearInputStateForPause() {
             releaseHardwareInput()
-            rightScrollStrip.cancelScroll()
+            for strip in scrollStrips { strip.cancelScroll() }
             twoFingerActive = false
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
@@ -4770,8 +4842,8 @@ struct VideoLayerView: UIViewRepresentable {
             if locatorLayer.superlayer == nil { layer.addSublayer(locatorLayer) }
             if resumeMarkerLayer.superlayer == nil { layer.addSublayer(resumeMarkerLayer) }
             updateCursorLayout()
-            layoutRightScrollStrip()
             CATransaction.commit()
+            layoutScrollStrips()
             // Rotation diagnostics — one line per layout change.
             let video = receiver?.videoSize ?? .zero
             let displayed = currentTransform.displayedRect
@@ -4784,15 +4856,30 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
-        private func layoutRightScrollStrip() {
-            let frame = rightScrollStripEnabled
-                ? RightEdgeScrollStripGeometry.frame(
-                    in: safeSurface.intersection(bounds), avoiding: occupiedControlFrames + reservedDivisions)
-                : nil
-            if let frame, frame != rightScrollStrip.frame { rightScrollStrip.cancelScroll() }
-            if frame == nil { rightScrollStrip.cancelScroll() }
-            rightScrollStrip.frame = frame ?? .zero
-            rightScrollStrip.isHidden = frame == nil
+        private func layoutScrollStrips() {
+            var obstacles = occupiedControlFrames + reservedDivisions
+            var frames: [ScrollStripEdge: CGRect] = [:]
+            for edge in scrollEdges {
+                if let frame = EdgeScrollStripGeometry.frame(on: edge, in: safeSurface.intersection(bounds),
+                                                             avoiding: obstacles) {
+                    frames[edge] = frame
+                    obstacles.append(frame)
+                }
+            }
+            var visibilityChanged = false
+            for strip in scrollStrips {
+                let frame = frames[strip.edge] ?? .zero
+                if frame != strip.frame {
+                    if momentumEdge == strip.edge { cancelScrollMomentum() }
+                    strip.cancelScroll()
+                    strip.frame = frame
+                }
+                if strip.isHidden != frame.isEmpty {
+                    strip.isHidden = frame.isEmpty
+                    visibilityChanged = true
+                }
+            }
+            if visibilityChanged { refreshPictureAccessibility() }
         }
 
         private func updateCurrentTransform() {
@@ -5034,7 +5121,10 @@ struct VideoLayerView: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             // Off screen: stop pacing and show the newest report when the view returns.
-            guard window == nil, cursorLink != nil else { return }
+            guard window == nil else { return }
+            for strip in scrollStrips { strip.cancelScroll() }
+            cancelScrollMomentum()
+            guard cursorLink != nil else { return }
             stopCursorLink()
             cursorPacer.settle()
             if let newest = cursorPacer.newest { drawCursor(at: newest) }
@@ -5514,6 +5604,7 @@ struct VideoLayerView: UIViewRepresentable {
             guard remoteScrollScale != nil else { return }
             cancelScrollMomentum()   // touching again immediately cancels any active momentum
             scrollVelocityTracker.reset()
+            scrollVelocityTracker.record(dx: 0, dy: 0, at: CACurrentMediaTime())
             twoFingerActive = true
             lastPan = .zero
             // macOS delivers scroll to whatever sits under the cursor, and
@@ -5547,34 +5638,51 @@ struct VideoLayerView: UIViewRepresentable {
             // Recorded in view points (pre-scale), matching the domain
             // `cancelScrollMomentum`/`beginScrollMomentum` convert from —
             // see `tickScrollMomentum`.
-            scrollVelocityTracker.record(dx: stepX, dy: stepY, at: CACurrentMediaTime())
+            recordScroll(dx: stepX, dy: stepY)
             lastPan = t
         }
 
         /// Starts a decaying momentum phase from the velocity estimated
         /// over the just-ended scroll's recent samples — a no-op if the
         /// release was too slow to clear `ScrollMomentumConfig.minReleaseVelocity`.
-        private func beginScrollMomentum() {
+        private func recordScroll(dx: CGFloat, dy: CGFloat) {
+            let time = CACurrentMediaTime()
+            scrollVelocityTracker.record(dx: dx, dy: dy, at: time)
+            if let scrollFeedback {
+                scrollFeedback.update(scrollVelocityTracker.releaseVelocity(at: time) ?? .zero)
+            }
+        }
+
+        private func beginScrollMomentum(edge: ScrollStripEdge? = nil) {
             let releaseTime = CACurrentMediaTime()
             defer { scrollVelocityTracker.reset() }
-            guard let velocity = scrollVelocityTracker.releaseVelocity(at: releaseTime),
-                  let session = ScrollMomentumSession(initialVelocity: velocity, at: releaseTime) else { return }
+            guard scrollMomentumEnabled, allowsInput,
+                  let velocity = scrollVelocityTracker.releaseVelocity(at: releaseTime),
+                  let session = ScrollMomentumSession(initialVelocity: velocity, at: releaseTime) else {
+                scrollFeedback?.stop()
+                return
+            }
+            momentumEdge = edge
             scrollMomentumSession = session
             scrollMomentumDisplayLink?.invalidate()
             let link = CADisplayLink(target: self, selector: #selector(tickScrollMomentum))
+            // Remote input needs no more packets than the standard UIKit refresh cadence.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
             link.add(to: .main, forMode: .common)
             scrollMomentumDisplayLink = link
         }
 
         @objc private func tickScrollMomentum() {
-            guard allowsInput, let session = scrollMomentumSession, let scale = remoteScrollScale else {
+            let scale: CGFloat? = momentumEdge == nil ? remoteScrollScale : 1
+            guard allowsInput, let session = scrollMomentumSession, let scale else {
                 cancelScrollMomentum()
                 return
             }
             let (delta, alive) = session.tick(now: CACurrentMediaTime())
             if delta.dx != 0 || delta.dy != 0 {
-                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale)
+                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale, atCurrentCursor: momentumEdge != nil)
             }
+            scrollFeedback?.update(session.velocity, tracking: false)
             if !alive { cancelScrollMomentum() }
         }
 
@@ -5587,6 +5695,8 @@ struct VideoLayerView: UIViewRepresentable {
             scrollMomentumDisplayLink?.invalidate()
             scrollMomentumDisplayLink = nil
             scrollMomentumSession = nil
+            momentumEdge = nil
+            scrollFeedback?.stop()
         }
 
         /// Toggles between the normal 1x viewport and the most recent
@@ -5682,7 +5792,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            if touch.view === rightScrollStrip ||
+            if (touch.type == .direct && (touch.view is EdgeScrollStrip || scrollStrips.contains(where: \.isTracking))) ||
                 (!videoEnabled && !currentTransform.containsViewPoint(touch.location(in: self))) {
                 return false
             }
@@ -6020,7 +6130,7 @@ struct VideoLayerView: UIViewRepresentable {
                     // two-finger scroll path (`continueScroll`).
                     guard let scale = remoteScrollScale else { continue }
                     sendRemoteScroll(dx: CGFloat(dx) / scale, dy: CGFloat(dy) / scale)
-                    scrollVelocityTracker.record(dx: CGFloat(dx), dy: CGFloat(dy), at: CACurrentMediaTime())
+                    recordScroll(dx: CGFloat(dx), dy: CGFloat(dy))
                 case .scrollEnded(let momentum):
                     if momentum {
                         beginScrollMomentum()
@@ -6164,10 +6274,21 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
+        private func surfaceTouches(_ touches: Set<UITouch>, phase: UITouch.Phase) -> Set<UITouch> {
+            if phase == .began, scrollStrips.contains(where: \.isTracking) {
+                touchesBlockedByStrip.formUnion(touches.map(ObjectIdentifier.init))
+            }
+            let allowed = touches.filter { !touchesBlockedByStrip.contains(ObjectIdentifier($0)) }
+            if phase == .ended || phase == .cancelled {
+                touchesBlockedByStrip.subtract(touches.map(ObjectIdentifier.init))
+            }
+            return allowed
+        }
+
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .began)
             guard !touches.isEmpty else { return }
             if workspaceTouch != nil || workspacePaneKind != nil, let first = touches.first {
                 // The pane under the finger as drawn, mid-slide too, so the
@@ -6209,7 +6330,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .moved)
             guard !touches.isEmpty else { return }
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: false)
@@ -6220,7 +6341,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .ended)
             guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
@@ -6237,7 +6358,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .cancelled)
             guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
@@ -6898,37 +7019,141 @@ private extension View {
 
 /// The Mac's pointer and screen arrangement are presentation-only. Receiver touches
 /// on this area still go directly to the relative-input surface behind it.
+@MainActor final class TrackpadScrollFeedback: ObservableObject {
+    @Published private(set) var velocity = CGVector.zero
+    private var idle: Task<Void, Never>?
+
+    func update(_ sample: CGVector, tracking: Bool = true) {
+        guard !UIAccessibility.isReduceMotionEnabled, !ProcessInfo.processInfo.isLowPowerModeEnabled else {
+            stop(immediately: true)
+            return
+        }
+        idle?.cancel()
+        if sample != velocity { velocity = sample }
+        if tracking, sample != .zero {
+            idle = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(ScrollMomentumConfig.velocitySampleWindow))
+                guard !Task.isCancelled else { return }
+                self?.stop()
+            }
+        }
+    }
+
+    func stop(immediately: Bool = false) {
+        idle?.cancel()
+        idle = nil
+        guard velocity != .zero else { return }
+        withAnimation(immediately ? nil : .easeOut(duration: ScrollMomentumConfig.velocitySampleWindow)) {
+            velocity = .zero
+        }
+    }
+}
+
 private struct TrackpadSurfaceDecoration: View {
     let showDots: Bool
+    let showBorder: Bool
     let dotAreas: [CGRect]
     let guideArea: CGRect
     let displays: [TrackpadDisplayGeometry]
-    let cursor: CGPoint?
+    let cursor: TrackpadCursorPresentation
+    @ObservedObject var feedback: TrackpadScrollFeedback
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Canvas { context, _ in
-            let result = TrackpadDisplayGuideGeometry.layout(
-                displays: displays.map(\.bounds), cursor: cursor, in: guideArea.size)
-            let outlines = result.outlines.map { $0.offsetBy(dx: guideArea.minX, dy: guideArea.minY) }
+        let result = TrackpadDisplayGuideGeometry.layout(
+            displays: displays.map(\.bounds), cursor: nil, in: guideArea.size)
+        let outlines = result.outlines.map { $0.offsetBy(dx: guideArea.minX, dy: guideArea.minY) }
+        ZStack(alignment: .topLeading) {
             if showDots {
-                let radius = TrackpadDisplayGuideGeometry.dotRadius
-                var dots = Path()
-                for area in dotAreas {
-                    for center in TrackpadDisplayGuideGeometry.dotCenters(in: area, excluding: outlines) {
-                        dots.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
-                                                   width: 2 * radius, height: 2 * radius))
-                    }
+                TrackpadDots(areas: dotAreas, outlines: outlines,
+                             velocity: reduceMotion ? .zero : feedback.velocity)
+            }
+            decoration(outlines: outlines)
+            ForEach(Array(zip(displays, outlines)), id: \.0.id) { display, outline in
+                if let name = display.name, outline.width >= 52, outline.height >= 24 {
+                    Text(verbatim: name)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .foregroundStyle(.white.opacity(0.30))
+                        .frame(width: outline.width - 12, alignment: .leading)
+                        .position(x: outline.midX, y: outline.minY + 11)
                 }
-                context.fill(dots, with: .color(.white.opacity(0.28)))
+            }
+            if !displays.isEmpty { TrackpadCursorMarker(cursor: cursor, displays: displays, area: guideArea) }
+        }
+    }
+
+    private func decoration(outlines: [CGRect]) -> some View {
+        Canvas { context, _ in
+            if showBorder {
+                // Restore the original one-point separator and twelve-point radius.
+                for area in dotAreas {
+                    guard area.width > 1, area.height > 1 else { continue }
+                    context.stroke(Path(roundedRect: area.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 12),
+                                   with: .color(Color(uiColor: .separator)), lineWidth: 1)
+                }
             }
             for outline in outlines {
                 context.stroke(Path(roundedRect: outline, cornerRadius: 3),
                                with: .color(.white.opacity(0.18)), lineWidth: 1)
             }
-            if let marker = result.cursor {
-                let rect = CGRect(x: guideArea.minX + marker.x - 3, y: guideArea.minY + marker.y - 3, width: 6, height: 6)
-                context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.65)))
+        }
+    }
+}
+
+/// Cursor samples invalidate only the marker while the dot grid and video keep their own cadence.
+private struct TrackpadCursorMarker: View {
+    @ObservedObject var cursor: TrackpadCursorPresentation
+    let displays: [TrackpadDisplayGeometry]
+    let area: CGRect
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let result = TrackpadDisplayGuideGeometry.layout(
+            displays: displays.map(\.bounds), cursor: cursor.location, in: area.size)
+        if let marker = result.cursor, let point = cursor.location,
+           let target = displays.first(where: { $0.bounds.contains(point) }) {
+            let topology = displays.flatMap { display in
+                [CGFloat(display.id), display.bounds.minX, display.bounds.minY,
+                 display.bounds.width, display.bounds.height]
             }
+            Circle().fill(.white.opacity(0.65))
+                .frame(width: 6, height: 6)
+                .position(x: area.minX + marker.x, y: area.minY + marker.y)
+                .animation(reduceMotion ? nil : .linear(duration: TrackpadLayoutWire.sampleInterval), value: marker)
+                .id(topology + [CGFloat(target.id), area.minX, area.minY, area.width, area.height])
+        }
+    }
+}
+
+private nonisolated struct TrackpadDots: View, Animatable {
+    let areas: [CGRect]
+    let outlines: [CGRect]
+    var velocity: CGVector
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { .init(velocity.dx, velocity.dy) }
+        set { velocity = .init(dx: newValue.first, dy: newValue.second) }
+    }
+
+    var body: some View {
+        Canvas { context, _ in
+            let radius = TrackpadDisplayGuideGeometry.dotRadius
+            // Limit the longest dimension to 1.6× the resting dot, even at fast flick speed.
+            let speed = hypot(velocity.dx, velocity.dy)
+            let fullStretch = min(1, speed / (ScrollMomentumConfig.maxReleaseVelocity / 4))
+            let maximumRadius = TrackpadDisplayGuideGeometry.stretchedDotRadius
+            let longRadius = radius + (maximumRadius - radius) * fullStretch
+            let ellipse = Path(ellipseIn: CGRect(x: -longRadius, y: -radius,
+                                                width: 2 * longRadius, height: 2 * radius))
+                .applying(CGAffineTransform(rotationAngle: atan2(velocity.dy, velocity.dx)))
+            var dots = Path()
+            for area in areas {
+                for center in TrackpadDisplayGuideGeometry.dotCenters(in: area, excluding: outlines) {
+                    dots.addPath(ellipse, transform: CGAffineTransform(translationX: center.x, y: center.y))
+                }
+            }
+            context.fill(dots, with: .color(.white.opacity(0.28)))
         }
     }
 }
@@ -6944,11 +7169,13 @@ private struct UITestTrackpadFixture: View {
     let displayCount: Int
     @State private var showChoice = true
     @State private var videoOn = false
+    @State private var feedback = TrackpadScrollFeedback()
+    private let scrollMode = ProcessInfo.processInfo.environment["MEOW_UITEST_EDGE_SCROLL"]
 
     var body: some View {
         let displays = Array([
-            TrackpadDisplayGeometry(id: 1, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
-            TrackpadDisplayGeometry(id: 2, bounds: CGRect(x: 1530, y: -260, width: 1920, height: 1080)),
+            TrackpadDisplayGeometry(id: 1, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982), name: "Built-in Display"),
+            TrackpadDisplayGeometry(id: 2, bounds: CGRect(x: 1530, y: -260, width: 1920, height: 1080), name: "Studio Display"),
         ].prefix(max(0, displayCount)))
         ZStack(alignment: .top) {
             Color(white: 0.07).ignoresSafeArea()
@@ -6959,17 +7186,23 @@ private struct UITestTrackpadFixture: View {
                 GeometryReader { proxy in
                     let area = CGRect(origin: .zero, size: proxy.size)
                     let divisions = ControlReservedRegion.frames(of: .division, in: ControlReservedRegion.active(in: proxy))
-                    TrackpadSurfaceDecoration(
-                        showDots: ProcessInfo.processInfo.environment["MEOW_UITEST_TRACKPAD_DOTS"] != "0",
-                        dotAreas: VideoOffSurfaceGeometry.usablePieces(of: area, removing: divisions),
-                        guideArea: VideoOffSurfaceGeometry.usablePiece(of: area, removing: divisions),
-                        displays: displays, cursor: displays.last.map {
-                            CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)
-                        })
+                    ZStack {
+                        if let scrollMode {
+                            UITestEdgeScrollSurface(area: area, divisions: divisions, mode: scrollMode, feedback: feedback)
+                        }
+                        TrackpadSurfaceDecoration(
+                            showDots: ProcessInfo.processInfo.environment["MEOW_UITEST_TRACKPAD_DOTS"] != "0",
+                            showBorder: true,
+                            dotAreas: VideoOffSurfaceGeometry.usablePieces(of: area, removing: divisions),
+                            guideArea: VideoOffSurfaceGeometry.usablePiece(of: area, removing: divisions),
+                            displays: displays, cursor: TrackpadCursorPresentation(location: displays.last.map {
+                                CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)
+                            }), feedback: feedback)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
                 }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-                if showChoice {
+                if showChoice, scrollMode == nil {
                     VideoOffStatus(onTurnOn: { videoOn = true }, onUseTrackpad: dismiss, onDismiss: dismiss)
                         .frame(maxWidth: 400)
                         .padding(.horizontal, 12)
@@ -6984,25 +7217,55 @@ private struct UITestTrackpadFixture: View {
 
     private func dismiss() { showChoice = false }
 }
+
+private struct UITestEdgeScrollSurface: UIViewRepresentable {
+    let area: CGRect
+    let divisions: [CGRect]
+    let mode: String
+    let feedback: TrackpadScrollFeedback
+
+    func makeUIView(context: Context) -> VideoLayerView.VideoView {
+        let view = VideoLayerView.VideoView()
+        view.setVideoEnabled(false)
+        return view
+    }
+
+    func updateUIView(_ view: VideoLayerView.VideoView, context: Context) {
+        let edges: [ScrollStripEdge] = mode == "both" ? [.right, .bottom] : (mode == "hidden" ? [] : [.right])
+        view.setSurfaceContext(safeSurface: area, occupiedControlFrames: [], reservedDivisions: divisions, scrollEdges: edges)
+        view.setScrollOptions(momentum: true, feedback: feedback)
+    }
+}
 #endif
 
-/// Owns one vertical touch sequence. Its touches never reach the underlying
-/// pointer engine, and cancellation drops the sequence without momentum.
-private final class RightEdgeScrollStrip: UIView {
+/// Touch ownership stays with the strip from contact to release.
+private final class EdgeScrollStrip: UIView {
+    let edge: ScrollStripEdge
+    var mayBegin: (() -> Bool)?
     var onBegan: (() -> Void)?
     var onDelta: ((CGFloat) -> Void)?
-    var onEnded: (() -> Void)?
+    var onEnded: ((Bool) -> Void)?
     private weak var activeTouch: UITouch?
-    private var lastY: CGFloat = 0
-    private let indicator = CALayer()
+    private var position: CGFloat = 0
+    private let rail = UIView()
+    private let contact = UIView()
+    var isTracking: Bool { activeTouch != nil }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        indicator.backgroundColor = UIColor.white.withAlphaComponent(0.36).cgColor
-        indicator.cornerRadius = 1.5
-        layer.addSublayer(indicator)
+    init(edge: ScrollStripEdge) {
+        self.edge = edge
+        super.init(frame: .zero)
+        rail.backgroundColor = .white
+        rail.layer.shadowColor = UIColor.black.cgColor
+        rail.layer.shadowOpacity = 0.45
+        rail.layer.shadowRadius = 1
+        rail.layer.shadowOffset = .zero
+        rail.isUserInteractionEnabled = false
+        contact.backgroundColor = .white
+        contact.isUserInteractionEnabled = false
+        addSubview(rail)
+        addSubview(contact)
         isAccessibilityElement = true
-        accessibilityLabel = String(localized: "Right-Edge Scroll Strip")
+        accessibilityLabel = edge.isVertical ? String(localized: "Vertical Scrollbar") : String(localized: "Horizontal Scrollbar")
         accessibilityTraits = .adjustable
     }
 
@@ -7011,46 +7274,99 @@ private final class RightEdgeScrollStrip: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        indicator.frame = CGRect(x: bounds.maxX - 7, y: 0, width: 3, height: bounds.height)
+        updateAppearance()
+    }
+
+    private func updateAppearance(animated: Bool = false) {
+        let pressed = activeTouch != nil
+        let thickness: CGFloat = pressed ? 10 : 3
+        let length = edge.isVertical ? bounds.height : bounds.width
+        let cross = edge.isVertical ? bounds.width : bounds.height
+        let origin = edge == .left || edge == .top ? 4 : cross - 4 - thickness
+        func rect(start: CGFloat, length: CGFloat) -> CGRect {
+            edge.isVertical ? CGRect(x: origin, y: start, width: thickness, height: length)
+                : CGRect(x: start, y: origin, width: length, height: thickness)
+        }
+        let feedbackLength = min(38, length)
+        let start = max(0, min(length - feedbackLength, position - feedbackLength / 2))
+        let update = {
+            self.rail.frame = rect(start: 0, length: length)
+            self.rail.layer.cornerRadius = thickness / 2
+            self.rail.alpha = pressed ? 0.48 : 0.27
+            self.contact.frame = rect(start: start, length: feedbackLength)
+            self.contact.layer.cornerRadius = thickness / 2
+            self.contact.alpha = pressed ? 0.85 : 0
+        }
+        if animated && !UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.24, delay: 0, usingSpringWithDamping: 0.88,
+                           initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction],
+                           animations: update)
+        } else {
+            update()
+        }
+    }
+
+    private func location(of touch: UITouch) -> CGFloat {
+        let point = touch.location(in: self)
+        return edge.isVertical ? point.y : point.x
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard activeTouch == nil, let touch = touches.first(where: { $0.type == .direct }) else { return }
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesBegan(otherTouches, with: event) }
+        guard activeTouch == nil, let touch = touches.first(where: { $0.type == .direct }),
+              mayBegin?() != false,
+              event?.allTouches?.contains(where: {
+                  $0.view === superview && $0.phase != .ended && $0.phase != .cancelled
+              }) != true else { return }
         activeTouch = touch
-        lastY = touch.location(in: self).y
+        position = location(of: touch)
         onBegan?()
+        updateAppearance(animated: true)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesMoved(otherTouches, with: event) }
         guard let touch = activeTouch, touches.contains(touch) else { return }
-        let y = touch.location(in: self).y
-        let delta = y - lastY
-        lastY = y
+        let next = location(of: touch)
+        let delta = next - position
+        position = next
+        updateAppearance()
         if delta != 0 { onDelta?(delta) }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesEnded(otherTouches, with: event) }
         guard let touch = activeTouch, touches.contains(touch) else { return }
-        cancelScroll()
+        finish(released: true)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchesEnded(touches, with: event)
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesCancelled(otherTouches, with: event) }
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        cancelScroll()
     }
 
     override func accessibilityIncrement() { accessibilityScrollStep(-40) }
     override func accessibilityDecrement() { accessibilityScrollStep(40) }
 
     private func accessibilityScrollStep(_ delta: CGFloat) {
+        guard mayBegin?() != false else { return }
         onBegan?()
         onDelta?(delta)
-        onEnded?()
+        onEnded?(false)
     }
 
-    func cancelScroll() {
+    func cancelScroll() { finish(released: false) }
+
+    private func finish(released: Bool) {
         guard activeTouch != nil else { return }
         activeTouch = nil
-        onEnded?()
+        updateAppearance(animated: true)
+        onEnded?(released)
     }
 }
 

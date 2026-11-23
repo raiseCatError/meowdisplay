@@ -888,8 +888,34 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum EdgeScrolling: String, Codable, CaseIterable {
+    case automatic, off, manual
+
+    var title: String {
+        switch self {
+        case .automatic: String(localized: "Automatic")
+        case .off: String(localized: "Off")
+        case .manual: String(localized: "Manual")
+        }
+    }
+}
+
+enum ScrollStripEdge {
+    case left, right, top, bottom
+
+    var isVertical: Bool { self == .left || self == .right }
+}
+
+enum VerticalScrollEdge: String, Codable {
+    case left, right
+}
+
+enum HorizontalScrollEdge: String, Codable {
+    case top, bottom
+}
+
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 24
+    static let schemaVersion = 25
 
     var version = schemaVersion
     var trayEnabled = true
@@ -991,7 +1017,30 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var showSurfaceGrid = true
     // An explicit choice. The QA preview previously defaulted its display guide on.
     var trackpadDisplayLayoutOptIn = false
-    var showRightScrollStrip = true
+    // Keeps Off intact when an older build reads these preferences.
+    private var showRightScrollStrip = true
+    var edgeScrolling = EdgeScrolling.automatic {
+        didSet { showRightScrollStrip = edgeScrolling != .off }
+    }
+    var verticalEdgeScrolling = true
+    var verticalScrollEdge = VerticalScrollEdge.right
+    var horizontalEdgeScrolling = false
+    var horizontalScrollEdge = HorizontalScrollEdge.bottom
+    var scrollMomentumEnabled = true
+    var scrollMotionFeedback = true
+    var showTrackpadBorder = true
+
+    var activeScrollEdges: [ScrollStripEdge] {
+        switch edgeScrolling {
+        case .automatic: return [.right]
+        case .off: return []
+        case .manual:
+            var edges: [ScrollStripEdge] = []
+            if verticalEdgeScrolling { edges.append(verticalScrollEdge == .left ? .left : .right) }
+            if horizontalEdgeScrolling { edges.append(horizontalScrollEdge == .top ? .top : .bottom) }
+            return edges
+        }
+    }
     /// An arrow at the edge of the picture pointing at the Mac pointer while it is somewhere
     /// this receiver isn't showing (another display, or zoomed or panned out of view). It
     /// never stands for the pointer itself and never affects input.
@@ -1151,7 +1200,17 @@ struct ReceiverControlPreferences: Codable, Equatable {
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
         trackpadDisplayLayoutOptIn = try value(.trackpadDisplayLayoutOptIn, fallback.trackpadDisplayLayoutOptIn)
-        showRightScrollStrip = try value(.showRightScrollStrip, fallback.showRightScrollStrip)
+        let legacyStrip = try value(.showRightScrollStrip, fallback.showRightScrollStrip)
+        edgeScrolling = (try? value(.edgeScrolling, legacyStrip ? fallback.edgeScrolling : .off))
+            ?? fallback.edgeScrolling
+        showRightScrollStrip = edgeScrolling != .off
+        verticalEdgeScrolling = try value(.verticalEdgeScrolling, fallback.verticalEdgeScrolling)
+        verticalScrollEdge = (try? value(.verticalScrollEdge, fallback.verticalScrollEdge)) ?? fallback.verticalScrollEdge
+        horizontalEdgeScrolling = try value(.horizontalEdgeScrolling, fallback.horizontalEdgeScrolling)
+        horizontalScrollEdge = (try? value(.horizontalScrollEdge, fallback.horizontalScrollEdge)) ?? fallback.horizontalScrollEdge
+        scrollMomentumEnabled = try value(.scrollMomentumEnabled, fallback.scrollMomentumEnabled)
+        scrollMotionFeedback = try value(.scrollMotionFeedback, fallback.scrollMotionFeedback)
+        showTrackpadBorder = try value(.showTrackpadBorder, fallback.showTrackpadBorder)
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
         keepPointerOnReceiverDisplay = try value(.keepPointerOnReceiverDisplay, fallback.keepPointerOnReceiverDisplay)
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
@@ -1439,6 +1498,7 @@ struct ReceiverControlPreferencesRepository {
             value.showCursorLocator = false
             value.version = 24
         }
+        if value.version < 25 { value.version = 25 }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
         // user's visibility, order, or group choices; a tray still at an

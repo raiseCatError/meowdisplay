@@ -239,6 +239,8 @@ enum WorkspaceEvent: Sendable {
     case displayDetail(OverviewDisplayDetailRequest, data: Data)
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
+    case trackpadCatalog(UUID, WorkspaceCatalogMessage)
+    case trackpadApps(UUID, revision: Int, apps: [MacAppItem]?)
     case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
@@ -298,10 +300,14 @@ enum WorkspaceEvent: Sendable {
                                           isVirtual: d["virtual"] as? Bool ?? false, overview: OverviewDisplay(wire: d),
                                           displayUUID: str(d, "uuid", 36).flatMap(UUID.init(uuidString:))?.uuidString)
             }
-            return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
+            let catalog = WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
                                                    installed: Array(installed),
                                                    unavailable: obj["error"] != nil && obj["error"] as? String != "starting",
-                                                   starting: obj["error"] as? String == "starting", displays: Array(displays)))
+                                                   starting: obj["error"] as? String == "starting", displays: Array(displays))
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadCatalog($0, catalog) }
+            }
+            return .catalog(catalog)
         case WireMessage.workspaceState:
             let tiles = (obj["tiles"] as? [[String: Any]] ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { t -> RemoteTileItem? in
                 guard let id = str(t, "id", 32) else { return nil }
@@ -348,14 +354,17 @@ enum WorkspaceEvent: Sendable {
             return .displayThumbnail(displayID: id, data: data)
         case WireMessage.appCatalog:
             guard let rev = obj["rev"] as? Int else { return nil }
-            if obj["same"] as? Bool == true { return .appCatalog(revision: rev, apps: nil) }
             let apps = (obj["apps"] as? [[String: Any]] ?? []).prefix(900).compactMap { a -> MacAppItem? in
                 guard let b = str(a, "bundle"), !b.isEmpty else { return nil }
                 return MacAppItem(bundleID: b, name: str(a, "name", 80) ?? b, running: a["running"] as? Bool ?? false,
                                   windowCount: a["windows"] as? Int ?? 0,
                                   lastUsed: (a["used"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) })
             }
-            return .appCatalog(revision: rev, apps: Array(apps))
+            let updatedApps = obj["same"] as? Bool == true ? nil : apps
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadApps($0, revision: rev, apps: updatedApps) }
+            }
+            return .appCatalog(revision: rev, apps: updatedApps)
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
             return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false, window: obj["window"] as? Bool)
@@ -640,6 +649,12 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var privacyShieldNotice: Bool?
     private var privacyNoticeClear: DispatchWorkItem?
     @Published private(set) var catalog: WorkspaceCatalogMessage?
+    @Published private(set) var trackpadPeekSupported = false
+    @Published private(set) var trackpadPeekCatalog: WorkspaceCatalogMessage?
+    @Published private(set) var trackpadPeekApps: [MacAppItem] = []
+    private var trackpadPeekToken: UUID?
+    private var trackpadPeekAppsRevision: Int?
+    var trackpadPeekAllowed: () -> Bool = { false }
     /// The Mac's screen is locked (or switched to another user): nothing of it is kept or shown
     /// here until it unlocks (`macLockState`). The layout itself is kept.
     @Published private(set) var macLocked = false
@@ -929,6 +944,7 @@ final class WorkspaceModel: ObservableObject {
     func apply(_ event: WorkspaceEvent) {
         switch event {
         case .connected(let peer):
+            clearTrackpadPeek()
             cancelWindowShow(message: String(localized: "The Mac session changed."))
             if peer != host { load(for: peer) }
             // A new connection: every app shown here gets its icon asked for again if it's missing
@@ -960,6 +976,7 @@ final class WorkspaceModel: ObservableObject {
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
+            trackpadPeekSupported = f.contains(TrackpadStagePeekWire.welcomeFeature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -1002,6 +1019,13 @@ final class WorkspaceModel: ObservableObject {
             if let returnTo { returnAfterEarlyExit(to: returnTo) }
         case .catalog(let c):
             onCatalog(c)
+        case .trackpadCatalog(let token, let catalog):
+            guard token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            trackpadPeekCatalog = catalog
+        case .trackpadApps(let token, let revision, let apps):
+            guard token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            trackpadPeekAppsRevision = revision
+            if let apps { trackpadPeekApps = apps }
         case .state(let s):
             remote = s
             validatePendingWindowShow()
@@ -1086,6 +1110,8 @@ final class WorkspaceModel: ObservableObject {
             // Only while the overview watches: a late message after it closed shows nothing.
             if displayOverviewOpen, overviewCursor != cursor { overviewCursor = cursor }
         case .disconnected:
+            trackpadPeekSupported = false
+            clearTrackpadPeek()
             cancelWindowShow(message: String(localized: "The Mac disconnected."))
             overviewCursor = nil
             overviewCursorRenewal?.cancel(); overviewCursorRenewal = nil
@@ -1152,6 +1178,7 @@ final class WorkspaceModel: ObservableObject {
             performAppOpening(step)
         }
         appDrop = nil
+        clearTrackpadPeek()
         stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false; displayArrangementEditorOpen = false
         overviewCursor = nil
         if overviewOpen { closeOverview() }
@@ -1313,6 +1340,27 @@ final class WorkspaceModel: ObservableObject {
     /// Windows, running apps and displays. Apps to open come from `appCatalog` (`requestApps`):
     /// current Macs don't answer the listing's old `installed` flag.
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
+
+    func refreshTrackpadPeek() {
+        guard trackpadPeekSupported, trackpadPeekAllowed(), !macLocked else { clearTrackpadPeek(); return }
+        if trackpadPeekToken == nil { trackpadPeekToken = UUID() }
+        sendTrackpadPeek(WorkspaceRequests.catalog(installed: false))
+        sendTrackpadPeek(WorkspaceRequests.appCatalog(revision: trackpadPeekAppsRevision))
+    }
+
+    func clearTrackpadPeek() {
+        trackpadPeekToken = nil
+        trackpadPeekAppsRevision = nil
+        if trackpadPeekCatalog != nil { trackpadPeekCatalog = nil }
+        if !trackpadPeekApps.isEmpty { trackpadPeekApps = [] }
+    }
+
+    func sendTrackpadPeek(_ action: [String: Any]) {
+        guard let trackpadPeekToken, trackpadPeekSupported, trackpadPeekAllowed(), !macLocked else { return }
+        var request = action
+        request[TrackpadStagePeekWire.tokenKey] = trackpadPeekToken.uuidString
+        _ = send(request)
+    }
 
     // MARK: Space
 
@@ -3644,9 +3692,6 @@ extension WorkspaceModel {
     /// (a tab of a pane always can, its pane stays).
     func canFloat(pane id: String, tab: Int? = nil) -> Bool {
         guard canFloat, floatsAllowedHere, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
-        // The Overview stays a tiled pane: a float is lifted from a still, and it has none.
-        let floated = tab.flatMap { t in layout.tiles[id]?.tabs.indices.contains(t) == true ? layout.tiles[id]?.tabs[t] : nil } ?? layout.tiles[id]?.source
-        if floated?.isOverview == true { return false }
         if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
         return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
     }
@@ -3786,7 +3831,7 @@ extension WorkspaceModel {
     /// the finger and once, a moment behind, by the Mac. Needs `floatLift` and a recent still;
     /// without them the Mac keeps drawing it, as before.
     func liftFloat(_ id: String) {
-        guard layout.isFloat(id) else { return }
+        guard layout.isFloat(id), layout.tiles[id]?.source?.isOverview != true else { return }
         liftWanted.insert(id)
         guard canLiftFloats, !liftedFloats.contains(id), hasFreshStill(id) else { return }
         liftedFloats.insert(id)

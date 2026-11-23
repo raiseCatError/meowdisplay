@@ -1048,6 +1048,59 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertNil(tile["display"])
     }
 
+    func testOverviewTabCanFloatAndDockWithoutLosingItsView() throws {
+        let m = model(displays: twoDisplays)
+        m.floatsDrawnHere = true
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.overviewPaneFeature,
+                           WindowWorkspaceWire.floatFeature]))
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        m.addOverviewTab(to: pane)
+        let tab = try XCTUnwrap(m.layout.tiles[pane]?.tabs.firstIndex(where: \.isOverview))
+        XCTAssertTrue(m.canFloat(pane: pane, tab: tab))
+        m.floatPane(pane, tab: tab)
+        let floating = try XCTUnwrap(m.layout.floats.first?.tile)
+        XCTAssertTrue(m.layout.tiles[floating]?.source?.isOverview == true)
+        let rest = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        XCTAssertEqual(m.layout.tiles[rest]?.source?.windowID, WorkspaceSource.displayKey(twoDisplays[0].id))
+        m.liftFloat(floating)
+        XCTAssertFalse(m.drawsFloatHere(floating))
+        m.dockFloat(floating, to: .tab(tile: rest, preview: WorkspaceRect(x: 0, y: 0, width: 1, height: 1)))
+        XCTAssertTrue(m.layout.floats.isEmpty)
+        XCTAssertEqual(m.layout.tiles[floating]?.tabs.filter(\.isOverview).count, 1)
+        XCTAssertEqual(m.layout.tiles[floating]?.tabs.count, 2)
+    }
+
+    func testTrackpadStagePeekRejectsStaleCatalogsAfterRevocationAndReconnect() throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        var hasControl = false
+        m.trackpadPeekAllowed = { hasControl }
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.welcomeFeature]
+        m.apply(.features(features))
+        m.refreshTrackpadPeek()
+        XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })
+        hasControl = true
+        m.refreshTrackpadPeek()
+        let firstMessage = try XCTUnwrap(sent.last)
+        let token = try XCTUnwrap(TrackpadStagePeekWire.token(in: firstMessage))
+        let catalog = try XCTUnwrap(m.catalog)
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertEqual(m.trackpadPeekCatalog, catalog)
+        hasControl = false
+        m.clearTrackpadPeek()
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertNil(m.trackpadPeekCatalog)
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-b"))
+        m.apply(.features(features))
+        hasControl = true
+        m.refreshTrackpadPeek()
+        XCTAssertNotEqual(sent.last.flatMap(TrackpadStagePeekWire.token(in:)), token)
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertNil(m.trackpadPeekCatalog)
+    }
+
     func testOverviewPanAndZoomPersistPerTabAndRestoreFromDisk() throws {
         let defaults = UserDefaults(suiteName: "OverviewViewport-\(UUID().uuidString)")!
         var sent: [[String: Any]] = []
