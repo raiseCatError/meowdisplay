@@ -153,6 +153,35 @@ final class DisplayArrangementServiceTests: XCTestCase {
         send(h, WireMessage.displayArrangeRevert, ["type": WireMessage.displayArrangeRevert, "req": req])
     }
 
+    func testAlwaysAllowIsBoundToThePairedPin() throws {
+        let name = "DisplayArrangementAuthorization.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let pinnedKey = Data([1, 2, 3])
+        XCTAssertFalse(DisplayArrangementAuthorization.allows(peerID: "phone", pin: pinnedKey, defaults: defaults))
+        DisplayArrangementAuthorization.setPin(pinnedKey, for: "phone", defaults: defaults)
+        XCTAssertTrue(DisplayArrangementAuthorization.allows(peerID: "phone", pin: pinnedKey, defaults: defaults))
+        XCTAssertFalse(DisplayArrangementAuthorization.allows(peerID: "phone", pin: Data([4]), defaults: defaults))
+        XCTAssertFalse(DisplayArrangementAuthorization.allows(peerID: "tablet", pin: pinnedKey, defaults: defaults))
+        DisplayArrangementAuthorization.setPin(nil, for: "phone", defaults: defaults)
+        XCTAssertFalse(DisplayArrangementAuthorization.allows(peerID: "phone", pin: pinnedKey, defaults: defaults))
+    }
+
+    func testPreapprovalStillRequiresKeepAndRevocationRevertsImmediately() {
+        let h = makeHarness()
+        h.service.handle(type: WireMessage.displayArrangeRequest, message: requestMessage(),
+                         inputGranted: true, preapproved: true, controlStillAllowed: { h.recorder.control })
+        XCTAssertTrue(h.confirmer.requests.isEmpty)
+        XCTAssertEqual(h.configurator.calls.map(\.scope), [.forSession])
+        XCTAssertEqual(h.recorder.states, ["applied"])
+        h.recorder.control = false
+        h.service.authorizationChanged()
+        XCTAssertEqual(h.configurator.origin(of: 2), CGPoint(x: 1000, y: 0))
+        XCTAssertEqual(h.recorder.states, ["applied", "reverted"])
+        keep(h)
+        XCTAssertFalse(h.configurator.calls.contains { $0.scope == .permanently })
+    }
+
     /// Request, the owner allows: applied for this session.
     private func applied() -> Harness {
         let h = makeHarness()

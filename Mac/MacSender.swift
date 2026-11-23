@@ -1622,6 +1622,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// alone remains a correct summary for every older peer.
     private func sendAllowInputState(state: SessionInputWireState? = nil) {
         if !trackpadPeekAllowed(generation: activeConnectionGeneration) { stopTrackpadPeek() }
+        displayArrangement?.authorizationChanged()
         let allowed = sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
         let resolvedState = state ?? (allowed ? .allowed : .off)
         sendJSONObject(["type": WireMessage.allowInputState,
@@ -6686,10 +6687,19 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard sessionAuthorization.isAdmitted else { return }
             let generation = activeConnectionGeneration
             let selfBox = self.selfBox
-            let stillAllowed: () -> Bool = { selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false }
+            let tls = transport.tls
+            let preapproved = type == WireMessage.displayArrangeRequest
+                && TrustStore.shared.pin(peerID: tls.peerID) == tls.pinnedPeerSPKI
+                && DisplayArrangementAuthorization.allows(peerID: tls.peerID, pin: tls.pinnedPeerSPKI)
+            let stillAllowed: () -> Bool = {
+                guard selfBox.resolve()?.controlStillAllowed(generation: generation) == true,
+                      TrustStore.shared.pin(peerID: tls.peerID) == tls.pinnedPeerSPKI else { return false }
+                return !preapproved || DisplayArrangementAuthorization.allows(peerID: tls.peerID, pin: tls.pinnedPeerSPKI)
+            }
             if type == WireMessage.displayArrangeRequest {
                 guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
                 ensureDisplayArrangement().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
+                                                  preapproved: preapproved,
                                                   controlStillAllowed: stillAllowed)
             } else {
                 displayArrangement?.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
@@ -8991,6 +9001,11 @@ extension MacSender {
         return service
     }
 
+    func displayArrangementAuthorizationChanged() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.displayArrangement?.authorizationChanged() }
+    }
+
     /// `queue` only. One browser per session; its messages pass the same admission gate.
     @discardableResult
     private func ensureWindowBrowser() -> WindowBrowserService {
@@ -9079,6 +9094,7 @@ extension MacSender {
         let paused = phase == .pausing || phase == .paused || phase == .stopped
         // Locked: every window capture and listing stops (and is started again on unlock).
         let hidden = !privacyGate.allowsContent
+        displayArrangement?.authorizationChanged()
         if paused || !trackpadPeekAllowed(generation: activeConnectionGeneration) { stopTrackpadPeek() }
         workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted || hidden)
         windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted && !hidden)

@@ -1654,6 +1654,12 @@ origins (`reverted` with `requested`, `timeout`, `control` or
 most 32 characters; receivers show unknown ones as a generic failure. After
 `kept` or `reverted` the receiver asks for `windowCatalog` again.
 
+Ask Every Time is the default on the Mac. A Mac owner can approve this
+operation in advance for one paired receiver's pinned public key. In that
+case a valid request can go directly to `applied`. The current input grant,
+paired key and display topology are rechecked before Apply and Keep. Withdrawing
+preapproval ends a pending arrangement from that approval.
+
 **Stage Peek with video off.** `welcome.workspaceFeatures` can include
 `trackpadStagePeek`. Older peers keep reading their original `features` list.
 Requests for a window catalog, app catalog, app launch or window activation

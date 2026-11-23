@@ -2286,6 +2286,7 @@ final class SenderController: ObservableObject {
                 // Files grants belong to this trust relationship too.
                 FilesDevicePolicyStore.removePolicy(peerID: $0)
                 ClipboardDevicePolicyStore.removePolicy(peerID: $0)
+                DisplayArrangementAuthorization.setPin(nil, for: $0)
             },
             removeSessionPolicy: { IncomingSessionPolicyStore.removePolicy(peerID: $0, role: .sender) },
             removeNetworkTransportState: {
@@ -3887,6 +3888,25 @@ final class SenderController: ObservableObject {
     /// mirrors for the UI's `.disabled` state.
     func canSetInputPolicy(_ policy: PeerInputRequestPolicy, peerID: String) -> Bool {
         policy != .alwaysAllow || !anySessionHasEffectiveInput
+    }
+
+    func alwaysAllowsDisplayArrangement(peerID: String) -> Bool {
+        guard let pin = TrustStore.shared.pin(peerID: peerID) else { return false }
+        return DisplayArrangementAuthorization.allows(peerID: peerID, pin: pin)
+    }
+
+    func setAlwaysAllowDisplayArrangement(_ allowed: Bool, peerID: String) {
+        if allowed {
+            guard !anySessionHasEffectiveInput, ConsentGrant.allowed(),
+                  let pin = TrustStore.shared.pin(peerID: peerID) else { return }
+            DisplayArrangementAuthorization.setPin(pin, for: peerID)
+        } else {
+            DisplayArrangementAuthorization.setPin(nil, for: peerID)
+            for session in sessions where session.deviceID == peerID {
+                session.sender.displayArrangementAuthorizationChanged()
+            }
+        }
+        objectWillChange.send()
     }
 
     /// Returns whether the change actually took effect — see
