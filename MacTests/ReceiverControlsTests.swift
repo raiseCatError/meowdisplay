@@ -2591,7 +2591,7 @@ final class ShortcutPaletteQuitTests: XCTestCase {
             saved.version = 22
             repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
             let loaded = repository.load()
-            XCTAssertEqual(loaded.version, 24)
+            XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
             for slot in ControlProfileSlot.allCases {
                 XCTAssertEqual(loaded.profile(for: slot), .canonical(slot: slot))
                 XCTAssertEqual(loaded.profile(for: slot).actions(for: command).filter { $0.id == "quit" }.count, 1)
