@@ -367,9 +367,11 @@ private struct DisplaySettingsPage: View {
                 }
                 .settingsAnchor("video")
                 if receiver.videoEnabled { displayModeRows }
+                Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
+                    .settingsAnchor("trackpadDots")
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.showTrackpadDisplayLayout))
-                    SettingNote("Shows the Mac pointer and outlines of connected displays when using the trackpad with video off.")
+                    Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.trackpadDisplayLayoutOptIn))
+                    SettingNote("Shows the Mac pointer and display outlines with video off. Surface dots stay outside the outlines.")
                 }
                 .settingsAnchor("trackpadDisplayLayout")
                 VStack(alignment: .leading, spacing: 4) {

@@ -108,6 +108,8 @@ enum MobileSettingsSearchIndex {
         // Display
         .init("video", String(localized: "Video"), .display, keywords: ["picture", "stream off"]),
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),
+        .init("trackpadDots", String(localized: "Show Surface Grid"), .display,
+              keywords: ["video off", "trackpad", "dots", "dotted background"]),
         .init("trackpadDisplayLayout", String(localized: "Show Display Layout on Trackpad"), .display,
               keywords: ["video off", "display outline", "monitor", "cursor"]),
         .init("cursorLocator", String(localized: "Show Off-Screen Cursor Indicator"), .display,

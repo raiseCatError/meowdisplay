@@ -297,26 +297,56 @@ enum VideoOffSurfaceGeometry {
     /// deterministic); `controlGap` separates it from the fold. Without an
     /// intersecting division the rectangle is returned unchanged.
     static func usablePiece(of available: CGRect, removing divisions: [CGRect]) -> CGRect {
-        let splitters = divisions
-            .map { $0.insetBy(dx: -controlGap, dy: -controlGap).intersection(available) }
-            .filter { !$0.isNull && !$0.isEmpty }
-        guard !splitters.isEmpty else { return available }
-        let columns = ControlPlacementArea.segments(
-            of: available, removing: splitters.filter { $0.height >= $0.width }, horizontal: true)
-        let rows = ControlPlacementArea.segments(
-            of: available, removing: splitters.filter { $0.height < $0.width }, horizontal: false)
-        let pieces = columns.flatMap { column in
-            rows.map { column.intersection($0) }
-        }.filter { !$0.isNull && !$0.isEmpty }
         func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
-        return pieces.reduce(nil as CGRect?) { best, piece in
+        return usablePieces(of: available, removing: divisions).reduce(nil as CGRect?) { best, piece in
             guard let best else { return piece }
             return area(piece) >= area(best) ? piece : best
         } ?? .zero
     }
+
+    /// Noninteractive surface decoration may occupy both usable sides of a fold.
+    static func usablePieces(of available: CGRect, removing divisions: [CGRect]) -> [CGRect] {
+        guard !available.isNull, !available.isEmpty else { return [] }
+        let splitters = divisions
+            .map { $0.insetBy(dx: -controlGap, dy: -controlGap).intersection(available) }
+            .filter { !$0.isNull && !$0.isEmpty }
+        guard !splitters.isEmpty else { return [available] }
+        let columns = ControlPlacementArea.segments(
+            of: available, removing: splitters.filter { $0.height >= $0.width }, horizontal: true)
+        let rows = ControlPlacementArea.segments(
+            of: available, removing: splitters.filter { $0.height < $0.width }, horizontal: false)
+        return columns.flatMap { column in
+            rows.map { column.intersection($0) }
+        }.filter { !$0.isNull && !$0.isEmpty }
+    }
+
+    /// A table fold puts short-lived actions on the stable lower half when they fit there.
+    static func choicePiece(of available: CGRect, removing divisions: [CGRect]) -> CGRect {
+        if let fold = divisions.first(where: { $0.width > $0.height && $0.intersects(available) }),
+           let lower = usablePieces(of: available, removing: divisions)
+            .filter({ $0.minY >= fold.maxY && $0.height >= 180 })
+            .max(by: { $0.width < $1.width }) {
+            return lower
+        }
+        return usablePiece(of: available, removing: divisions)
+    }
 }
 
 enum TrackpadDisplayGuideGeometry {
+    static let dotRadius: CGFloat = 1.1
+
+    static func dotCenters(in surface: CGRect, excluding outlines: [CGRect]) -> [CGPoint] {
+        let spacing: CGFloat = 28
+        guard !surface.isNull, !surface.isEmpty, surface.width.isFinite, surface.height.isFinite else { return [] }
+        let excluded = outlines.map { $0.insetBy(dx: -dotRadius, dy: -dotRadius) }
+        return stride(from: surface.minY + spacing / 2, to: surface.maxY, by: spacing).flatMap { y in
+            stride(from: surface.minX + spacing / 2, to: surface.maxX, by: spacing).compactMap { x in
+                let point = CGPoint(x: x, y: y)
+                return excluded.contains(where: { $0.contains(point) }) ? nil : point
+            }
+        }
+    }
+
     struct Layout {
         let outlines: [CGRect]
         let cursor: CGPoint?

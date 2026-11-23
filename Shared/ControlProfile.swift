@@ -989,7 +989,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Purely visual decoration for the mapped interaction surface shown
     /// while video production is off. It never participates in hit-testing.
     var showSurfaceGrid = true
-    var showTrackpadDisplayLayout = true
+    // An explicit choice. The QA preview previously defaulted its display guide on.
+    var trackpadDisplayLayoutOptIn = false
     var showRightScrollStrip = true
     /// An arrow at the edge of the picture pointing at the Mac pointer while it is somewhere
     /// this receiver isn't showing (another display, or zoomed or panned out of view). It
@@ -1149,7 +1150,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
-        showTrackpadDisplayLayout = try value(.showTrackpadDisplayLayout, fallback.showTrackpadDisplayLayout)
+        trackpadDisplayLayoutOptIn = try value(.trackpadDisplayLayoutOptIn, fallback.trackpadDisplayLayoutOptIn)
         showRightScrollStrip = try value(.showRightScrollStrip, fallback.showRightScrollStrip)
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
         keepPointerOnReceiverDisplay = try value(.keepPointerOnReceiverDisplay, fallback.keepPointerOnReceiverDisplay)

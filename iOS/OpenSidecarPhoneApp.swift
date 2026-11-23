@@ -578,9 +578,12 @@ struct ReceiverScreen: View {
                 (model.workspace.overviewOpen || model.workspace.stagePeekOpen || model.workspace.launchpadOpen)
             let safeCanvas = effectiveSafeInsets.safeRect(in: geo.size).intersection(canvas)
             let visibleCanvas = shownKeyboardRect.map { $0.offsetBy(dx: canvas.minX, dy: canvas.minY) } ?? canvas
-            let trackpadArea = VideoOffSurfaceGeometry.usablePiece(
-                of: safeCanvas.intersection(visibleCanvas),
-                removing: ControlReservedRegion.frames(of: .division, in: reservedRegions))
+            let padArea = safeCanvas.intersection(visibleCanvas)
+            let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+            let padPieces = VideoOffSurfaceGeometry.usablePieces(of: padArea, removing: divisions)
+            let guideArea = VideoOffSurfaceGeometry.usablePiece(of: padArea, removing: divisions)
+            let choiceArea = VideoOffSurfaceGeometry.choicePiece(of: padArea, removing: divisions)
+            let showsTrackpadGuide = inputReachesMac && controlStore.preferences.trackpadDisplayLayoutOptIn
             ZStack {
                 if showsReceiverSurface {
                     ReceiverSafeAreaProbe { insets, notchSide in
@@ -684,15 +687,22 @@ struct ReceiverScreen: View {
                         // The surface always takes touches so a blocked one
                         // can offer Request Control; what they may do is
                         // decided inside `VideoView`.
-                    if videoOffStatusShown, inputReachesMac, controlStore.preferences.showTrackpadDisplayLayout,
-                       !trackpadArea.isNull, !trackpadArea.isEmpty {
-                        TrackpadDisplayGuide(displays: model.receiver.trackpadDisplayGeometry,
-                                             cursor: model.receiver.trackpadCursorLocation)
-                            .frame(width: trackpadArea.width, height: trackpadArea.height)
-                            .position(x: trackpadArea.midX, y: trackpadArea.midY)
+                    if videoOffStatusShown, !padPieces.isEmpty {
+                        TrackpadSurfaceDecoration(
+                            showDots: controlStore.preferences.showSurfaceGrid,
+                            dotAreas: padPieces.map { $0.offsetBy(dx: -padArea.minX, dy: -padArea.minY) },
+                            guideArea: guideArea.offsetBy(dx: -padArea.minX, dy: -padArea.minY),
+                            displays: showsTrackpadGuide ? model.receiver.trackpadDisplayGeometry : [],
+                            cursor: showsTrackpadGuide ? model.receiver.trackpadCursorLocation : nil)
+                            .frame(width: padArea.width, height: padArea.height)
+                            .position(x: padArea.midX, y: padArea.midY)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
-                            .task {
+                            .task(id: showsTrackpadGuide) {
+                                guard showsTrackpadGuide else {
+                                    model.receiver.stopTrackpadLayout()
+                                    return
+                                }
                                 while !Task.isCancelled {
                                     model.receiver.requestTrackpadLayout()
                                     try? await Task.sleep(for: .seconds(2))
@@ -831,7 +841,7 @@ struct ReceiverScreen: View {
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
                     }
-                    if showsVideoOffChoice, !trackpadArea.isNull {
+                    if showsVideoOffChoice, !choiceArea.isEmpty {
                         VideoOffStatus(onTurnOn: {
                             dismissVideoOffChoice()
                             model.receiver.requestVideoEnabled(true)
@@ -839,9 +849,9 @@ struct ReceiverScreen: View {
                             dismissVideoOffChoice()
                             if !inputReachesMac { requestInputFromPrompt() }
                         }, onDismiss: dismissVideoOffChoice)
-                            .frame(maxWidth: min(400, max(0, trackpadArea.width - 24)),
-                                   maxHeight: trackpadArea.height, alignment: .top)
-                            .position(x: trackpadArea.midX, y: trackpadArea.midY)
+                            .frame(maxWidth: min(400, max(0, choiceArea.width - 24)),
+                                   maxHeight: choiceArea.height, alignment: .top)
+                            .position(x: choiceArea.midX, y: choiceArea.midY)
                             .transition(slideTransition(from: .top))
                     }
                     if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
@@ -1059,9 +1069,6 @@ struct ReceiverScreen: View {
             try? await Task.sleep(for: .seconds(voiceOverEnabled ? 30 : 12))
             guard !Task.isCancelled else { return }
             dismissVideoOffChoice()
-        }
-        .onChange(of: controlStore.preferences.showTrackpadDisplayLayout) { enabled in
-            if !enabled { model.receiver.stopTrackpadLayout() }
         }
         .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { _ = requestInputFromPrompt() }))
         .modifier(WorkspaceDragGuard(model: model.workspace))
@@ -6891,20 +6898,35 @@ private extension View {
 
 /// The Mac's pointer and screen arrangement are presentation-only. Receiver touches
 /// on this area still go directly to the relative-input surface behind it.
-private struct TrackpadDisplayGuide: View {
+private struct TrackpadSurfaceDecoration: View {
+    let showDots: Bool
+    let dotAreas: [CGRect]
+    let guideArea: CGRect
     let displays: [TrackpadDisplayGeometry]
     let cursor: CGPoint?
 
     var body: some View {
-        Canvas { context, size in
+        Canvas { context, _ in
             let result = TrackpadDisplayGuideGeometry.layout(
-                displays: displays.map(\.bounds), cursor: cursor, in: size)
-            for outline in result.outlines {
+                displays: displays.map(\.bounds), cursor: cursor, in: guideArea.size)
+            let outlines = result.outlines.map { $0.offsetBy(dx: guideArea.minX, dy: guideArea.minY) }
+            if showDots {
+                let radius = TrackpadDisplayGuideGeometry.dotRadius
+                var dots = Path()
+                for area in dotAreas {
+                    for center in TrackpadDisplayGuideGeometry.dotCenters(in: area, excluding: outlines) {
+                        dots.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
+                                                   width: 2 * radius, height: 2 * radius))
+                    }
+                }
+                context.fill(dots, with: .color(.white.opacity(0.28)))
+            }
+            for outline in outlines {
                 context.stroke(Path(roundedRect: outline, cornerRadius: 3),
                                with: .color(.white.opacity(0.18)), lineWidth: 1)
             }
             if let marker = result.cursor {
-                let rect = CGRect(x: marker.x - 3, y: marker.y - 3, width: 6, height: 6)
+                let rect = CGRect(x: guideArea.minX + marker.x - 3, y: guideArea.minY + marker.y - 3, width: 6, height: 6)
                 context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.65)))
             }
         }
@@ -6934,9 +6956,18 @@ private struct UITestTrackpadFixture: View {
             if videoOn {
                 Text("Video on").accessibilityIdentifier("uitestTrackpadVideoOn")
             } else {
-                TrackpadDisplayGuide(displays: displays, cursor: displays.last.map {
-                    CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)
-                })
+                GeometryReader { proxy in
+                    let area = CGRect(origin: .zero, size: proxy.size)
+                    let divisions = ControlReservedRegion.frames(of: .division, in: ControlReservedRegion.active(in: proxy))
+                    TrackpadSurfaceDecoration(
+                        showDots: ProcessInfo.processInfo.environment["MEOW_UITEST_TRACKPAD_DOTS"] != "0",
+                        dotAreas: VideoOffSurfaceGeometry.usablePieces(of: area, removing: divisions),
+                        guideArea: VideoOffSurfaceGeometry.usablePiece(of: area, removing: divisions),
+                        displays: displays, cursor: displays.last.map {
+                            CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)
+                        })
+                }
+                .allowsHitTesting(false)
                 .accessibilityHidden(true)
                 if showChoice {
                     VideoOffStatus(onTurnOn: { videoOn = true }, onUseTrackpad: dismiss, onDismiss: dismiss)

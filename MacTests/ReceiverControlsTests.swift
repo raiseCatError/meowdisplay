@@ -258,7 +258,7 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.inputMode = .trackpad
         preferences.showSurfaceGrid = false
         preferences.showRightScrollStrip = false
-        preferences.showTrackpadDisplayLayout = false
+        preferences.trackpadDisplayLayoutOptIn = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -339,11 +339,37 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertTrue(ReceiverControlPreferencesRepository(defaults: defaults).load().showCursorLocator)
     }
 
-    func testVideoOffGuideAndScrollStripDefaultOnForOldSettings() throws {
-        let legacy = Data(#"{"version":23}"#.utf8)
+    func testVideoOffDefaultsToDotsWithAnOptInDisplayGuide() throws {
+        let legacy = Data(#"{"version":24,"showTrackpadDisplayLayout":true}"#.utf8)
         let decoded = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
-        XCTAssertTrue(decoded.showTrackpadDisplayLayout)
+        XCTAssertTrue(decoded.showSurfaceGrid)
+        XCTAssertFalse(decoded.trackpadDisplayLayoutOptIn, "the QA default did not record an explicit opt-in")
         XCTAssertTrue(decoded.showRightScrollStrip)
+        var customized = decoded
+        customized.showSurfaceGrid = false
+        customized.trackpadDisplayLayoutOptIn = true
+        let saved = try JSONDecoder().decode(ReceiverControlPreferences.self, from: JSONEncoder().encode(customized))
+        XCTAssertFalse(saved.showSurfaceGrid)
+        XCTAssertTrue(saved.trackpadDisplayLayoutOptIn)
+    }
+
+    func testDotsUseBothSidesOfAnObstructedFoldAndStayOutsideDisplayOutlines() {
+        let pad = CGRect(x: 0, y: 0, width: 640, height: 600)
+        let fold = CGRect(x: 310, y: 0, width: 20, height: 600)
+        let outline = CGRect(x: 380, y: 180, width: 210, height: 140)
+        let pieces = VideoOffSurfaceGeometry.usablePieces(of: pad, removing: [fold])
+        XCTAssertEqual(pieces.count, 2)
+        for piece in pieces {
+            let full = TrackpadDisplayGuideGeometry.dotCenters(in: piece, excluding: [])
+            let dots = TrackpadDisplayGuideGeometry.dotCenters(in: piece, excluding: [outline])
+            XCTAssertFalse(dots.isEmpty)
+            XCTAssertFalse(dots.contains { fold.contains($0) || outline.contains($0) })
+            if piece.intersects(outline) { XCTAssertLessThan(dots.count, full.count) }
+            else { XCTAssertEqual(dots, full) }
+        }
+        let tableFold = CGRect(x: 0, y: 360, width: 640, height: 12)
+        let choice = VideoOffSurfaceGeometry.choicePiece(of: pad, removing: [tableFold])
+        XCTAssertGreaterThan(choice.minY, tableFold.maxY)
     }
 
     func testTrackpadDisplayGuideUsesFullSurfaceForOneDisplay() throws {
