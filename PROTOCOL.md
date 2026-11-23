@@ -1713,6 +1713,10 @@ display that moved since the listing, is ignored. Neither has a reply; the
 cursor report shows the move. While a session is browsing, the Mac also
 sends a fresh `windowCatalog` when its displays change (attached, removed,
 rearranged or resized), so an overview never keeps an old arrangement.
+Physical display entries can include a stable `uuid` for saved display panes
+and tabs. A receiver resolves that UUID to the current listed display ID before
+sending `workspaceRequest`. The request still uses the current numeric `display`
+ID, and older senders and layouts can continue using the listed ID.
 
 **Overview cursor** (same entry, `displayArrange`; sessions that pass the same
 gates as `windowThumbnailRequest`: `hello.ws`, Window mode allowed, video on,

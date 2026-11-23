@@ -546,6 +546,14 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     var windowID: UInt32
     var bundleID: String?
     var follow: Follow = .window
+    /// Durable identity for a physical display. Older saved layouts use the listed ID.
+    var displayUUID: String? = nil
+
+    func matches(_ other: WorkspaceSource) -> Bool {
+        guard host == other.host, kind == other.kind else { return false }
+        if let displayUUID, let otherUUID = other.displayUUID { return displayUUID == otherUUID }
+        return windowID == other.windowID
+    }
 
     /// A whole Mac display can fill a pane too (Full Desktop as a tile source). It is kept
     /// as a reserved window id with the high bit set (CGWindowIDs never get there), so
@@ -628,7 +636,7 @@ struct WorkspaceTabView: Equatable, Codable, Sendable {
 
 extension WorkspaceSource {
     /// One window on one Mac (generation and follow aside): a tab's identity in its pane.
-    var tabKey: String { "\(host)#\(windowID)" }
+    var tabKey: String { "\(host)#\(displayUUID ?? String(windowID))" }
 }
 
 /// Pinch and pan inside one pane: the source point under the fingers when they came down stays
@@ -1050,7 +1058,7 @@ struct WorkspaceLayout: Equatable, Sendable {
 
     private static func unique(_ list: [WorkspaceSource]) -> [WorkspaceSource] {
         var seen: [WorkspaceSource] = []
-        for s in list where !seen.contains(where: { $0.host == s.host && $0.windowID == s.windowID }) { seen.append(s) }
+        for s in list where !seen.contains(where: { $0.matches(s) }) { seen.append(s) }
         return seen
     }
 
@@ -1059,8 +1067,8 @@ struct WorkspaceLayout: Equatable, Sendable {
         guard var tile = tiles[id] else { return self }
         guard let current = tile.source else { return replacingSource(of: id, with: source) }
         var list = tile.windows
-        if !list.contains(where: { $0.host == current.host && $0.windowID == current.windowID }) { list.append(current) }
-        list.removeAll { $0.host == source.host && $0.windowID == source.windowID }
+        if !list.contains(where: { $0.matches(current) }) { list.append(current) }
+        list.removeAll { $0.matches(source) }
         list.append(source)
         tile.tabs = list.count > 1 ? list : []
         tile.show(source)
@@ -1142,6 +1150,10 @@ struct WorkspaceLayout: Equatable, Sendable {
     /// The pane (or floating pane) showing, or holding as a tab, this window, if any.
     func tile(holding host: String, windowID: UInt32) -> String? {
         allTileIDs.first { id in tiles[id]?.windows.contains { $0.host == host && $0.windowID == windowID } == true }
+    }
+
+    func tile(holding source: WorkspaceSource) -> String? {
+        allTileIDs.first { id in tiles[id]?.windows.contains { $0.matches(source) } == true }
     }
 
     /// A new pane beside the one in slot `index` (a drop on a pane's edge).
@@ -1947,6 +1959,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         /// Its window closed on the Mac and it was kept empty (absent otherwise; older readers
         /// drop the empty pane, as they always have).
         var emptied: Bool?
+        var displayUUID: String? = nil
     }
 
     struct TabRecord: Codable, Equatable, Sendable {
@@ -1958,6 +1971,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var rotation: Int?
         var fit: String?
         var zoom: [Double]?
+        var displayUUID: String? = nil
     }
 
     /// A floating pane (schema 4): its tile (in `tiles`), its frame on the canvas, and the edge
@@ -1998,9 +2012,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                  tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { [views = $0.tabViews] s in
                      let v = views[s.tabKey]
                      return TabRecord(host: s.host, window: s.windowID, bundle: s.bundleID, follow: s.follow.rawValue,
-                                      rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue }, zoom: v?.zoom?.wire)
+                                      rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue },
+                                      zoom: v?.zoom?.wire, displayUUID: s.displayUUID)
                  },
-                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil)
+                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil, displayUUID: $0.source?.displayUUID)
         }
         maximized = layout.maximized
         floats = layout.floats.isEmpty ? nil : layout.floats.map {
@@ -2026,7 +2041,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             var source: WorkspaceSource?
             if let host = t.host, let window = t.window, !host.isEmpty {
                 source = WorkspaceSource(host: host, windowID: window, bundleID: t.bundle,
-                                         follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
+                                         follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window,
+                                         displayUUID: t.displayUUID)
             }
             // Fit unless Fill was chosen ("auto", the old default, shows the whole window too).
             let fit: WorkspaceFit = t.fit == WorkspaceFit.fill.rawValue ? .fill : .fit
@@ -2035,12 +2051,13 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             if source == nil, t.emptied == true { tile.emptied = true }
             let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
-                                follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
+                                follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window,
+                                displayUUID: $0.displayUUID)
             }
             if tabs.count > 1, let s = source, tabs.contains(s) {
                 tile.tabs = Array(tabs)
                 for r in (t.tabs ?? []).prefix(8) where r.rotation != nil || r.fit != nil || r.zoom != nil {
-                    let key = WorkspaceSource(host: r.host, windowID: r.window).tabKey
+                    let key = WorkspaceSource(host: r.host, windowID: r.window, displayUUID: r.displayUUID).tabKey
                     guard key != s.tabKey, tile.tabs.contains(where: { $0.tabKey == key }) else { continue }
                     let v = WorkspaceTabView(rotation: WorkspaceRotation(degrees: r.rotation ?? 0), fit: r.fit == WorkspaceFit.fill.rawValue ? .fill : .fit,
                                              zoom: WorkspacePaneZoom(wire: r.zoom).flatMap { $0.isIdentity ? nil : $0 })

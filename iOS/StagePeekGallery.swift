@@ -525,6 +525,7 @@ struct StagePeekGallery: View {
     let topInset: CGFloat
     let onWindow: (CatalogWindowItem) -> Void
     let onDisplay: (CatalogDisplayItem) -> Void
+    let onAddDisplayFromMirror: (CatalogDisplayItem, Bool) -> Void
     let onApp: (MacAppItem) -> Void
     let onAddTile: (CatalogWindowItem) -> Void
     var onAddOverviewTab: (() -> Void)?
@@ -655,7 +656,10 @@ struct StagePeekGallery: View {
         })
         .onChange(of: visible) { model.thumbnailPriority = $0 }
         .modifier(DisplayOverviewPresentation(isPresented: $showDisplayOverview, model: model, onShowInPane: onDisplay,
-                                              onAddAsNewPane: { d in onAddTile(model.displayWindow(d)) }))
+                                              onAddAsNewPane: { d in
+                                                  if model.canAddDisplayFromMirror(d) { onAddDisplayFromMirror(d, false) }
+                                                  else { onAddTile(model.displayWindow(d)) }
+                                              }))
         .onChange(of: model.closingWindows) { closing in if let r = revealed, closing.contains(r) { revealed = nil } }
         .confirmationDialog(menuWindow.map { $0.title.isEmpty ? $0.app : $0.title } ?? "",
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
@@ -684,6 +688,29 @@ struct StagePeekGallery: View {
             arrangementMap(overview, displays)
         } else {
             displayGrid(displays, cols)
+        }
+        if !model.windowMode, model.mirroring() {
+            ForEach(displays.filter { model.canAddDisplayFromMirror($0) }) { display in
+                Menu {
+                    Button { onDisplay(display) } label: {
+                        Label("Switch Current Mirror Source", systemImage: "display")
+                    }
+                    if model.canSplitDesktop {
+                        Button { onAddDisplayFromMirror(display, false) } label: {
+                            Label("Add as New Pane", systemImage: "rectangle.split.2x1")
+                        }
+                    }
+                    Button { onAddDisplayFromMirror(display, true) } label: {
+                        Label("Add as Tab", systemImage: "rectangle.on.rectangle")
+                    }
+                } label: {
+                    Label(display.name, systemImage: "ellipsis.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minHeight: 44, alignment: .leading)
+                }
+                .accessibilityHint("Switch Mirror or keep both displays in Window view.")
+                .accessibilityIdentifier("stagePeekMirrorDisplayActions-\(display.id)")
+            }
         }
     }
 
@@ -739,13 +766,13 @@ struct StagePeekGallery: View {
             ForEach(displays) { d in
                 let source = model.displayWindow(d)
                 StagePeekDisplayCard(model: model, display: d,
-                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : model.desktopDisplay?.id == d.id)
+                                     current: model.windowMode ? model.containsDisplayView(d) : model.desktopDisplay?.id == d.id)
                     .scaleEffect(held == source.id ? 1.04 : 1)
                     // The desktop is a pane source too: hold and drag it onto a pane.
                     .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onDisplay(d) }
-                    .accessibilityAction(named: model.mirroring() ? Text("Mirror This Display") : Text("Show in Pane")) { onDisplay(d) }
+                    .accessibilityAction(named: model.mirroring() ? Text("Switch Current Mirror Source") : Text("Show in Pane")) { onDisplay(d) }
             }
         }
     }
@@ -786,7 +813,7 @@ struct StagePeekGallery: View {
             thumbnail: model.displayThumbnails[d.id], name: d.name,
             label: mirrored ? String(localized: "\(name), mirrored") : name,
             isMain: tile.isMain, isMirrored: mirrored,
-            current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : model.desktopDisplay?.id == d.id,
+            current: model.windowMode ? model.containsDisplayView(d) : model.desktopDisplay?.id == d.id,
             showsName: tile.rect.height >= 28)
             .frame(width: tile.rect.width, height: tile.rect.height)
             .scaleEffect(held == source.id ? 1.04 : 1)
@@ -794,7 +821,7 @@ struct StagePeekGallery: View {
             .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onDisplay(d) }
-            .accessibilityAction(named: model.mirroring() ? Text("Mirror This Display") : Text("Show in Pane")) { onDisplay(d) }
+            .accessibilityAction(named: model.mirroring() ? Text("Switch Current Mirror Source") : Text("Show in Pane")) { onDisplay(d) }
             .offset(x: tile.rect.minX, y: tile.rect.minY)
     }
 

@@ -1928,7 +1928,7 @@ struct WorkspaceLeaveExtendConfirmation: ViewModifier {
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).
-/// Moving a whole pane that is already in the layout also offers Remove from Layout beside Cancel.
+/// Moving a pane or tab already in the layout also offers Remove from Layout where available.
 struct WorkspaceDropOverlay: View {
     @ObservedObject var model: WorkspaceModel
     /// The picture, in this view's coordinates.
@@ -2022,7 +2022,7 @@ struct WorkspaceDropOverlay: View {
             case .tab(let t, _):
                 if case .pane(let p, let tab?) = item, p == t, tab >= 0 { return String(localized: "Move Tab Here") }
                 return String(localized: "Add as Tab")
-            case .split: return String(localized: "New Pane")
+            case .split: return String(localized: "Add as New Pane")
             case .emptySlot: return String(localized: "Show Here")
             }
         }()
@@ -2110,8 +2110,7 @@ struct WorkspaceDropOverlay: View {
         }
     }
 
-    /// Takes the pane out of this device's layout, or a float being docked off this device (the
-    /// float menu's own Remove from This Device). Never closes, minimizes or quits the Mac window.
+    /// Takes a pane or tab out of this layout, or removes a float being docked from this device.
     private func removeZone(over: Bool, float: Bool) -> some View {
         dropZone(over ? String(localized: "Release to Remove")
                       : (float ? String(localized: "Remove from This Device") : String(localized: "Remove from Layout")),
@@ -2125,7 +2124,7 @@ struct WorkspaceDropOverlay: View {
                           frame report: @escaping (CGRect) -> Void) -> some View {
         Label(text, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
-            .lineLimit(1).minimumScaleFactor(0.85)
+            .lineLimit(2).minimumScaleFactor(0.85)
             .foregroundStyle(.white)
             .padding(.horizontal, 16).padding(.vertical, 12)
             .frame(minHeight: 44)

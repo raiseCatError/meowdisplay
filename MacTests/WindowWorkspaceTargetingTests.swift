@@ -141,6 +141,35 @@ final class WindowWorkspaceTargetingTests: XCTestCase {
                                                     focusedWindowIsChild: false), .deliver)
     }
 
+    func testTwoPhysicalDisplayTilesRouteToTheirOwnGlobalCoordinates() {
+        let displays: [UInt32: CGRect] = [
+            1: CGRect(x: 0, y: 0, width: 1000, height: 1000),
+            2: CGRect(x: -1000, y: 150, width: 1000, height: 1000),
+        ]
+        var next: UInt64 = 1
+        let canvas = CGSize(width: 2000, height: 1000)
+        let result = WorkspaceRequestValidator.validate(tiles: [
+            ["id": "builtIn", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "display": 1],
+            ["id": "external", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0, "display": 2],
+        ], catalog: [:], hostID: "mac-a", canvasPixels: canvas, previous: [:], nextGeneration: &next, displays: displays)
+        XCTAssertEqual(result.assignments.compactMap(\.displayID), [1, 2])
+        XCTAssertTrue(result.rejected.isEmpty)
+
+        var targeting = WorkspaceInputTargeting()
+        targeting.canvas = canvas
+        targeting.windowFrames = Dictionary(uniqueKeysWithValues: displays.map { (WorkspaceSource.displayKey($0.key), $0.value) })
+        _ = targeting.update(assignments: result.assignments)
+        let builtInPoint = WorkspacePoint(x: 0.25, y: 0.5)
+        let externalPoint = WorkspacePoint(x: 0.75, y: 0.5)
+        let first = targeting.resolve(.down, at: builtInPoint)
+        XCTAssertEqual(first?.tileID, "builtIn")
+        XCTAssertEqual(first?.point, CGPoint(x: 500, y: 500))
+        _ = targeting.resolve(.up, at: builtInPoint)
+        let second = targeting.resolve(.down, at: externalPoint)
+        XCTAssertEqual(second?.tileID, "external")
+        XCTAssertEqual(second?.point, CGPoint(x: -500, y: 650))
+    }
+
     func testOneWindowShowsInOneTileOnly() {
         let catalog: [UInt32: WindowCatalogEntry] = [10: entry(10, gen: 5)]
         var next: UInt64 = 1

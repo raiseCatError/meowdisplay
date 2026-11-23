@@ -317,19 +317,18 @@ struct DisplayOverviewScreen: View {
         interaction.model.selected.flatMap { id in model.catalog?.displays.first { $0.id == id } }
     }
 
-    private var tiledSources: Set<UInt32> {
-        Set(model.layout.tiles.values.compactMap { $0.source?.windowID })
-    }
-
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
     private var showTitle: String {
-        if model.mirroring() { return String(localized: "Mirror Display") }
+        if !model.windowMode, model.mirroring() { return String(localized: "Switch Current Mirror Source") }
         return model.replacingTile != nil ? String(localized: "Use Display") : String(localized: "Show in Pane")
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {
-        model.canAddTile && model.replacingTile == nil && !tiledSources.contains(WorkspaceSource.displayKey(item.id))
+        if !model.windowMode, model.mirroring() {
+            return model.canSplitDesktop && model.canAddDisplayFromMirror(item)
+        }
+        return model.canAddTile && model.replacingTile == nil && !model.containsDisplayView(item)
     }
 
     /// A display source cannot float on iOS, so there is no float action here.

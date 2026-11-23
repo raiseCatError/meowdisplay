@@ -136,6 +136,7 @@ struct DisplayCatalogEntry: Equatable, Sendable {
     var isMeow = false
     /// A virtual display owned by this session (implies `isMeow`).
     var isOwn = false
+    var displayUUID: String? = nil
 
     var wire: [String: Any] {
         var out: [String: Any] = [
@@ -147,6 +148,7 @@ struct DisplayCatalogEntry: Equatable, Sendable {
         if let scale { out["scale"] = scale }
         if refreshHz > 0 { out["hz"] = refreshHz }
         if let mirrorOf { out["mirrorOf"] = Int(mirrorOf) }
+        if let displayUUID { out["uuid"] = displayUUID }
         return out
     }
 
@@ -524,11 +526,15 @@ final class WindowBrowserService: @unchecked Sendable {
                 || (screen?.localizedName.contains("MeowDisplay") ?? false)
             let mode = CGDisplayCopyDisplayMode(d.displayID)
             let mirror = CGDisplayMirrorsDisplay(d.displayID)
-            return DisplayCatalogEntry.make(
+            var entry = DisplayCatalogEntry.make(
                 id: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
                 frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual,
                 pixelWidth: mode?.pixelWidth ?? 0, refreshHz: mode?.refreshRate ?? 0,
                 mirrorOf: mirror == kCGNullDirectDisplay ? nil : mirror, meowIDs: meowIDs, ownIDs: ownIDs)
+            if !entry.isVirtual && !entry.isMeow {
+                entry.displayUUID = MirrorDisplayIdentity.uuidString(for: d.displayID)
+            }
+            return entry
         }.sorted { ($0.isMain ? 0 : 1, $0.displayID) < ($1.isMain ? 0 : 1, $1.displayID) }
     }
 

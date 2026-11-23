@@ -344,7 +344,7 @@ final class WorkspaceClientTests: XCTestCase {
     }
 
     /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
-    /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
+    /// layout with another left; never for a Stage Peek window or app; Cancel changes nothing;
     /// removal is one undo step and never closes or minimizes the Mac window.
     func testDraggingAPaneToRemoveTakesItOutOfTheLayoutOnly() {
         var sent: [[String: Any]] = []
@@ -372,7 +372,7 @@ final class WorkspaceClientTests: XCTestCase {
         m.beginDrag(.app(MacAppItem(bundleID: "dev.zed.Zed", name: "Zed", running: true, windowCount: 1, lastUsed: nil)), at: CGPoint(x: 200, y: 400))
         XCTAssertFalse(m.canDropToRemove)
         m.cancelDrag()
-        // A tab is never offered Remove.
+        // A pane with one window has no real tab label to remove.
         m.beginDrag(.pane(pane, tab: 0), at: CGPoint(x: 200, y: 20))
         XCTAssertFalse(m.canDropToRemove)
         m.cancelDrag()
@@ -409,6 +409,49 @@ final class WorkspaceClientTests: XCTestCase {
         m.moveDrag(to: onRemove)
         _ = m.endDrag()
         XCTAssertEqual(m.layout.tiles.count, 1)
+    }
+
+    func testDraggingAnExistingTabToRemovePreservesItsPaneAndOtherStreams() throws {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "a"), (11, 6, "b"), (12, 7, "c")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        let windows = try XCTUnwrap(m.catalog?.windows)
+        m.choose(windows[0], asNewTile: false)
+        m.choose(windows[2], asNewTile: true)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        let whole = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        m.drop(windows[1], on: .tab(tile: pane, preview: whole))
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.windowID), [10, 11])
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.removeZoneGlobal = CGRect(x: 200, y: 720, width: 160, height: 44)
+        m.floatZoneGlobal = m.removeZoneGlobal
+        let onRemove = CGPoint(x: 280, y: 740)
+
+        m.beginDrag(.pane(pane, tab: 1), at: CGPoint(x: 200, y: 20))
+        XCTAssertTrue(m.canDropToRemove)
+        m.moveDrag(to: onRemove)
+        XCTAssertTrue(m.overRemoveZone(onRemove))
+        XCTAssertFalse(m.overFloatZone(onRemove))
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.windowID, 10)
+        XCTAssertEqual(Set(m.layout.tiles.values.compactMap { $0.source?.windowID }), [10, 12])
+        let types = sent.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains(WireMessage.windowClose))
+        XCTAssertFalse(types.contains(WireMessage.windowAction))
+        m.undo()
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.windowID), [10, 11])
+
+        // The first tab disappears while the second is held. Its old index cannot remove another source.
+        m.beginDrag(.pane(pane, tab: 1), at: CGPoint(x: 200, y: 20))
+        m.removeTab(pane, at: 0)
+        m.moveDrag(to: onRemove)
+        XCTAssertFalse(m.canDropToRemove)
+        XCTAssertFalse(m.endDrag())
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.windowID, 11)
     }
 
     /// An app dragged onto a pane: its one window goes there; several → the person picks; none →
@@ -833,6 +876,61 @@ final class OverviewPaneReceiverTests: XCTestCase {
                                                  displays: displays)))
         m.updateSpace(WorkspaceSize(width: 1200, height: 800), hinge: nil)
         return m
+    }
+
+    func testDraggingASecondPhysicalDisplayFromMirrorStartsTwoLivePaneAssignments() throws {
+        let m = model(displays: twoDisplays, inWindowMode: false)
+        var switches = 0
+        m.mirroring = { true }
+        m.requestWindowMode = { switches += 1; return true }
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.beginDrag(.window(m.displayWindow(twoDisplays[0])), at: CGPoint(x: 200, y: 400))
+        XCTAssertNil(m.dropTarget(forGlobal: CGPoint(x: 200, y: 400)), "the already mirrored source cannot add itself")
+        m.cancelDrag()
+        m.beginDrag(.window(m.displayWindow(twoDisplays[1])), at: CGPoint(x: 200, y: 400))
+        guard case .split = m.dropTarget(forGlobal: CGPoint(x: 200, y: 400)) else {
+            return XCTFail("the second display should join the current desktop")
+        }
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(switches, 1)
+        m.apply(.mode(window: true))
+        let assignments = WorkspaceRequests.workspace(m.layout, frames: m.frames, host: "mac-a", focus: nil,
+                                                       generation: { _ in nil }, displayID: { m.display(for: $0)?.id })
+        let tiles = try XCTUnwrap(assignments["tiles"] as? [[String: Any]])
+        XCTAssertEqual(tiles.compactMap { $0["display"] as? Int }, [1, 2])
+        XCTAssertTrue(tiles.allSatisfy { $0["window"] == nil })
+    }
+
+    func testMirrorDisplayTabsPersistAndReconnectByPhysicalIdentity() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "PhysicalDisplayTabs-\(UUID().uuidString)"))
+        var original = twoDisplays
+        original[0].displayUUID = UUID().uuidString
+        original[1].displayUUID = UUID().uuidString
+        let m = model(displays: original, inWindowMode: false, defaults: defaults)
+        m.mirroring = { true }
+        m.requestWindowMode = { true }
+        XCTAssertTrue(m.addDisplayFromMirror(original[1], asTab: true))
+        m.apply(.mode(window: true))
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.displayUUID), original.map(\.displayUUID))
+
+        // A different monitor now owns the old live ID. The saved tab must wait for its UUID.
+        let impostor = display(original[1].id, original[1].name, x: 1920)
+        let reloaded = model(displays: [original[0], impostor], defaults: defaults)
+        let external = try XCTUnwrap(reloaded.layout.tiles[pane]?.source)
+        XCTAssertNil(reloaded.display(for: external))
+        XCTAssertTrue(reloaded.missing.contains(pane))
+
+        var replugged = display(85, original[1].name, x: 1920)
+        replugged.displayUUID = original[1].displayUUID
+        reloaded.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [],
+                                                        unavailable: false, displays: [original[0], impostor, replugged])))
+        XCTAssertEqual(reloaded.display(for: external)?.id, 85)
+        XCTAssertFalse(reloaded.missing.contains(pane))
+        reloaded.choose(reloaded.displayWindow(replugged), asNewTile: true)
+        XCTAssertEqual(reloaded.layout.orderedTileIDs, [pane], "the rebound display still has one saved view")
+        reloaded.switchTab(pane, to: 0)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source.flatMap { reloaded.display(for: $0) }?.id, 1)
     }
 
     func testOverviewTabKeepsTheCurrentLayoutAndRestoresFromDisk() throws {

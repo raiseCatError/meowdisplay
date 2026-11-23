@@ -442,6 +442,14 @@ struct StagePeekOverlay: View {
         .accessibilityValue(window?.pausedSpoken ?? "")
         .accessibilityAddTraits(card.highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { finish(machine.select(index: card.index)) }
+        .accessibilityActions {
+            if let display, model.canAddDisplayFromMirror(display) {
+                if model.canSplitDesktop {
+                    Button("Add as New Pane") { addDisplayFromMirror(display, asTab: false) }
+                }
+                Button("Add as Tab") { addDisplayFromMirror(display, asTab: true) }
+            }
+        }
     }
 
     /// The floating search pill and the Dock-like app carousel: independent glass pieces,
@@ -489,6 +497,14 @@ struct StagePeekOverlay: View {
         model.stagePeekOpen = false
     }
 
+    private func addDisplayFromMirror(_ display: CatalogDisplayItem, asTab: Bool) {
+        guard model.addDisplayFromMirror(display, asTab: asTab) else { return }
+        haptics.play(.select, enabled: hapticsEnabled)
+        searchFocused = false
+        animate { machine.cancelAll() }
+        model.stagePeekOpen = false
+    }
+
     /// Expanded Stage Peek: every window (and display) as a vertical gallery, as many columns as
     /// fit. It sits between the search and app carousel and the buttons, fading at both edges, so
     /// no card ever passes under (or intercepts touches meant for) those controls.
@@ -500,6 +516,7 @@ struct StagePeekOverlay: View {
                          width: safe.width, topInset: 12,
                          onWindow: { w in pick(w) },
                          onDisplay: { d in pickDisplay(d) },
+                         onAddDisplayFromMirror: addDisplayFromMirror,
                          onApp: { a in query = ""; searchFocused = false; tapApp(a, forceFilter: true) },
                          onAddTile: { w in
                              haptics.play(.select, enabled: hapticsEnabled)
