@@ -235,7 +235,7 @@ final class StagePeekTests: XCTestCase {
     }
 
     func testCompactFlickSettlesPastTheReleasePointWithoutSelecting() {
-        var m = machine()
+        var m = machine(natural: true)
         _ = opened(&m)
         _ = m.touchEnded(id: 1, at: CGPoint(x: 8, y: 430), time: 0.5, cardAt: cardAt(m))
         let start = cards(m).first { $0.highlighted }!.center
