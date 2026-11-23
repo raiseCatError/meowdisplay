@@ -257,6 +257,8 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.allowInput = false
         preferences.inputMode = .trackpad
         preferences.showSurfaceGrid = false
+        preferences.showRightScrollStrip = false
+        preferences.showTrackpadDisplayLayout = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -335,6 +337,67 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.showCursorLocator = true
         repository.save(preferences)
         XCTAssertTrue(ReceiverControlPreferencesRepository(defaults: defaults).load().showCursorLocator)
+    }
+
+    func testVideoOffGuideAndScrollStripDefaultOnForOldSettings() throws {
+        let legacy = Data(#"{"version":23}"#.utf8)
+        let decoded = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertTrue(decoded.showTrackpadDisplayLayout)
+        XCTAssertTrue(decoded.showRightScrollStrip)
+    }
+
+    func testTrackpadDisplayGuideUsesFullSurfaceForOneDisplay() throws {
+        let size = CGSize(width: 280, height: 600)
+        let display = CGRect(x: -1024, y: -768, width: 1024, height: 768)
+        let result = TrackpadDisplayGuideGeometry.layout(displays: [display],
+            cursor: CGPoint(x: -256, y: -576), in: size)
+        XCTAssertTrue(result.outlines.isEmpty)
+        XCTAssertEqual(result.cursor, CGPoint(x: 210, y: 150))
+        let unavailable = TrackpadDisplayGuideGeometry.layout(displays: [], cursor: .zero, in: size)
+        XCTAssertTrue(unavailable.outlines.isEmpty)
+        XCTAssertNil(unavailable.cursor)
+    }
+
+    func testTrackpadDisplayGuideFitsWithAccurateOffsetsAndNoCursorInDisplayGap() throws {
+        let left = CGRect(x: -200, y: 0, width: 100, height: 200)
+        let right = CGRect(x: 0, y: -50, width: 200, height: 100)
+        for size in [CGSize(width: 300, height: 600), CGSize(width: 600, height: 300)] {
+            let result = TrackpadDisplayGuideGeometry.layout(displays: [left, right],
+                cursor: CGPoint(x: 100, y: 0), in: size)
+            XCTAssertEqual(result.outlines.count, 2)
+            let leftOutline = try XCTUnwrap(result.outlines.first)
+            let rightOutline = try XCTUnwrap(result.outlines.last)
+            XCTAssertEqual(rightOutline.width, leftOutline.width * 2, accuracy: 0.001)
+            XCTAssertEqual(rightOutline.minX - leftOutline.maxX, leftOutline.width, accuracy: 0.001)
+            XCTAssertEqual(leftOutline.minY - rightOutline.minY, leftOutline.width / 2, accuracy: 0.001)
+            let cursor = try XCTUnwrap(result.cursor)
+            XCTAssertEqual(cursor.x, rightOutline.midX, accuracy: 0.001)
+            XCTAssertEqual(cursor.y, rightOutline.midY, accuracy: 0.001)
+            let gap = TrackpadDisplayGuideGeometry.layout(displays: [left, right],
+                cursor: CGPoint(x: -50, y: 0), in: size)
+            XCTAssertNil(gap.cursor)
+        }
+    }
+
+    func testRightEdgeScrollStripLeavesControlsAndFoldClear() throws {
+        for size in [CGSize(width: 390, height: 780), CGSize(width: 720, height: 310),
+                     CGSize(width: 175, height: 180)] {
+            let safe = CGRect(origin: CGPoint(x: 15, y: 10), size: size)
+            let controls = CGRect(x: safe.maxX - 45, y: safe.maxY - 60, width: 45, height: 60)
+            let strip = try XCTUnwrap(RightEdgeScrollStripGeometry.frame(in: safe, avoiding: [controls]))
+            XCTAssertTrue(safe.contains(strip))
+            XCTAssertFalse(strip.intersects(controls))
+            XCTAssertEqual(strip.maxX, safe.maxX - 8)
+            XCTAssertGreaterThanOrEqual(strip.height, 44)
+        }
+        let landscape = CGRect(x: 0, y: 0, width: 700, height: 350)
+        let verticalTray = CGRect(x: 650, y: 0, width: 50, height: 350)
+        let besideTray = try XCTUnwrap(RightEdgeScrollStripGeometry.frame(in: landscape, avoiding: [verticalTray]))
+        XCTAssertEqual(besideTray.maxX, verticalTray.minX - 4)
+        XCTAssertFalse(besideTray.intersects(verticalTray))
+        let narrow = CGRect(x: 0, y: 0, width: 60, height: 190)
+        let blockedEdge = CGRect(x: 34, y: 0, width: 26, height: 190)
+        XCTAssertNil(RightEdgeScrollStripGeometry.frame(in: narrow, avoiding: [blockedEdge]))
     }
 
     func testLegacyCursorLocatorDefaultDoesNotBecomeAnOptIn() throws {

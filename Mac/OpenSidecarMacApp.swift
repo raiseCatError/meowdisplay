@@ -1124,7 +1124,7 @@ final class SenderController: ObservableObject {
         autoConnect()   // a rebuilt WiFi session may deserve its cable back
     }
 
-    func requestVideoEnabled(_ enabled: Bool) {
+    func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false) {
         guard enabled != videoEnabled else { return }
         if enabled {
             displayModes.enableVideo()
@@ -1133,7 +1133,14 @@ final class SenderController: ObservableObject {
         }
         // Video is Mac-wide; the mode hand-off is per device (issue #20).
         let hasPhysicalDisplay = hasUsablePhysicalDisplayNow()
-        let transitioning = Set(displayModes.disableVideo(hasUsablePhysicalDisplay: hasPhysicalDisplay))
+        let transitioning = Set(displayModes.disableVideo(hasUsablePhysicalDisplay: hasPhysicalDisplay,
+                                                            preserveCaptureMode: preserveCaptureMode))
+        if preserveCaptureMode {
+            // Keep every session's capture assignment and its display identity.
+            // The property fans the video stop out without rebuilding the pipeline.
+            videoEnabled = false
+            return
+        }
         // Mirror is established through the existing authoritative mode
         // transition before capture is stopped — this reclaims the virtual
         // display's system resources by handing input/capture off to a
@@ -3161,9 +3168,9 @@ final class SenderController: ObservableObject {
             SecurityPresentationCoordinator.dismissFilesConsent(sessionID: session.id)
             ClipboardHub.shared.connectionReset(sessionID: session.id)
         }
-        sender.onVideoEnabledRequest = { [weak self, weak session] requested in
+        sender.onVideoEnabledRequest = { [weak self, weak session] requested, preserveMode in
             guard let self, let session, self.owns(session) else { return }
-            self.requestVideoEnabled(requested)
+            self.requestVideoEnabled(requested, preserveCaptureMode: preserveMode)
         }
         // A receiver's request changes the Mac-wide setting only when it can
         // take effect and differs from what's in use; otherwise nothing is

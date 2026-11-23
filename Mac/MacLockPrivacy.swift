@@ -109,7 +109,7 @@ enum LockedContentPolicy {
         WireMessage.menu, WireMessage.menuResult, WireMessage.appLaunchResult, WireMessage.windowCloseResult,
         ClipboardWire.type,
         // Where the focused text field is: on the lock screen, the password field.
-        WireMessage.textCaret,
+        WireMessage.textCaret, TrackpadLayoutWire.state,
     ]
 
     static func allows(type: String?, privacy: MacScreenPrivacy) -> Bool {

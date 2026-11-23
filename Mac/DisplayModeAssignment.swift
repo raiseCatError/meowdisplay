@@ -185,6 +185,7 @@ struct DisplayModeCoordinator {
 
     private(set) var defaults: DisplayModeDefaults
     private(set) var videoEnabled: Bool
+    private var preservingAssignmentsWhileVideoOff = false
     private(set) var live: [String: LiveSession] = [:]
     private let store: UserDefaults
 
@@ -201,8 +202,10 @@ struct DisplayModeCoordinator {
     /// What a device would get right now (also for a device that is offline).
     func resolvedAssignment(peerID: String?) -> DeviceDisplayAssignment {
         DeviceDisplayModeResolution.resolve(preference: preference(peerID: peerID), defaults: defaults,
-                                            videoEnabled: videoEnabled)
+                                            videoEnabled: videoEnabledForModeResolution)
     }
+
+    private var videoEnabledForModeResolution: Bool { videoEnabled || preservingAssignmentsWhileVideoOff }
 
     func assignment(sessionID: String) -> DeviceDisplayAssignment? { live[sessionID]?.assignment }
 
@@ -312,7 +315,7 @@ struct DisplayModeCoordinator {
         let base = live[sessionID]?.assignment ?? resolvedAssignment(peerID: nil)
         live[sessionID] = LiveSession(
             peerID: live[sessionID]?.peerID,
-            assignment: DeviceDisplayAssignment(mode: VideoModePolicy.normalized(mode: mode, videoEnabled: videoEnabled),
+            assignment: DeviceDisplayAssignment(mode: VideoModePolicy.normalized(mode: mode, videoEnabled: videoEnabledForModeResolution),
                                                 mirrorDisplayUUID: base.mirrorDisplayUUID,
                                                 modeIsDeviceChoice: true,
                                                 mirrorSourceIsDeviceChoice: base.mirrorSourceIsDeviceChoice))
@@ -336,11 +339,13 @@ struct DisplayModeCoordinator {
     /// display) and turning video back on never restores Extend implicitly —
     /// the pre-#20 behavior, now applied per device: the default becomes
     /// Mirror, and a device whose own choice was Extend now remembers Mirror.
-    /// Headless, nothing changes mode. Returns the sessions the caller must
-    /// transition in place (not rebuild).
-    mutating func disableVideo(hasUsablePhysicalDisplay: Bool) -> [String] {
+    /// Headless and explicit Video Off layout preservation keep existing
+    /// modes. Returns the sessions the caller must transition in place.
+    mutating func disableVideo(hasUsablePhysicalDisplay: Bool, preserveCaptureMode: Bool = false) -> [String] {
         videoEnabled = false
-        guard MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplay) else {
+        preservingAssignmentsWhileVideoOff = preserveCaptureMode
+        guard !preserveCaptureMode,
+              MirrorUnavailableOfferPolicy.canEnterMirror(hasUsablePhysicalDisplay: hasUsablePhysicalDisplay) else {
             return []
         }
         defaults.mode = .mirror
@@ -360,9 +365,10 @@ struct DisplayModeCoordinator {
         return transitioned
     }
 
-    /// Video On never restores Extend: nothing is rebuilt.
+    /// Resume the existing assignments without rebuilding a session.
     mutating func enableVideo() {
         videoEnabled = true
+        preservingAssignmentsWhileVideoOff = false
     }
 
     /// The Mac default mode the Displays picker shows.
@@ -376,7 +382,7 @@ struct DisplayModeCoordinator {
             // all it has; only the parts that follow the default re-resolve.
             let fromDefaults = resolvedAssignment(peerID: nil)
             let mode = entry.assignment.modeIsDeviceChoice
-                ? VideoModePolicy.normalized(mode: entry.assignment.mode, videoEnabled: videoEnabled)
+                ? VideoModePolicy.normalized(mode: entry.assignment.mode, videoEnabled: videoEnabledForModeResolution)
                 : fromDefaults.mode
             return DeviceDisplayAssignment(mode: mode, mirrorDisplayUUID: fromDefaults.mirrorDisplayUUID,
                                            modeIsDeviceChoice: entry.assignment.modeIsDeviceChoice,
@@ -405,7 +411,7 @@ struct DisplayModeCoordinator {
         } else {
             // Nothing durable to key on: the choice lasts for this session.
             resolved = DeviceDisplayModeResolution.resolve(preference: preference, defaults: defaults,
-                                                           videoEnabled: videoEnabled)
+                                                           videoEnabled: videoEnabledForModeResolution)
         }
         live[sessionID]?.assignment = resolved
         return resolved.capturesSame(as: entry.assignment) ? .unchanged : .rebuild(resolved)

@@ -430,7 +430,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
-    @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
+    @MainActor var onVideoEnabledRequest: ((Bool, Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
     /// `SenderController`, which remembers it as THIS device's own source
     /// (issue #20) and rebuilds this session only. `nil` requests Auto.
@@ -770,6 +770,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// differ until its hello proves support for protocol v9. Older peers are
     /// always kept video-on so they never get a frozen, unexplained surface.
     private var desiredVideoEnabled: Bool
+    private var trackpadLayoutLease: (generation: UInt64, expires: TimeInterval)?
+    private var trackpadLayoutPolling = false
+    private var lastTrackpadLayout: TrackpadLayoutWire.Sample?
     private var videoEnabled = true
     // Mac system audio (M-audio). Per-receiver, not Mac-wide like
     // `videoEnabled`: only this session's receiver can turn its own audio
@@ -5761,6 +5764,61 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONObject(TextCaretWire.message(rect: rect, sequence: textCaretSeq))
     }
 
+    // MARK: - Video Off layout
+
+    private func trackpadLayoutAllowed(generation: UInt64) -> Bool {
+        !stopped && !videoEnabled && transportController.isReady
+            && sessionAuthorization.isAdmitted(generation: generation)
+            && receiverMayMovePointer() && privacyGate.allowsContent
+            && LoginSessionConsole.shared.isOnConsole && !PrivacyShieldWindows.isUnlocking
+    }
+
+    private func watchTrackpadLayout(on: Bool) {
+        let generation = activeConnectionGeneration
+        guard on else {
+            trackpadLayoutLease = nil
+            lastTrackpadLayout = nil
+            return
+        }
+        guard trackpadLayoutAllowed(generation: generation) else { return }
+        if trackpadLayoutLease?.generation != generation { lastTrackpadLayout = nil }
+        trackpadLayoutLease = (generation, ProcessInfo.processInfo.systemUptime + 5)
+        if !trackpadLayoutPolling { pollTrackpadLayout() }
+    }
+
+    private func pollTrackpadLayout() {
+        guard let lease = trackpadLayoutLease, lease.expires > ProcessInfo.processInfo.systemUptime,
+              lease.generation == activeConnectionGeneration,
+              trackpadLayoutAllowed(generation: lease.generation) else {
+            trackpadLayoutLease = nil
+            trackpadLayoutPolling = false
+            lastTrackpadLayout = nil
+            return
+        }
+        trackpadLayoutPolling = true
+        let limit = TrackpadLayoutWire.displayLimit
+        var ids = [CGDirectDisplayID](repeating: 0, count: limit)
+        var count: UInt32 = 0
+        let ok = CGGetActiveDisplayList(UInt32(limit), &ids, &count) == .success
+        let virtual = VirtualDisplayRegistry.shared.displayIDs
+        let displays: [TrackpadDisplayGeometry] = ok ? ids.prefix(Int(count)).sorted().compactMap { id in
+            guard id != 0, !virtual.contains(id), CGDisplayMirrorsDisplay(id) == 0 else { return nil }
+            let bounds = CGDisplayBounds(id)
+            return bounds.isEmpty ? nil : .init(id: id, bounds: bounds)
+        } : []
+        let cursor = (CGEvent(source: nil)?.location).flatMap { location in
+            displays.contains(where: { $0.bounds.contains(location) }) ? location : nil
+        }
+        let sample = TrackpadLayoutWire.Sample(displays: displays, cursor: cursor)
+        if sample != lastTrackpadLayout, trackpadLayoutAllowed(generation: lease.generation) {
+            lastTrackpadLayout = sample
+            sendJSONObject(sample.message)
+        }
+        queue.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+            self?.pollTrackpadLayout()
+        }
+    }
+
     // MARK: - Local cursor echo (Mac -> phone)
 
     private func startCursorEcho() {
@@ -6380,7 +6438,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         case "scroll":
             guard receiverInputIsAllowed() else { return }
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: allowsDesktopTrackpad(obj))
+                let atCursor = obj[WireMessage.scrollAtCursor] as? Bool == true
+                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: allowsDesktopTrackpad(obj),
+                                            atCurrentCursor: atCursor)
             }
         case "pointer":
             // M7: absolute/relative cursor movement decoupled from button
@@ -6407,8 +6467,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 case "down":
                     if let button = PointerButton.parse(obj["button"]) {
+                        var workspacePoint: CGPoint?
+                        if mode == .window, videoEnabled, !usesTrackpadPoints(obj),
+                           let x = obj["x"] as? Double, let y = obj["y"] as? Double,
+                           (0...1).contains(x), (0...1).contains(y) {
+                            workspacePoint = CGPoint(x: x, y: y)
+                        }
                         inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1,
-                                                         desktopTrackpad: allowsDesktopTrackpad(obj))
+                                                         desktopTrackpad: allowsDesktopTrackpad(obj), workspacePoint: workspacePoint)
                     }
                 case "up":
                     if let button = PointerButton.parse(obj["button"]) {
@@ -6736,6 +6802,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 denySessionInput(state: .off)
             }
+        case TrackpadLayoutWire.watch:
+            guard let on = obj["on"] as? Bool else { return }
+            watchTrackpadLayout(on: on)
         case WireMessage.videoRequest:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.videoControlWireVersion,
@@ -6743,10 +6812,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if requested == desiredVideoEnabled {
                 applyVideoEnabled(requested)
             } else {
+                let preserveMode = !requested && obj[WireMessage.preserveCaptureMode] as? Bool == true
                 let videoEnabledSelfBox = self.selfBox
                 Task { @MainActor in
                     guard let self = videoEnabledSelfBox.resolve() else { return }
-                    self.onVideoEnabledRequest?(requested)
+                    self.onVideoEnabledRequest?(requested, preserveMode)
                 }
             }
         case WireMessage.streamingProfileRequest:
@@ -8075,7 +8145,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// `welcome.features`: what this Mac offers beyond its `pv`. A receiver
-    /// reads at most 17 entries; older receivers read the first 16. Window-mode features,
+    /// reads a bounded prefix. Keep existing features in the same prefix for older clients. Window-mode features,
     /// Fill/Restore on Mac (`windowFrame`) among them, only while Window mode is allowed.
     static func welcomeFeatures(windowStreamingAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
@@ -8097,6 +8167,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         features.append(MacLockWire.welcomeFeature)
         features.append(LockScreenWire.welcomeFeature)
         if windowStreamingAllowed { features.append(WindowWorkspaceWire.restoreOffscreenFeature) }
+        features.append(TrackpadLayoutWire.welcomeFeature)
+        features.append(WireMessage.scrollAtCursor)
+        features.append(WireMessage.preserveCaptureMode)
         return features
     }
 

@@ -2083,7 +2083,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 target.point = again.point
             }
         }
-        if phase == .down, !target.activates, !isTopmost(target.windowID, at: target.point, cached: false) {
+        if phase == .down, !target.activates,
+           (NSWorkspace.shared.frontmostApplication?.processIdentifier != target.pid
+            || !isTopmost(target.windowID, at: target.point, cached: false)) {
             // The active tile's window was covered on the Mac since (someone
             // clicked another app there): a press in its tile brings it back,
             // as a press on another tile does.

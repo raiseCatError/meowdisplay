@@ -483,6 +483,31 @@ final class DisplayModeAssignmentTests: XCTestCase {
         XCTAssertEqual(coordinator.assignment(sessionID: "a")?.mode, .extend)
     }
 
+    func testPreservingVideoOffRetainsAssignmentsPreferencesAndModeOnReconnect() {
+        var coordinator = DisplayModeCoordinator(defaults: .init(mode: .extend, mirrorDisplayUUID: "built-in"),
+                                                 videoEnabled: true, store: store)
+        _ = coordinator.begin(sessionID: "extend", peerID: "A")
+        _ = coordinator.begin(sessionID: "window", peerID: "B")
+        _ = coordinator.requestMode(.window, sessionID: "window", hasUsablePhysicalDisplay: true)
+        let originalExtend = coordinator.assignment(sessionID: "extend")
+        let originalWindow = coordinator.assignment(sessionID: "window")
+
+        XCTAssertEqual(coordinator.disableVideo(hasUsablePhysicalDisplay: true, preserveCaptureMode: true), [])
+        XCTAssertFalse(coordinator.videoEnabled)
+        XCTAssertEqual(coordinator.defaultMode, .extend)
+        XCTAssertEqual(coordinator.resolvedAssignment(peerID: "A"), originalExtend)
+        XCTAssertEqual(coordinator.assignment(sessionID: "window"), originalWindow)
+        XCTAssertEqual(coordinator.preference(peerID: "B").mode, .window)
+        coordinator.end(sessionID: "window")
+        XCTAssertEqual(coordinator.begin(sessionID: "reconnected", peerID: "B"), originalWindow)
+        XCTAssertEqual(coordinator.requestMode(.extend, sessionID: "reconnected", hasUsablePhysicalDisplay: true),
+                       .rejected(.videoOff))
+
+        coordinator.enableVideo()
+        XCTAssertEqual(coordinator.assignment(sessionID: "extend"), originalExtend)
+        XCTAssertEqual(coordinator.assignment(sessionID: "reconnected"), originalWindow)
+    }
+
     func testSummaryNamesTheModeItsOriginAndTheMirrorSource() {
         XCTAssertEqual(DeviceDisplayAssignment(mode: .extend, mirrorDisplayUUID: "X", modeIsDeviceChoice: false,
                                                mirrorSourceIsDeviceChoice: false).summary,

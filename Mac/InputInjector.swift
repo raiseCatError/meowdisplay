@@ -306,12 +306,16 @@ final class InputInjector {
 
     /// dx/dy in display pixels, natural-scrolling sign from the phone.
     /// Scroll events take points, so convert via the display's pixel scale.
-    func handleScroll(dx: Double, dy: Double, desktopTrackpad: Bool = false) {
+    func handleScroll(dx: Double, dy: Double, desktopTrackpad: Bool = false, atCurrentCursor: Bool = false) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed() else { return }
         let whole: (dx: Int32, dy: Int32)
-        if desktopTrackpad {
+        if atCurrentCursor {
+            // Edge-strip deltas are receiver points. The event uses the actual
+            // pointer position even in Window mode and never moves the pointer.
+            whole = scrollRemainder.take(dxPoints: dx, dyPoints: dy)
+        } else if desktopTrackpad {
             let g = displayGeometry()
             whole = scrollRemainder.take(dxPoints: dx / g.scale, dyPoints: dy / g.scale)
         } else if let mapper = targetMapper {
@@ -342,6 +346,7 @@ final class InputInjector {
                                   wheel1: whole.dy,
                                   wheel2: whole.dx,
                                   wheel3: 0) else { return }
+        if atCurrentCursor { event.location = currentCursor() }
         event.flags = heldModifiers.flags   // see `MouseEventFlags`'s doc
         eventSink.post(event)
     }
@@ -440,7 +445,8 @@ final class InputInjector {
     /// cursor"). Mirror/Extend: only on this display. With the cursor on
     /// another display it is first moved to this session's re-entry point,
     /// so a click never lands on a display the receiver isn't showing.
-    func handlePointerDown(button: PointerButton, clickCount: Int, desktopTrackpad: Bool = false) {
+    func handlePointerDown(button: PointerButton, clickCount: Int, desktopTrackpad: Bool = false,
+                           workspacePoint: CGPoint? = nil) {
         inputLock.lock()
         defer { inputLock.unlock() }
         guard inputIsAllowed(.pointerButton(button)) else { return }
@@ -451,7 +457,9 @@ final class InputInjector {
         if desktopTrackpad {
             point = currentCursor()
         } else if let mapper = targetMapper {
-            guard let mapped = mapper.mapPointer(phase: .down, x: nil, y: nil, dx: 0, dy: 0) else { return }
+            guard let mapped = mapper.mapPointer(phase: .down, x: workspacePoint.map { Double($0.x) },
+                                                  y: workspacePoint.map { Double($0.y) },
+                                                  dx: 0, dy: 0) else { return }
             point = mapped
         } else {
             let g = displayGeometry()
@@ -459,6 +467,7 @@ final class InputInjector {
             if !start.cursorOnDisplay { postMouseMoved(to: start.point) }
             point = start.point
         }
+        guard inputIsAllowed(.pointerButton(button)) else { return }
         let clickState = Int64(max(clickCount, 1))
         guard let event = CGEvent(mouseEventSource: source, mouseType: type,
                                   mouseCursorPosition: point, mouseButton: cgButton) else { return }

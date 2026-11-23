@@ -47,9 +47,26 @@ final class DisplayActionPolicyTests: XCTestCase {
         XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(DisplayArrangeWire.welcomeFeature))
         let features = MacSender.welcomeFeatures(windowStreamingAllowed: true)
         XCTAssertLessThanOrEqual(features.count, WindowWorkspaceWire.welcomeFeatureLimit)
-        XCTAssertEqual(features.last, WindowWorkspaceWire.restoreOffscreenFeature,
+        XCTAssertEqual(features.prefix(17).last, WindowWorkspaceWire.restoreOffscreenFeature,
                        "older receivers retain their first 16 features")
         XCTAssertFalse(MacSender.welcomeFeatures(windowStreamingAllowed: false).contains(WindowWorkspaceWire.restoreOffscreenFeature))
+    }
+
+    func testVideoOffLayoutUsesOptionalDesktopMetadataInEveryMode() {
+        for windowMode in [true, false] {
+            XCTAssertTrue(MacSender.welcomeFeatures(windowStreamingAllowed: windowMode)
+                .contains(TrackpadLayoutWire.welcomeFeature))
+        }
+        let displays = listed.keys.sorted().map { TrackpadDisplayGeometry(id: $0, bounds: listed[$0]!) }
+        for cursor in [CGPoint(x: 756, y: 491), CGPoint(x: -1280, y: 420)] {
+            let sample = TrackpadLayoutWire.Sample(displays: displays, cursor: cursor)
+            XCTAssertEqual(TrackpadLayoutWire.Sample.parse(sample.message), sample)
+        }
+        let gap = TrackpadLayoutWire.Sample(displays: displays, cursor: CGPoint(x: 400, y: -200))
+        XCTAssertNil(TrackpadLayoutWire.Sample.parse(gap.message)?.cursor)
+        let duplicate = TrackpadLayoutWire.Sample(displays: displays + displays, cursor: nil)
+        XCTAssertNil(TrackpadLayoutWire.Sample.parse(duplicate.message))
+        XCTAssertFalse(LockedContentPolicy.allows(type: TrackpadLayoutWire.state, privacy: .locked))
     }
 
     func testRequests() {

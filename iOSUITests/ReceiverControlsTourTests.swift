@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Walks the receiver's touch controls in Demo Mode (the real control
 /// overlay over a sample desktop) and keeps a screenshot of each state:
@@ -10,6 +11,43 @@ final class ReceiverControlsTourTests: XCTestCase {
 
     override func setUp() {
         continueAfterFailure = false
+    }
+
+    @MainActor
+    func testVideoOffChoiceAndDisplayGuideInPortraitAndLandscape() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for (count, orientation) in [(0, UIDeviceOrientation.portrait),
+                                     (1, .landscapeLeft), (2, .portrait), (2, .landscapeLeft)] {
+            XCUIDevice.shared.orientation = orientation
+            app = XCUIApplication()
+            app.launchEnvironment["MEOW_UITEST_TRACKPAD_DISPLAYS"] = String(count)
+            app.launch()
+            let card = app.descendants(matching: .any)["videoOffStatus"].firstMatch
+            let turnOn = app.buttons["videoOffTurnOn"]
+            let useTrackpad = app.buttons["videoOffUseTrackpad"]
+            XCTAssertTrue(card.waitForExistence(timeout: 5))
+            XCTAssertTrue(turnOn.isHittable)
+            XCTAssertTrue(useTrackpad.isHittable)
+            let portrait = orientation == .portrait
+            let turnsVideoOn = count == 2 && !portrait
+            let name = "video-off-\(count)-\(portrait ? "portrait" : "landscape")"
+            snapshot("\(name)-with-choice")
+            switch (count, portrait) {
+            case (0, _):
+                app.buttons["Dismiss"].tap()
+            case (1, _):
+                useTrackpad.tap()
+            case (2, true):
+                card.swipeLeft()
+            default:
+                turnOn.tap()
+                XCTAssertTrue(app.staticTexts["uitestTrackpadVideoOn"].waitForExistence(timeout: 3))
+            }
+            XCTAssertTrue(card.waitForNonExistence(timeout: 3))
+            XCTAssertEqual(app.staticTexts["uitestTrackpadVideoOn"].exists, turnsVideoOn)
+            if !turnsVideoOn { snapshot("\(name)-surface") }
+            app.terminate()
+        }
     }
 
     @MainActor

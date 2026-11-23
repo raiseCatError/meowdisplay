@@ -801,6 +801,11 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published var videoSize = CGSize.zero   // for touch coordinate mapping
     @MainActor @Published private(set) var displayState = DisplayState.running
     @MainActor @Published private(set) var videoEnabled = true
+    @MainActor @Published private(set) var trackpadDisplayGeometry: [TrackpadDisplayGeometry] = []
+    @MainActor @Published private(set) var trackpadCursorLocation: CGPoint?
+    @MainActor private var trackpadLayoutSupported = false
+    @MainActor private var trackpadLayoutWatching = false
+    @MainActor private var trackpadLayoutControlGranted = false
     /// Queue-confined copy used to distinguish an idempotent state push from
     /// an actual off/on transition that must retire decoder state.
     private var receivedVideoEnabled = true
@@ -997,6 +1002,8 @@ final class StreamReceiver: ObservableObject {
     /// `exactModifiers` posts with only its own modifiers, so the arrow
     /// keypad's ⇧ ⌥ ⌘ never mix with the tray's latch (PROTOCOL.md `keyboard`).
     @MainActor @Published private(set) var macSupportsExactKeyModifiers = false
+    @MainActor @Published private(set) var macSupportsScrollAtCursor = false
+    @MainActor private var macSupportsPreservingCaptureMode = false
 
     @MainActor
     func noteWorkspaceEvent(_ event: WorkspaceEvent) {
@@ -1005,10 +1012,14 @@ final class StreamReceiver: ObservableObject {
             macOffersWindows = features.contains(WindowWorkspaceWire.welcomeFeature)
             macSupportsTextCaret = features.contains(TextCaretWire.welcomeFeature)
             macSupportsExactKeyModifiers = features.contains(ExactKeyModifiersWire.welcomeFeature)
+            macSupportsScrollAtCursor = features.contains(WireMessage.scrollAtCursor)
+            macSupportsPreservingCaptureMode = features.contains(WireMessage.preserveCaptureMode)
         case .mode(let window): windowModeActive = window
         case .disconnected:
             macOffersWindows = false; windowModeActive = false; macSupportsTextCaret = false
             macSupportsExactKeyModifiers = false
+            macSupportsScrollAtCursor = false
+            macSupportsPreservingCaptureMode = false
         default: break
         }
     }
@@ -2700,6 +2711,7 @@ final class StreamReceiver: ObservableObject {
         DispatchQueue.main.async {
             uiSink.publishCursorReset()
             uiSink.publishTextCaret(nil)
+            uiSink.publishTrackpadLayoutSupport(false)
         }
     }
 
@@ -2975,6 +2987,8 @@ final class StreamReceiver: ObservableObject {
             let macPV = obj["pv"] as? Int ?? WireProtocol.assumedWhenAbsent
             DispatchQueue.main.async { uiSink.publishMacProtocolVersion(macPV) }
             let macFeatures = Set((obj["features"] as? [String] ?? []).prefix(WindowWorkspaceWire.welcomeFeatureLimit).map { String($0.prefix(32)) })
+            let supportsTrackpadLayout = macFeatures.contains(TrackpadLayoutWire.welcomeFeature)
+            DispatchQueue.main.async { uiSink.publishTrackpadLayoutSupport(supportsTrackpadLayout) }
             workspaceEvents.emit(.features(macFeatures))
             macTakesRemoteEndpoints = macFeatures.contains(RemoteEndpointsWire.welcomeFeature)
             sendRemoteEndpointsIfSupported()
@@ -3105,6 +3119,10 @@ final class StreamReceiver: ObservableObject {
                 resetDecoderForVideoStateChange()
             }
             DispatchQueue.main.async { uiSink.publishVideoState(width: update.width, height: update.height, enabled: update.enabled) }
+        case TrackpadLayoutWire.state:
+            guard !receivedVideoEnabled, sessionAdmission.admitted,
+                  let sample = TrackpadLayoutWire.Sample.parse(obj) else { return }
+            DispatchQueue.main.async { uiSink.publishTrackpadLayout(sample) }
         case WireMessage.audioState:
             guard let update = AudioStateUpdate(message: obj) else { return }
             if !update.enabled { resetAudioPlayback() }
@@ -3423,9 +3441,12 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
-    @MainActor func sendScroll(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false) {
+    @MainActor func sendScroll(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false,
+                               atCurrentCursor: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
+        guard !atCurrentCursor || macSupportsScrollAtCursor else { return }
         var message: [String: Any] = ["type": "scroll", "dx": dx, "dy": dy]
+        if atCurrentCursor { message[WireMessage.scrollAtCursor] = true }
         if trackpad {
             message["trackpadPoints"] = true
             message["confined"] = confined
@@ -3464,12 +3485,16 @@ final class StreamReceiver: ObservableObject {
     /// Presses `button` down at the Mac's current cursor position with the
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
-    @MainActor func sendPointerDown(button: PointerButton, clickCount: Int, trackpad: Bool = false, confined: Bool = false) {
+    @MainActor func sendPointerDown(button: PointerButton, clickCount: Int, trackpad: Bool = false,
+                                    confined: Bool = false, workspacePoint: CGPoint? = nil) {
         guard displayState == .running, remoteInputMayLeave() else { return }
         var message: [String: Any] = ["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount]
         if trackpad {
             message["trackpadPoints"] = true
             message["confined"] = confined
+        } else if let workspacePoint {
+            message["x"] = workspacePoint.x
+            message["y"] = workspacePoint.y
         }
         sendTaggedInput(message)
     }
@@ -3666,9 +3691,33 @@ final class StreamReceiver: ObservableObject {
         sendUIControl(LockScreenWire.request(show: show))
     }
 
-    @MainActor func requestVideoEnabled(_ enabled: Bool) {
+    @MainActor func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false) {
         guard connected, macSupportsVideoControl else { return }
-        sendUIControl(["type": WireMessage.videoRequest, "enabled": enabled])
+        var request: [String: Any] = ["type": WireMessage.videoRequest, "enabled": enabled]
+        if !enabled && preserveCaptureMode && macSupportsPreservingCaptureMode {
+            request[WireMessage.preserveCaptureMode] = true
+        }
+        sendUIControl(request)
+    }
+
+    @MainActor func requestTrackpadLayout() {
+        guard trackpadLayoutSupported, connected, !videoEnabled, macLock == nil,
+              trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
+        trackpadLayoutWatching = true
+        sendUIControl(["type": TrackpadLayoutWire.watch, "on": true])
+    }
+
+    @MainActor func stopTrackpadLayout() {
+        if connected, trackpadLayoutWatching {
+            sendUIControl(["type": TrackpadLayoutWire.watch, "on": false])
+        }
+        clearTrackpadLayout()
+    }
+
+    @MainActor private func clearTrackpadLayout() {
+        trackpadLayoutWatching = false
+        if !trackpadDisplayGeometry.isEmpty { trackpadDisplayGeometry = [] }
+        if trackpadCursorLocation != nil { trackpadCursorLocation = nil }
     }
 
     /// Requests a Mac-side streaming profile over the existing authenticated
@@ -6353,6 +6402,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyConnectedUIMirrorFields(_ value: Bool) {
         connected = value
         if !value {
+            applyTrackpadLayoutSupport(false)
             self.authenticatedPeerID = nil
             self.macProtocolVersion = WireProtocol.assumedWhenAbsent
             self.videoEnabled = true
@@ -6495,7 +6545,24 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func applyAllowInputStateChangeUpdate(_ state: SessionInputWireState) {
+        trackpadLayoutControlGranted = state == .allowed
+        if !trackpadLayoutControlGranted { clearTrackpadLayout() }
         onAllowInputStateChange?(state)
+    }
+
+    @MainActor func applyTrackpadLayoutSupport(_ supported: Bool) {
+        trackpadLayoutSupported = supported
+        if !supported {
+            trackpadLayoutControlGranted = false
+            clearTrackpadLayout()
+        }
+    }
+
+    @MainActor func applyTrackpadLayout(_ sample: TrackpadLayoutWire.Sample) {
+        guard connected, !videoEnabled, macLock == nil, trackpadLayoutWatching,
+              trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
+        if trackpadDisplayGeometry != sample.displays { trackpadDisplayGeometry = sample.displays }
+        if trackpadCursorLocation != sample.cursor { trackpadCursorLocation = sample.cursor }
     }
 
     @MainActor func applyVideoStateUpdate(width: Int?, height: Int?, enabled: Bool) {
@@ -6503,6 +6570,7 @@ final class StreamReceiver: ObservableObject {
             videoSize = CGSize(width: width, height: height)
         }
         videoEnabled = enabled
+        if enabled { clearTrackpadLayout() }
     }
 
     @MainActor func applyActiveStreamCodecUpdate(_ codec: StreamCodec) {
@@ -6523,6 +6591,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyMacLockUpdate(_ notice: MacLockNotice) {
         macLock = notice.isLocked ? notice : nil
+        if notice.isLocked { clearTrackpadLayout() }
         // Tagged from the moment this device knows the Mac is locked, untagged from the moment it
         // knows it's unlocked; a view the Mac no longer calls active ends here too.
         setLockScreenInputTag(LockScreenInputTagState(

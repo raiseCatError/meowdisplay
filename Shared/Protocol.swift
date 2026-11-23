@@ -1,7 +1,64 @@
 // Compiled into BOTH the Mac and iOS targets (see project.yml `sources`).
-// Keep this Foundation-only so it stays platform-neutral.
+// Keep the wire definitions independent of AppKit and UIKit.
 
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+
+struct TrackpadDisplayGeometry: Equatable, Identifiable, Sendable {
+    let id: UInt32
+    let bounds: CGRect
+}
+
+/// Optional, leased geometry and cursor telemetry for Video Off.
+enum TrackpadLayoutWire {
+    static let welcomeFeature = "trackpadLayout"
+    static let watch = "trackpadLayoutWatch"
+    static let state = "trackpadLayoutState"
+    static let displayLimit = 16
+
+    struct Sample: Equatable, Sendable {
+        let displays: [TrackpadDisplayGeometry]
+        let cursor: CGPoint?
+
+        var message: [String: Any] {
+            var message: [String: Any] = [
+                "type": TrackpadLayoutWire.state,
+                "displays": displays.map {
+                    ["id": Int($0.id), "x": Double($0.bounds.minX), "y": Double($0.bounds.minY),
+                     "w": Double($0.bounds.width), "h": Double($0.bounds.height)] as [String: Any]
+                },
+            ]
+            if let cursor { message["cursor"] = ["x": Double(cursor.x), "y": Double(cursor.y)] }
+            return message
+        }
+
+        static func parse(_ message: [String: Any]) -> Self? {
+            guard let records = message["displays"] as? [[String: Any]],
+                  records.count <= TrackpadLayoutWire.displayLimit else { return nil }
+            var displays: [TrackpadDisplayGeometry] = []
+            var seen: Set<UInt32> = []
+            for record in records {
+                guard let raw = record["id"] as? Int, let id = UInt32(exactly: raw), id != 0,
+                      seen.insert(id).inserted,
+                      let origin = Self.point(record),
+                      let width = record["w"] as? Double, width > 0, width <= 100_000,
+                      let height = record["h"] as? Double, height > 0, height <= 100_000 else { return nil }
+                displays.append(.init(id: id, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height))))
+            }
+            let cursor = (message["cursor"] as? [String: Any]).flatMap(Self.point)
+                .flatMap { point in displays.contains(where: { $0.bounds.contains(point) }) ? point : nil }
+            return Self(displays: displays, cursor: cursor)
+        }
+
+        private static func point(_ record: [String: Any]) -> CGPoint? {
+            guard let x = record["x"] as? Double, let y = record["y"] as? Double,
+                  abs(x) <= 1_000_000, abs(y) <= 1_000_000 else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+    }
+}
 
 /// The wire-protocol contract between the two apps, decoupled from the app's
 /// marketing version. See COMPATIBILITY.md.
@@ -235,7 +292,7 @@ enum WindowWorkspaceWire {
     /// across them. Without it the receiver never sends one (an older Mac refuses it as `unavailable`).
     static let overviewPaneFeature = "overviewPane"
     static let restoreOffscreenFeature = "restoreOffscreenWindow"
-    static let welcomeFeatureLimit = 17
+    static let welcomeFeatureLimit = 20
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
 }
@@ -602,6 +659,8 @@ enum WireMessage {
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
+    static let preserveCaptureMode = "preserveCaptureMode" // welcome feature and optional videoRequest field
+    static let scrollAtCursor = "scrollAtCursor"     // welcome feature and optional scroll field
     static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
     static let nativeAppGesture = "nativeAppGesture" // receiver -> Mac: continuous magnify/rotate lifecycle
     static let audioRequest = "audioRequest"         // receiver -> Mac: request system-audio capture on/off

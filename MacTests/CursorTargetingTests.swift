@@ -213,6 +213,54 @@ final class CursorTargetingTests: XCTestCase {
 
     // MARK: - Window mode binding
 
+    func testEdgeStripScrollsAtTheCurrentCursorWithoutRetargetingAndStopsOnRevocation() {
+        let actual = CGPoint(x: 45, y: 60)
+        let injector = makeInjector(cursor: actual)
+        let mapper = BindingMapper()
+        var mappings = 0
+        mapper.onMap = { _, _ in
+            mappings += 1
+            return CGPoint(x: 200, y: 400)
+        }
+        injector.setTargetMapper(mapper)
+        injector.handleScroll(dx: 0, dy: 40, atCurrentCursor: true)
+        grant.set(false)
+        injector.handleScroll(dx: 0, dy: 40, atCurrentCursor: true)
+        XCTAssertEqual(mappings, 0)
+        XCTAssertEqual(events.posted.map(\.type), [.scrollWheel])
+        XCTAssertEqual(events.posted.first?.location, actual)
+    }
+
+    func testWorkspacePressUsesItsOwnPointAndPostsOnce() {
+        let mapper = BindingMapper()
+        let injector = makeInjector(cursor: CGPoint(x: 20, y: 30))
+        injector.setTargetMapper(mapper)
+        let pressed = CGPoint(x: 0.8, y: 0.3)
+        let mapped = CGPoint(x: 680, y: 150)
+        var presses: [CGPoint] = []
+        mapper.onMap = { phase, point in
+            if phase == .down, let point { presses.append(point) }
+            return mapped
+        }
+        injector.handlePointerDown(button: .left, clickCount: 1, workspacePoint: pressed)
+        injector.handlePointerUp(button: .left, clickCount: 1)
+        XCTAssertEqual(presses, [pressed])
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseUp])
+        XCTAssertEqual(events.posted.first?.location, mapped)
+    }
+
+    func testWorkspacePressIsRefusedIfControlIsRevokedWhileMapping() {
+        let mapper = BindingMapper()
+        let injector = makeInjector(cursor: .zero)
+        injector.setTargetMapper(mapper)
+        mapper.onMap = { [grant] _, _ in
+            grant.set(false)
+            return CGPoint(x: 680, y: 150)
+        }
+        injector.handlePointerDown(button: .left, clickCount: 1, workspacePoint: CGPoint(x: 0.8, y: 0.3))
+        XCTAssertTrue(events.posted.isEmpty)
+    }
+
     func testCancellingInputEndsTheWorkspaceDragBinding() {
         let mapper = BindingMapper()
         let injector = makeInjector(cursor: .zero)
@@ -246,7 +294,12 @@ private final class LocatedEventSink: SyntheticEventSink, @unchecked Sendable {
 
 private final class BindingMapper: InputTargetMapper, @unchecked Sendable {
     var cancels = 0
-    func mapPointer(phase: InputMapPhase, x: Double?, y: Double?, dx: Double, dy: Double) -> CGPoint? { nil }
+    var onMap: ((InputMapPhase, CGPoint?) -> CGPoint?)?
+    func mapPointer(phase: InputMapPhase, x: Double?, y: Double?, dx: Double, dy: Double) -> CGPoint? {
+        let point: CGPoint?
+        if let x, let y { point = CGPoint(x: x, y: y) } else { point = nil }
+        return onMap?(phase, point)
+    }
     func scrollVector(dx: Double, dy: Double) -> CGVector { .zero }
     func keyboardTargetReady() -> Bool { true }
     func locate(x: Double, y: Double) -> CGPoint? { nil }

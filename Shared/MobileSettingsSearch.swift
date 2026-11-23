@@ -108,7 +108,8 @@ enum MobileSettingsSearchIndex {
         // Display
         .init("video", String(localized: "Video"), .display, keywords: ["picture", "stream off"]),
         .init("displayMode", String(localized: "Display Mode"), .display, keywords: ["mirror", "extend", "second screen"]),
-        .init("surfaceGrid", String(localized: "Show Surface Grid"), .display, keywords: ["video off", "dots"]),
+        .init("trackpadDisplayLayout", String(localized: "Show Display Layout on Trackpad"), .display,
+              keywords: ["video off", "display outline", "monitor", "cursor"]),
         .init("cursorLocator", String(localized: "Show Off-Screen Cursor Indicator"), .display,
               keywords: ["pointer", "mouse", "arrow", "find cursor", "other display"]),
         .init("pictureInPicture", String(localized: "Picture in Picture"), .display, keywords: ["pip", "floating window"]),
@@ -127,6 +128,8 @@ enum MobileSettingsSearchIndex {
         .init("keepPointerOnReceiverDisplay", String(localized: "Keep Pointer on Receiver Display"), .display,
               keywords: ["trackpad", "cursor", "confine"]),
         .init("scrollDirection", String(localized: "Natural Vertical Scrolling"), .input, keywords: ["natural horizontal scrolling", "invert vertical scrolling", "invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
+        .init("rightScrollStrip", String(localized: "Right-Edge Scroll Strip"), .input,
+              keywords: ["scroll bar", "right edge", "one finger"]),
         .init("zoomWhileTyping", String(localized: "Zoom While Typing"), .input, keywords: ["keyboard"]),
         // Gestures
         .init("pinch", String(localized: "Pinch / Zoom"), .gestures, keywords: ["magnify", "zoom"]),

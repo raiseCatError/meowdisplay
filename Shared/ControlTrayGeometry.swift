@@ -316,6 +316,80 @@ enum VideoOffSurfaceGeometry {
     }
 }
 
+enum TrackpadDisplayGuideGeometry {
+    struct Layout {
+        let outlines: [CGRect]
+        let cursor: CGPoint?
+    }
+
+    static func layout(displays: [CGRect], cursor: CGPoint?, in size: CGSize) -> Layout {
+        let displays = displays.filter {
+            $0.width > 0 && $0.height > 0 &&
+                $0.minX.isFinite && $0.maxX.isFinite && $0.minY.isFinite && $0.maxY.isFinite
+        }
+        guard size.width > 0, size.height > 0, size.width.isFinite, size.height.isFinite,
+              let first = displays.first else { return Layout(outlines: [], cursor: nil) }
+
+        func contains(_ rect: CGRect, _ point: CGPoint) -> Bool {
+            (rect.minX...rect.maxX).contains(point.x) && (rect.minY...rect.maxY).contains(point.y)
+        }
+        let knownCursor = cursor.flatMap { point in
+            displays.contains(where: { contains($0, point) }) ? point : nil
+        }
+        if displays.count == 1 {
+            let marker = knownCursor.map {
+                CGPoint(x: ($0.x - first.minX) / first.width * size.width,
+                        y: ($0.y - first.minY) / first.height * size.height)
+            }
+            return Layout(outlines: [], cursor: marker)
+        }
+
+        let desktop = displays.reduce(first) { $0.union($1) }
+        let margin = min(12, size.width / 4, size.height / 4)
+        let scale = min((size.width - 2 * margin) / desktop.width, (size.height - 2 * margin) / desktop.height)
+        let fitOrigin = CGPoint(x: (size.width - desktop.width * scale) / 2,
+                                y: (size.height - desktop.height * scale) / 2)
+        func map(_ point: CGPoint) -> CGPoint {
+            CGPoint(x: fitOrigin.x + (point.x - desktop.minX) * scale,
+                    y: fitOrigin.y + (point.y - desktop.minY) * scale)
+        }
+        return Layout(outlines: displays.map {
+            CGRect(origin: map($0.origin), size: CGSize(width: $0.width * scale, height: $0.height * scale))
+        }, cursor: knownCursor.map(map))
+    }
+}
+
+enum RightEdgeScrollStripGeometry {
+    /// Keep a usable vertical segment at the right edge, leaving the surrounding
+    /// content and controls available. Only obstacles across the hit area count.
+    static func frame(in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
+        let edgeGap: CGFloat = 8
+        let targetWidth: CGFloat = 32
+        let minimumHeight: CGFloat = 44
+        guard !safeArea.isNull, safeArea.width >= targetWidth + 2 * edgeGap,
+              safeArea.height >= minimumHeight + 2 * edgeGap else { return nil }
+        let clearances = obstacles
+            .filter { !$0.isNull && !$0.isEmpty }
+            .map { $0.insetBy(dx: -4, dy: -4) }
+        let outerEdge = safeArea.maxX - edgeGap
+        let innerLimit = max(safeArea.midX, safeArea.maxX - 120, safeArea.minX + edgeGap + targetWidth)
+        // A vertical tray may occupy the entire outer column in landscape.
+        // In that case use the nearest free column beside it on the right.
+        let rightEdges = [outerEdge] + clearances.map(\.minX)
+            .filter { $0 >= innerLimit && $0 < outerEdge }.sorted(by: >)
+        for rightEdge in rightEdges {
+            let rail = CGRect(x: rightEdge - targetWidth, y: safeArea.minY + edgeGap,
+                              width: targetWidth, height: safeArea.height - 2 * edgeGap)
+            let crossing = clearances.filter { !$0.intersection(rail).isEmpty }
+            guard let segment = ControlPlacementArea.segments(of: rail, removing: crossing, horizontal: false)
+                .max(by: { $0.height < $1.height }), segment.height >= minimumHeight else { continue }
+            let height = min(128, segment.height)
+            return CGRect(x: segment.minX, y: segment.midY - height / 2, width: segment.width, height: height)
+        }
+        return nil
+    }
+}
+
 enum ControlTrayGeometry {
     struct ShortcutPaletteGrid {
         let rows: Int

@@ -361,14 +361,17 @@ private struct DisplaySettingsPage: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Video", isOn: Binding(
                         get: { receiver.videoEnabled },
-                        set: { receiver.requestVideoEnabled($0) }))
+                        set: { receiver.requestVideoEnabled($0, preserveCaptureMode: true) }))
                         .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
-                    SettingNote("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
+                    SettingNote("Turning video off makes the receiver a trackpad. Turn Video on to return to your display or window layout.")
                 }
                 .settingsAnchor("video")
-                displayModeRows
-                Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
-                    .settingsAnchor("surfaceGrid")
+                if receiver.videoEnabled { displayModeRows }
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.showTrackpadDisplayLayout))
+                    SettingNote("Shows the Mac pointer and outlines of connected displays when using the trackpad with video off.")
+                }
+                .settingsAnchor("trackpadDisplayLayout")
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Show Off-Screen Cursor Indicator", isOn: preferenceBinding(controlStore, \.showCursorLocator))
                     SettingNote("When the Mac pointer is somewhere you can't see, such as another display, an arrow at the edge points to it.")
@@ -826,6 +829,8 @@ private struct InputSettingsPage: View {
                 Toggle("Natural Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
                     .settingsAnchor("scrollDirection")
                 Toggle("Natural Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
+                Toggle("Right-Edge Scroll Strip", isOn: preferenceBinding(controlStore, \.showRightScrollStrip))
+                    .settingsAnchor("rightScrollStrip")
             } header: {
                 Text("Scrolling")
             } footer: {
