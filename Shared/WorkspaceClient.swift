@@ -1418,7 +1418,7 @@ final class WorkspaceModel: ObservableObject {
         extendedDisplayRequest = request
         extendedDisplayBusy = true
         extendedDisplayTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
             guard !Task.isCancelled, self?.extendedDisplayRequest == request else { return }
             self?.finishExtendedDisplayOperation(failed: true)
         }
