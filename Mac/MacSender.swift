@@ -9103,11 +9103,9 @@ extension MacSender {
                 if let candidate {
                     ShareableContent.invalidate()
                     let id = candidate.displayID
-                    let listed = try? await sender.findSCDisplay(id: id, budget: .seconds(10)) {
-                        !sender.controlStillAllowed(generation: generation)
-                    }
+                    let listed = await Self.workspaceExtendedDisplayIsListed(id, generation: generation, sender: selfBox)
                     sender.onQueueSync {
-                        guard listed != nil, sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID),
+                        guard listed, sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID),
                               DisplayUsability.evaluate(DisplayHealth.reading(for: id)) == .usable,
                               let uuid = MirrorDisplayIdentity.uuidString(for: id) else { return }
                         sender.workspaceExtendedDisplay = candidate
@@ -9136,6 +9134,15 @@ extension MacSender {
     private func workspaceExtendedDisplayAllowed(generation: UInt64, engineID: ObjectIdentifier) -> Bool {
         videoEnabled && workspaceEngine.map(ObjectIdentifier.init) == engineID
             && controlStillAllowed(generation: generation) && CGPreflightScreenCaptureAccess()
+    }
+
+    private static func workspaceExtendedDisplayIsListed(
+        _ id: UInt32, generation: UInt64, sender selfBox: MacSenderSelfBox
+    ) async -> Bool {
+        guard let sender = selfBox.resolve() else { return false }
+        return (try? await sender.findSCDisplay(id: id, budget: .seconds(10)) {
+            selfBox.resolve()?.controlStillAllowed(generation: generation) != true
+        }) != nil
     }
 
     /// This browser is never attached to the compositor and never accepts still requests.
