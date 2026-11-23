@@ -995,6 +995,7 @@ final class WorkspaceModel: ObservableObject {
             onCatalog(c)
         case .state(let s):
             remote = s
+            validatePendingWindowShow()
             if let r = requestedFocus, s.active == r || layout.tiles[r] == nil { requestedFocus = nil }
             // A live pane gets its whole-source still before the first pinch, so zooming out or
             // panning never shows an empty area while the fingers move (bounded: once a second).
@@ -1546,11 +1547,11 @@ final class WorkspaceModel: ObservableObject {
 
     /// Mission Control holds this pane's or float's picture: a window (never a display: Full
     /// Desktop keeps showing the Mac's screen, Mission Control and all) that the Mac reports
-    /// paused, waiting or retrying while it is open. Only these show its notice.
+    /// unavailable while it is open. Even an offscreen capture can be held by Mission Control.
     func missionControlPaused(_ id: String) -> Bool {
         guard missionControlOpen, let source = layout.tiles[id]?.source, !source.isDisplay,
               let status = tileState(id)?.status else { return false }
-        return [.paused, .waiting, .retrying].contains(status)
+        return [.paused, .offscreen, .waiting, .retrying].contains(status)
     }
 
     /// A paused tile's notice: in full, or folded by its × to a small status that brings it back.
@@ -1822,16 +1823,18 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func showOnMacTitle(_ id: String) -> String? {
-        if let window = minimizedPaneWindow(id) { return minimizedWindowAction(window)?.title }
-        return canControlMac && !missionControlOpen ? String(localized: "Show on Mac") : nil
+        guard !missionControlOpen, let window = minimizedPaneWindow(id) else { return nil }
+        return minimizedWindowAction(window)?.title
     }
 
     func showOnMac(_ id: String) {
+        guard !missionControlOpen else { return }
         if let window = minimizedPaneWindow(id) {
             showMinimizedWindow(window, pane: id)
             return
         }
-        guard canControlMac, let source = layout.tiles[id]?.source, source.kind == .window,
+        guard canControlMac, tileState(id)?.inStageStrip == true,
+              let source = layout.tiles[id]?.source, source.kind == .window,
               let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.activateWindow(source.windowID, generation: gen))
     }

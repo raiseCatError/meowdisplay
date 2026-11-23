@@ -130,7 +130,10 @@ final class MissionControlTests: XCTestCase {
         XCTAssertTrue(m.missionControlPaused(a))
         XCTAssertTrue(m.missionControlPaused(b))
         XCTAssertFalse(m.missionControlPaused(desktop))
-        XCTAssertFalse(m.missionControlPaused(f), "minimized: its own notice, not Mission Control's")
+        XCTAssertTrue(m.missionControlPaused(f), "offscreen alone does not identify a minimized window")
+        m.controlState = { .allowed }
+        XCTAssertNil(m.showOnMacTitle(f), "offer Exit Mission Control while it is known open")
+        XCTAssertEqual(m.missionControlAction, .exit)
         for s in ["closed", "failed", "limit", "live"] {
             m.apply(state(missionControl: true, tiles: [(a, s)]))
             XCTAssertNil(m.missionControlNotice(a), s)
@@ -140,6 +143,7 @@ final class MissionControlTests: XCTestCase {
         m.apply(state(missionControl: false, tiles: [(a, "paused"), (f, "paused")]))
         XCTAssertNil(m.missionControlNotice(a), "closed: a paused window is macOS's usual pause")
         XCTAssertNil(m.missionControlNotice(f))
+        XCTAssertNil(m.showOnMacTitle(a), "capture pause alone does not offer a window restore")
 
         m.apply(state(missionControl: true, tiles: [(a, "paused")]))
         XCTAssertNotNil(m.missionControlNotice(a))

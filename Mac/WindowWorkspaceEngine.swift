@@ -1786,7 +1786,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // Exit Mission Control, asked by a person with control (the caller checks the grant).
             // The Mac checks it is open right now and only then sends Escape: never a blind toggle.
             guard obj["exit"] as? Bool == true else { return }
-            DispatchQueue.global(qos: .userInitiated).async { MissionControlMonitor.exit() }
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard stillAllowed() else { return }
+                MissionControlMonitor.exit(stillAllowed: stillAllowed)
+            }
         case "addToStage":
             // Confirmed on the device by a person with control (the caller checks the grant):
             // Stage Manager's own Add to Stage on the strip item holding exactly this window.
@@ -1803,15 +1806,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 }
             }
         case "activate":
-            guard stillAllowed(), let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
+            guard stillAllowed(), !missionControlOpen, !MissionControlMonitor.shared.isOpen,
+                  !MissionControlMonitor.isOpenNow(), stillAllowed(),
+                  let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            if entry.availability == .offscreen {
+            if entry.availability == .offscreen, !entry.inStageStrip {
                 // Show on Mac for a minimized or hidden window: bring it back first, then forward.
-                let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                 DispatchQueue.main.async {
-                    guard stillAllowed() else { return }
-                    Self.restoreQuietly(pid: pid, frame: frame, title: title)
-                    Self.raise(pid: pid, frame: frame)
+                    Self.restoreOffscreen(entry, stillAllowed: stillAllowed)
                 }
                 refreshSoon()
             } else {
@@ -2379,7 +2381,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// Resolve the original window again after the consent round trip, before touching AX.
     static func restoreOffscreen(_ target: WindowCatalogEntry, stillAllowed: () -> Bool) {
-        guard stillAllowed(), AXIsProcessTrusted(),
+        guard stillAllowed(), !MissionControlMonitor.isOpenNow(), AXIsProcessTrusted(),
               let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], target.windowID) as? [[String: Any]])?
                 .first(where: { ($0[kCGWindowNumber as String] as? UInt32) == target.windowID }),
               (info[kCGWindowOwnerPID as String] as? Int32) == target.pid,
