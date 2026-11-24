@@ -2271,7 +2271,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         }
                         sender.queue.async {
                             let sender = owner.sender
-                            sender.applyVideoEnabled(false)
+                            if !sender.stopped { sender.applyVideoEnabled(sender.desiredVideoEnabled) }
                             Task { @MainActor in completion() }
                         }
                     }

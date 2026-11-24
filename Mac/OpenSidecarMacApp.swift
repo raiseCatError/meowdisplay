@@ -1136,14 +1136,23 @@ final class SenderController: ObservableObject {
         } else {
             handleDisplayModeOutcome(outcome, for: session)
         }
-        videoEnabled = true
+        applyVideoOn()
+    }
+
+    private func applyVideoOn() {
+        if videoEnabled {
+            // An in-flight Off transition may already have paused an individual sender.
+            sessions.forEach { $0.sender.setVideoEnabled(true) }
+        } else {
+            videoEnabled = true
+        }
     }
 
     func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false) {
         if enabled {
             videoTransitionGeneration &+= 1
             displayModes.enableVideo()
-            videoEnabled = true
+            applyVideoOn()
             return
         }
         guard videoEnabled, displayModes.videoEnabled else { return }
