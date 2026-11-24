@@ -59,20 +59,28 @@ final class ReceiverControlsTourTests: XCTestCase {
     @MainActor
     func testTrackpadEdgeScrollTour() {
         defer { XCUIDevice.shared.orientation = .portrait }
-        for (mode, orientation) in [("automatic", UIDeviceOrientation.portrait), ("both", .landscapeLeft), ("hidden", .portrait)] {
+        for (mode, orientation) in [("automatic", UIDeviceOrientation.portrait), ("video", .landscapeLeft), ("hidden", .portrait)] {
             XCUIDevice.shared.orientation = orientation
             app = XCUIApplication()
             app.launchEnvironment["MEOW_UITEST_TRACKPAD_DISPLAYS"] = "2"
             app.launchEnvironment["MEOW_UITEST_EDGE_SCROLL"] = mode
             app.launch()
             XCTAssertTrue(app.descendants(matching: .any)["uitestTrackpadSurface"].firstMatch.waitForExistence(timeout: 5))
+            let vertical = element("edgeScrollVertical")
+            let horizontal = element("edgeScrollHorizontal")
+            XCTAssertEqual(vertical.exists, mode != "hidden")
+            XCTAssertEqual(horizontal.exists, mode == "automatic")
             snapshot("edge-scroll-\(mode)-idle")
             if mode == "automatic" {
-                let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.77))
-                let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.28))
-                start.press(forDuration: 0.3, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+                let start = vertical.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.77))
+                let end = vertical.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+                start.press(forDuration: 0.3, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+                XCTAssertEqual(vertical.value as? String, "Expanded")
+                snapshot("edge-scroll-automatic-expanded")
                 start.press(forDuration: 0.04, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
                 end.tap()
+                let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", "Expanded"), object: vertical)
+                XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 6), .completed)
                 snapshot("edge-scroll-automatic-settled")
             }
             app.terminate()

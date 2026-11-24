@@ -29,6 +29,7 @@ enum TrackpadLayoutWire {
     struct Sample: Equatable, Sendable {
         let displays: [TrackpadDisplayGeometry]
         let cursor: CGPoint?
+        var inWindow = false
 
         var message: [String: Any] {
             var message: [String: Any] = [
@@ -42,6 +43,7 @@ enum TrackpadLayoutWire {
                     return display
                 },
             ]
+            if inWindow { message[WorkspaceTrackpadWire.inputKey] = true }
             if let cursor { message["cursor"] = ["x": Double(cursor.x), "y": Double(cursor.y)] }
             return message
         }
@@ -62,7 +64,7 @@ enum TrackpadLayoutWire {
             }
             let cursor = (message["cursor"] as? [String: Any]).flatMap(Self.point)
                 .flatMap { point in displays.contains(where: { $0.bounds.contains(point) }) ? point : nil }
-            return Self(displays: displays, cursor: cursor)
+            return Self(displays: displays, cursor: cursor, inWindow: message[WorkspaceTrackpadWire.inputKey] as? Bool == true)
         }
 
         private static func point(_ record: [String: Any]) -> CGPoint? {
@@ -73,9 +75,18 @@ enum TrackpadLayoutWire {
     }
 }
 
+/// A negotiated input and telemetry context for the receiver's local Window-mode Trackpad.
+enum WorkspaceTrackpadWire {
+    static let feature = "workspaceTrackpad"
+    static let inputKey = "workspaceTrackpad"
+    static let resumeWindowKey = "resumeWindow"
+}
+
 /// A distinct request ID keeps catalog replies out of the saved Window workspace.
 enum TrackpadStagePeekWire {
     static let welcomeFeature = "trackpadStagePeek"
+    // A receiver needs this capability before asking for Video Off metadata.
+    static let textOnlyFeature = "trackpadPeekText"
     static let tokenKey = "trackpadStagePeek"
 
     static func token(in message: [String: Any]) -> UUID? {

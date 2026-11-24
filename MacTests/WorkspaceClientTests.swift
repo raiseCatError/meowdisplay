@@ -22,6 +22,27 @@ final class WorkspaceClientTests: XCTestCase {
         return m
     }
 
+    func testTrackpadTabKeepsVideoSiblingsAndStaysOffTheCaptureWire() throws {
+        let host = "mac-a"
+        let window = WorkspaceSource(host: host, windowID: 10)
+        let trackpad = WorkspaceSource.trackpad(host: host)
+        let sibling = WorkspaceSource(host: host, windowID: 20)
+        let original = WorkspaceLayout(preset: .sideBySide, tiles: [
+            WorkspaceTile(id: "w1", source: window), WorkspaceTile(id: "w2", source: sibling),
+        ])
+        let selected = original.addingTab(trackpad, to: "w1")
+        XCTAssertEqual(selected.tiles["w1"]?.windows, [window, trackpad])
+        XCTAssertEqual(selected.tiles["w2"]?.source, sibling)
+        XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: trackpad.kind), .trackpad)
+        let saved = try JSONEncoder().encode(WorkspaceLayoutRecord(selected))
+        let restored = try XCTUnwrap(WorkspaceLayoutRecord.decode(saved))
+        XCTAssertEqual(restored, selected)
+        let frames = WorkspaceGeometry.frames(for: restored, in: WorkspaceSize(width: 800, height: 600))
+        let request = WorkspaceRequests.workspace(restored, frames: frames, host: host, focus: "w1", generation: { _ in nil })
+        let tiles = try XCTUnwrap(request["tiles"] as? [[String: Any]])
+        XCTAssertEqual(tiles.compactMap { $0["id"] as? String }, ["w2"])
+    }
+
     private func restoreCatalog(generation: Int? = 5, minimized: Bool = true) -> WorkspaceEvent {
         let windows: [[String: Any]] = generation.map {
             [["id": 10, "gen": $0, "bundle": "dev.zed.Zed", "app": "Zed",
@@ -1071,12 +1092,22 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(m.layout.tiles[floating]?.tabs.count, 2)
     }
 
+    func testTrackpadStagePeekDoesNotRequestCatalogFromLegacyMetadataSender() {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        m.trackpadPeekAllowed = { true }
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.welcomeFeature]))
+        m.refreshTrackpadPeek()
+        XCTAssertFalse(m.trackpadPeekSupported)
+        XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })
+    }
+
     func testTrackpadStagePeekRejectsStaleCatalogsAfterRevocationAndReconnect() throws {
         var sent: [[String: Any]] = []
         let m = model(displays: twoDisplays) { sent.append($0) }
         var hasControl = false
         m.trackpadPeekAllowed = { hasControl }
-        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.welcomeFeature]
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.textOnlyFeature]
         m.apply(.features(features))
         m.refreshTrackpadPeek()
         XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })

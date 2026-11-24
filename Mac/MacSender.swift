@@ -430,7 +430,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
-    @MainActor var onVideoEnabledRequest: ((Bool, Bool) -> Void)?
+    @MainActor var onVideoEnabledRequest: ((Bool, Bool, Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
     /// `SenderController`, which remembers it as THIS device's own source
     /// (issue #20) and rebuilds this session only. `nil` requests Auto.
@@ -770,7 +770,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// differ until its hello proves support for protocol v9. Older peers are
     /// always kept video-on so they never get a frozen, unexplained surface.
     private var desiredVideoEnabled: Bool
-    private var trackpadLayoutLease: (generation: UInt64, expires: TimeInterval)?
+    private var trackpadLayoutLease: (generation: UInt64, expires: TimeInterval, inWindow: Bool)?
     private var trackpadDisplayNames: [UInt32: String] = [:]
     private var trackpadLayoutPolling = false
     private var lastTrackpadLayout: TrackpadLayoutWire.Sample?
@@ -3964,8 +3964,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func allowsDesktopTrackpad(_ message: [String: Any]) -> Bool {
-        guard usesTrackpadPoints(message), privacyGate.allowsInput else { return false }
-        return !videoEnabled || (mode != .window && (message["confined"] as? Bool) != true)
+        guard privacyGate.allowsInput else { return false }
+        if message[WorkspaceTrackpadWire.inputKey] as? Bool == true {
+            guard usesTrackpadPoints(message) || message[WireMessage.scrollAtCursor] as? Bool == true else { return false }
+            return mode == .window && videoEnabled && lastHello?.supportsWindowWorkspace == true
+                && controlStillAllowed(generation: activeConnectionGeneration)
+        }
+        return usesTrackpadPoints(message) && (!videoEnabled || (mode != .window && (message["confined"] as? Bool) != true))
     }
 
     /// Side-effect-free recheck immediately before a deferred Window or Overview action.
@@ -5775,14 +5780,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - Video Off layout
 
-    private func trackpadLayoutAllowed(generation: UInt64) -> Bool {
-        !stopped && !videoEnabled && transportController.isReady
+    private func trackpadLayoutAllowed(generation: UInt64, inWindow: Bool) -> Bool {
+        let usableSurface = !videoEnabled || (inWindow && mode == .window && lastHello?.supportsWindowWorkspace == true
+                                              && WindowStreamingPolicy.isAllowed())
+        return !stopped && usableSurface && transportController.isReady
             && sessionAuthorization.isAdmitted(generation: generation)
             && receiverMayMovePointer() && privacyGate.allowsContent
             && LoginSessionConsole.shared.isOnConsole && !PrivacyShieldWindows.isUnlocking
     }
 
-    private func watchTrackpadLayout(on: Bool) {
+    private func watchTrackpadLayout(on: Bool, inWindow: Bool) {
         let generation = activeConnectionGeneration
         guard on else {
             trackpadLayoutLease = nil
@@ -5790,9 +5797,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             trackpadDisplayNames = [:]
             return
         }
-        guard trackpadLayoutAllowed(generation: generation) else { return }
-        if trackpadLayoutLease?.generation != generation { lastTrackpadLayout = nil }
-        trackpadLayoutLease = (generation, ProcessInfo.processInfo.systemUptime + 5)
+        guard trackpadLayoutAllowed(generation: generation, inWindow: inWindow) else { return }
+        if trackpadLayoutLease?.generation != generation || trackpadLayoutLease?.inWindow != inWindow { lastTrackpadLayout = nil }
+        trackpadLayoutLease = (generation, ProcessInfo.processInfo.systemUptime + 5, inWindow)
         let queue = self.queue
         let selfBox = self.selfBox
         DispatchQueue.main.async {
@@ -5805,7 +5812,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let namesByID = names
             queue.async {
                 guard let sender = selfBox.currentOnQueue(), sender.trackpadLayoutLease?.generation == generation,
-                      sender.trackpadLayoutAllowed(generation: generation) else { return }
+                      sender.trackpadLayoutLease?.inWindow == inWindow,
+                      sender.trackpadLayoutAllowed(generation: generation, inWindow: inWindow) else { return }
                 sender.trackpadDisplayNames = namesByID
             }
         }
@@ -5815,7 +5823,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func pollTrackpadLayout() {
         guard let lease = trackpadLayoutLease, lease.expires > ProcessInfo.processInfo.systemUptime,
               lease.generation == activeConnectionGeneration,
-              trackpadLayoutAllowed(generation: lease.generation) else {
+              trackpadLayoutAllowed(generation: lease.generation, inWindow: lease.inWindow) else {
             trackpadLayoutLease = nil
             trackpadLayoutPolling = false
             lastTrackpadLayout = nil
@@ -5836,8 +5844,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let cursor = (CGEvent(source: nil)?.location).flatMap { location in
             displays.contains(where: { $0.bounds.contains(location) }) ? location : nil
         }
-        let sample = TrackpadLayoutWire.Sample(displays: displays, cursor: cursor)
-        if sample != lastTrackpadLayout, trackpadLayoutAllowed(generation: lease.generation) {
+        let sample = TrackpadLayoutWire.Sample(displays: displays, cursor: cursor, inWindow: lease.inWindow)
+        if sample != lastTrackpadLayout, trackpadLayoutAllowed(generation: lease.generation, inWindow: lease.inWindow) {
             lastTrackpadLayout = sample
             sendJSONObject(sample.message)
         }
@@ -6464,9 +6472,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "scroll":
             guard receiverInputIsAllowed() else { return }
+            let desktopTrackpad = allowsDesktopTrackpad(obj)
+            guard obj[WorkspaceTrackpadWire.inputKey] as? Bool != true || desktopTrackpad else { return }
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                 let atCursor = obj[WireMessage.scrollAtCursor] as? Bool == true
-                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: allowsDesktopTrackpad(obj),
+                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: desktopTrackpad,
                                             atCurrentCursor: atCursor)
             }
         case "pointer":
@@ -6480,6 +6490,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             default: .other
             }
             guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
+            let desktopTrackpad = allowsDesktopTrackpad(obj)
+            if obj[WorkspaceTrackpadWire.inputKey] as? Bool == true {
+                guard desktopTrackpad, usesTrackpadPoints(obj), action == "moveRelative" || action == "down" else { return }
+            }
             inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
                 switch action {
                 case "move":
@@ -6490,7 +6504,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                         inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy,
                                                                  trackpadPoints: usesTrackpadPoints(obj),
-                                                                 desktopTrackpad: allowsDesktopTrackpad(obj))
+                                                                 desktopTrackpad: desktopTrackpad)
                     }
                 case "down":
                     if let button = PointerButton.parse(obj["button"]) {
@@ -6501,7 +6515,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                             workspacePoint = CGPoint(x: x, y: y)
                         }
                         inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1,
-                                                         desktopTrackpad: allowsDesktopTrackpad(obj), workspacePoint: workspacePoint)
+                                                         desktopTrackpad: desktopTrackpad, workspacePoint: workspacePoint)
                     }
                 case "up":
                     if let button = PointerButton.parse(obj["button"]) {
@@ -6846,19 +6860,23 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case TrackpadLayoutWire.watch:
             guard let on = obj["on"] as? Bool else { return }
-            watchTrackpadLayout(on: on)
+            watchTrackpadLayout(on: on, inWindow: obj[WorkspaceTrackpadWire.inputKey] as? Bool == true)
         case WireMessage.videoRequest:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.videoControlWireVersion,
                   let requested = obj["enabled"] as? Bool else { return }
-            if requested == desiredVideoEnabled {
+            let resumeWindow = requested && info.supportsWindowWorkspace && WindowStreamingPolicy.isAllowed()
+                && obj[WorkspaceTrackpadWire.resumeWindowKey] as? Bool == true
+            if requested == desiredVideoEnabled && !resumeWindow {
                 applyVideoEnabled(requested)
             } else {
                 let preserveMode = !requested && obj[WireMessage.preserveCaptureMode] as? Bool == true
                 let videoEnabledSelfBox = self.selfBox
+                let generation = activeConnectionGeneration
                 Task { @MainActor in
-                    guard let self = videoEnabledSelfBox.resolve() else { return }
-                    self.onVideoEnabledRequest?(requested, preserveMode)
+                    guard let self = videoEnabledSelfBox.resolve(),
+                          self.sessionAuthorization.isAdmitted(generation: generation) else { return }
+                    self.onVideoEnabledRequest?(requested, preserveMode, resumeWindow)
                 }
             }
         case WireMessage.streamingProfileRequest:
@@ -8185,7 +8203,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let windowStreaming = WindowStreamingPolicy.isAllowed()
         welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: windowStreaming)
         if windowStreaming {
-            welcome["workspaceFeatures"] = [TrackpadStagePeekWire.welcomeFeature, WorkspaceExtendedDisplayWire.feature]
+            welcome["workspaceFeatures"] = [
+                TrackpadStagePeekWire.welcomeFeature, TrackpadStagePeekWire.textOnlyFeature,
+                WorkspaceExtendedDisplayWire.feature, WorkspaceTrackpadWire.feature,
+            ]
         }
         sendJSONObject(welcome)
         // Connected while locked (Wake & Connect, a reconnect): said at once, before anything else.

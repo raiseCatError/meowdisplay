@@ -415,10 +415,17 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// Where the receiver surface starts in this overlay's coordinates —
     /// `keyboardVisibleRect` is in the surface's own.
     var surfaceOrigin: CGPoint = .zero
+    /// Stable scrollbar hit regions in the overlay's coordinates.
+    var scrollRailFrames: [ScrollStripEdge: CGRect] = [:]
     /// Opens Session Actions (Back to Home, Disconnect from Mac) on a touch
     /// and hold of Settings. nil in Demo Mode and while no session is on
     /// screen, where Settings stays a plain button.
     var onSessionActions: (() -> Void)? = nil
+
+    private var screenBounds: CGRect { CGRect(origin: .zero, size: containerSize) }
+    private var controlBounds: CGRect {
+        EdgeScrollStripGeometry.controlBounds(in: screenBounds, reserving: scrollRailFrames)
+    }
 
     @State private var interaction = ControlInteractionState()
     @State private var initiatingMoveView = false
@@ -689,12 +696,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // off), so there is deliberately no top-level condition here that
         // could hide the gear itself.
         let portrait = containerSize.height > containerSize.width
+        let bounds = controlBounds
         let collapsed = store.preferences.trayCollapsed || !store.preferences.trayCanBeShown
         let count = max(controls.count, 1)
         // Shrinks only when the chips wouldn't fit the screen edge (nine
         // standard chips are wider than a 390pt iPhone).
         let trayItem = ControlTrayGeometry.fittedChipDiameter(
-            count: count, length: portrait ? containerSize.width : containerSize.height,
+            count: count, length: portrait ? bounds.width : bounds.height,
             preferred: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack)
         let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count, item: trayItem)
         // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
@@ -709,10 +717,16 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let autoHideScale: CGFloat = autoHiding && !reduceMotion ? 0.98 : 1
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
-        let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
-        let safe = safeInsets
+        let paletteGrid = ControlTrayGeometry.shortcutPaletteGrid(count: actions.count, portrait: portrait)
+        let paletteDiameter = scrollRailFrames.isEmpty ? Metrics.paletteKey : min(
+            ControlTrayGeometry.fittedChipDiameter(count: paletteGrid.columns, length: bounds.width,
+                preferred: Metrics.paletteKey, gap: Metrics.paletteGap, slack: Metrics.touchSlack),
+            ControlTrayGeometry.fittedChipDiameter(count: paletteGrid.rows, length: bounds.height,
+                preferred: Metrics.paletteKey, gap: Metrics.paletteGap, slack: Metrics.touchSlack))
+        let paletteSize = calculatedPaletteSize(grid: paletteGrid, diameter: paletteDiameter)
+        let safe = EdgeScrollStripGeometry.safeInsets(safeInsets, from: screenBounds, within: bounds)
         let baseLayout = ControlTrayGeometry.layout(
-            container: CGRect(origin: .zero, size: containerSize),
+            container: bounds,
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
@@ -738,7 +752,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                                  ? -autoHideRetreat : autoHideRetreat, height: 0))
             : .zero
         let rawLayout = ControlTrayGeometry.layout(
-            container: CGRect(origin: .zero, size: containerSize),
+            container: bounds,
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
@@ -774,7 +788,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                    height: paletteSize.height)
         }
         let functionFrames = ControlTrayGeometry.functionTrayLayout(
-            container: CGRect(origin: .zero, size: containerSize),
+            container: bounds,
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
@@ -791,7 +805,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // Only computed when the overlay is actually on — a second,
         // avoidNotch:false pass purely for the debug visualization below.
         let rawFunctionFrames = notchDebugOverlayEnabled ? ControlTrayGeometry.functionTrayLayout(
-            container: CGRect(origin: .zero, size: containerSize),
+            container: bounds,
             safeInsets: safe,
             keyboardVisibleRect: keyboardVisibleRect,
             portrait: portrait,
@@ -809,7 +823,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let calculatorButton: CGRect? = LocalCalculatorPolicy.showsButton(
             added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
             keyboardBarShown: false) ? LocalCalculatorPlacement.phoneButtonFrame(
-                container: CGRect(origin: .zero, size: containerSize), safeInsets: safe,
+                container: bounds, safeInsets: safe,
                 keyboardVisibleRect: keyboardVisibleRect, portrait: portrait, diameter: Metrics.trayItem,
                 occupied: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
                 avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
@@ -819,7 +833,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // never moves for them, so the two can't push each other around.
         // The keypad's ⇧ ⌥ ⌘ strip is placed with the T as one block.
         let computedArrows: ArrowKeysLayout? = arrowKeysShown ? ControlTrayGeometry.arrowKeysLayoutWithModifiers(
-            container: CGRect(origin: .zero, size: containerSize),
+            container: bounds,
             safeInsets: safe,
             portrait: portrait,
             side: store.preferences.arrowKeysSide,
@@ -841,7 +855,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
         ZStack(alignment: .topLeading) {
             if let paletteChord {
-                shortcutPalette(actions, portrait: portrait, chord: paletteChord)
+                shortcutPalette(actions, portrait: portrait, chord: paletteChord, grid: paletteGrid,
+                                diameter: paletteDiameter)
                     .frame(width: layout.paletteFrame.width, height: layout.paletteFrame.height)
                     .position(x: layout.paletteFrame.midX, y: layout.paletteFrame.midY)
                     .transition(.scale(scale: 0.75).combined(with: .opacity))
@@ -912,15 +927,15 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
             LocalCalculatorLayer(
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
-                panelBounds: safe.safeRect(in: containerSize).insetBy(dx: LocalCalculatorPlacement.margin,
-                                                                       dy: LocalCalculatorPlacement.margin),
+                panelBounds: bounds.intersection(safeInsets.safeRect(in: containerSize))
+                    .insetBy(dx: LocalCalculatorPlacement.margin, dy: LocalCalculatorPlacement.margin),
                 obstacles: [renderedMainTrayFrame] + functionFrames
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { chip(selected: $0) }
 
             #if DEBUG
             if notchDebugOverlayEnabled {
-                notchDebugOverlay(container: CGRect(origin: .zero, size: containerSize),
+                notchDebugOverlay(container: bounds,
                                   safeInsets: safe, portrait: portrait, notchSide: notchSide,
                                   mainRaw: rawLayout.trayFrame, mainFinal: layout.trayFrame,
                                   functionRaw: rawFunctionFrames, functionFinal: functionFrames)
@@ -951,7 +966,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                      + "container=\(containerSize) resolvedSafeInsets=\(safe) "
                      + "physicalNotchSide=\(notchSide.map(String.init(describing:)) ?? "none") notchDepthUsed=\(notchDepth) "
                      + "rawMain=\(rawLayout.trayFrame) "
-                     + "exclusions=\(ControlTrayGeometry.unsafeRegions(in: CGRect(origin: .zero, size: containerSize), safeInsets: safe, portrait: portrait, notchSide: notchSide)) "
+                     + "exclusions=\(ControlTrayGeometry.unsafeRegions(in: bounds, safeInsets: safe, portrait: portrait, notchSide: notchSide)) "
                      + "finalMain=\(layout.trayFrame) renderedControls=\($0)")
             #endif
         }
@@ -1032,13 +1047,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             : CGSize(width: thickness, height: length)
     }
 
-    private func calculatedPaletteSize(actions: [ShortcutItem], portrait: Bool) -> CGSize {
-        let count = max(actions.count, 1)
+    private func calculatedPaletteSize(grid: ControlTrayGeometry.ShortcutPaletteGrid, diameter: CGFloat) -> CGSize {
         func span(_ n: Int) -> CGFloat {
-            CGFloat(n) * Metrics.paletteKey
+            CGFloat(n) * diameter
                 + CGFloat(Swift.max(0, n - 1)) * Metrics.paletteGap + Metrics.touchSlack
         }
-        let grid = ControlTrayGeometry.shortcutPaletteGrid(count: count, portrait: portrait)
         return CGSize(width: span(grid.columns), height: span(grid.rows))
     }
 
@@ -1062,7 +1075,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private func foldedTrayRow(baseFrame: CGRect, traySize: CGSize, count: Int,
                                collapsed: Bool, portrait: Bool) -> ControlFoldGeometry.TrayRow? {
         guard portrait, !collapsed else { return nil }
-        var visible = CGRect(origin: .zero, size: containerSize)
+        var visible = controlBounds
         if let keyboardVisibleRect { visible = visible.intersection(keyboardVisibleRect) }
         return ControlFoldGeometry.trayRow(
             count: count, item: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack,
@@ -1195,8 +1208,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .sessionActionsAccessibility(item == .settings && onSessionActions != nil ? { openSessionActions() } : nil)
     }
 
-    private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool,
-                                 chord: ModifierChord) -> some View {
+    private func shortcutPalette(_ actions: [ShortcutItem], portrait: Bool, chord: ModifierChord,
+                                 grid: ControlTrayGeometry.ShortcutPaletteGrid, diameter: CGFloat) -> some View {
         Group {
             if actions.isEmpty {
                 Text("No shortcuts for \(chord.displayName)")
@@ -1207,13 +1220,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .overlay(Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
                     .shadow(color: .black.opacity(0.28), radius: 5, y: 1)
             } else {
-                let grid = ControlTrayGeometry.shortcutPaletteGrid(count: actions.count, portrait: portrait)
                 Grid(horizontalSpacing: Metrics.paletteGap, verticalSpacing: Metrics.paletteGap) {
                     ForEach(0..<grid.rows, id: \.self) { row in
                         GridRow {
                             ForEach(Array(actions.enumerated()).filter { grid.row(for: $0.offset) == row },
                                     id: \.element.id) { _, action in
-                                shortcutButton(action, portrait: portrait)
+                                shortcutButton(action, portrait: portrait, diameter: diameter)
                             }
                         }
                     }
@@ -2170,6 +2182,10 @@ extension ReceiverControlOverlay {
     @ViewBuilder
     private func edgeLayoutContent(mode: PadControlLayoutMode, container: CGRect) -> some View {
         let strip = mode == .strip
+        // Solid strips already sit outside the picture and its rails.
+        // Floating controls and transient palettes use the protected area.
+        let placement = strip ? container : controlBounds
+        let placementInsets = EdgeScrollStripGeometry.safeInsets(safeInsets, from: container, within: placement)
         let hints = strip && store.preferences.padShowControlHints
         let metrics = PadControlMetrics(scale: padMetricsScale, showsHints: hints)
         let mainGroups = padCollapsed ? [] : padMainGroups
@@ -2186,7 +2202,7 @@ extension ReceiverControlOverlay {
         // A fold (iPhone Duo) is skipped over by the rails, never crossed.
         let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
         let pass: (CGFloat?) -> PadEdgeLayout = { keyboardTop in
-            PadEdgeGeometry.layout(container: container, safeInsets: safeInsets, reservesStrips: strip,
+            PadEdgeGeometry.layout(container: placement, safeInsets: placementInsets, reservesStrips: strip,
                                    mainEdge: mainEdge, functionEdge: functionEdge,
                                    mainGroupCounts: mainGroups.map(\.count),
                                    mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
@@ -2196,11 +2212,13 @@ extension ReceiverControlOverlay {
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
         let layout = keyboardTop == nil ? firstPass : pass(keyboardTop)
-        let canvasPublication = PadCanvasPublication(canvas: layout.canvas, containerSize: containerSize)
+        let canvasPublication = PadCanvasPublication(canvas: strip ? layout.canvas : container,
+                                                     containerSize: containerSize)
         // Collapsed (or the tray can't show): only the gear, floating at the
         // Main edge, never a rail.
         let gearFrame: CGRect? = padCollapsed ? PadEdgeGeometry.layout(
-            container: container, safeInsets: safeInsets, reservesStrips: false,
+            container: controlBounds, safeInsets: EdgeScrollStripGeometry.safeInsets(
+                safeInsets, from: container, within: controlBounds), reservesStrips: false,
             mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1], mainGroupAlignments: [.end],
             functionGroupCounts: [],
             metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop,
@@ -2222,7 +2240,7 @@ extension ReceiverControlOverlay {
             ? CGSize(width: 132 * metrics.scale, height: 36 * metrics.scale)
             : CGSize(width: metrics.item * 0.92, height: metrics.item * 0.92)
         let paletteBounds = Self.boundsAboveKeyboard(
-            layout.canvas.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
+            layout.canvas.intersection(controlBounds).insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
             keyboardTop: keyboardTop)
         let wheel: WheelPaletteLayout? = store.preferences.padOverlayPaletteStyle == .wheel && !actions.isEmpty
             ? padWheelAnchor(mainControls: mainControls, gearFrame: gearFrame).flatMap {
@@ -2347,7 +2365,7 @@ extension ReceiverControlOverlay {
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
                 buttonHint: hints ? String(localized: "calculator", comment: "Strip control hint.") : nil,
                 panelBounds: Self.boundsAboveKeyboard(
-                    layout.canvas.intersection(safeInsets.safeRect(in: containerSize))
+                    layout.canvas.intersection(controlBounds).intersection(safeInsets.safeRect(in: containerSize))
                         .insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
                     keyboardTop: keyboardTop),
                 obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
@@ -2445,7 +2463,7 @@ extension ReceiverControlOverlay {
             container: Self.boundsAboveKeyboard(container, keyboardTop: keyboardTop.map { $0 + PadControlMetrics.edgeMargin }),
             safeInsets: keyboardTop == nil ? safeInsets
                 : ControlSafeInsets(top: safeInsets.top, leading: safeInsets.leading, bottom: 0,
-                                    trailing: safeInsets.trailing))
+                                    trailing: safeInsets.trailing)).intersection(controlBounds)
         // A fold (iPhone Duo) never cuts a control: one that would straddle it
         // moves into the piece holding most of it.
         let allFrames = CustomLayoutGeometry.frames(

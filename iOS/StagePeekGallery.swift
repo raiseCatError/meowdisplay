@@ -688,6 +688,12 @@ struct StagePeekGallery: View {
                     if model.windowMode, model.extendedDisplaySupported, receiverSize.width > 0 {
                         extendedDisplayAction
                     }
+                    if model.windowMode, model.workspaceTrackpadSupported {
+                        Button { model.addTrackpadTab() } label: {
+                            Label("Add Trackpad", systemImage: "trackpad")
+                        }
+                        .accessibilityIdentifier("stagePeekAddTrackpad")
+                    }
                     sectionTitle(String(localized: "Windows"))
                     if allWindows.isEmpty {
                         emptyText(model.catalog?.unavailable == true ? String(localized: "The Mac can't list its windows right now.")

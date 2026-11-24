@@ -1124,13 +1124,31 @@ final class SenderController: ObservableObject {
         autoConnect()   // a rebuilt WiFi session may deserve its cable back
     }
 
+    private var videoTransitionGeneration = 0
+
+    private func resumeVideoInWindowMode(for session: DeviceSession) {
+        videoTransitionGeneration &+= 1
+        let outcome = displayModes.resumeVideoInWindow(sessionID: session.id,
+                                                       hasUsablePhysicalDisplay: hasUsablePhysicalDisplayNow())
+        if case .rebuild = outcome {
+            // Switch the receiver's capture assignment while its old stream is still paused.
+            rebuild(session)
+        } else {
+            handleDisplayModeOutcome(outcome, for: session)
+        }
+        videoEnabled = true
+    }
+
     func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false) {
-        guard enabled != videoEnabled else { return }
         if enabled {
+            videoTransitionGeneration &+= 1
             displayModes.enableVideo()
             videoEnabled = true
             return
         }
+        guard videoEnabled, displayModes.videoEnabled else { return }
+        videoTransitionGeneration &+= 1
+        let transition = videoTransitionGeneration
         // Video is Mac-wide; the mode hand-off is per device (issue #20).
         let hasPhysicalDisplay = hasUsablePhysicalDisplayNow()
         let transitioning = Set(displayModes.disableVideo(hasUsablePhysicalDisplay: hasPhysicalDisplay,
@@ -1162,7 +1180,7 @@ final class SenderController: ObservableObject {
             var remaining = transitioning.count
             for session in transitioning {
                 session.sender.disableVideoKeepingExtend { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.videoTransitionGeneration == transition else { return }
                     remaining -= 1
                     if remaining == 0 { self.videoEnabled = false }
                 }
@@ -1189,7 +1207,7 @@ final class SenderController: ObservableObject {
         var remaining = transitioningSessions.count
         for session in transitioningSessions {
             session.sender.transitionToMirrorAndDisableVideo { [weak self] in
-                guard let self else { return }
+                guard let self, self.videoTransitionGeneration == transition else { return }
                 remaining -= 1
                 if remaining == 0 { self.videoEnabled = false }
             }
@@ -3169,9 +3187,13 @@ final class SenderController: ObservableObject {
             SecurityPresentationCoordinator.dismissFilesConsent(sessionID: session.id)
             ClipboardHub.shared.connectionReset(sessionID: session.id)
         }
-        sender.onVideoEnabledRequest = { [weak self, weak session] requested, preserveMode in
+        sender.onVideoEnabledRequest = { [weak self, weak session] requested, preserveMode, resumeWindow in
             guard let self, let session, self.owns(session) else { return }
-            self.requestVideoEnabled(requested, preserveCaptureMode: preserveMode)
+            if resumeWindow {
+                self.resumeVideoInWindowMode(for: session)
+            } else {
+                self.requestVideoEnabled(requested, preserveCaptureMode: preserveMode)
+            }
         }
         // A receiver's request changes the Mac-wide setting only when it can
         // take effect and differs from what's in use; otherwise nothing is

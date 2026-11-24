@@ -811,6 +811,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor let trackpadCursor = TrackpadCursorPresentation()
     @MainActor private var trackpadLayoutSupported = false
     @MainActor private var trackpadLayoutWatching = false
+    @MainActor private var trackpadLayoutInWindow = false
     @MainActor private var trackpadLayoutControlGranted = false
     @MainActor var canBrowseTrackpadStagePeek: Bool {
         connected && !videoEnabled && macLock == nil && trackpadLayoutControlGranted
@@ -3133,8 +3134,9 @@ final class StreamReceiver: ObservableObject {
             }
             DispatchQueue.main.async { uiSink.publishVideoState(width: update.width, height: update.height, enabled: update.enabled) }
         case TrackpadLayoutWire.state:
-            guard !receivedVideoEnabled, sessionAdmission.admitted else { return }
-            let sample = TrackpadLayoutWire.Sample.parse(obj) ?? .init(displays: [], cursor: nil)
+            let inWindow = obj[WorkspaceTrackpadWire.inputKey] as? Bool == true
+            guard (!receivedVideoEnabled || inWindow), sessionAdmission.admitted else { return }
+            let sample = TrackpadLayoutWire.Sample.parse(obj) ?? .init(displays: [], cursor: nil, inWindow: inWindow)
             DispatchQueue.main.async { uiSink.publishTrackpadLayout(sample) }
         case WireMessage.audioState:
             guard let update = AudioStateUpdate(message: obj) else { return }
@@ -3455,11 +3457,12 @@ final class StreamReceiver: ObservableObject {
 
     /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
     @MainActor func sendScroll(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false,
-                               atCurrentCursor: Bool = false) {
+                               atCurrentCursor: Bool = false, workspaceTrackpad: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
         guard !atCurrentCursor || macSupportsScrollAtCursor else { return }
         var message: [String: Any] = ["type": "scroll", "dx": dx, "dy": dy]
         if atCurrentCursor { message[WireMessage.scrollAtCursor] = true }
+        if workspaceTrackpad { message[WorkspaceTrackpadWire.inputKey] = true }
         if trackpad {
             message["trackpadPoints"] = true
             message["confined"] = confined
@@ -3485,12 +3488,14 @@ final class StreamReceiver: ObservableObject {
     }
 
     /// Relative movement in video pixels, or Quartz points on a Trackpad peer.
-    @MainActor func sendPointerMoveRelative(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false) {
+    @MainActor func sendPointerMoveRelative(dx: Double, dy: Double, trackpad: Bool = false, confined: Bool = false,
+                                                  workspaceTrackpad: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
         var message: [String: Any] = ["type": "pointer", "action": "moveRelative", "dx": dx, "dy": dy]
         if trackpad {
             message["trackpadPoints"] = true
             message["confined"] = confined
+            if workspaceTrackpad { message[WorkspaceTrackpadWire.inputKey] = true }
         }
         sendTaggedInput(message)
     }
@@ -3499,12 +3504,14 @@ final class StreamReceiver: ObservableObject {
     /// given click count (1 = single, 2 = double, 3 = triple — mirrors
     /// `NSEvent.clickCount`/`CGEventClickState`).
     @MainActor func sendPointerDown(button: PointerButton, clickCount: Int, trackpad: Bool = false,
-                                    confined: Bool = false, workspacePoint: CGPoint? = nil) {
+                                    confined: Bool = false, workspacePoint: CGPoint? = nil,
+                                    workspaceTrackpad: Bool = false) {
         guard displayState == .running, remoteInputMayLeave() else { return }
         var message: [String: Any] = ["type": "pointer", "action": "down", "button": button.wireValue, "clickCount": clickCount]
         if trackpad {
             message["trackpadPoints"] = true
             message["confined"] = confined
+            if workspaceTrackpad { message[WorkspaceTrackpadWire.inputKey] = true }
         } else if let workspacePoint {
             message["x"] = workspacePoint.x
             message["y"] = workspacePoint.y
@@ -3704,20 +3711,23 @@ final class StreamReceiver: ObservableObject {
         sendUIControl(LockScreenWire.request(show: show))
     }
 
-    @MainActor func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false) {
+    @MainActor func requestVideoEnabled(_ enabled: Bool, preserveCaptureMode: Bool = false,
+                                        resumeWindow: Bool = false) {
         guard connected, macSupportsVideoControl else { return }
         var request: [String: Any] = ["type": WireMessage.videoRequest, "enabled": enabled]
         if !enabled && preserveCaptureMode && macSupportsPreservingCaptureMode {
             request[WireMessage.preserveCaptureMode] = true
         }
+        if enabled && resumeWindow { request[WorkspaceTrackpadWire.resumeWindowKey] = true }
         sendUIControl(request)
     }
 
-    @MainActor func requestTrackpadLayout() {
-        guard trackpadLayoutSupported, connected, !videoEnabled, macLock == nil,
+    @MainActor func requestTrackpadLayout(inWindow: Bool = false) {
+        guard trackpadLayoutSupported, connected, (!videoEnabled || inWindow && windowModeActive), macLock == nil,
               trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
         trackpadLayoutWatching = true
-        sendUIControl(["type": TrackpadLayoutWire.watch, "on": true])
+        trackpadLayoutInWindow = inWindow
+        sendUIControl(["type": TrackpadLayoutWire.watch, "on": true, WorkspaceTrackpadWire.inputKey: inWindow])
     }
 
     @MainActor func stopTrackpadLayout() {
@@ -3729,6 +3739,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor private func clearTrackpadLayout() {
         trackpadLayoutWatching = false
+        trackpadLayoutInWindow = false
         if !trackpadDisplayGeometry.isEmpty { trackpadDisplayGeometry = [] }
         if trackpadCursor.location != nil { trackpadCursor.location = nil }
     }
@@ -6579,7 +6590,8 @@ final class StreamReceiver: ObservableObject {
     }
 
     @MainActor func applyTrackpadLayout(_ sample: TrackpadLayoutWire.Sample) {
-        guard connected, !videoEnabled, macLock == nil, trackpadLayoutWatching,
+        guard connected, (!videoEnabled || trackpadLayoutInWindow && windowModeActive), macLock == nil, trackpadLayoutWatching,
+              sample.inWindow == trackpadLayoutInWindow,
               trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
         if trackpadDisplayGeometry != sample.displays { trackpadDisplayGeometry = sample.displays }
         if trackpadCursor.location != sample.cursor { trackpadCursor.location = sample.cursor }
@@ -6590,7 +6602,7 @@ final class StreamReceiver: ObservableObject {
             videoSize = CGSize(width: width, height: height)
         }
         videoEnabled = enabled
-        if enabled { clearTrackpadLayout() }
+        if enabled && !trackpadLayoutInWindow { clearTrackpadLayout() }
     }
 
     @MainActor func applyActiveStreamCodecUpdate(_ codec: StreamCodec) {

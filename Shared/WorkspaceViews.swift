@@ -11,7 +11,7 @@ import UIKit
 private let workspaceAccent = Color(red: 0.50, green: 0.70, blue: 1.0)
 private let workspaceChip = Color(white: 0.11, opacity: 0.8)
 
-private extension WorkspaceRect {
+extension WorkspaceRect {
     func onScreen(_ picture: CGRect) -> CGRect {
         CGRect(x: picture.minX + x * picture.width, y: picture.minY + y * picture.height,
                width: width * picture.width, height: height * picture.height)
@@ -77,6 +77,7 @@ struct WorkspaceChromeView: View {
     var onSettings: (() -> Void)?
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
     var onViewFullScreen: (() -> Void)?
+    var localTrackpad: ((String, CGRect) -> AnyView)?
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
@@ -166,7 +167,7 @@ struct WorkspaceChromeView: View {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                if let id = model.active, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
+                if let id = model.active, model.activeTrackpadID == nil, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
                    multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     // While all its tabs are shown and leave too little room, the bar steps aside.
@@ -185,7 +186,8 @@ struct WorkspaceChromeView: View {
                 // Floating panes over the arrangement, back to front, and tucked floats' edge handles.
                 if !model.arranging {
                     WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
-                                        onClose: { confirmClose = $0 }, tipAvoiding: titles, placementChip: placementChip)
+                                        onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
+                                        tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
                 WorkspaceDropOverlay(model: model, picture: picture, safeArea: safeArea, controls: controls + divisions,
@@ -469,6 +471,12 @@ struct WorkspaceChromeView: View {
         let hovered = model.hovered == id && !active
         let corners = outerCorners(rect)
         ZStack(alignment: .topLeading) {
+            if tile.source?.isTrackpad == true, let localTrackpad {
+                localTrackpad(id, rect)
+                    .frame(width: rect.width, height: rect.height)
+                    .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
+                    .allowsHitTesting(false)
+            }
             PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))

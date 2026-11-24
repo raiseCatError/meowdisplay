@@ -852,6 +852,15 @@ private struct InputSettingsPage: View {
                         }
                     }
                 }
+                Slider(value: preferenceBinding(controlStore, \.edgeScrollSensitivity),
+                       in: EdgeScrollSensitivity.range, step: 0.1) {
+                    Text("Edge Scroll Sensitivity")
+                } minimumValueLabel: {
+                    Text("Slow")
+                } maximumValueLabel: {
+                    Text("Fast")
+                }
+                .settingsAnchor("edgeScrollSensitivity")
                 Toggle("Scroll Momentum", isOn: preferenceBinding(controlStore, \.scrollMomentumEnabled))
                 Toggle("Scroll Motion Feedback", isOn: preferenceBinding(controlStore, \.scrollMotionFeedback))
             } header: {

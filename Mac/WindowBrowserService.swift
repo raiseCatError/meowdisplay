@@ -520,9 +520,15 @@ final class WindowBrowserService: @unchecked Sendable {
             refreshStartedAt = ProcessInfo.processInfo.systemUptime
             let ledgerIn = ledgerLock.withLock { ledger }
             let includeOwn = includeOwnProcessForTesting
+            let includeDisplays = allowsStills
             Task { [weak self] in
                 let built = try? await WindowCatalogBuilder.build(ledger: ledgerIn, includeOwnProcess: includeOwn)
-                let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                let content: SCShareableContent?
+                if includeDisplays {
+                    content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                } else {
+                    content = nil
+                }
                 self?.queue.async {
                     guard let self else { return }
                     self.refreshInFlight = false
@@ -572,13 +578,16 @@ final class WindowBrowserService: @unchecked Sendable {
     }
 
     private func sendCatalogMessage(_ snap: WindowCatalogSnapshot) {
-        sendMessage?([
+        var message: [String: Any] = [
             "type": WireMessage.windowCatalog,
-            "host": hostID,
-            "windows": snap.windows.prefix(120).map(\.wire),
-            "apps": snap.apps.prefix(60).map(\.wire),
-            "displays": displays.prefix(8).map(\.wire),
-        ])
+            "windows": snap.windows.prefix(120).map { allowsStills ? $0.wire : $0.trackpadWire },
+        ]
+        if allowsStills {
+            message["host"] = hostID
+            message["apps"] = snap.apps.prefix(60).map(\.wire)
+            message["displays"] = displays.prefix(8).map(\.wire)
+        }
+        sendMessage?(message)
         Log.info("workspace: catalog sent enumerated=\(snap.windows.count) displays=\(displays.count) apps=\(snap.apps.count)")
     }
 
@@ -593,14 +602,16 @@ final class WindowBrowserService: @unchecked Sendable {
         var list = apps.map { a -> [String: Any] in
             var m: [String: Any] = ["bundle": a.bundleID, "name": String(a.name.prefix(80))]
             if running[a.bundleID] != nil { m["running"] = true }
-            if let n = windowCounts[a.bundleID] { m["windows"] = n }
-            if let used = a.lastUsed { m["used"] = Int(used.timeIntervalSince1970) }
+            if allowsStills, let n = windowCounts[a.bundleID] { m["windows"] = n }
+            if allowsStills, let used = a.lastUsed { m["used"] = Int(used.timeIntervalSince1970) }
             return m
         }
         // Running apps that aren't installed in an app folder (a dev build, a helper) still belong in the list.
         let known = Set(apps.map(\.bundleID))
         for r in snapshot?.apps ?? [] where !known.contains(r.bundleID) {
-            list.append(["bundle": r.bundleID, "name": String(r.name.prefix(80)), "running": true, "windows": windowCounts[r.bundleID] ?? 0])
+            var app: [String: Any] = ["bundle": r.bundleID, "name": String(r.name.prefix(80)), "running": true]
+            if allowsStills { app["windows"] = windowCounts[r.bundleID] ?? 0 }
+            list.append(app)
         }
         sendMessage?(["type": WireMessage.appCatalog, "rev": revision, "apps": Array(list.prefix(AppCatalog.wireLimit))])
         lastAppRevisionSent = revision

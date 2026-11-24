@@ -391,6 +391,39 @@ enum TrackpadDisplayGuideGeometry {
 }
 
 enum EdgeScrollStripGeometry {
+    /// Only stable obstacles (a fold or system occlusion) constrain a rail.
+    /// A perpendicular rail gives way at the shared corner.
+    static func frames(edges: [ScrollStripEdge], in safeArea: CGRect,
+                       avoiding obstacles: [CGRect]) -> [ScrollStripEdge: CGRect] {
+        var occupied = obstacles
+        var rails: [ScrollStripEdge: CGRect] = [:]
+        for edge in edges {
+            guard let rail = frame(on: edge, in: safeArea, avoiding: occupied) else { continue }
+            rails[edge] = rail
+            occupied.append(rail)
+        }
+        return rails
+    }
+
+    /// Keep interactive controls inside the rails while their presentation
+    /// changes. This is a placement bound, separate from the video canvas.
+    static func controlBounds(in container: CGRect, reserving rails: [ScrollStripEdge: CGRect]) -> CGRect {
+        guard !container.isNull, !container.isEmpty, !rails.isEmpty else { return container }
+        let gap: CGFloat = 6
+        let left = max(container.minX, rails[.left].map { $0.maxX + gap } ?? container.minX)
+        let right = min(container.maxX, rails[.right].map { $0.minX - gap } ?? container.maxX)
+        let top = max(container.minY, rails[.top].map { $0.maxY + gap } ?? container.minY)
+        let bottom = min(container.maxY, rails[.bottom].map { $0.minY - gap } ?? container.maxY)
+        return CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
+    }
+
+    static func safeInsets(_ insets: ControlSafeInsets, from screen: CGRect, within bounds: CGRect) -> ControlSafeInsets {
+        ControlSafeInsets(top: max(0, insets.top - (bounds.minY - screen.minY)),
+                          leading: max(0, insets.leading - (bounds.minX - screen.minX)),
+                          bottom: max(0, insets.bottom - (screen.maxY - bounds.maxY)),
+                          trailing: max(0, insets.trailing - (screen.maxX - bounds.maxX)))
+    }
+
     static func frame(on edge: ScrollStripEdge, in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
         func transpose(_ rect: CGRect) -> CGRect {
             CGRect(x: rect.minY, y: rect.minX, width: rect.height, height: rect.width)

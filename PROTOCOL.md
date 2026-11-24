@@ -1096,6 +1096,9 @@ When the Mac advertises `preserveCaptureMode`, a mobile receiver may include
 `preserveCaptureMode: true` with `enabled: false`. The Mac keeps active
 capture assignments and any live Extend display identities while pausing
 video. A subsequent Video On resumes those assignments in the same sessions.
+A receiver can include `resumeWindow: true` with `enabled: true` when it knows
+the Mac supports Window mode. The Mac selects Window for that receiver before
+rebuilding its capture. Other receivers retain their assignments.
 
 **`audioRequest` / `audioState`** (pv 12) control Mac system-audio capture
 independently of video, per receiver — each receiver's own request, not a
@@ -1661,13 +1664,24 @@ paired key and display topology are rechecked before Apply and Keep. Withdrawing
 preapproval ends a pending arrangement from that approval.
 
 **Stage Peek with video off.** `welcome.workspaceFeatures` can include
-`trackpadStagePeek`. Older peers keep reading their original `features` list.
+`trackpadStagePeek` and `trackpadPeekText`. The latter allows a receiver
+to require text-only catalog replies. Older peers keep reading `features`.
 Requests for a window catalog, app catalog, app launch or window activation
 carry a `trackpadStagePeek` UUID for that opening. A separate metadata-only
 browser accepts them while video is off and the currently admitted connection
-has control. Catalog replies echo the UUID. Neither still requests nor
+has control. Catalog replies echo the UUID. Text-only window records carry
+window ID, generation, bundle, app name, and title. Neither still requests nor
 workspace layout changes belong to this exchange. A receiver discards replies
 from any other opening or after it loses control.
+
+**Trackpad tab in Window mode.** A receiver can add a local Trackpad tab when
+the Mac advertises `workspaceTrackpad` in `welcome.workspaceFeatures`. The
+tab never appears in the Mac’s workspace capture request. Its relative
+pointer and scroll messages use `trackpadPoints: true` and
+`workspaceTrackpad: true` to select desktop-relative input. The Mac rechecks
+the session input grant, active Window mode, and desktop permissions for
+these messages. The same marker permits the existing control-gated
+`trackpadLayoutWatch` to run while Window video stays on.
 
 **Extended display in Window mode.** `welcome.workspaceFeatures` can include
 `workspaceExtendedDisplay`. An admitted receiver with control can ask for

@@ -510,7 +510,8 @@ enum OverviewPaneInput {
     static func route(_ gesture: Gesture, kind: WorkspaceSource.Kind, preferred: PointerInputMode,
                       inputReachesMac: Bool, moveViewActive: Bool) -> Route {
         switch (gesture, kind) {
-        case (.oneFinger, .overview): return .pointer(.trackpad)
+        case (.oneFinger, .overview), (.oneFinger, .trackpad): return .pointer(.trackpad)
+        case (.pinch, .trackpad): return .none
         case (.oneFinger, _): return .pointer(preferred)
         case (.pinch, _): return .zoomPane
         case (.twoFingerDrag, _):
@@ -573,8 +574,17 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     static func overview(host: String) -> WorkspaceSource { WorkspaceSource(host: host, windowID: overviewKey) }
     var isOverview: Bool { windowID == Self.overviewKey }
 
-    enum Kind: Equatable, Sendable { case window, display, overview }
-    var kind: Kind { isOverview ? .overview : isDisplay ? .display : .window }
+    /// Receiver-only pseudo-source, excluded from the Mac's capture requests.
+    static let trackpadKey = UInt32.max
+    static func trackpad(host: String) -> WorkspaceSource { WorkspaceSource(host: host, windowID: trackpadKey) }
+    var isTrackpad: Bool { windowID == Self.trackpadKey }
+
+    enum Kind: Equatable, Sendable { case window, display, overview, trackpad }
+    var kind: Kind {
+        if isTrackpad { return .trackpad }
+        if isOverview { return .overview }
+        return isDisplay ? .display : .window
+    }
 }
 
 struct WorkspaceTile: Equatable, Codable, Sendable {

@@ -371,6 +371,11 @@ struct DisplayModeCoordinator {
         preservingAssignmentsWhileVideoOff = false
     }
 
+    mutating func resumeVideoInWindow(sessionID: String, hasUsablePhysicalDisplay: Bool) -> DisplayModeChangeOutcome {
+        enableVideo()
+        return requestMode(.window, sessionID: sessionID, hasUsablePhysicalDisplay: hasUsablePhysicalDisplay)
+    }
+
     /// The Mac default mode the Displays picker shows.
     var defaultMode: CaptureMode { defaults.mode }
 

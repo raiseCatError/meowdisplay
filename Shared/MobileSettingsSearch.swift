@@ -132,6 +132,8 @@ enum MobileSettingsSearchIndex {
         .init("scrollDirection", String(localized: "Natural Vertical Scrolling"), .input, keywords: ["natural horizontal scrolling", "invert vertical scrolling", "invert horizontal scrolling", "natural scrolling", "scroll direction", "reverse"]),
         .init("rightScrollStrip", String(localized: "Edge Scrolling"), .input,
               keywords: ["scroll bar", "right edge", "one finger"]),
+        .init("edgeScrollSensitivity", String(localized: "Edge Scroll Sensitivity"), .input,
+              keywords: ["scroll bar", "speed", "slow", "fast"]),
         .init("zoomWhileTyping", String(localized: "Zoom While Typing"), .input, keywords: ["keyboard"]),
         // Gestures
         .init("pinch", String(localized: "Pinch / Zoom"), .gestures, keywords: ["magnify", "zoom"]),

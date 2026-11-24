@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum ControlModifier: String, Codable, CaseIterable, Hashable, Identifiable {
@@ -914,8 +915,23 @@ enum HorizontalScrollEdge: String, Codable {
     case top, bottom
 }
 
+enum EdgeScrollSensitivity {
+    static let defaultValue = 1.5
+    static let range = 0.5...3.0
+
+    static func clamped(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    static func output(for delta: CGVector, gain: Double) -> CGVector {
+        let multiplier = CGFloat(clamped(gain))
+        return CGVector(dx: delta.dx * multiplier, dy: delta.dy * multiplier)
+    }
+}
+
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 25
+    static let schemaVersion = 26
 
     var version = schemaVersion
     var trayEnabled = true
@@ -1026,13 +1042,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var verticalScrollEdge = VerticalScrollEdge.right
     var horizontalEdgeScrolling = false
     var horizontalScrollEdge = HorizontalScrollEdge.bottom
+    var edgeScrollSensitivity = EdgeScrollSensitivity.defaultValue
     var scrollMomentumEnabled = true
-    var scrollMotionFeedback = true
+    var scrollMotionFeedback = false
     var showTrackpadBorder = true
 
-    var activeScrollEdges: [ScrollStripEdge] {
+    func activeScrollEdges(trackpad: Bool) -> [ScrollStripEdge] {
         switch edgeScrolling {
-        case .automatic: return [.right]
+        case .automatic: return trackpad ? [.right, .bottom] : [.right]
         case .off: return []
         case .manual:
             var edges: [ScrollStripEdge] = []
@@ -1208,6 +1225,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
         verticalScrollEdge = (try? value(.verticalScrollEdge, fallback.verticalScrollEdge)) ?? fallback.verticalScrollEdge
         horizontalEdgeScrolling = try value(.horizontalEdgeScrolling, fallback.horizontalEdgeScrolling)
         horizontalScrollEdge = (try? value(.horizontalScrollEdge, fallback.horizontalScrollEdge)) ?? fallback.horizontalScrollEdge
+        let sensitivity = (try? value(.edgeScrollSensitivity, fallback.edgeScrollSensitivity)) ?? fallback.edgeScrollSensitivity
+        edgeScrollSensitivity = EdgeScrollSensitivity.clamped(sensitivity)
         scrollMomentumEnabled = try value(.scrollMomentumEnabled, fallback.scrollMomentumEnabled)
         scrollMotionFeedback = try value(.scrollMotionFeedback, fallback.scrollMotionFeedback)
         showTrackpadBorder = try value(.showTrackpadBorder, fallback.showTrackpadBorder)
@@ -1498,7 +1517,7 @@ struct ReceiverControlPreferencesRepository {
             value.showCursorLocator = false
             value.version = 24
         }
-        if value.version < 25 { value.version = 25 }
+        if value.version < 26 { value.version = 26 }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
         // user's visibility, order, or group choices; a tray still at an

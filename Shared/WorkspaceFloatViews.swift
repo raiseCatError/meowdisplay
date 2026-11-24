@@ -230,6 +230,7 @@ struct WorkspaceFloatLayer: View {
     let inputAllowed: Bool
     /// Close Window on Mac… (asks first, in the chrome).
     var onClose: (String) -> Void
+    var localTrackpad: ((String, CGRect) -> AnyView)? = nil
     /// Pane titles and floats' title pills: the first-use tip keeps clear of them.
     var tipAvoiding: [CGRect] = []
     /// Where the drag's placement chip is drawn: the tip goes beside or below it.
@@ -353,6 +354,9 @@ struct WorkspaceFloatLayer: View {
     // MARK: A float
 
     private func title(_ id: String) -> String {
+        if let source = model.layout.tiles[id]?.source, source.isTrackpad, let item = model.windowItem(source) {
+            return item.title
+        }
         if let s = model.tileState(id) { return s.title.isEmpty ? s.app : s.title }
         if let w = model.layout.tiles[id]?.source?.windowID, let item = model.catalog?.windows.first(where: { $0.id == w }) {
             return item.title.isEmpty ? item.app : item.title
@@ -394,7 +398,11 @@ struct WorkspaceFloatLayer: View {
         ZStack {
             if !docked {
                 Group {
-                    if drawnHere, let image = model.backdrop(id)?.image,
+                    if model.layout.tiles[id]?.source?.isTrackpad == true, let localTrackpad {
+                        localTrackpad(id, rect)
+                            .frame(width: rect.width, height: rect.height)
+                            .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+                    } else if drawnHere, let image = model.backdrop(id)?.image,
                        let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
                         FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
                     } else if drawnHere {
@@ -774,7 +782,9 @@ struct WorkspaceFloatLayer: View {
             act(String(localized: "Tuck Left"), "sidebar.left") { tuck(id, .left) },
             act(String(localized: "Tuck Right"), "sidebar.right") { tuck(id, .right) },
         ])
-        let isOverview = model.layout.tiles[id]?.source?.isOverview == true
+        let source = model.layout.tiles[id]?.source
+        let isOverview = source?.isOverview == true
+        let isTrackpad = source?.isTrackpad == true
         let resetView = act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) }
         let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: isOverview ? [resetView] : [
             filled ? act(String(localized: "Whole Window"), "rectangle.arrowtriangle.2.inward") { model.toggleFit(id) }
@@ -786,13 +796,23 @@ struct WorkspaceFloatLayer: View {
         if !front {
             local.append(act(String(localized: "Bring to Front"), "square.3.layers.3d.top.filled") { model.raiseFloat(id); model.focus(id, raise: false) })
         }
+        if let tile = model.layout.tiles[id], tile.tabs.count > 1 {
+            let tabs = tile.tabs.enumerated().map { index, source in
+                UIAction(title: model.windowItem(source)?.title ?? String(localized: "Window"),
+                         state: source == tile.source ? .on : .off) { _ in
+                    model.switchTab(id, to: index)
+                }
+            }
+            local.append(UIMenu(title: String(localized: "Tabs"), image: UIImage(systemName: "rectangle.on.rectangle"),
+                                children: tabs))
+        }
         local.append(act(String(localized: "Add to Layout"), "rectangle.split.2x1") { model.addFloatToLayout(id) })
         var sizes = [
             act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.45 : 0.3) },
             act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.65 : 0.45) },
             act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.9 : 0.65) },
         ]
-        if !isOverview {
+        if !isOverview, !isTrackpad {
             sizes.append(act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) })
         }
         local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"),
@@ -800,6 +820,7 @@ struct WorkspaceFloatLayer: View {
         local.append(act(String(localized: "Change Window…"), "macwindow.on.rectangle") { model.openOverview(replacing: id) })
         local.append(act(String(localized: "Remove from This Device"), "rectangle.badge.minus") { model.removeFloat(id) })
         let localMenu = UIMenu(title: "", options: .displayInline, children: local)
+        if isTrackpad { return [placement, localMenu] }
         if isOverview { return [placement, view, localMenu] }
 
         // The real window on the Mac: needs control, and says so.

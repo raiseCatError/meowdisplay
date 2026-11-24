@@ -482,7 +482,7 @@ enum WorkspaceRequests {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
-            guard let tile = layout.tiles[id], let source = tile.source, source.host == host,
+            guard let tile = layout.tiles[id], let source = tile.source, source.host == host, !source.isTrackpad,
                   let r = frames.tiles[id], r.width > 0, r.height > 0 else { continue }
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
                                     "follow": source.follow.rawValue,
@@ -508,7 +508,7 @@ enum WorkspaceRequests {
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
-        if let focus { m["focus"] = focus }
+        if let focus, layout.tiles[focus]?.source?.isTrackpad != true { m["focus"] = focus }
         // Every window held here, shown or not (other tabs, tucked floats): the Mac says which closed.
         if !watch.isEmpty { m["watch"] = watch.prefix(128).map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         return m
@@ -944,7 +944,14 @@ final class WorkspaceModel: ObservableObject {
     /// Unified Clipboard with the connected Mac (off until turned on here and allowed there).
     let clipboard: ClipboardModel
 
-    var active: String? { remote?.active }
+    @Published private var localTrackpadFocus: String?
+
+    var active: String? {
+        if let localTrackpadFocus, layout.tiles[localTrackpadFocus]?.source?.isTrackpad == true {
+            return localTrackpadFocus
+        }
+        return remote?.active ?? frames.tiles.keys.sorted().first { layout.tiles[$0]?.source?.isTrackpad == true }
+    }
     /// The connected Mac's name as paired (never a name the network claims).
     var hostName: String {
         host.flatMap { id in TrustStore.receiverRole.pinnedPeers().first { $0.peerID == id }?.displayName } ?? "your Mac"
@@ -991,7 +998,9 @@ final class WorkspaceModel: ObservableObject {
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
-            trackpadPeekSupported = f.contains(TrackpadStagePeekWire.welcomeFeature)
+            trackpadPeekSupported = f.contains(TrackpadStagePeekWire.textOnlyFeature)
+            if !trackpadPeekSupported { clearTrackpadPeek() }
+            workspaceTrackpadSupported = f.contains(WorkspaceTrackpadWire.feature)
             extendedDisplaySupported = f.contains(WorkspaceExtendedDisplayWire.feature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
@@ -1039,10 +1048,10 @@ final class WorkspaceModel: ObservableObject {
         case .catalog(let c):
             onCatalog(c)
         case .trackpadCatalog(let token, let catalog):
-            guard token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
             trackpadPeekCatalog = catalog
         case .trackpadApps(let token, let revision, let apps):
-            guard token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
             trackpadPeekAppsRevision = revision
             if let apps { trackpadPeekApps = apps }
         case .extendedDisplay(let request, let status, let display, let uuid):
@@ -1180,6 +1189,8 @@ final class WorkspaceModel: ObservableObject {
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canShowOverviewPane = false
+            workspaceTrackpadSupported = false
+            localTrackpadFocus = nil
             supportsOffscreenRestore = false
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
@@ -1274,6 +1285,7 @@ final class WorkspaceModel: ObservableObject {
         var rebased = saved
         for (id, tile) in saved.tiles {
             guard let source = tile.source else { continue }
+            if source.isTrackpad { continue }
             if source.isOverview {
                 if c.displays.isEmpty { missing.insert(id) }
                 continue
@@ -2190,6 +2202,29 @@ final class WorkspaceModel: ObservableObject {
     var overviewPaneDisplays: [CatalogDisplayItem] { OverviewPaneInput.shownDisplays(catalog?.displays ?? []) }
 
     /// Whether the pane holding the focus shows the Overview (the Mac draws its cursor there).
+    @Published private(set) var workspaceTrackpadSupported = false
+
+    var activeTrackpadID: String? { active.flatMap { layout.tiles[$0]?.source?.isTrackpad == true ? $0 : nil } }
+
+    func addTrackpadTab() {
+        guard windowMode, workspaceTrackpadSupported, let host else { return }
+        let source = WorkspaceSource.trackpad(host: host)
+        if let holder = layout.tile(holding: source), let tile = layout.tiles[holder] {
+            if let index = tile.tabs.firstIndex(where: \.isTrackpad) { switchTab(holder, to: index) }
+            else { focus(holder, raise: false) }
+        } else if let target = [requestedFocus, active, lastFocusedPane].compactMap({ $0 })
+            .first(where: { layout.orderedTileIDs.contains($0) }) ?? layout.orderedTileIDs.first {
+            edit { $0.addingTab(source, to: target) }
+            focus(target, raise: false)
+        } else {
+            let id = "w\(nextTile)"
+            nextTile += 1
+            edit { $0.adding(WorkspaceTile(id: id, source: source), landscape: size.width >= size.height) }
+            focus(id, raise: false)
+        }
+        stagePeekCloseRequest += 1
+    }
+
     var activeIsOverview: Bool { active.flatMap { layout.tiles[$0]?.source?.isOverview } ?? false }
 
     /// What the pane at `p` (normalized to the picture) shows: nil where there's no pane or it's empty.
@@ -2249,6 +2284,11 @@ final class WorkspaceModel: ObservableObject {
 
     /// The catalog entry a pane source shows (a display's pseudo-window for displays).
     func windowItem(_ source: WorkspaceSource) -> CatalogWindowItem? {
+        if source.isTrackpad {
+            let name = String(localized: "Trackpad")
+            return CatalogWindowItem(id: source.windowID, generation: 0, bundleID: "", app: name, title: name,
+                                     width: 0, height: 0, minimized: false, active: false)
+        }
         if source.isOverview { return overviewWindow }
         if source.isDisplay { return display(for: source).map(displayWindow) }
         return catalog?.windows.first { $0.id == source.windowID }
@@ -2444,6 +2484,7 @@ final class WorkspaceModel: ObservableObject {
         guard let c = catalog else { return }
         missing = Set(saved.tiles.compactMap { id, tile in
             guard let source = tile.source else { return nil }
+            if source.isTrackpad { return nil }
             if source.isOverview { return c.displays.isEmpty ? id : nil }
             if source.isDisplay { return display(for: source) == nil ? id : nil }
             let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
@@ -3507,6 +3548,12 @@ final class WorkspaceModel: ObservableObject {
     /// device): the Mac window then stays where it is, and comes forward only when a key or a
     /// press for it needs it to (never typing into another window meanwhile).
     func focus(_ tile: String, raise: Bool = true) {
+        if layout.tiles[tile]?.source?.isTrackpad == true {
+            requestedFocus = nil
+            localTrackpadFocus = tile
+            return
+        }
+        localTrackpadFocus = nil
         if layout.tiles[tile] != nil, !layout.isFloat(tile) { lastFocusedPane = tile }
         requestedFocus = tile
         _ = send(WorkspaceRequests.focus(tile, raise: raise))
@@ -4214,11 +4261,12 @@ extension WorkspaceModel {
     /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,
     /// else the pane focused before it. Nothing is sent to the Mac but the focus.
     private func refocus(after id: String) {
-        guard active == id || requestedFocus == id else { return }
+        guard active == id || requestedFocus == id || localTrackpadFocus == id else { return }
         let next = layout.visibleFloatIDs.last { $0 != id }
             ?? lastFocusedPane.flatMap { layout.orderedTileIDs.contains($0) ? $0 : nil }
             ?? layout.orderedTileIDs.first
         if let next { focus(next, raise: false) }
+        else { localTrackpadFocus = nil }
     }
 
     // MARK: Drag placement (Pane | Floating)

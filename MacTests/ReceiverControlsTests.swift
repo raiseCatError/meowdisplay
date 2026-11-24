@@ -447,7 +447,7 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertFalse(preferences.showSurfaceGrid)
         XCTAssertTrue(preferences.showTrackpadBorder)
         XCTAssertTrue(preferences.scrollMomentumEnabled)
-        XCTAssertTrue(preferences.scrollMotionFeedback)
+        XCTAssertFalse(preferences.scrollMotionFeedback)
         preferences.edgeScrolling = .manual
         preferences.verticalScrollEdge = .left
         preferences.horizontalEdgeScrolling = true
@@ -455,12 +455,59 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.showTrackpadBorder = false
         let data = try JSONEncoder().encode(preferences)
         preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
-        XCTAssertEqual(preferences.activeScrollEdges, [.left, .top])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: false), [.left, .top])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.left, .top])
         XCTAssertFalse(preferences.showTrackpadBorder)
         preferences.edgeScrolling = .automatic
-        XCTAssertEqual(preferences.activeScrollEdges, [.right])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: false), [.right])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.right, .bottom])
         preferences.edgeScrolling = .manual
-        XCTAssertEqual(preferences.activeScrollEdges, [.left, .top])
+        preferences.verticalEdgeScrolling = false
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.top])
+        preferences.horizontalEdgeScrolling = false
+        XCTAssertTrue(preferences.activeScrollEdges(trackpad: true).isEmpty)
+    }
+
+    func testEdgeScrollSensitivityAndFeedbackSurvivePreferenceRoundTrip() throws {
+        let legacy = Data(#"{"version":25,"scrollMotionFeedback":true}"#.utf8)
+        var preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertTrue(preferences.scrollMotionFeedback)
+        XCTAssertGreaterThan(preferences.edgeScrollSensitivity, 1)
+        preferences.edgeScrollSensitivity = 2
+        let data = try JSONEncoder().encode(preferences)
+        let stored = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
+        XCTAssertEqual(stored.edgeScrollSensitivity, 2)
+        XCTAssertTrue(stored.scrollMotionFeedback)
+        let excessive = Data(#"{"edgeScrollSensitivity":500}"#.utf8)
+        let limited = try JSONDecoder().decode(ReceiverControlPreferences.self, from: excessive)
+        XCTAssertEqual(limited.edgeScrollSensitivity, EdgeScrollSensitivity.range.upperBound)
+    }
+
+    func testEdgeScrollRailsLeaveSeparateSpaceForExpandedControls() throws {
+        for size in [CGSize(width: 390, height: 780), CGSize(width: 720, height: 310),
+                     CGSize(width: 1024, height: 768)] {
+            let screen = CGRect(origin: .zero, size: size)
+            let safe = screen.insetBy(dx: 20, dy: 24)
+            let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe, avoiding: [])
+            let vertical = try XCTUnwrap(rails[.right])
+            let horizontal = try XCTUnwrap(rails[.bottom])
+            XCTAssertTrue(safe.contains(vertical))
+            XCTAssertTrue(safe.contains(horizontal))
+            XCTAssertEqual(vertical.height, safe.height - 16)
+            XCTAssertFalse(vertical.intersects(horizontal))
+            let controls = EdgeScrollStripGeometry.controlBounds(in: screen, reserving: rails)
+            XCTAssertFalse(controls.intersects(vertical))
+            XCTAssertFalse(controls.intersects(horizontal))
+            let room = ControlTrayGeometry.layout(
+                container: controls, safeInsets: .zero, keyboardVisibleRect: nil, portrait: size.height > size.width,
+                side: .trailing, traySize: CGSize(width: 130, height: 44),
+                paletteSize: CGSize(width: 220, height: 92), avoidNotch: false)
+            for frame in [room.trayFrame, room.paletteFrame] {
+                XCTAssertTrue(controls.contains(frame))
+                XCTAssertFalse(vertical.intersects(frame))
+                XCTAssertFalse(horizontal.intersects(frame))
+            }
+        }
     }
 
     func testLegacyCursorLocatorDefaultDoesNotBecomeAnOptIn() throws {
