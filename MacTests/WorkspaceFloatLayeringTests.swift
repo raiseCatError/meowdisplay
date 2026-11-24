@@ -1,3 +1,4 @@
+import CoreGraphics
 import XCTest
 
 /// Receiver chrome layering (Shared/WorkspaceFloats.swift, `WorkspaceFloatLayering`): a float's
@@ -76,6 +77,48 @@ final class WorkspaceFloatLayeringTests: XCTestCase {
                                                                                WorkspaceRect(x: 500, y: 450, width: 200, height: 100)])
         XCTAssertEqual(three.map(\.x), [0, 200, 700])
         XCTAssertEqual(three.map(\.maxX), [100, 500, 1000])
+    }
+
+    func testQuickCloseFitsBelowTheTitleWithoutTouchingResizeGrips() {
+        let content = CGRect(x: 60, y: 100, width: 120, height: 80)
+        let title = CGRect(x: 58, y: 85, width: 124, height: 30)
+        let grip = CGRect(x: 32, y: 164, width: 44, height: 44)
+        let target = WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [title, grip])
+        XCTAssertEqual(target, CGRect(x: 64, y: 119, width: 44, height: 44))
+    }
+
+    func testQuickCloseMovesOutOfAnOccludingFloatOrHidesWhenNoTargetFits() {
+        let content = CGRect(x: 60, y: 100, width: 120, height: 80)
+        let covered = CGRect(x: 60, y: 100, width: 120, height: 60)
+        XCTAssertNil(WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [covered]))
+    }
+
+    func testQuickCloseRequiresTwoTapsOnTheSameFloat() {
+        var close = WorkspaceFloatQuickClose()
+        XCTAssertFalse(close.tap("first", at: 1))
+        XCTAssertFalse(close.tap("second", at: 1))
+        XCTAssertEqual(close.armedID, "second")
+        XCTAssertTrue(close.tap("second", at: 1))
+        XCTAssertNil(close.armedID)
+    }
+
+    func testQuickCloseTreatsASecondTapAfterTheDeadlineAsANewArm() {
+        var close = WorkspaceFloatQuickClose()
+        XCTAssertFalse(close.tap("first", at: 1))
+        XCTAssertFalse(close.tap("first", at: 1 + WorkspaceFloatQuickClose.confirmationSeconds))
+        XCTAssertTrue(close.tap("first", at: 5))
+    }
+
+    func testQuickCloseExpiryCannotCancelTheNextArm() {
+        var close = WorkspaceFloatQuickClose()
+        XCTAssertFalse(close.tap("first", at: 1))
+        let firstGeneration = close.generation
+        close.cancel()
+        XCTAssertFalse(close.tap("first", at: 1))
+        close.cancel(generation: firstGeneration)
+        XCTAssertEqual(close.armedID, "first")
+        close.cancel(generation: close.generation)
+        XCTAssertFalse(close.tap("first", at: 1))
     }
 
     /// Grips and the grabber clutter the picture (and take touches) on floats nobody is using.

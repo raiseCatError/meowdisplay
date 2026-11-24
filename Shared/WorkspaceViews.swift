@@ -78,6 +78,8 @@ struct WorkspaceChromeView: View {
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
     var onViewFullScreen: (() -> Void)?
     var localTrackpad: ((String, CGRect) -> AnyView)?
+    var floatCloseHapticsEnabled = true
+    var floatCloseAvoiding: [CGRect] = []
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
@@ -144,6 +146,13 @@ struct WorkspaceChromeView: View {
                 .onChange(of: divisions) { _ in model.updateSpace(size, hinge: hinge) }
             chrome
         }
+        #if os(iOS)
+        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { event in
+            if !model.floatCloseTargetsGlobal.contains(where: { $0.contains(event.location) }) {
+                model.cancelFloatClose()
+            }
+        })
+        #endif
     }
 
     @ViewBuilder
@@ -187,6 +196,8 @@ struct WorkspaceChromeView: View {
                 if !model.arranging {
                     WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
                                         onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
+                                        closeHapticsEnabled: floatCloseHapticsEnabled,
+                                        closeAvoiding: divisions + controls + floatCloseAvoiding,
                                         tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif

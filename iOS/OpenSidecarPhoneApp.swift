@@ -675,12 +675,14 @@ struct ReceiverScreen: View {
                                    onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
                                    onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
                                    onActivityBegan: {
+                                       model.workspace.cancelFloatClose()
                                        controlStore.beginAutoHideActivity()
                                        // A touch on the Mac closes the arrow keypad; the touch still goes through.
                                        controlStore.noteSurfaceTouch()
                                    },
                                    onActivityEnded: { controlStore.scheduleAutoHide() },
                                    onEdgeScrollBegan: {
+                                       model.workspace.cancelFloatClose()
                                        controlStore.beginAutoHideActivity()
                                    },
                                    preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
@@ -831,7 +833,9 @@ struct ReceiverScreen: View {
                                             controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
                                             onSettings: { showSettings = true },
                                             onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) },
-                                            localTrackpad: { id, rect in windowTrackpad(id, rect: rect) })
+                                            localTrackpad: { id, rect in windowTrackpad(id, rect: rect) },
+                                            floatCloseHapticsEnabled: controlStore.preferences.hapticsEnabled,
+                                            floatCloseAvoiding: Array(surfaceScrollRails.values))
                             .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
                             .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                             .stepsAside(forAllApps: model.workspace.launchpadOpen)
@@ -1108,6 +1112,11 @@ struct ReceiverScreen: View {
                 .transition(slideTransition(from: .top))
             }
         }
+        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { tap in
+            if !model.workspace.floatCloseTargetsGlobal.contains(where: { $0.contains(tap.location) }) {
+                model.workspace.cancelFloatClose()
+            }
+        })
         .task(id: trackpadGuideContext) {
             guard let inWindow = trackpadGuideContext else { model.receiver.stopTrackpadLayout(); return }
             while !Task.isCancelled {

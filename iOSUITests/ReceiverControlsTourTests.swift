@@ -88,6 +88,32 @@ final class ReceiverControlsTourTests: XCTestCase {
     }
 
     @MainActor
+    func testFloatingPaneQuickCloseInDemo() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let toggle = app.buttons["demoWindowViewToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        app.buttons["demoOpenFloating"].tap()
+        let pane = element("workspaceFloat")
+        XCTAssertTrue(pane.waitForExistence(timeout: 5))
+        let close = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "floatQuickClose-")).firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(close.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(close.frame.height, 44)
+        snapshot("float-quick-close-idle")
+        close.tap()
+        XCTAssertEqual(close.label, "Confirm Close Floating Pane")
+        snapshot("float-quick-close-armed")
+
+        let reset = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Close Floating Pane"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [reset], timeout: 6), .completed)
+        close.doubleTap()
+        XCTAssertTrue(pane.waitForNonExistence(timeout: 5))
+        snapshot("float-quick-close-removed")
+    }
+
+    @MainActor
     func testControlsTourLandscape() {
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }

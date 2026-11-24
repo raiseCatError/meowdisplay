@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // Floating panes: Window mode panes that float above the tiled panes (or above a Full Desktop
@@ -1213,6 +1214,21 @@ enum WorkspaceFloatLayering {
         }
     }
 
+    /// A full-sized close target near the top-left, below any chrome or float covering it.
+    static func closeTarget(in content: CGRect, safe: CGRect?, avoiding obstacles: [CGRect]) -> CGRect? {
+        let area = safe.map { content.intersection($0) } ?? content
+        let side: CGFloat = 44
+        let inset: CGFloat = 4
+        guard !area.isNull, area.width >= side + inset, area.height >= side + inset else { return nil }
+        let x = area.minX + inset
+        let rows = obstacles.filter { $0.minX < x + side && $0.maxX > x }.map { $0.maxY + inset }
+        for y in ([area.minY + inset] + rows).sorted() where y >= area.minY + inset && y + side <= area.maxY {
+            let target = CGRect(x: x, y: y, width: side, height: side)
+            if !obstacles.contains(where: { $0.intersects(target) }) { return target }
+        }
+        return nil
+    }
+
     /// The parts of a straight strip (a divider's touch area) that no float covers, each at least
     /// `minLength` long: a divider stays draggable where it's visible and never takes a touch
     /// meant for a float drawn over it.
@@ -1237,6 +1253,33 @@ enum WorkspaceFloatLayering {
     /// picture and take touches meant for the windows around them.
     static func showsHandles(selected: Bool, hovered: Bool, manipulating: Bool) -> Bool {
         selected || hovered || manipulating
+    }
+}
+
+/// One receiver-local arm at a time. A tap on another float starts its own confirmation.
+struct WorkspaceFloatQuickClose {
+    static let confirmationSeconds: TimeInterval = 3
+
+    private(set) var armedID: String?
+    private(set) var generation = 0
+    private var deadline: TimeInterval = 0
+
+    /// Returns true only on the second activation of the same float before its deadline.
+    mutating func tap(_ id: String, at time: TimeInterval) -> Bool {
+        if armedID == id, time < deadline {
+            cancel()
+            return true
+        }
+        generation &+= 1
+        armedID = id
+        deadline = time + Self.confirmationSeconds
+        return false
+    }
+
+    /// An old timeout cannot cancel an arm that replaced it.
+    mutating func cancel(generation expected: Int? = nil) {
+        if let expected, expected != generation { return }
+        armedID = nil
     }
 }
 

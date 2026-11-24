@@ -945,6 +945,13 @@ final class WorkspaceModel: ObservableObject {
     let clipboard: ClipboardModel
 
     @Published private var localTrackpadFocus: String?
+    @Published private(set) var floatCloseCancellationGeneration = 0
+    var floatCloseTargetsGlobal: [CGRect] = []
+
+    func cancelFloatClose() {
+        guard !floatCloseTargetsGlobal.isEmpty else { return }
+        floatCloseCancellationGeneration &+= 1
+    }
 
     var active: String? {
         if let localTrackpadFocus, layout.tiles[localTrackpadFocus]?.source?.isTrackpad == true {
@@ -3548,6 +3555,7 @@ final class WorkspaceModel: ObservableObject {
     /// device): the Mac window then stays where it is, and comes forward only when a key or a
     /// press for it needs it to (never typing into another window meanwhile).
     func focus(_ tile: String, raise: Bool = true) {
+        if tile != active { cancelFloatClose() }
         if layout.tiles[tile]?.source?.isTrackpad == true {
             requestedFocus = nil
             localTrackpadFocus = tile
