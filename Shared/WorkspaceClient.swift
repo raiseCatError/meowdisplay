@@ -241,6 +241,7 @@ enum WorkspaceEvent: Sendable {
     case appCatalog(revision: Int, apps: [MacAppItem]?)
     case trackpadCatalog(UUID, WorkspaceCatalogMessage)
     case trackpadApps(UUID, revision: Int, apps: [MacAppItem]?)
+    case trackpadIcon(UUID, bundleID: String, data: Data)
     case extendedDisplay(UUID, status: String, display: UInt32?, uuid: String?)
     case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
@@ -405,6 +406,9 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadIcon($0, bundleID: bundle, data: data) }
+            }
             return .icon(bundleID: bundle, data: data)
         default:
             return nil
@@ -658,6 +662,7 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var trackpadPeekSupported = false
     @Published private(set) var trackpadPeekCatalog: WorkspaceCatalogMessage?
     @Published private(set) var trackpadPeekApps: [MacAppItem] = []
+    @Published private(set) var trackpadPeekIcons: [String: CGImage] = [:]
     private var trackpadPeekToken: UUID?
     private var trackpadPeekAppsRevision: Int?
     var trackpadPeekAllowed: () -> Bool = { false }
@@ -1061,6 +1066,11 @@ final class WorkspaceModel: ObservableObject {
             guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
             trackpadPeekAppsRevision = revision
             if let apps { trackpadPeekApps = apps }
+        case .trackpadIcon(let token, let bundle, let data):
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked,
+                  trackpadPeekIcons.count < AppIconRequestPlanner.keep,
+                  let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            trackpadPeekIcons[bundle] = image
         case .extendedDisplay(let request, let status, let display, let uuid):
             guard extendedDisplayRequest == request, windowMode else { return }
             switch status {
@@ -1479,6 +1489,12 @@ final class WorkspaceModel: ObservableObject {
         if trackpadPeekToken == nil { trackpadPeekToken = UUID() }
         sendTrackpadPeek(WorkspaceRequests.catalog(installed: false))
         sendTrackpadPeek(WorkspaceRequests.appCatalog(revision: trackpadPeekAppsRevision))
+        let bundles = (trackpadPeekCatalog?.windows.map(\.bundleID) ?? []) + trackpadPeekApps.map(\.bundleID)
+        var seen = Set<String>()
+        let missing = bundles.filter { !$0.isEmpty && trackpadPeekIcons[$0] == nil && seen.insert($0).inserted }
+        if !missing.isEmpty {
+            sendTrackpadPeek(WorkspaceRequests.thumbnails([], maxWidth: 96, icons: Array(missing.prefix(32))))
+        }
     }
 
     func clearTrackpadPeek() {
@@ -1486,6 +1502,7 @@ final class WorkspaceModel: ObservableObject {
         trackpadPeekAppsRevision = nil
         if trackpadPeekCatalog != nil { trackpadPeekCatalog = nil }
         if !trackpadPeekApps.isEmpty { trackpadPeekApps = [] }
+        if !trackpadPeekIcons.isEmpty { trackpadPeekIcons = [:] }
     }
 
     func sendTrackpadPeek(_ action: [String: Any]) {

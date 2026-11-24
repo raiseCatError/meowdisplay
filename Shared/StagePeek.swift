@@ -551,13 +551,18 @@ enum StagePeekLayout {
     /// `fitsRegion`: the compact cards are also no taller than `StagePeekCompactBand` allows
     /// for that band, so a short landscape band still holds the highlighted card and its
     /// neighbours (#130). Off, and for the Normal Dock, the sizes are what they always were.
+    static func compactCardWidth(in safe: CGRect, isPad: Bool, metadataOnly: Bool) -> CGFloat {
+        if metadataOnly { return min(max(1, safe.width - 32), isPad ? 360 : 270) }
+        return min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+    }
+
     static func cards(aspects: [Double], position: Double, expansion: Double, edge: StagePeekEdge,
                       safe: CGRect, isPad: Bool, reduceMotion: Bool, region: CGRect? = nil,
-                      fitsRegion: Bool = false) -> [StagePeekCard] {
+                      fitsRegion: Bool = false, metadataOnly: Bool = false) -> [StagePeekCard] {
         guard !aspects.isEmpty, safe.width > 0, safe.height > 0 else { return [] }
         let e = CGFloat(min(max(expansion, 0), 1))
         func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * e }
-        let compactWidth = min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+        let compactWidth = compactCardWidth(in: safe, isPad: isPad, metadataOnly: metadataOnly)
         let expandedWidth = min(max(safe.width * 0.6, compactWidth), isPad ? 640 : 420)
         let maxWidth = lerp(compactWidth, expandedWidth)
         var compactHeight = safe.height * 0.26
@@ -567,7 +572,7 @@ enum StagePeekLayout {
         func cardSize(_ i: Int) -> CGSize {
             let aspect = CGFloat(min(max(aspects[i], 0.5), 2.2))
             var w = maxWidth, h = w / aspect
-            if h > maxHeight { h = maxHeight; w = h * aspect }
+            if h > maxHeight { h = maxHeight; if !metadataOnly { w = h * aspect } }
             return CGSize(width: w, height: h)
         }
         let focusSize = cardSize(focus)

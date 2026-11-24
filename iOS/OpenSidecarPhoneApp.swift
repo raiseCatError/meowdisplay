@@ -599,7 +599,8 @@ struct ReceiverScreen: View {
             // complete new snapshot, never an update to the previous one.
             let reservedRegions = ControlReservedRegion.active(in: geo)
             let videoEnabled = model.receiver.videoEnabled
-            let canvas = canvas(in: geo.size)
+            let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+            let canvas = !videoEnabled && !divisions.isEmpty ? CGRect(origin: .zero, size: geo.size) : canvas(in: geo.size)
             let workspaceVisible = videoEnabled && !lockScreenShowing
             let workspaceEditing = workspaceVisible && (model.workspace.drag != nil || model.workspace.arranging)
             let workspaceOverlayOpen = trackpadPeekOpen || (workspaceVisible &&
@@ -607,28 +608,11 @@ struct ReceiverScreen: View {
             let safeCanvas = effectiveSafeInsets.safeRect(in: geo.size).intersection(canvas)
             let visibleCanvas = shownKeyboardRect.map { $0.offsetBy(dx: canvas.minX, dy: canvas.minY) } ?? canvas
             let padArea = safeCanvas.intersection(visibleCanvas)
-            let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
             let scrollRailFrames = EdgeScrollStripGeometry.frames(
-                edges: model.receiver.macSupportsScrollAtCursor && inputReachesMac
+                edges: model.receiver.macSupportsScrollAtCursor
                     ? controlStore.preferences.activeScrollEdges(trackpad: !videoEnabled) : [],
                 in: safeCanvas,
                 avoiding: divisions + ControlReservedRegion.frames(of: .occlusion, in: reservedRegions))
-            let localTrackpadID = workspaceVisible && model.workspace.windowMode ? model.workspace.activeTrackpadID : nil
-            let workspaceFrames = model.workspace.frames
-            let localPad = localTrackpadID.flatMap { workspaceFrames.tiles[$0] }
-            let windowRails = localPad.map { pane in
-                let picture = workspacePicture(canvas: canvas).drawn
-                let rect = pane.onScreen(picture)
-                let floats = workspaceFrames.floats
-                let covers = floats.dropFirst(localTrackpadID.flatMap(floats.firstIndex(of:)).map { $0 + 1 } ?? 0)
-                    .compactMap { workspaceFrames.tiles[$0]?.onScreen(picture) }
-                return EdgeScrollStripGeometry.frames(
-                    edges: model.receiver.macSupportsScrollAtCursor && inputReachesMac
-                        ? controlStore.preferences.activeScrollEdges(trackpad: true) : [],
-                    in: rect.inset(by: UIEdgeInsets(top: 40, left: 0, bottom: 0, right: 0)).intersection(safeCanvas),
-                    avoiding: divisions + occupiedControlFrames + covers)
-            }
-            let surfaceScrollRails = windowRails ?? scrollRailFrames
             let peekEdge: ScrollStripEdge = controlStore.preferences.stagePeekEdge == .left ? .left : .right
             let peekSideRail = scrollRailFrames.filter { $0.key == peekEdge }
             let peekSafe = EdgeScrollStripGeometry.controlBounds(in: safeCanvas, reserving: peekSideRail)
@@ -713,13 +697,14 @@ struct ReceiverScreen: View {
                                    workspaceTrackpadSelected: workspaceVisible && model.workspace.activeTrackpadID != nil,
                                    invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
                                    invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
-                                   scrollRailFrames: !lockScreenShowing && !showSettings
+                                   scrollRailFrames: inputReachesMac && !lockScreenShowing && !showSettings
                                        && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
-                                       && !controlStore.moveViewActive && !controlStore.autoHidden && model.workspace.floatGesture == nil
-                                       ? surfaceScrollRails.mapValues { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) } : [:],
+                                       && !controlStore.moveViewActive && !controlStore.autoHidden
+                                       ? scrollRailFrames.mapValues { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) } : [:],
+                                   touchDivisions: divisions.map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
                                    edgeScrollSensitivity: controlStore.preferences.edgeScrollSensitivity,
                                    scrollMomentumEnabled: controlStore.preferences.scrollMomentumEnabled,
-                                   scrollFeedback: (!videoEnabled || localPad != nil) && controlStore.preferences.scrollMotionFeedback
+                                   scrollFeedback: (!videoEnabled || model.workspace.activeTrackpadID != nil) && controlStore.preferences.scrollMotionFeedback
                                        && controlStore.preferences.showSurfaceGrid ? scrollFeedback : nil,
                                    onBlockedInputAttempt: { noteBlockedInputAttempt() },
                                    threeFingerHoldEnabled: workspaceVisible && model.workspace.available,
@@ -835,7 +820,7 @@ struct ReceiverScreen: View {
                                             onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) },
                                             localTrackpad: { id, rect in windowTrackpad(id, rect: rect) },
                                             floatCloseHapticsEnabled: controlStore.preferences.hapticsEnabled,
-                                            floatCloseAvoiding: Array(surfaceScrollRails.values))
+                                            floatCloseAvoiding: Array(scrollRailFrames.values))
                             .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
                             .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                             .stepsAside(forAllApps: model.workspace.launchpadOpen)
@@ -3351,6 +3336,7 @@ struct VideoLayerView: UIViewRepresentable {
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
     var scrollRailFrames: [ScrollStripEdge: CGRect] = [:]
+    var touchDivisions: [CGRect] = []
     var edgeScrollSensitivity = EdgeScrollSensitivity.defaultValue
     var scrollMomentumEnabled = true
     var scrollFeedback: TrackpadScrollFeedback?
@@ -3393,6 +3379,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setCursorLocatorEnabled(showCursorLocator)
         view.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         view.setScrollRailFrames(scrollRailFrames)
+        view.touchDivisions = touchDivisions
         view.setScrollOptions(momentum: scrollMomentumEnabled, sensitivity: edgeScrollSensitivity, feedback: scrollFeedback)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
@@ -3552,6 +3539,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setCursorLocatorEnabled(showCursorLocator)
         uiView.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         uiView.setScrollRailFrames(scrollRailFrames)
+        uiView.touchDivisions = touchDivisions
         uiView.setScrollOptions(momentum: scrollMomentumEnabled, sensitivity: edgeScrollSensitivity, feedback: scrollFeedback)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
@@ -4557,8 +4545,10 @@ struct VideoLayerView: UIViewRepresentable {
 
         /// While VoiceOver runs without Direct Touch, touches pass through
         /// this view (nothing here sees them, so nothing reaches the Mac).
+        var touchDivisions: [CGRect] = []
+
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            guard pictureTouch.picturePassesTouches else { return nil }
+            guard pictureTouch.picturePassesTouches, !touchDivisions.contains(where: { $0.contains(point) }) else { return nil }
             return super.hitTest(point, with: event)
         }
 
@@ -7356,6 +7346,10 @@ private final class EdgeScrollStrip: UIView {
         rail.layer.shadowOffset = .zero
         rail.isUserInteractionEnabled = false
         contact.backgroundColor = .white
+        contact.layer.shadowColor = UIColor.black.cgColor
+        contact.layer.shadowOpacity = 0.65
+        contact.layer.shadowRadius = 2
+        contact.layer.shadowOffset = .zero
         contact.isUserInteractionEnabled = false
         addSubview(rail)
         addSubview(contact)
@@ -7376,7 +7370,7 @@ private final class EdgeScrollStrip: UIView {
     private func updateAppearance(animated: Bool = false) {
         let expanded = interaction.isExpanded
         accessibilityValue = expanded ? String(localized: "Expanded") : nil
-        let thickness: CGFloat = expanded ? 10 : 3
+        let thickness: CGFloat = expanded ? 13 : 3
         let length = edge.isVertical ? bounds.height : bounds.width
         let cross = edge.isVertical ? bounds.width : bounds.height
         let origin = edge == .left || edge == .top ? 4 : cross - 4 - thickness
@@ -7384,14 +7378,20 @@ private final class EdgeScrollStrip: UIView {
             edge.isVertical ? CGRect(x: origin, y: start, width: thickness, height: length)
                 : CGRect(x: start, y: origin, width: length, height: thickness)
         }
-        let feedbackLength = min(38, length)
+        let feedbackLength = min(72, length)
         let start = max(0, min(length - feedbackLength, position - feedbackLength / 2))
+        let contactThickness: CGFloat = 12
+        let contactOrigin = edge == .left || edge == .top
+            ? cross - contactThickness : 0
+        let contactFrame = edge.isVertical
+            ? CGRect(x: contactOrigin, y: start, width: contactThickness, height: feedbackLength)
+            : CGRect(x: start, y: contactOrigin, width: feedbackLength, height: contactThickness)
         let update = {
             self.rail.frame = rect(start: 0, length: length)
             self.rail.layer.cornerRadius = thickness / 2
-            self.rail.alpha = expanded ? 0.48 : 0.27
-            self.contact.frame = rect(start: start, length: feedbackLength)
-            self.contact.layer.cornerRadius = thickness / 2
+            self.rail.alpha = expanded ? 0.62 : 0.27
+            self.contact.frame = contactFrame
+            self.contact.layer.cornerRadius = contactThickness / 2
             self.contact.alpha = self.isTracking ? 0.85 : 0
         }
         if animated && !UIAccessibility.isReduceMotionEnabled {

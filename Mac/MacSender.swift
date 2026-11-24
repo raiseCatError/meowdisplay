@@ -9172,7 +9172,7 @@ extension MacSender {
         guard trackpadPeekAllowed(generation: generation),
               let token = TrackpadStagePeekWire.token(in: message) else { return }
         switch type {
-        case WireMessage.windowCatalogRequest, WireMessage.appCatalogRequest, WireMessage.appLaunch:
+        case WireMessage.windowCatalogRequest, WireMessage.appCatalogRequest, WireMessage.appLaunch, WireMessage.windowThumbnailRequest:
             break
         case WireMessage.windowAction:
             guard message["action"] as? String == "activate" else { return }
@@ -9186,7 +9186,7 @@ extension MacSender {
             let selfBox = self.selfBox
             browser.sendMessage = { [weak browser] message in
                 guard let type = message["type"] as? String,
-                      type == WireMessage.windowCatalog || type == WireMessage.appCatalog else { return }
+                      [WireMessage.windowCatalog, WireMessage.appCatalog, WireMessage.appIcon].contains(type) else { return }
                 let box = WorkspaceMessageBox(value: message)
                 queue.async {
                     guard let sender = selfBox.currentOnQueue(), let browser,

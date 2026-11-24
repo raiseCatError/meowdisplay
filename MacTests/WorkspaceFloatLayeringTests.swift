@@ -79,15 +79,15 @@ final class WorkspaceFloatLayeringTests: XCTestCase {
         XCTAssertEqual(three.map(\.maxX), [100, 500, 1000])
     }
 
-    func testQuickCloseFitsBelowTheTitleWithoutTouchingResizeGrips() {
+    func testQuickCloseStaysAtTheActualCornerWithRoomForTitleAndGrip() {
         let content = CGRect(x: 60, y: 100, width: 120, height: 80)
-        let title = CGRect(x: 58, y: 85, width: 124, height: 30)
+        let title = CGRect(x: 108, y: 85, width: 70, height: 30)
         let grip = CGRect(x: 32, y: 164, width: 44, height: 44)
         let target = WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [title, grip])
-        XCTAssertEqual(target, CGRect(x: 64, y: 119, width: 44, height: 44))
+        XCTAssertEqual(target, CGRect(x: 60, y: 100, width: 44, height: 44))
     }
 
-    func testQuickCloseMovesOutOfAnOccludingFloatOrHidesWhenNoTargetFits() {
+    func testQuickCloseHidesInsteadOfMovingAwayFromAnOccludedCorner() {
         let content = CGRect(x: 60, y: 100, width: 120, height: 80)
         let covered = CGRect(x: 60, y: 100, width: 120, height: 60)
         XCTAssertNil(WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [covered]))

@@ -26,6 +26,17 @@ final class StagePeekCompactBandTests: XCTestCase {
         ("older small 568x320", CGRect(x: 0, y: 0, width: 568, height: 320)),
     ]
 
+    func testMetadataCardKeepsItsTextWidthInAShortBand() throws {
+        let safe = CGRect(x: 0, y: 0, width: 600, height: 320)
+        let region = band(safe)
+        let metadata = StagePeekLayout.cards(aspects: [1.6], position: 0, expansion: 0, edge: .left, safe: safe,
+                                             isPad: false, reduceMotion: false, region: region, fitsRegion: true,
+                                             metadataOnly: true)
+        let size = try XCTUnwrap(metadata.first?.size)
+        XCTAssertGreaterThan(size.width, 220)
+        XCTAssertLessThanOrEqual(size.height, region.height)
+    }
+
     func testTheFadeFollowsTheBandAndIsUnchangedWhenRoomy() {
         XCTAssertEqual(StagePeekCompactBand.fade(bandHeight: 178), 17.8, accuracy: 0.001)
         XCTAssertEqual(StagePeekCompactBand.fade(bandHeight: 280), StagePeekConfig.dockFade, accuracy: 0.001)

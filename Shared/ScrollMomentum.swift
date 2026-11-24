@@ -27,12 +27,12 @@ struct EdgeScrollInteraction {
 
     mutating func end(coasting: Bool, now: TimeInterval) {
         guard case .tracking = phase else { return }
-        phase = coasting ? .coasting : .holding(until: now + 2)
+        phase = coasting ? .coasting : .holding(until: now + 1)
     }
 
     mutating func momentumEnded(now: TimeInterval) {
         guard case .coasting = phase else { return }
-        phase = .holding(until: now + 2)
+        phase = .holding(until: now + 1)
     }
 
     mutating func settle(now: TimeInterval) {

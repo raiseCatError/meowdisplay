@@ -1102,7 +1102,7 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })
     }
 
-    func testTrackpadStagePeekRejectsStaleCatalogsAfterRevocationAndReconnect() throws {
+    func testTrackpadStagePeekRejectsStaleCatalogsAndIconsAfterRevocationAndReconnect() throws {
         var sent: [[String: Any]] = []
         let m = model(displays: twoDisplays) { sent.append($0) }
         var hasControl = false
@@ -1118,10 +1118,25 @@ final class OverviewPaneReceiverTests: XCTestCase {
         let catalog = try XCTUnwrap(m.catalog)
         m.apply(.trackpadCatalog(token, catalog))
         XCTAssertEqual(m.trackpadPeekCatalog, catalog)
+        let bundle = "com.example.editor"
+        let context = try XCTUnwrap(CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8,
+                                              bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let png = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(png, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let iconMessage = ["bundle": bundle, "png": (png as Data).base64EncodedString(),
+                           TrackpadStagePeekWire.tokenKey: token.uuidString]
+        let icon = try XCTUnwrap(WorkspaceEvent.parse(type: WireMessage.appIcon, iconMessage))
+        m.apply(icon)
+        XCTAssertEqual(m.trackpadPeekIcons[bundle]?.width, 16)
         hasControl = false
         m.clearTrackpadPeek()
         m.apply(.trackpadCatalog(token, catalog))
         XCTAssertNil(m.trackpadPeekCatalog)
+        m.apply(icon)
+        XCTAssertTrue(m.trackpadPeekIcons.isEmpty)
         m.apply(.disconnected)
         m.apply(.connected(peerID: "mac-b"))
         m.apply(.features(features))
@@ -1130,6 +1145,8 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertNotEqual(sent.last.flatMap(TrackpadStagePeekWire.token(in:)), token)
         m.apply(.trackpadCatalog(token, catalog))
         XCTAssertNil(m.trackpadPeekCatalog)
+        m.apply(icon)
+        XCTAssertTrue(m.trackpadPeekIcons.isEmpty)
     }
 
     func testExtendedDisplayWaitsForMatchingOwnedCatalogAndRemovesWithoutCatalog() throws {

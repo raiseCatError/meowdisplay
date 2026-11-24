@@ -2157,7 +2157,9 @@ extension ReceiverControlOverlay {
 
     @ViewBuilder
     var padBody: some View {
-        let mode = store.effectivePadLayout
+        let preferred = store.effectivePadLayout
+        let foldedTrackpad = !receiver.videoEnabled && reservedRegions.contains { $0.kind == .division }
+        let mode: PadControlLayoutMode = foldedTrackpad && preferred == .strip ? .overlay : preferred
         let container = CGRect(origin: .zero, size: containerSize)
         ZStack(alignment: .topLeading) {
             if mode == .custom, let layout = store.preferences.activeCustomLayout {

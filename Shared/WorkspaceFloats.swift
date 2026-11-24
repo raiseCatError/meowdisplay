@@ -1214,19 +1214,15 @@ enum WorkspaceFloatLayering {
         }
     }
 
-    /// A full-sized close target near the top-left, below any chrome or float covering it.
+    /// Reserve the pane's actual upper-left corner for the close action.
     static func closeTarget(in content: CGRect, safe: CGRect?, avoiding obstacles: [CGRect]) -> CGRect? {
-        let area = safe.map { content.intersection($0) } ?? content
         let side: CGFloat = 44
-        let inset: CGFloat = 4
-        guard !area.isNull, area.width >= side + inset, area.height >= side + inset else { return nil }
-        let x = area.minX + inset
-        let rows = obstacles.filter { $0.minX < x + side && $0.maxX > x }.map { $0.maxY + inset }
-        for y in ([area.minY + inset] + rows).sorted() where y >= area.minY + inset && y + side <= area.maxY {
-            let target = CGRect(x: x, y: y, width: side, height: side)
-            if !obstacles.contains(where: { $0.intersects(target) }) { return target }
-        }
-        return nil
+        let target = CGRect(x: content.minX, y: content.minY, width: side, height: side)
+        // Leave room for the pane's title and menu on the same edge.
+        guard content.width >= side + 64, content.contains(target),
+              safe?.contains(target) != false,
+              !obstacles.contains(where: { $0.intersects(target) }) else { return nil }
+        return target
     }
 
     /// The parts of a straight strip (a divider's touch area) that no float covers, each at least

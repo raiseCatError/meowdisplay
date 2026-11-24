@@ -310,7 +310,7 @@ struct WorkspaceFloatLayer: View {
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
                 // Coming back out of its edge: drawn as its edge picture until it's out.
                 if motion.edges[f.id]?.kind != .restoring {
-                    floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
+                    floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i), reservesClose: closeTargets[f.id] != nil)
                     if let target = closeTargets[f.id] { closeButton(f.id, at: target) }
                 }
             }
@@ -421,7 +421,7 @@ struct WorkspaceFloatLayer: View {
     /// touchable) where they'd sit over a float in front: they would show through that float and
     /// take its touches.
     @ViewBuilder
-    private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect]) -> some View {
+    private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect], reservesClose: Bool) -> some View {
         let active = model.active == id
         // Being docked: only its card is drawn. Its title pill and grabber stay, empty and taking
         // no new touch: the move that docks it lives on one of them, and SwiftUI cancels a
@@ -479,9 +479,9 @@ struct WorkspaceFloatLayer: View {
         // the finger took it: they never jump from under it. Being docked: only its card is drawn;
         // the pill and grabber stay, empty and taking no new touch (the docking move lives there).
         let held = start[id].map { $0.screen(in: picture) } ?? rect
-        let pill = pillFrame(rect, held: held)
+        let pill = pillFrame(rect, held: held, reservesClose: reservesClose)
         if docked || !covered(pill) {
-            titlePill(id, rect: rect, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline, docked: docked)
+            titlePill(id, width: pill.width, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline, docked: docked)
         }
         if handles {
             let grab = grabberFrame(rect, held: held)
@@ -503,9 +503,15 @@ struct WorkspaceFloatLayer: View {
         }
     }
 
-    private func pillFrame(_ rect: CGRect, held: CGRect) -> CGRect {
-        WorkspaceOverlayPlacement.floatPill(
-            content: held, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size, safe: safeArea, picture: picture)
+    private func pillFrame(_ rect: CGRect, held: CGRect, reservesClose: Bool) -> CGRect {
+        let topEdge = reservesClose
+            ? CGRect(x: held.minX + 48, y: held.minY, width: held.width - 48, height: held.height)
+            : held
+        var size = WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size
+        if reservesClose { size.width = min(size.width, topEdge.width) }
+        let pill = WorkspaceOverlayPlacement.floatPill(content: topEdge, size: size, safe: safeArea, picture: picture)
+        let x = reservesClose ? max(topEdge.minX, pill.minX) : pill.minX
+        return CGRect(x: x, y: pill.minY, width: pill.width, height: pill.height)
             .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
     }
 
@@ -522,7 +528,7 @@ struct WorkspaceFloatLayer: View {
     private func closeTarget(_ id: String, rect: CGRect, covers: [CGRect]) -> CGRect? {
         guard model.dockingFloat != id, motion.edges[id] == nil, motion.frames[id] == nil,
               start[id] == nil, resizeStart[id] == nil else { return nil }
-        let obstacles = covers + closeAvoiding + [pillFrame(rect, held: rect), grabberFrame(rect, held: rect),
+        let obstacles = covers + closeAvoiding + [grabberFrame(rect, held: rect),
                                   gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
         return WorkspaceFloatLayering.closeTarget(in: rect, safe: safeArea ?? picture, avoiding: obstacles)
     }
@@ -538,11 +544,13 @@ struct WorkspaceFloatLayer: View {
             Image(systemName: "xmark")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(armed ? 1 : 0))
-                .frame(width: armed ? 26 : 15, height: armed ? 26 : 15)
+                .frame(width: armed ? 20 : 15, height: armed ? 20 : 15)
                 .background(Color(red: 0.88, green: 0.24, blue: 0.29).opacity(armed ? 1 : 0.76), in: Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(highContrast ? 0.8 : 0.32), lineWidth: 1))
-            .frame(width: target.width, height: target.height)
-            .contentShape(Rectangle())
+                .frame(width: 24, height: 24)
+                .padding(1)
+                .frame(width: target.width, height: target.height, alignment: .topLeading)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
         .hoverEffect(.highlight)
@@ -637,14 +645,13 @@ struct WorkspaceFloatLayer: View {
     /// at an edge to tuck); tap to select, double-tap for Fullscreen on This Device; ⋯ for options.
     /// `docked`: the float is being docked (only its card shows): the pill draws nothing and takes
     /// no new touch, but stays, because the move that docks it lives here.
-    private func titlePill(_ id: String, rect: CGRect, at centre: CGPoint, active: Bool, outline: Color, docked: Bool) -> some View {
-        let maxWidth = max(min(rect.width - 28, 280), 90)
+    private func titlePill(_ id: String, width maxWidth: CGFloat, at centre: CGPoint, active: Bool, outline: Color, docked: Bool) -> some View {
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
-                appIcon(id, size: 14)
+                if maxWidth >= 90 { appIcon(id, size: 14) }
                 Text(title(id)).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(Color.white.opacity(active ? 1 : 0.8))
-                    .frame(maxWidth: max(maxWidth - 64, 40))
+                    .frame(maxWidth: max(maxWidth - 64, 12))
             }
             .opacity(docked ? 0 : 1)
             .padding(.leading, 10)

@@ -294,6 +294,15 @@ final class WindowBrowserService: @unchecked Sendable {
                 lastCatalogRequestAt = now
                 refresh(sendCatalog: true)
             case WireMessage.windowThumbnailRequest:
+                if trackpadPeek {
+                    // An icon-only request may reuse the installed-app icon path.
+                    // No request fields can enter either still-capture path.
+                    if let bundles = obj["icons"] as? [String] {
+                        let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
+                        if !fresh.isEmpty { sendIcons(fresh, stillAllowed: controlStillAllowed) }
+                    }
+                    return
+                }
                 guard allowsStills else { return }
                 let ids = (obj["ids"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
                 let width = min(max(obj["max"] as? Int ?? 240, 64), 640)
@@ -767,9 +776,10 @@ final class WindowBrowserService: @unchecked Sendable {
         return nil
     }
 
-    private func sendIcons(_ bundles: [String]) {
+    private func sendIcons(_ bundles: [String], stillAllowed: @escaping @Sendable () -> Bool = { true }) {
         DispatchQueue.main.async { [weak self] in
             for bundle in bundles {
+                guard stillAllowed() else { return }
                 // The listed copy's icon (an app on an external drive or behind a link may not be
                 // the copy Launch Services knows); nothing when no copy is there.
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil
@@ -781,7 +791,7 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
                 let msg: [String: Any] = ["type": WireMessage.appIcon, "bundle": bundle, "png": png.base64EncodedString()]
                 self?.queue.async {
-                    guard let self, self.active else { return }
+                    guard let self, self.active, stillAllowed() else { return }
                     self.icons.sent(bundle)
                     self.sendMessage?(msg)
                 }

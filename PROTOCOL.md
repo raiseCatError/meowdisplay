@@ -1666,13 +1666,15 @@ preapproval ends a pending arrangement from that approval.
 **Stage Peek with video off.** `welcome.workspaceFeatures` can include
 `trackpadStagePeek` and `trackpadPeekText`. The latter allows a receiver
 to require text-only catalog replies. Older peers keep reading `features`.
-Requests for a window catalog, app catalog, app launch or window activation
+Requests for a window catalog, app catalog, app icon, app launch or window activation
 carry a `trackpadStagePeek` UUID for that opening. A separate metadata-only
 browser accepts them while video is off and the currently admitted connection
 has control. Catalog replies echo the UUID. Text-only window records carry
-window ID, generation, bundle, app name, and title. Neither still requests nor
-workspace layout changes belong to this exchange. A receiver discards replies
-from any other opening or after it loses control.
+window ID, generation, bundle, app name, and title. The receiver may request
+installed app icons with a tagged `windowThumbnailRequest` whose window list
+is empty. The sender only reads its icon list on this path and replies with
+tagged `appIcon` messages. A receiver discards these replies from any other
+opening or after it loses control.
 
 **Trackpad tab in Window mode.** A receiver can add a local Trackpad tab when
 the Mac advertises `workspaceTrackpad` in `welcome.workspaceFeatures`. The

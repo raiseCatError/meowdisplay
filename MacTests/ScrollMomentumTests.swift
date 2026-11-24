@@ -17,10 +17,10 @@ final class ScrollMomentumTests: XCTestCase {
         XCTAssertTrue(rail.isExpanded)
         XCTAssertNil(rail.holdUntil)
         rail.momentumEnded(now: 2)
-        XCTAssertEqual(rail.holdUntil, 4)
-        rail.settle(now: 3.99)
+        XCTAssertEqual(rail.holdUntil, 3)
+        rail.settle(now: 2.99)
         XCTAssertTrue(rail.isExpanded)
-        rail.settle(now: 4)
+        rail.settle(now: 3)
         XCTAssertFalse(rail.isExpanded)
     }
 
@@ -28,7 +28,7 @@ final class ScrollMomentumTests: XCTestCase {
         var rail = EdgeScrollInteraction()
         rail.begin()
         rail.end(coasting: false, now: 1)
-        XCTAssertEqual(rail.holdUntil, 3)
+        XCTAssertEqual(rail.holdUntil, 2)
         rail.begin()
         rail.settle(now: 3)
         XCTAssertTrue(rail.isExpanded)

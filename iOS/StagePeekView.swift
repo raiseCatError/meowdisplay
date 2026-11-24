@@ -310,13 +310,13 @@ struct StagePeekOverlay: View {
         }
         return StagePeekLayout.cards(aspects: aspects, position: machine.position, expansion: machine.expansion,
                                      edge: edge, safe: safe, isPad: roomy, reduceMotion: reduceMotion, region: dockRegion,
-                                     fitsRegion: true)
+                                     fitsRegion: true, metadataOnly: trackpad != nil)
     }
 
     /// The Compact Dock's band: under the search and app carousel, above the buttons.
     private var dockRegion: CGRect? {
         guard dock == .compact else { return nil }
-        let compactWidth = min(max(safe.width * (roomy ? 0.24 : 0.36), 110), roomy ? 300 : 210)
+        let compactWidth = StagePeekLayout.compactCardWidth(in: safe, isPad: roomy, metadataOnly: trackpad != nil)
         let column = edge == .left ? safe.minX + 16 + compactWidth / 2 : safe.maxX - 16 - compactWidth / 2
         let top = trackpad == nil ? Self.topControlsBottom : 56
         return StagePeekLayout.dockRegion(safe: safe, controlsAbove: safe.minY + top,
@@ -452,9 +452,7 @@ struct StagePeekOverlay: View {
         return ZStack {
             shape.fill(Color(white: 0.17))
             if trackpad != nil, let window {
-                metadataLabel(title: window.title.isEmpty ? window.app : window.title,
-                              subtitle: window.title.isEmpty || window.title == window.app ? nil : window.app,
-                              icon: "macwindow")
+                metadataLabel(app: window.app, windowTitle: window.title, bundle: window.bundleID)
             } else if fullDesktop, let still = display.flatMap({ model.displayThumbnails[$0.id] }) {
                 Image(decorative: still, scale: 1).resizable().scaledToFill()
                 Label(display?.isMain == false ? display?.name ?? "" : String(localized: "Full Desktop"), systemImage: "display")
@@ -594,7 +592,7 @@ struct StagePeekOverlay: View {
         let top = safe.minY + 64
         let bottom = toolbarY(safe.midX) - Self.toolbarHalfHeight - 6
         let height = max(1, bottom - top)
-        let columns = [GridItem(.adaptive(minimum: roomy ? 200 : 140), spacing: 10)]
+        let columns = [GridItem(.adaptive(minimum: min(max(1, safe.width - 24), 260)), spacing: 10)]
         let apps = WorkspaceSearch.search(query, apps: model.trackpadPeekApps, windows: []).apps
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -609,9 +607,7 @@ struct StagePeekOverlay: View {
                                 activateTrackpadWindow(window)
                                 finish(machine.dismiss())
                             } label: {
-                                metadataLabel(title: window.title.isEmpty ? window.app : window.title,
-                                              subtitle: window.title.isEmpty || window.title == window.app ? nil : window.app,
-                                              icon: "macwindow")
+                                metadataLabel(app: window.app, windowTitle: window.title, bundle: window.bundleID)
                             }
                             .buttonStyle(.plain)
                             .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 12))
@@ -626,7 +622,7 @@ struct StagePeekOverlay: View {
                                 model.sendTrackpadPeek(WorkspaceRequests.appLaunch(app.bundleID, reveal: true))
                                 finish(machine.dismiss())
                             } label: {
-                                metadataLabel(title: app.name, subtitle: nil, icon: "app")
+                                metadataLabel(app: app.name, windowTitle: nil, bundle: app.bundleID)
                             }
                             .buttonStyle(.plain)
                             .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 12))
@@ -642,19 +638,25 @@ struct StagePeekOverlay: View {
         .accessibilityIdentifier("trackpadStagePeekGallery")
     }
 
-    private func metadataLabel(title: String, subtitle: String?, icon: String) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: icon).foregroundStyle(.white.opacity(0.7)).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(verbatim: title).font(.subheadline.weight(.semibold)).lineLimit(2)
-                if let subtitle { Text(verbatim: subtitle).font(.caption).foregroundStyle(.white.opacity(0.7)).lineLimit(1) }
+    private func metadataLabel(app: String, windowTitle: String?, bundle: String) -> some View {
+        HStack(spacing: 8) {
+            WorkspaceAppIcon(icon: trackpadMetadataAllowed ? model.trackpadPeekIcons[bundle] : nil,
+                             name: app, bundleID: bundle, size: 26)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: app).font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.8)).lineLimit(2)
+                if let windowTitle, !windowTitle.isEmpty, windowTitle != app {
+                    Text(verbatim: windowTitle).font(.subheadline.weight(.medium)).lineLimit(3)
+                }
             }
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 
     private func activateTrackpadWindow(_ window: CatalogWindowItem) {
