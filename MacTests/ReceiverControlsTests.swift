@@ -1564,8 +1564,11 @@ final class ReceiverControlsTests: XCTestCase {
             }
             let raw = frames(avoidNotch: false)
             let adjusted = frames(avoidNotch: true)
-            XCTAssertEqual(adjusted[0], raw[0])
-            XCTAssertEqual(adjusted[1].origin.y, raw[1].origin.y)
+            let originalNotchAdjustment = raw.dropLast().map {
+                ControlTrayGeometry.avoidingUnsafeRegion($0, in: container, safeInsets: safe,
+                                                         enabled: true, notchSide: side)
+            }
+            XCTAssertEqual(Array(adjusted.dropLast()), originalNotchAdjustment)
             XCTAssertEqual(adjusted[2].origin.y, raw[2].origin.y)
             XCTAssertFalse(adjusted[1].intersects(adjusted[2]))
             XCTAssertTrue(container.contains(adjusted[2]))
