@@ -391,8 +391,8 @@ enum TrackpadDisplayGuideGeometry {
 }
 
 enum EdgeScrollStripGeometry {
-    /// Only stable obstacles (a fold or system occlusion) constrain a rail.
-    /// A perpendicular rail gives way at the shared corner.
+    /// Rails fit around existing controls and system geometry. A perpendicular
+    /// rail gives way at the shared corner.
     static func frames(edges: [ScrollStripEdge], in safeArea: CGRect,
                        avoiding obstacles: [CGRect]) -> [ScrollStripEdge: CGRect] {
         var occupied = obstacles
@@ -405,23 +405,25 @@ enum EdgeScrollStripGeometry {
         return rails
     }
 
-    /// Keep interactive controls inside the rails while their presentation
-    /// changes. This is a placement bound, separate from the video canvas.
-    static func controlBounds(in container: CGRect, reserving rails: [ScrollStripEdge: CGRect]) -> CGRect {
-        guard !container.isNull, !container.isEmpty, !rails.isEmpty else { return container }
-        let gap: CGFloat = 6
-        let left = max(container.minX, rails[.left].map { $0.maxX + gap } ?? container.minX)
-        let right = min(container.maxX, rails[.right].map { $0.minX - gap } ?? container.maxX)
-        let top = max(container.minY, rails[.top].map { $0.maxY + gap } ?? container.minY)
-        let bottom = min(container.maxY, rails[.bottom].map { $0.minY - gap } ?? container.maxY)
-        return CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
-    }
-
-    static func safeInsets(_ insets: ControlSafeInsets, from screen: CGRect, within bounds: CGRect) -> ControlSafeInsets {
-        ControlSafeInsets(top: max(0, insets.top - (bounds.minY - screen.minY)),
-                          leading: max(0, insets.leading - (bounds.minX - screen.minX)),
-                          bottom: max(0, insets.bottom - (screen.maxY - bounds.maxY)),
-                          trailing: max(0, insets.trailing - (screen.maxX - bounds.maxX)))
+    /// The contact marker is in the rail's own coordinates and stays inset
+    /// from its capsule ends. Expansion keeps the screen-facing edge fixed.
+    static func visualFrames(edge: ScrollStripEdge, size: CGSize, expanded: Bool,
+                             position: CGFloat) -> (rail: CGRect, contact: CGRect) {
+        let length = edge.isVertical ? size.height : size.width
+        let cross = edge.isVertical ? size.width : size.height
+        let thickness = min(expanded ? 13 : 3, max(0, cross - 8))
+        let outerOrigin = min(4, cross / 2)
+        let origin = edge == .left || edge == .top ? outerOrigin : cross - outerOrigin - thickness
+        let inset: CGFloat = 1
+        let contactLength = min(72, max(0, length - 2 * inset))
+        let start = max(inset, min(length - contactLength - inset, position - contactLength / 2))
+        let contactThickness = max(0, thickness - 2 * inset)
+        if edge.isVertical {
+            return (CGRect(x: origin, y: 0, width: thickness, height: length),
+                    CGRect(x: inset, y: start, width: contactThickness, height: contactLength))
+        }
+        return (CGRect(x: 0, y: origin, width: length, height: thickness),
+                CGRect(x: start, y: inset, width: contactLength, height: contactThickness))
     }
 
     static func frame(on edge: ScrollStripEdge, in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {

@@ -559,6 +559,7 @@ struct WorkspaceFloatLayer: View {
         .accessibilityHint("Removes this pane from the receiver layout.")
         .accessibilityIdentifier("floatQuickClose-\(id)")
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: armed)
+        .workspaceRailObstacle()
         .position(x: target.midX, y: target.midY)
     }
 
@@ -677,6 +678,7 @@ struct WorkspaceFloatLayer: View {
         .overlay(Capsule().strokeBorder(outline, lineWidth: active ? 2 : 1).opacity(docked ? 0 : 1).allowsHitTesting(false))
         .environment(\.colorScheme, .dark)
         .accessibilityHidden(docked)
+        .workspaceRailObstacle(!docked)
         .position(centre)
     }
 
@@ -689,6 +691,7 @@ struct WorkspaceFloatLayer: View {
             .opacity(docked ? 0 : 1)
             .frame(width: 76, height: 28)
             .contentShape(FloatTouchArea(on: !docked))
+            .workspaceRailObstacle(!docked)
             .position(centre)
             .gesture(moveGesture(id))
             .hoverEffect(.highlight)
@@ -704,6 +707,7 @@ struct WorkspaceFloatLayer: View {
             .shadow(color: .black.opacity(0.55), radius: 1.5)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
+            .workspaceRailObstacle()
             .position(x: x, y: rect.maxY + 6)
             .gesture(resizeGesture(id, corner: corner))
             .modifier(FloatResizePointer(leading: leading))
@@ -1335,6 +1339,7 @@ struct WorkspaceFloatLayer: View {
             .accessibilityAction(named: Text("Restore")) { restore(id) }
             .accessibilityAction(named: Text("Remove from This Device")) { model.removeFloat(id) }
             .accessibilityIdentifier("floatTuckHandle")
+            .workspaceRailObstacle()
             .position(x: target.midX, y: target.midY)
             .transition(.opacity)
     }
@@ -1373,6 +1378,7 @@ struct WorkspaceFloatLayer: View {
                                            accessibilityIdentifier: "floatTuckHandle") {
             tab.ids.map { id in UIAction(title: String(localized: "Restore \(title(id))")) { _ in restore(id) } }
         })
+        .workspaceRailObstacle()
         .position(x: centre.x, y: centre.y)
         .transition(.opacity)
     }

@@ -13,6 +13,181 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testReceiverChromeFramesStayStableInPortrait() {
+        checkReceiverChromeFrames(in: .portrait)
+    }
+
+    @MainActor
+    func testReceiverChromeFramesStayStableInLandscapeLeft() {
+        checkReceiverChromeFrames(in: .landscapeLeft)
+    }
+
+    @MainActor
+    func testReceiverChromeFramesStayStableInLandscapeRight() {
+        checkReceiverChromeFrames(in: .landscapeRight)
+    }
+
+    @MainActor
+    func testDividedReceiverCanvasReachesBothWindowEdges() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_FOLD"] = "vertical"
+        app.launch()
+        defer { app.terminate() }
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        let fold = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        let window = app.windows.firstMatch
+        XCTAssertTrue(picture.waitForExistence(timeout: 10))
+        XCTAssertTrue(fold.waitForExistence(timeout: 3))
+
+        menu.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Set Rail Right"].tap()
+
+        for mode in ["window", "video-off"] {
+            XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+            XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+            keep(app, "receiver-chrome-fold-\(mode)")
+            let vertical = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+            XCTAssertTrue(vertical.waitForExistence(timeout: 3), app.debugDescription)
+            XCTAssertGreaterThanOrEqual(vertical.frame.minX, fold.frame.maxX)
+            let horizontal = app.descendants(matching: .any)["edgeScrollHorizontal"].firstMatch
+            XCTAssertTrue(horizontal.exists)
+            XCTAssertFalse(horizontal.frame.intersects(fold.frame))
+            if mode == "window" {
+                menu.tap()
+                app.buttons["Toggle Video"].tap()
+            }
+        }
+    }
+
+    @MainActor
+    private func checkReceiverChromeFrames(in orientation: UIDeviceOrientation) {
+        XCUIDevice.shared.orientation = orientation
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        XCUIDevice.shared.orientation = orientation
+        let window = app.windows.firstMatch
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        #if targetEnvironment(simulator)
+        if orientation.isLandscape, !waitUntil(2, { window.frame.width > window.frame.height }) {
+            app.terminate()
+            app.launchEnvironment["MEOW_UITEST_RECEIVER_LANDSCAPE"] =
+                orientation == .landscapeLeft ? "leading" : "trailing"
+            app.launch()
+            XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        }
+        #endif
+        XCTAssertTrue(picture.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntil {
+            let bounds = picture.frame
+            return !bounds.isEmpty && (bounds.width > bounds.height) == orientation.isLandscape
+        }, "The receiver did not lay out in orientation \(orientation.rawValue)")
+
+        func perform(_ action: String, in group: String? = nil) {
+            menu.tap()
+            if let group { app.buttons[group].tap() }
+            app.buttons[action].tap()
+        }
+
+        func frames() -> [String: CGRect] {
+            let controls = ["Settings", "Command", "Option", "Keyboard", "Arrow Keys", "Zoom In", "Zoom Out"]
+            return Dictionary(uniqueKeysWithValues: controls.map {
+                let element = app.descendants(matching: .any)[$0].firstMatch
+                XCTAssertTrue(element.exists, "Missing \($0) in \(orientation.rawValue)")
+                let frame = element.frame
+                XCTAssertFalse(frame.isEmpty, "\($0) must have a rendered frame")
+                XCTAssertTrue(window.frame.contains(frame), "\($0) must stay inside the window: \(frame)")
+                return ($0, frame)
+            })
+        }
+
+        let prefix = "receiver-chrome-\(orientation.rawValue)"
+        let original = frames()
+        let canvas = picture.frame
+        var moved: [String] = []
+        var hiddenRails: [String] = []
+        let vertical = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+        let horizontal = app.descendants(matching: .any)["edgeScrollHorizontal"].firstMatch
+        let pane = app.descendants(matching: .any).matching(identifier: "workspacePane")
+        func check(_ stage: String, railExpected: Bool = true) {
+            let current = frames()
+            if !framesMatch(original, current) || picture.frame != canvas {
+                moved.append("\(stage): controls \(current), canvas \(picture.frame)")
+            }
+            if railExpected && !vertical.waitForExistence(timeout: 2) { hiddenRails.append(stage) }
+            let railFrame = vertical.exists ? vertical.frame : .zero
+            print("Receiver chrome \(prefix)-\(stage): \(current), canvas \(picture.frame), rail \(railFrame)")
+            keep(app, "\(prefix)-\(stage)")
+        }
+
+        check("full-desktop-rail-off", railExpected: false)
+        perform("Set Rail Right", in: "Controls")
+        check("full-desktop-right")
+        if vertical.exists { XCTAssertGreaterThan(vertical.frame.midX, app.windows.firstMatch.frame.midX) }
+        perform("Add Trackpad Tab", in: "Panes")
+        perform("Show Full Desktop", in: "Panes")
+        check("trackpad-added")
+        perform("Show Trackpad Tab", in: "Panes")
+        check("trackpad-selected")
+        XCTAssertTrue(pane.matching(NSPredicate(format: "label CONTAINS %@", "Trackpad")).firstMatch.exists)
+        if vertical.exists, horizontal.exists {
+            for (rail, a, b) in [
+                (vertical, CGVector(dx: 0.5, dy: 0.75), CGVector(dx: 0.5, dy: 0.25)),
+                (horizontal, CGVector(dx: 0.75, dy: 0.5), CGVector(dx: 0.25, dy: 0.5)),
+            ] {
+                let start = rail.coordinate(withNormalizedOffset: a)
+                let end = rail.coordinate(withNormalizedOffset: b)
+                start.press(forDuration: 0.2, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+                XCTAssertEqual(rail.value as? String, "Expanded", "the Trackpad pane must pass scroll touches to the rail")
+                keep(app, "\(prefix)-\(rail.identifier)-expanded")
+                let idle = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", "Expanded"), object: rail)
+                XCTAssertEqual(XCTWaiter.wait(for: [idle], timeout: 6), .completed)
+            }
+        } else {
+            hiddenRails.append("trackpad: drag both axes")
+        }
+        perform("Show Full Desktop", in: "Panes")
+        check("back-to-desktop")
+        perform("Add Display Pane", in: "Panes")
+        XCTAssertEqual(pane.count, 2)
+        check("two-panes")
+        perform("Float Display Pane", in: "Panes")
+        XCTAssertTrue(app.descendants(matching: .any)["workspaceFloat"].firstMatch.waitForExistence(timeout: 3))
+        check("floating-pane")
+        let floatOptions = app.descendants(matching: .any)["floatOptions"].firstMatch
+        XCTAssertTrue(floatOptions.exists)
+        for rail in [vertical, horizontal] where rail.exists {
+            XCTAssertFalse(rail.frame.intersects(floatOptions.frame), "The rail covers the floating pane menu")
+        }
+        perform("Show Trackpad Tab", in: "Panes")
+        check("trackpad-with-float")
+        perform("Set Rail Left", in: "Controls")
+        check("trackpad-left")
+        if vertical.exists { XCTAssertLessThan(vertical.frame.midX, app.windows.firstMatch.frame.midX) }
+        perform("Toggle Controls", in: "Controls")
+        keep(app, "\(prefix)-controls-hidden")
+        perform("Toggle Controls", in: "Controls")
+        check("controls-restored")
+
+        perform("Toggle Video")
+        if !vertical.waitForExistence(timeout: 2) { hiddenRails.append("video-off") }
+        keep(app, "\(prefix)-video-off")
+
+        // Report every stage even on the baseline where the old layout moves.
+        continueAfterFailure = true
+        XCTAssertTrue(moved.isEmpty, "\(prefix) unrailed controls \(original), canvas \(canvas). Moved: \(moved)")
+        XCTAssertTrue(hiddenRails.isEmpty, "\(prefix) rails covered or unreachable: \(hiddenRails)\n\(app.debugDescription)")
+        continueAfterFailure = false
+    }
+
+    @MainActor
     func testDemoStreamControlsStayInsideTheWindowInBothOrientations() {
         let app = XCUIApplication()
         app.launch()

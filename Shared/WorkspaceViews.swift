@@ -52,6 +52,28 @@ struct WorkspaceRectsShape: Shape {
     func path(in rect: CGRect) -> Path { Path { $0.addRects(rects) } }
 }
 
+/// Interactive workspace chrome measured in screen coordinates for the receiver rails.
+struct WorkspaceRailObstaclePreference: PreferenceKey {
+    static let defaultValue: [CGRect] = []
+
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+extension View {
+    func workspaceRailObstacle(_ visible: Bool = true) -> some View {
+        background {
+            if visible {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: WorkspaceRailObstaclePreference.self, value: [proxy.frame(in: .global)])
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
 /// Tile borders, state badges, title pills with the tile menu, drag-to-move
 /// with a drop preview, and divider grips while arranging. `picture` is where
 /// the Mac's picture is drawn, in this view's coordinates.
@@ -79,7 +101,7 @@ struct WorkspaceChromeView: View {
     var onViewFullScreen: (() -> Void)?
     var localTrackpad: ((String, CGRect) -> AnyView)?
     var floatCloseHapticsEnabled = true
-    var floatCloseAvoiding: [CGRect] = []
+    var onMenuVisibilityChange: ((Bool) -> Void)?
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
@@ -89,6 +111,7 @@ struct WorkspaceChromeView: View {
     @State private var layoutName = ""
     /// The floating label menu: which pane (and tab) it is for.
     @State private var menu: PaneMenuTarget?
+    @State private var appMenuOpen = false
     @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
@@ -147,6 +170,11 @@ struct WorkspaceChromeView: View {
             chrome
         }
         #if os(iOS)
+        .onReceive(model.menus.$open.map { !$0.isEmpty }.removeDuplicates()) { open in
+            appMenuOpen = open
+        }
+        .onChange(of: menu != nil || appMenuOpen) { onMenuVisibilityChange?($0) }
+        .onDisappear { onMenuVisibilityChange?(false) }
         .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { event in
             if !model.floatCloseTargetsGlobal.contains(where: { $0.contains(event.location) }) {
                 model.cancelFloatClose()
@@ -197,7 +225,7 @@ struct WorkspaceChromeView: View {
                     WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
                                         onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
                                         closeHapticsEnabled: floatCloseHapticsEnabled,
-                                        closeAvoiding: divisions + controls + floatCloseAvoiding,
+                                        closeAvoiding: divisions + controls,
                                         tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
@@ -695,6 +723,7 @@ struct WorkspaceChromeView: View {
                         && (multi || model.localFullscreen == id)
                     labelStrip(id: id, tile: tile, rect: rect, active: active, sharesRow: barHere)
                 }
+                .workspaceRailObstacle()
                 .background(GeometryReader { g in
                     Color.clear
                         .onAppear { labelStripEnd[id] = g.frame(in: .named("workspace")).maxX }
@@ -2264,6 +2293,7 @@ struct PaneMenuBar: View {
                 }
                 bar
                     .frame(width: pane.width - 12, height: Self.height)
+                    .workspaceRailObstacle()
                     .offset(x: pane.minX + 6, y: top)
                 if let level = menus.open.last {
                     let anchor = titleFrames[level.path.first ?? -1]?.minX ?? pane.minX + 6

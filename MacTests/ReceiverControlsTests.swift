@@ -483,29 +483,43 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(limited.edgeScrollSensitivity, EdgeScrollSensitivity.range.upperBound)
     }
 
-    func testEdgeScrollRailsLeaveSeparateSpaceForExpandedControls() throws {
+    func testEdgeScrollRailsFitAroundTheExistingTrayAndPalette() throws {
         for size in [CGSize(width: 390, height: 780), CGSize(width: 720, height: 310),
                      CGSize(width: 1024, height: 768)] {
             let screen = CGRect(origin: .zero, size: size)
             let safe = screen.insetBy(dx: 20, dy: 24)
-            let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe, avoiding: [])
+            let layout = ControlTrayGeometry.layout(
+                container: screen, safeInsets: .init(top: 24, leading: 20, bottom: 24, trailing: 20),
+                keyboardVisibleRect: nil, portrait: size.height > size.width,
+                side: .trailing, traySize: CGSize(width: 130, height: 44),
+                paletteSize: CGSize(width: 220, height: 92), avoidNotch: true)
+            let controls = [layout.trayFrame, layout.paletteFrame]
+            let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe, avoiding: controls)
             let vertical = try XCTUnwrap(rails[.right])
             let horizontal = try XCTUnwrap(rails[.bottom])
             XCTAssertTrue(safe.contains(vertical))
             XCTAssertTrue(safe.contains(horizontal))
-            XCTAssertEqual(vertical.height, safe.height - 16)
             XCTAssertFalse(vertical.intersects(horizontal))
-            let controls = EdgeScrollStripGeometry.controlBounds(in: screen, reserving: rails)
-            XCTAssertFalse(controls.intersects(vertical))
-            XCTAssertFalse(controls.intersects(horizontal))
-            let room = ControlTrayGeometry.layout(
-                container: controls, safeInsets: .zero, keyboardVisibleRect: nil, portrait: size.height > size.width,
-                side: .trailing, traySize: CGSize(width: 130, height: 44),
-                paletteSize: CGSize(width: 220, height: 92), avoidNotch: false)
-            for frame in [room.trayFrame, room.paletteFrame] {
-                XCTAssertTrue(controls.contains(frame))
+            for frame in controls {
                 XCTAssertFalse(vertical.intersects(frame))
                 XCTAssertFalse(horizontal.intersects(frame))
+            }
+        }
+    }
+
+    func testEdgeScrollFeedbackFitsInsideAllFourExpandedRails() {
+        for edge in [ScrollStripEdge.left, .right, .top, .bottom] {
+            let size = edge.isVertical ? CGSize(width: 32, height: 160) : CGSize(width: 160, height: 32)
+            let hitTarget = CGRect(origin: .zero, size: size)
+            let idle = EdgeScrollStripGeometry.visualFrames(edge: edge, size: size, expanded: false, position: 0)
+            for position in [-30.0, 0, 55, 110, 160, 190] {
+                let active = EdgeScrollStripGeometry.visualFrames(edge: edge, size: size, expanded: true, position: position)
+                XCTAssertTrue(hitTarget.contains(active.rail))
+                XCTAssertTrue(active.rail.contains(idle.rail))
+                XCTAssertTrue(hitTarget.contains(active.contact.offsetBy(dx: active.rail.minX, dy: active.rail.minY)))
+                XCTAssertTrue(CGRect(origin: .zero, size: active.rail.size).contains(active.contact))
+                XCTAssertEqual(edge.isVertical ? active.contact.width : active.contact.height, 11)
+                XCTAssertEqual(edge.isVertical ? active.contact.height : active.contact.width, 72)
             }
         }
     }
