@@ -1,26 +1,32 @@
 import CoreGraphics
 import XCTest
 
-/// iPhone Duo and other foldable windows: the one roomy rule, first-run
-/// defaults on a roomy window, the Settings presentation latch, the
+/// iPhone Duo and iPad windows: the iPad presentation rule, first-run
+/// defaults on a roomy iPad window, the Settings presentation latch, the
 /// compact/roomy reachability table, and roomy layouts that keep clear of a
 /// fold. All pure policy, no UIKit.
 final class DuoAdaptiveControlsTests: XCTestCase {
     // MARK: - One roomy rule
 
-    func testRoomyOnlyWhenRegularInBothDirections() {
-        XCTAssertTrue(ReceiverLayoutClass.isRoomy(horizontalRegular: true, verticalRegular: true))
-        XCTAssertFalse(ReceiverLayoutClass.isRoomy(horizontalRegular: true, verticalRegular: false),
-                       "a landscape Plus/Max phone is regular wide but compact tall")
-        XCTAssertFalse(ReceiverLayoutClass.isRoomy(horizontalRegular: false, verticalRegular: true))
-        XCTAssertFalse(ReceiverLayoutClass.isRoomy(horizontalRegular: false, verticalRegular: false))
+    func testIPadControlsRequireRegularSizeClassesInBothDirections() {
+        XCTAssertTrue(ReceiverLayoutClass.isRoomy(supportsPadControls: true, horizontalRegular: true, verticalRegular: true))
+        XCTAssertFalse(ReceiverLayoutClass.isRoomy(supportsPadControls: true, horizontalRegular: true, verticalRegular: false))
+        XCTAssertFalse(ReceiverLayoutClass.isRoomy(supportsPadControls: true, horizontalRegular: false, verticalRegular: true))
+        XCTAssertFalse(ReceiverLayoutClass.isRoomy(supportsPadControls: true, horizontalRegular: false, verticalRegular: false))
     }
 
-    func testLayoutClassStateStartedCompactBecomesRoomyOnARoomyWindow() {
-        // Demo Mode's own control store starts from the device idiom (compact on
-        // an iPhone) and must follow the window exactly like the live store.
-        var demo = ReceiverLayoutClassState(startsRoomy: false)
-        var live = ReceiverLayoutClassState(startsRoomy: false)
+    func testUnfoldedPhoneKeepsPhoneControlsAndDefaults() {
+        var state = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: false)
+        let unfolded = state.update(horizontalRegular: true, verticalRegular: true, hasSavedPreferences: false)
+        XCTAssertFalse(state.isRoomy)
+        XCTAssertFalse(unfolded.roomyChanged)
+        XCTAssertNil(unfolded.adoptedPreferences)
+    }
+
+    func testCompactIPadWindowBecomesRoomyWhenItGrows() {
+        // Demo Mode and the live store follow the same resize policy.
+        var demo = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: true)
+        var live = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: true)
         let demoChange = demo.update(horizontalRegular: true, verticalRegular: true, hasSavedPreferences: true)
         let liveChange = live.update(horizontalRegular: true, verticalRegular: true, hasSavedPreferences: true)
         XCTAssertTrue(demo.isRoomy)
@@ -64,7 +70,7 @@ final class DuoAdaptiveControlsTests: XCTestCase {
         let (repository, defaults, suite) = try makeRepository()
         defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertFalse(repository.hasSavedPreferences)
-        var state = ReceiverLayoutClassState(startsRoomy: false)
+        var state = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: true)
         let first = state.update(horizontalRegular: true, verticalRegular: true,
                                  hasSavedPreferences: repository.hasSavedPreferences)
         let adopted = try XCTUnwrap(first.adoptedPreferences)
@@ -84,7 +90,7 @@ final class DuoAdaptiveControlsTests: XCTestCase {
         saved.inputMode = .trackpad
         repository.save(saved)
         XCTAssertTrue(repository.hasSavedPreferences)
-        var state = ReceiverLayoutClassState(startsRoomy: false)
+        var state = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: true)
         let change = state.update(horizontalRegular: true, verticalRegular: true,
                                   hasSavedPreferences: repository.hasSavedPreferences)
         XCTAssertNil(change.adoptedPreferences)
@@ -92,14 +98,14 @@ final class DuoAdaptiveControlsTests: XCTestCase {
     }
 
     func testRoomyDefaultsOnlyApplyToTheFirstWindowThatStartedCompact() {
-        // First seen compact: a later unfold keeps the phone defaults.
-        var compactFirst = ReceiverLayoutClassState(startsRoomy: false)
+        // First seen compact: a later resize keeps the loaded defaults.
+        var compactFirst = ReceiverLayoutClassState(startsRoomy: false, supportsPadControls: true)
         XCTAssertNil(compactFirst.update(horizontalRegular: false, verticalRegular: true,
                                          hasSavedPreferences: false).adoptedPreferences)
         XCTAssertNil(compactFirst.update(horizontalRegular: true, verticalRegular: true,
                                          hasSavedPreferences: false).adoptedPreferences)
         // An iPad already starts roomy with the iPad defaults: nothing to adopt.
-        var pad = ReceiverLayoutClassState(startsRoomy: true)
+        var pad = ReceiverLayoutClassState(startsRoomy: true, supportsPadControls: true)
         XCTAssertNil(pad.update(horizontalRegular: true, verticalRegular: true,
                                 hasSavedPreferences: false).adoptedPreferences)
     }

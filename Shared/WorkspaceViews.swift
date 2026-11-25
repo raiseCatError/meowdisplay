@@ -208,9 +208,7 @@ struct WorkspaceChromeView: View {
                    multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     // While all its tabs are shown and leave too little room, the bar steps aside.
-                    let e = unsafeInsets(of: rect)
-                    let pane = CGRect(x: rect.minX + e.leading, y: rect.minY + e.top,
-                                      width: rect.width - e.leading - e.trailing, height: rect.height - e.top - e.bottom)
+                    let pane = paneTitleRow(rect)
                     if let end = labelStripEnd[id], end > pane.minX, end < pane.maxX {
                         PaneMenuBar(menus: model.menus, pane: CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height),
                                     top: pane.minY + 5, bounds: picture)
@@ -571,9 +569,8 @@ struct WorkspaceChromeView: View {
     private func titleZones(_ frames: WorkspaceFrames) -> [CGRect] {
         let panes = frames.tiles.compactMap { id, r -> CGRect? in
             guard !frames.isFloat(id), let end = labelStripEnd[id] else { return nil }
-            let rect = r.onScreen(picture), e = unsafeInsets(of: rect)
-            let x = rect.minX + e.leading
-            return end > x ? CGRect(x: x, y: rect.minY + e.top, width: end - x, height: WorkspaceOverlayPlacement.paneTitleHeight) : nil
+            let row = paneTitleRow(r.onScreen(picture))
+            return end > row.minX ? CGRect(x: row.minX, y: row.minY, width: end - row.minX, height: row.height) : nil
         }
         // A float being docked is drawn only as its card under the finger: no pill to avoid.
         var docked: String?
@@ -581,10 +578,14 @@ struct WorkspaceChromeView: View {
         return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
     }
 
-    /// Where a pane's label strip starts: its top-left corner inside the safe area.
+    private func paneTitleRow(_ rect: CGRect) -> CGRect {
+        WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls)
+    }
+
+    /// Where a pane's label strip starts, clear of the receiver controls.
     private func titleRow(_ rect: CGRect, width: CGFloat) -> CGRect {
-        let e = unsafeInsets(of: rect)
-        return CGRect(x: rect.minX + e.leading, y: rect.minY + e.top, width: min(rect.width - e.leading, width), height: 44)
+        let row = paneTitleRow(rect)
+        return CGRect(x: row.minX, y: row.minY, width: min(row.width, width), height: 44)
     }
 
     /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
@@ -717,11 +718,13 @@ struct WorkspaceChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if multi || model.arranging || tile.tabs.count > 1 || model.localFullscreen == id {
+                let row = paneTitleRow(rect)
+                let offset = max(0, row.minX - rect.minX - unsafeInsets(of: rect).leading)
                 AppMenuObserver(menus: model.menus) { menus in
                     // The menu bar shares this row (see `chrome`): its tabs fold to the shown one and "+N".
                     let barHere = active && menus.barShown && menus.tile == id && !model.arranging && model.drag == nil
                         && (multi || model.localFullscreen == id)
-                    labelStrip(id: id, tile: tile, rect: rect, active: active, sharesRow: barHere)
+                    labelStrip(id: id, tile: tile, rect: row, active: active, sharesRow: barHere)
                 }
                 .workspaceRailObstacle()
                 .background(GeometryReader { g in
@@ -729,6 +732,7 @@ struct WorkspaceChromeView: View {
                         .onAppear { labelStripEnd[id] = g.frame(in: .named("workspace")).maxX }
                         .onChange(of: g.frame(in: .named("workspace"))) { labelStripEnd[id] = $0.maxX }
                 })
+                .padding(.leading, offset)
                 .onDisappear { labelStripEnd[id] = nil }
             }
             VStack(spacing: 6) {

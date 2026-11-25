@@ -391,6 +391,25 @@ enum TrackpadDisplayGuideGeometry {
 }
 
 enum EdgeScrollStripGeometry {
+    /// A corner occlusion can inflate UIKit's safe inset for a whole side.
+    /// Recover that side for the rails when the system reports its exact
+    /// footprint. The caller still supplies the occlusion as an obstacle.
+    static func placementArea(canvas: CGRect, safeArea: CGRect, occlusions: [CGRect]) -> CGRect {
+        guard !safeArea.isNull, !safeArea.isEmpty else { return safeArea }
+        let tolerance: CGFloat = 1
+        let leftHasLocalOcclusion = occlusions.contains {
+            $0.intersects(canvas) && $0.minX <= canvas.minX + tolerance
+                && abs($0.maxX - safeArea.minX) <= tolerance
+        }
+        let rightHasLocalOcclusion = occlusions.contains {
+            $0.intersects(canvas) && $0.maxX >= canvas.maxX - tolerance
+                && abs($0.minX - safeArea.maxX) <= tolerance
+        }
+        let minX = leftHasLocalOcclusion ? canvas.minX : safeArea.minX
+        let maxX = rightHasLocalOcclusion ? canvas.maxX : safeArea.maxX
+        return CGRect(x: minX, y: safeArea.minY, width: maxX - minX, height: safeArea.height)
+    }
+
     /// Rails fit around existing controls and system geometry. A perpendicular
     /// rail gives way at the shared corner.
     static func frames(edges: [ScrollStripEdge], in safeArea: CGRect,
@@ -439,14 +458,16 @@ enum EdgeScrollStripGeometry {
         }
         guard !safeArea.isEmpty, !safeArea.isNull,
               let segment = frame(in: toRightEdge(safeArea),
-                                  avoiding: obstacles.filter { !$0.isEmpty && !$0.isNull }.map(toRightEdge))
+                                  avoiding: obstacles.filter { !$0.isEmpty && !$0.isNull }.map(toRightEdge),
+                                  preferredLength: edge.isVertical ? nil : safeArea.width * 0.6)
         else { return nil }
         let vertical = edge == .left || edge == .top ? reflect(segment) : segment
         return edge.isVertical ? vertical : transpose(vertical)
     }
 
     /// Find the longest uninterrupted strip in the nearest usable column.
-    static func frame(in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
+    /// A horizontal rail can move past the control rows to find better travel.
+    static func frame(in safeArea: CGRect, avoiding obstacles: [CGRect], preferredLength: CGFloat? = nil) -> CGRect? {
         let edgeGap: CGFloat = 8
         let targetWidth: CGFloat = 32
         let minimumHeight: CGFloat = 44
@@ -461,15 +482,17 @@ enum EdgeScrollStripGeometry {
         // In that case use the nearest free column beside it on the right.
         let rightEdges = [outerEdge] + clearances.map(\.minX)
             .filter { $0 >= innerLimit && $0 < outerEdge }.sorted(by: >)
+        var nearest: CGRect?
         for rightEdge in rightEdges {
             let rail = CGRect(x: rightEdge - targetWidth, y: safeArea.minY + edgeGap,
                               width: targetWidth, height: safeArea.height - 2 * edgeGap)
             let crossing = clearances.filter { !$0.intersection(rail).isEmpty }
             guard let segment = ControlPlacementArea.segments(of: rail, removing: crossing, horizontal: false)
                 .max(by: { $0.height < $1.height }), segment.height >= minimumHeight else { continue }
-            return segment
+            if segment.height >= (preferredLength ?? minimumHeight) { return segment }
+            if nearest == nil { nearest = segment }
         }
-        return nil
+        return nearest
     }
 }
 
@@ -991,6 +1014,15 @@ enum WorkspaceOverlayPlacement {
         guard let safe else { return picture }
         let r = picture.intersection(safe)
         return r.isNull || r.isEmpty ? picture : r
+    }
+
+    /// Use the first usable part of a pane's top row for its tabs.
+    static func paneTitleRow(pane: CGRect, safe: CGRect?, avoiding controls: [CGRect]) -> CGRect {
+        let area = usable(picture: pane, safe: safe)
+        let row = CGRect(x: area.minX, y: area.minY, width: area.width, height: min(area.height, paneTitleHeight))
+        let obstacles = controls.map { $0.insetBy(dx: -gap, dy: -gap) }.filter { $0.intersects(row) }
+        return ControlPlacementArea.segments(of: row, removing: obstacles, horizontal: true)
+            .first { $0.width >= min(160, row.width) } ?? row
     }
 
     /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below

@@ -440,6 +440,41 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(top.width, safe.width - 16)
     }
 
+    func testPortraitRightScrollRailClearsTheCameraOnlyWhereItTouchesTheEdge() throws {
+        let canvas = CGRect(x: 0, y: 0, width: 466, height: 678)
+        let safe = CGRect(x: 0, y: 0, width: 382, height: 644)
+        let camera = CGRect(x: 382, y: 0, width: 84, height: 82)
+        let area = EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safe, occlusions: [camera])
+        XCTAssertEqual(area.maxY, safe.maxY, "Keep the home-indicator inset")
+        let rail = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .right, in: area, avoiding: [camera]))
+        XCTAssertEqual(rail.maxX, canvas.maxX - 8)
+        XCTAssertEqual(rail.minY, camera.maxY + 4)
+        XCTAssertEqual(EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safe, occlusions: []), safe)
+    }
+
+    func testBottomScrollRailUsesTheOpenSpaceAbovePackedPortraitControls() throws {
+        let safe = CGRect(x: 0, y: 0, width: 466, height: 644)
+        let functionTray = CGRect(x: 111, y: 548, width: 244, height: 40)
+        let keypad = CGRect(x: 410, y: 546, width: 44, height: 44)
+        let mainTray = CGRect(x: 35, y: 600, width: 396, height: 44)
+        let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe,
+                                                    avoiding: [functionTray, keypad, mainTray])
+        let bottom = try XCTUnwrap(rails[.bottom])
+        XCTAssertGreaterThanOrEqual(bottom.width, safe.width * 0.6)
+        XCTAssertLessThanOrEqual(bottom.maxY, keypad.minY - 4)
+        XCTAssertFalse(bottom.intersects(try XCTUnwrap(rails[.right])))
+    }
+
+    func testPaneTabsCanStartBesideTheLandscapeZoomControl() {
+        let pane = CGRect(x: 0, y: 0, width: 466, height: 326)
+        let safe = CGRect(x: 48, y: 0, width: 418, height: 310)
+        let zoom = CGRect(x: 50, y: 14, width: 40, height: 40)
+        let row = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: safe, avoiding: [zoom])
+        XCTAssertEqual(row.minX, zoom.maxX + WorkspaceOverlayPlacement.gap)
+        XCTAssertEqual(row.minY, safe.minY)
+        XCTAssertFalse(row.intersects(zoom))
+    }
+
     func testEdgeScrollingPreservesLegacyOffAndManualConfiguration() throws {
         let legacy = Data(#"{"showRightScrollStrip":false,"showSurfaceGrid":false}"#.utf8)
         var preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)

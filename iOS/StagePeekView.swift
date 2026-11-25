@@ -105,10 +105,10 @@ struct StagePeekOverlay: View {
     private var filterApp: MacAppItem? { appFilter.flatMap { b in dockApps.first { $0.bundleID == b } } }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Roomier chrome when the window is regular in both directions (a full iPad, an unfolded
-    /// iPhone Duo), whatever the device; a phone in landscape stays compact.
+    /// iPad card sizing in a roomy window. A phone keeps its card layout when unfolded.
     private var roomy: Bool {
-        ReceiverLayoutClass.isRoomy(horizontalRegular: horizontalSizeClass == .regular,
+        ReceiverLayoutClass.isRoomy(supportsPadControls: UIDevice.current.userInterfaceIdiom == .pad,
+                                    horizontalRegular: horizontalSizeClass == .regular,
                                     verticalRegular: verticalSizeClass == .regular)
     }
 

@@ -25,11 +25,9 @@ final class ReceiverControlStore: ObservableObject {
     private static let autoHideDelay: Duration = .seconds(9)
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
-    /// The roomy presentation (Strip/Overlay/Custom, Control Size, …)
-    /// applies only when true; otherwise the compact tray. It starts from the
-    /// device and then follows the window (`updateLayoutClass`): a full iPad
-    /// or an unfolded iPhone Duo is roomy, a phone or a narrow iPad window
-    /// (Slide Over, a small Stage Manager window) is compact.
+    /// iPads can switch to the roomy presentation as their window grows.
+    /// iPhones keep the phone tray across window sizes and fold states.
+    let supportsPadControls: Bool
     @Published private(set) var isPad: Bool
     /// Move View: while true the receiver surface moves the local viewport
     /// instead of controlling the Mac. Transient — never persisted, and
@@ -84,25 +82,20 @@ final class ReceiverControlStore: ObservableObject {
     init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository(),
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
+        supportsPadControls = isPad
         self.isPad = isPad
-        layoutClass = ReceiverLayoutClassState(startsRoomy: isPad)
+        layoutClass = ReceiverLayoutClassState(startsRoomy: isPad, supportsPadControls: isPad)
         preferences = repository.load(initial: .initial(isPad: isPad))
     }
 
-    /// The iPad layout mode actually in effect: Custom needs a layout to
-    /// show, otherwise it presents as Overlay.
+    /// The iPad layout mode actually in effect. Custom needs a layout to show.
     var effectivePadLayout: PadControlLayoutMode {
         let stored = preferences.padControlLayout
         return stored == .custom && preferences.activeCustomLayout == nil ? .overlay : stored
     }
 
-    /// The window's size classes changed (rotation, fold, resize): roomy
-    /// only when it is regular in both directions (`ReceiverLayoutClass`), so
-    /// a phone in landscape stays compact.
-    ///
-    /// The first report on a device that started compact (an iPhone idiom
-    /// that opened unfolded) with nothing saved yet adopts the iPad initial
-    /// defaults once; saved preferences are never replaced.
+    /// The window's size classes changed. The iPad layout needs regular space
+    /// in both directions. Saved preferences are never replaced.
     func updateLayoutClass(horizontalRegular: Bool, verticalRegular: Bool) {
         let change = layoutClass.update(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular,
                                         hasSavedPreferences: repository.hasSavedPreferences)

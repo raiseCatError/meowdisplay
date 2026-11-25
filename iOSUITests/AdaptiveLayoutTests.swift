@@ -28,6 +28,38 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testRoomyPhoneUsesTheIPhoneTrayAcrossTheFullCanvas() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "iPad offers a docked Strip")
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_ROOMY"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        let window = app.windows.firstMatch
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        let command = app.descendants(matching: .any)["Command"].firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        XCTAssertTrue(picture.waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.exists)
+        XCTAssertTrue(command.exists)
+        keep(app, "roomy-phone-window-right-edge")
+        XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+        XCTAssertEqual(settings.frame.midY, command.frame.midY, accuracy: 1,
+                       "The unfolded phone keeps Settings and modifiers in the iPhone tray")
+        XCTAssertGreaterThan(settings.frame.midY, window.frame.midY)
+
+        menu.tap()
+        app.buttons["Toggle Video"].tap()
+        keep(app, "roomy-phone-trackpad-right-edge")
+        XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+    }
+
+    @MainActor
     func testDividedReceiverCanvasReachesBothWindowEdges() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -134,12 +166,26 @@ final class AdaptiveLayoutTests: XCTestCase {
         perform("Set Rail Right", in: "Controls")
         check("full-desktop-right")
         if vertical.exists { XCTAssertGreaterThan(vertical.frame.midX, app.windows.firstMatch.frame.midX) }
+        if orientation == .portrait, UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertEqual(vertical.frame.maxX, window.frame.maxX - 8, accuracy: 1,
+                           "A corner camera must not inset the whole right rail")
+            XCTAssertGreaterThanOrEqual(horizontal.frame.width, window.frame.width * 0.6,
+                                        "Keep the horizontal rail usable beside the control rows")
+        }
         perform("Add Trackpad Tab", in: "Panes")
         perform("Show Full Desktop", in: "Panes")
         check("trackpad-added")
         perform("Show Trackpad Tab", in: "Panes")
         check("trackpad-selected")
         XCTAssertTrue(pane.matching(NSPredicate(format: "label CONTAINS %@", "Trackpad")).firstMatch.exists)
+        if orientation.isLandscape {
+            let desktopTab = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Full Desktop, tab")).firstMatch
+            XCTAssertTrue(desktopTab.exists)
+            if let zoom = original["Zoom In"] {
+                XCTAssertFalse(desktopTab.frame.intersects(zoom), "The pane tab and the Zoom In control must be distinct")
+            }
+        }
         if vertical.exists, horizontal.exists {
             for (rail, a, b) in [
                 (vertical, CGVector(dx: 0.5, dy: 0.75), CGVector(dx: 0.5, dy: 0.25)),
@@ -248,11 +294,10 @@ final class AdaptiveLayoutTests: XCTestCase {
 
     // MARK: - Size-class dependent controls
 
-    /// Roomy (the iPad-style layouts) is decided by the window's size classes, never by the
-    /// device or its orientation: regular in both directions. An unfolded iPhone Duo can be
-    /// roomy; the same app on a phone, or folded, is compact.
+    /// iPad uses its own controls when the window is regular in both directions.
     @MainActor
     private func isRoomy(_ app: XCUIApplication) throws -> Bool {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return false }
         let window = app.windows.firstMatch
         try XCTSkipIf(window.horizontalSizeClass == .unspecified || window.verticalSizeClass == .unspecified,
                       "The window does not report its size classes")
@@ -349,7 +394,7 @@ final class AdaptiveLayoutTests: XCTestCase {
             openSettings(app)
             openControlsPage(app)
             let hasLayout = controlsPageHas(app, "controlLayoutPicker")
-            XCTAssertEqual(hasLayout, roomy, "Control Layout is offered exactly on a roomy window (\(orientation.rawValue))")
+            XCTAssertEqual(hasLayout, roomy, "Control Layout is offered on roomy iPad windows (\(orientation.rawValue))")
             // Back to the top of the page for the next row: reopen it.
             leaveSettings(app)
             openSettings(app)

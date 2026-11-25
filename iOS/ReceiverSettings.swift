@@ -22,17 +22,21 @@ struct SettingsView: View {
     /// Unified Clipboard with the connected Mac.
     var clipboard: ClipboardModel?
     @Environment(\.dismiss) private var dismiss
-    // Deliberately the horizontal class alone, not `ReceiverLayoutClass.isRoomy`:
-    // a sidebar needs width, not height, so a landscape iPhone Max that is
-    // regular-wide still gets the standard NavigationSplitView. Only the
-    // control layout (Strip/Overlay/Custom) uses the roomy rule.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var selection: MobileSettingsCategory?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var query = ""
     /// The setting a search result pointed at; its page scrolls to it and
     /// tints it briefly.
     @State private var highlight: String?
+
+    /// An unfolded iPhone uses the same category list as its cover screen.
+    /// Ordinary wide landscape keeps the standard split-view behavior.
+    private var navigationWidth: UserInterfaceSizeClass? {
+        if !controlStore.supportsPadControls, verticalSizeClass == .regular { return .compact }
+        return horizontalSizeClass
+    }
 
     private static var debugBuild: Bool {
         #if DEBUG
@@ -84,6 +88,7 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
+        .environment(\.horizontalSizeClass, navigationWidth)
         // Settings owns its system chrome: the receiver surface behind it
         // hides the status bar and home indicator, and a presentation that
         // inherited that would lay its navigation bar out under the top
@@ -94,7 +99,7 @@ struct SettingsView: View {
         .persistentSystemOverlays(.automatic)
         .onAppear {
             if selection == nil {
-                selection = MobileSettingsCategory.initialSelection(regularWidth: horizontalSizeClass == .regular)
+                selection = MobileSettingsCategory.initialSelection(regularWidth: navigationWidth == .regular)
             }
         }
         .task(id: highlight) {

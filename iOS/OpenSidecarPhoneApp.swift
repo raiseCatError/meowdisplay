@@ -31,6 +31,10 @@ struct OpenSidecarPhoneApp: App {
                         .position(x: window.size.width / 2, y: window.size.height / 2)
                 }
                 .ignoresSafeArea()
+            } else if ReceiverScreen.chromeFixtureRoomy {
+                ReceiverScreen()
+                    .environment(\.horizontalSizeClass, .regular)
+                    .environment(\.verticalSizeClass, .regular)
             } else {
                 ReceiverScreen().uiTestFoldBandMarker()
             }
@@ -738,12 +742,14 @@ struct ReceiverScreen: View {
             let workspaceControls = workspaceVisible ? occupiedWorkspaceChrome.map {
                 $0.offsetBy(dx: -receiverOrigin.x, dy: -receiverOrigin.y)
             } : []
+            let occlusions = ControlReservedRegion.frames(of: .occlusion, in: reservedRegions)
+            let railArea = EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safeCanvas,
+                                                                occlusions: occlusions)
             let scrollRailFrames = EdgeScrollStripGeometry.frames(
                 edges: model.receiver.macSupportsScrollAtCursor
                     ? controlStore.preferences.activeScrollEdges(trackpad: !videoEnabled) : [],
-                in: safeCanvas,
-                avoiding: occupiedControlFrames + divisions
-                    + ControlReservedRegion.frames(of: .occlusion, in: reservedRegions)
+                in: railArea,
+                avoiding: occupiedControlFrames + divisions + occlusions
                     + workspaceControls + (stagePeekHandle.map { [$0] } ?? []))
             let railsVisible = inputReachesMac && !lockScreenShowing && !showSettings
                 && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
@@ -1532,6 +1538,8 @@ struct ReceiverScreen: View {
 extension ReceiverScreen {
     fileprivate static let chromeFixtureEnabled =
         ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_CHROME"] == "1"
+    fileprivate static let chromeFixtureRoomy = chromeFixtureEnabled
+        && ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_ROOMY"] == "1"
     fileprivate static let chromeFixtureLandscapeSide: LandscapeTraySide? = chromeFixtureEnabled
         ? ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_LANDSCAPE"].flatMap(LandscapeTraySide.init(rawValue:))
         : nil
@@ -1569,6 +1577,11 @@ extension ReceiverScreen {
             $0.arrowKeysEnabled = true
             $0.naturalTouchHintShown = true
             $0.edgeScrolling = .off
+            if Self.chromeFixtureRoomy {
+                $0.padControlLayout = .strip
+                $0.padMainEdge = .trailing
+                $0.padFunctionEdge = .trailing
+            }
         }
     }
 
