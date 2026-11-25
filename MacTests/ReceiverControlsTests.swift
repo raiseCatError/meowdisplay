@@ -1548,6 +1548,30 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(frames[0].minX, leftNotch.leading)
     }
 
+    func testLandscapeBottomFunctionGroupsStayClearAfterTheNotchMovesOne() {
+        let container = CGRect(x: 0, y: 0, width: 466, height: 326)
+        let sizes = [CGSize(width: 44, height: 88), CGSize(width: 44, height: 88),
+                     CGSize(width: 44, height: 44)]
+        for side in [LandscapeTraySide.leading, .trailing] {
+            let safe = ControlSafeInsets(top: 0, leading: side == .leading ? 48 : 0,
+                                         bottom: 16, trailing: side == .trailing ? 48 : 0)
+            func frames(avoidNotch: Bool) -> [CGRect] {
+                ControlTrayGeometry.functionTrayLayout(
+                    container: container, safeInsets: safe, keyboardVisibleRect: nil,
+                    portrait: false, mainSide: side.opposite, position: .oppositeSide,
+                    mainTrayFrame: .zero, groupSizes: sizes, avoiding: nil,
+                    avoidNotch: avoidNotch, notchSide: side, bottomRow: true)
+            }
+            let raw = frames(avoidNotch: false)
+            let adjusted = frames(avoidNotch: true)
+            XCTAssertEqual(adjusted[0], raw[0])
+            XCTAssertEqual(adjusted[1].origin.y, raw[1].origin.y)
+            XCTAssertEqual(adjusted[2].origin.y, raw[2].origin.y)
+            XCTAssertFalse(adjusted[1].intersects(adjusted[2]))
+            XCTAssertTrue(container.contains(adjusted[2]))
+        }
+    }
+
     func testTemporaryPaletteUsesConditionalObstacleAvoidance() {
         let container = CGRect(x: 0, y: 0, width: 844, height: 390)
         let leftNotch = ControlSafeInsets(top: 0, leading: 59, bottom: 0, trailing: 0)

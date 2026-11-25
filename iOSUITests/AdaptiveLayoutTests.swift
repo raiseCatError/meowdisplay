@@ -97,7 +97,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         }
 
         func frames() -> [String: CGRect] {
-            let controls = ["Settings", "Command", "Option", "Keyboard", "Arrow Keys", "Zoom In", "Zoom Out"]
+            let controls = ["Settings", "Command", "Option", "Keyboard", "Arrow Keys", "Zoom In", "Zoom Out", "Redo", "Return"]
             return Dictionary(uniqueKeysWithValues: controls.map {
                 let element = app.descendants(matching: .any)[$0].firstMatch
                 XCTAssertTrue(element.exists, "Missing \($0) in \(orientation.rawValue)")
@@ -110,6 +110,9 @@ final class AdaptiveLayoutTests: XCTestCase {
 
         let prefix = "receiver-chrome-\(orientation.rawValue)"
         let original = frames()
+        if let redo = original["Redo"], let returnKey = original["Return"] {
+            XCTAssertFalse(redo.intersects(returnKey), "Redo and Return must have separate hit targets")
+        }
         let canvas = picture.frame
         var moved: [String] = []
         var hiddenRails: [String] = []
@@ -147,8 +150,10 @@ final class AdaptiveLayoutTests: XCTestCase {
                 start.press(forDuration: 0.2, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
                 XCTAssertEqual(rail.value as? String, "Expanded", "the Trackpad pane must pass scroll touches to the rail")
                 keep(app, "\(prefix)-\(rail.identifier)-expanded")
-                let idle = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", "Expanded"), object: rail)
-                XCTAssertEqual(XCTWaiter.wait(for: [idle], timeout: 6), .completed)
+                // Accessibility snapshots can pause while the simulator is busy.
+                // The unit test pins the one-second hold from momentum end.
+                XCTAssertTrue(waitUntil(12) { rail.exists && rail.value as? String != "Expanded" },
+                              "\(rail.identifier) stayed expanded")
             }
         } else {
             hiddenRails.append("trackpad: drag both axes")

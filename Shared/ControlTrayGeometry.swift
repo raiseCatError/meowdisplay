@@ -890,7 +890,7 @@ extension ControlTrayGeometry {
                                 portrait: portrait, notchSide: notchSide)
         }
         let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
-        return frames.map { frame in
+        var placed = frames.map { frame in
             var result = frame
             let piece = home(of: frame)
             result.origin.x = clamp(result.origin.x, min: piece.minX + margin, max: piece.maxX - margin - result.width)
@@ -899,6 +899,27 @@ extension ControlTrayGeometry {
                                            within: fullVisible.insetBy(dx: margin, dy: margin),
                                            alsoAvoiding: [mainTrayFrame] + (collisionFrame.map { [$0] } ?? []))
         }
+        // A notch can push the outer bottom group into the next group after
+        // the row has been laid out. Keep its corrected anchor and move only
+        // the overlapping neighbour inward if the row has room.
+        guard avoidNotch, !portrait, bottomRow, placed.count > 2 else { return placed }
+        let side = position == .sameSide ? mainSide : mainSide.opposite
+        let available = visible.insetBy(dx: margin, dy: margin)
+        let protected = obstacles + unsafeRegions(in: container, safeInsets: safeInsets, notchSide: notchSide)
+            + [mainTrayFrame, placed[0]] + (collisionFrame.map { [$0] } ?? [])
+        for index in 2..<placed.count {
+            let previous = placed[index - 1]
+            let frame = placed[index]
+            guard frame.intersects(previous) else { continue }
+            let dx = side == .leading ? previous.maxX + groupGap - frame.minX
+                : previous.minX - groupGap - frame.maxX
+            let adjusted = frame.offsetBy(dx: dx, dy: 0)
+            if available.contains(adjusted),
+               protected.allSatisfy({ !$0.intersects(adjusted) }) {
+                placed[index] = adjusted
+            }
+        }
+        return placed
     }
 
     /// Nudges `frame` clear of `avoid` along `axis` — up/down in portrait
