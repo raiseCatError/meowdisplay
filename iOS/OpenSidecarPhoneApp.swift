@@ -4707,12 +4707,16 @@ struct VideoLayerView: UIViewRepresentable {
 
         private var pictureTouch = ScreenReaderPictureTouch(screenReaderRunning: UIAccessibility.isVoiceOverRunning)
 
+        fileprivate func allowsPictureTouch(at point: CGPoint) -> Bool {
+            pictureTouch.picturePassesTouches && !touchDivisions.contains(where: { $0.contains(point) })
+        }
+
         /// While VoiceOver runs without Direct Touch, touches pass through
         /// this view (nothing here sees them, so nothing reaches the Mac).
         var touchDivisions: [CGRect] = []
 
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            guard pictureTouch.picturePassesTouches, !touchDivisions.contains(where: { $0.contains(point) }) else { return nil }
+            guard allowsPictureTouch(at: point) else { return nil }
             return super.hitTest(point, with: event)
         }
 
@@ -7507,8 +7511,12 @@ private final class EdgeScrollRailLayer: UIView {
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let event, event.type != .touches { return nil }
-        let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
+        // The strips count as picture touches even though they now live above it.
+        // VoiceOver's adjustable actions remain independent of direct hit testing.
+        guard let hit = super.hitTest(point, with: event), hit !== self,
+              let surface, surface.window === window,
+              surface.allowsPictureTouch(at: convert(point, to: surface)) else { return nil }
+        return hit
     }
 }
 
