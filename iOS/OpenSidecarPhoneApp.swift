@@ -1011,7 +1011,7 @@ struct ReceiverScreen: View {
                                            safeInsets: effectiveSafeInsets.edgeInsets)
                     }
                     #if DEBUG
-                    if Self.chromeFixtureEnabled { chromeFixtureMenu }
+                    if Self.chromeFixtureEnabled { chromeFixtureMenu(viewport: geo.size) }
                     #endif
                     }
                 } else if route == .demo, let demo, let demoControlStore {
@@ -1034,7 +1034,17 @@ struct ReceiverScreen: View {
                 #endif
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
-            .onAppear { updateControlLayoutClass() }
+            .onAppear {
+                updateControlLayoutClass()
+                #if DEBUG
+                if Self.chromeFixtureEnabled { updateChromeFixtureViewport(geo.size) }
+                #endif
+            }
+            #if DEBUG
+            .onChange(of: geo.size) { size in
+                if Self.chromeFixtureEnabled { updateChromeFixtureViewport(size) }
+            }
+            #endif
             .onChange(of: horizontalSizeClass) { _ in updateControlLayoutClass() }
             .onChange(of: verticalSizeClass) { _ in updateControlLayoutClass() }
             .sheet(isPresented: $showOnboarding) {
@@ -1509,10 +1519,7 @@ struct ReceiverScreen: View {
             model.receiver.announceReceiverPreferences(controlStore.preferences)
             model.receiver.primeAudioPreference(controlStore.preferences.audioPreferred)
             #if DEBUG
-            if Self.chromeFixtureEnabled {
-                prepareChromeFixture()
-                return
-            }
+            if Self.chromeFixtureEnabled { return }
             #endif
             model.start()
             // Show the first-run hint unless the device has connected before
@@ -1553,9 +1560,17 @@ extension ReceiverScreen {
         return defaults
     }()
 
+    private func updateChromeFixtureViewport(_ size: CGSize) {
+        guard size.width >= 1, size.height >= 1 else { return }
+        if !model.receiver.session.allowsLiveInput {
+            prepareChromeFixture(viewport: size)
+        } else if model.receiver.videoEnabled {
+            setChromeFixtureVideo(true, viewport: size)
+        }
+    }
+
     /// Feed the real receiver and workspace UI a session without opening a listener.
-    private func prepareChromeFixture() {
-        guard !model.receiver.session.allowsLiveInput else { return }
+    private func prepareChromeFixture(viewport: CGSize) {
         let workspace = model.workspace
         let receiver = model.receiver
         let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature,
@@ -1570,7 +1585,7 @@ extension ReceiverScreen {
         receiver.noteWorkspaceEvent(.mode(window: true))
         receiver.applyMacProtocolVersionUpdate(WireProtocol.version)
         receiver.applyAllowInputStateChangeUpdate(.allowed)
-        receiver.applyVideoStateUpdate(width: 1512, height: 982, enabled: true)
+        setChromeFixtureVideo(true, viewport: viewport)
         var session = ReceiverSessionState()
         _ = session.connectionEstablished()
         receiver.applyUISessionSnapshot(session)
@@ -1588,7 +1603,15 @@ extension ReceiverScreen {
         }
     }
 
-    private var chromeFixtureMenu: some View {
+    // The Mac's Window stream is composed to the receiver viewport. A fixed
+    // desktop aspect ratio would letterbox the workspace and its Trackpad tab.
+    private func setChromeFixtureVideo(_ enabled: Bool, viewport: CGSize) {
+        model.receiver.applyVideoStateUpdate(width: enabled ? Int(viewport.width.rounded()) : nil,
+                                             height: enabled ? Int(viewport.height.rounded()) : nil,
+                                             enabled: enabled)
+    }
+
+    private func chromeFixtureMenu(viewport: CGSize) -> some View {
         let workspace = model.workspace
         return VStack {
             Menu {
@@ -1611,7 +1634,7 @@ extension ReceiverScreen {
                 Button("Toggle Video") {
                     let enabled = !model.receiver.videoEnabled
                     videoOffChoiceDismissed = !enabled
-                    model.receiver.applyVideoStateUpdate(width: nil, height: nil, enabled: enabled)
+                    setChromeFixtureVideo(enabled, viewport: viewport)
                 }
             } label: {
                 Image(systemName: "testtube.2")

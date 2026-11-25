@@ -53,6 +53,18 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertGreaterThan(settings.frame.midY, window.frame.midY)
 
         menu.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Trackpad Tab"].tap()
+        let trackpad = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "workspacePane", "Trackpad")).firstMatch
+        XCTAssertTrue(trackpad.waitForExistence(timeout: 5))
+        keep(app, "roomy-phone-trackpad-tab-full-canvas")
+        XCTAssertEqual(trackpad.frame.minX, window.frame.minX, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.minY, window.frame.minY, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.maxY, window.frame.maxY, accuracy: 1)
+
+        menu.tap()
         app.buttons["Toggle Video"].tap()
         keep(app, "roomy-phone-trackpad-right-edge")
         XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)

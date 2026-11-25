@@ -461,7 +461,8 @@ final class ReceiverControlsTests: XCTestCase {
                                                     avoiding: [functionTray, keypad, mainTray])
         let bottom = try XCTUnwrap(rails[.bottom])
         XCTAssertGreaterThanOrEqual(bottom.width, safe.width * 0.6)
-        XCTAssertLessThanOrEqual(bottom.maxY, keypad.minY - 4)
+        XCTAssertLessThanOrEqual(bottom.maxY, functionTray.minY - 4)
+        XCTAssertFalse(bottom.intersects(keypad))
         XCTAssertFalse(bottom.intersects(try XCTUnwrap(rails[.right])))
     }
 
