@@ -231,6 +231,25 @@ final class CursorTargetingTests: XCTestCase {
         XCTAssertEqual(events.posted.first?.location, actual)
     }
 
+    func testHorizontalEdgeScrollPostsOnlyWheelTwoAtTheCurrentCursor() throws {
+        let actual = CGPoint(x: 45, y: 60)
+        let injector = makeInjector(cursor: actual)
+        let mapper = BindingMapper()
+        mapper.onMap = { _, _ in
+            XCTFail("An edge rail must scroll at the real cursor without consulting the pane mapper")
+            return CGPoint(x: 200, y: 400)
+        }
+        injector.setTargetMapper(mapper)
+
+        injector.handleScroll(dx: -40, dy: 0, atCurrentCursor: true)
+
+        XCTAssertEqual(events.posted.map(\.type), [.scrollWheel])
+        let scroll = try XCTUnwrap(events.posted.first)
+        XCTAssertEqual(scroll.location, actual)
+        XCTAssertEqual(scroll.wheel1PointDelta, 0)
+        XCTAssertEqual(scroll.wheel2PointDelta, -40)
+    }
+
     func testWorkspacePressUsesItsOwnPointAndPostsOnce() {
         let mapper = BindingMapper()
         let injector = makeInjector(cursor: CGPoint(x: 20, y: 30))
@@ -281,14 +300,22 @@ final class CursorTargetingTests: XCTestCase {
     }
 }
 
-/// Records each posted event's type and location.
+/// Records event coordinates and scroll deltas without posting to the desktop.
 private final class LocatedEventSink: SyntheticEventSink, @unchecked Sendable {
-    struct Posted { let type: CGEventType; let location: CGPoint }
+    struct Posted {
+        let type: CGEventType
+        let location: CGPoint
+        let wheel1PointDelta: Int64
+        let wheel2PointDelta: Int64
+    }
     private let lock = NSLock()
     private var entries: [Posted] = []
     var posted: [Posted] { lock.withLock { entries } }
     func post(_ event: CGEvent) {
-        lock.withLock { entries.append(Posted(type: event.type, location: event.location)) }
+        let posted = Posted(type: event.type, location: event.location,
+                            wheel1PointDelta: event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1),
+                            wheel2PointDelta: event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2))
+        lock.withLock { entries.append(posted) }
     }
 }
 

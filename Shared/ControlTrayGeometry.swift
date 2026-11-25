@@ -482,7 +482,7 @@ enum EdgeScrollStripGeometry {
         // In that case use the nearest free column beside it on the right.
         let rightEdges = [outerEdge] + clearances.map(\.minX)
             .filter { $0 >= innerLimit && $0 < outerEdge }.sorted(by: >)
-        var nearest: CGRect?
+        var longest: CGRect?
         for rightEdge in rightEdges {
             let rail = CGRect(x: rightEdge - targetWidth, y: safeArea.minY + edgeGap,
                               width: targetWidth, height: safeArea.height - 2 * edgeGap)
@@ -490,9 +490,9 @@ enum EdgeScrollStripGeometry {
             guard let segment = ControlPlacementArea.segments(of: rail, removing: crossing, horizontal: false)
                 .max(by: { $0.height < $1.height }), segment.height >= minimumHeight else { continue }
             if segment.height >= (preferredLength ?? minimumHeight) { return segment }
-            if nearest == nil { nearest = segment }
+            if segment.height > (longest?.height ?? 0) { longest = segment }
         }
-        return nearest
+        return longest
     }
 }
 
@@ -1068,7 +1068,8 @@ enum WorkspaceOverlayPlacement {
     /// area, never off the float; the float itself stays where it is. Past the picture's top or
     /// side (gliding into or out of an edge) it keeps the place it has at that edge and moves
     /// with the float, instead of sliding along it.
-    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect) -> CGRect {
+    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect,
+                          avoiding rails: [CGRect] = []) -> CGRect {
         // Placed as on the same float just inside the picture, then moved back with it.
         let dx = max(picture.minX - content.minX, 0) + min(picture.maxX - content.maxX, 0)
         let dy = max(picture.minY - content.minY, 0)
@@ -1080,7 +1081,15 @@ enum WorkspaceOverlayPlacement {
             if c.x - hw < safe.minX { c.x = min(safe.minX + hw, inside.maxX) }
             if c.x + hw > safe.maxX { c.x = max(safe.maxX - hw, inside.minX) }
         }
-        return CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+        let pill = CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+        return floatPillClearingRails(pill, safe: safe, picture: picture, rails: rails)
+    }
+
+    static func floatPillClearingRails(_ pill: CGRect, safe: CGRect?, picture: CGRect,
+                                       rails: [CGRect], closeSpace: CGRect? = nil) -> CGRect {
+        ControlTrayGeometry.avoidingReservedRegions(pill, obstacles: rails,
+                                                   within: usable(picture: picture, safe: safe),
+                                                   alsoAvoiding: closeSpace.map { [$0] } ?? [])
     }
 
     /// The centre of a float's grabber (a 28 pt tall touch area under the window): just below it,

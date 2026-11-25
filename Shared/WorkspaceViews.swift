@@ -95,6 +95,8 @@ struct WorkspaceChromeView: View {
     /// The receiver's own controls (the tray or its gear, the Function Tray, the arrow keypad, the
     /// keyboard and its bar) in this view's coordinates: the drop bar and Arrange's bar sit above them.
     var controls: [CGRect] = []
+    /// Fixed receiver rails that local titles and menus should keep clear of.
+    var railFrames: [CGRect] = []
     /// Opens the receiver's settings (the fullscreen strip's Settings button).
     var onSettings: (() -> Void)?
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
@@ -224,6 +226,7 @@ struct WorkspaceChromeView: View {
                                         onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
                                         closeHapticsEnabled: floatCloseHapticsEnabled,
                                         closeAvoiding: divisions + controls,
+                                        railFrames: railFrames,
                                         tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
@@ -561,7 +564,7 @@ struct WorkspaceChromeView: View {
     /// edge is under the notch, the Dynamic Island or the status bar.
     private func floatPill(_ content: CGRect) -> CGRect {
         WorkspaceOverlayPlacement.floatPill(content: content, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(content)).cgRect.size,
-                                            safe: safeArea, picture: picture)
+                                            safe: safeArea, picture: picture, avoiding: railFrames)
     }
 
     /// The panes' label strips and the floats' title pills on screen: the drag's chip and the
@@ -579,7 +582,7 @@ struct WorkspaceChromeView: View {
     }
 
     private func paneTitleRow(_ rect: CGRect) -> CGRect {
-        WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls)
+        WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls + railFrames)
     }
 
     /// Where a pane's label strip starts, clear of the receiver controls.

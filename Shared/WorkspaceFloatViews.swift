@@ -233,6 +233,7 @@ struct WorkspaceFloatLayer: View {
     var localTrackpad: ((String, CGRect) -> AnyView)? = nil
     var closeHapticsEnabled = true
     var closeAvoiding: [CGRect] = []
+    var railFrames: [CGRect] = []
     /// Pane titles and floats' title pills: the first-use tip keeps clear of them.
     var tipAvoiding: [CGRect] = []
     /// Where the drag's placement chip is drawn: the tip goes beside or below it.
@@ -511,8 +512,11 @@ struct WorkspaceFloatLayer: View {
         if reservesClose { size.width = min(size.width, topEdge.width) }
         let pill = WorkspaceOverlayPlacement.floatPill(content: topEdge, size: size, safe: safeArea, picture: picture)
         let x = reservesClose ? max(topEdge.minX, pill.minX) : pill.minX
-        return CGRect(x: x, y: pill.minY, width: pill.width, height: pill.height)
+        let current = CGRect(x: x, y: pill.minY, width: pill.width, height: pill.height)
             .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
+        let closeSpace = CGRect(x: rect.minX, y: rect.minY, width: 48, height: 44)
+        return WorkspaceOverlayPlacement.floatPillClearingRails(current, safe: safeArea, picture: picture,
+                                                                 rails: railFrames, closeSpace: reservesClose ? closeSpace : nil)
     }
 
     private func grabberFrame(_ rect: CGRect, held: CGRect) -> CGRect {

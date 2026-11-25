@@ -752,8 +752,7 @@ struct ReceiverScreen: View {
                 edges: model.receiver.macSupportsScrollAtCursor
                     ? controlStore.preferences.activeScrollEdges(trackpad: !videoEnabled) : [],
                 in: railArea,
-                avoiding: occupiedControlFrames + divisions + occlusions
-                    + workspaceControls + (stagePeekHandle.map { [$0] } ?? []))
+                avoiding: occupiedControlFrames + divisions + occlusions + (stagePeekHandle.map { [$0] } ?? []))
             let railsVisible = inputReachesMac && !lockScreenShowing && !showSettings
                 && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
                 && !(workspaceVisible && workspaceMenuOpen)
@@ -872,6 +871,7 @@ struct ReceiverScreen: View {
                                             divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
                                             safeArea: effectiveSafeInsets.safeRect(in: geo.size),
                                             controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
+                                            railFrames: Array(scrollRailFrames.values),
                                             onSettings: { showSettings = true },
                                             onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) },
                                             localTrackpad: { id, rect in windowTrackpad(id, rect: rect) },
@@ -885,7 +885,10 @@ struct ReceiverScreen: View {
                     }
                     // The rails are receiver chrome above both Trackpad renderers and floats.
                     // Only the strip hit regions take touches.
-                    ReceiverEdgeScrollOverlay(layer: foregroundScrollRails)
+                    ReceiverEdgeScrollOverlay(layer: foregroundScrollRails,
+                                              touchExclusions: workspaceControls.map {
+                                                  $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                                              })
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
                     if workspaceVisible, controlStore.preferences.windowSwitcher == .rail {
@@ -1553,6 +1556,9 @@ extension ReceiverScreen {
     fileprivate static let chromeFixtureLandscapeSide: LandscapeTraySide? = chromeFixtureEnabled
         ? ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_LANDSCAPE"].flatMap(LandscapeTraySide.init(rawValue:))
         : nil
+    private static let chromeFixtureWindow = CatalogWindowItem(
+        id: 310, generation: 1, bundleID: "com.google.Chrome", app: "Google Chrome",
+        title: "Google Chrome", width: 1120, height: 690, minimized: false, active: true)
     private static let chromeFixtureDefaults = {
         let suite = "uitest.receiverChrome"
         let defaults = UserDefaults(suiteName: suite) ?? .standard
@@ -1577,10 +1583,11 @@ extension ReceiverScreen {
                                      WorkspaceTrackpadWire.feature, WireMessage.scrollAtCursor]
         workspace.apply(.connected(peerID: "uitest-chrome-mac"))
         workspace.apply(.features(features))
-        workspace.apply(.catalog(WorkspaceCatalogMessage(host: nil, windows: [], apps: [], installed: [],
+        workspace.apply(.catalog(WorkspaceCatalogMessage(host: nil, windows: [Self.chromeFixtureWindow], apps: [], installed: [],
                                                          unavailable: false, displays: UITestOverviewFixture.displays)))
         workspace.apply(.mode(window: true))
         workspace.choose(workspace.displayWindow(UITestOverviewFixture.displays[0]), asNewTile: false)
+        if let desktop = workspace.layout.orderedTileIDs.first { publishChromeFixtureFocus(desktop) }
         receiver.noteWorkspaceEvent(.features(features))
         receiver.noteWorkspaceEvent(.mode(window: true))
         receiver.applyMacProtocolVersionUpdate(WireProtocol.version)
@@ -1619,8 +1626,13 @@ extension ReceiverScreen {
                     Button("Add Trackpad Tab") { workspace.addTrackpadTab() }
                     Button("Show Trackpad Tab") { selectChromeFixtureTab(trackpad: true) }
                     Button("Show Full Desktop") { selectChromeFixtureTab(trackpad: false) }
-                    Button("Add Display Pane") {
-                        workspace.choose(workspace.displayWindow(UITestOverviewFixture.displays[1]), asNewTile: true)
+                    Button("Add Google Chrome Pane") {
+                        workspace.choose(Self.chromeFixtureWindow, asNewTile: true)
+                        if let tile = workspace.layout.orderedTileIDs.first(where: {
+                            workspace.layout.tiles[$0]?.source?.windowID == Self.chromeFixtureWindow.id
+                        }) {
+                            publishChromeFixtureFocus(tile)
+                        }
                     }
                     Button("Float Display Pane") {
                         if let pane = workspace.layout.orderedTileIDs.last { workspace.floatPane(pane) }
@@ -1653,6 +1665,12 @@ extension ReceiverScreen {
         guard let tile = workspace.layout.tiles.values.first(where: { $0.tabs.contains(where: \.isTrackpad) }),
               let index = tile.tabs.firstIndex(where: { $0.isTrackpad == trackpad }) else { return }
         workspace.switchTab(tile.id, to: index)
+        publishChromeFixtureFocus(tile.id)
+    }
+
+    private func publishChromeFixtureFocus(_ tile: String) {
+        model.workspace.apply(.state(WorkspaceStateMessage(host: nil, tiles: [], active: tile,
+                                                          hostFocus: .deliver, rejected: [:])))
     }
 
     private func setChromeFixtureRail(_ side: VerticalScrollEdge) {
@@ -7530,15 +7548,19 @@ private struct UITestEdgeScrollSurface: UIViewRepresentable {
 
 private struct ReceiverEdgeScrollOverlay: UIViewRepresentable {
     let layer: EdgeScrollRailLayer
+    let touchExclusions: [CGRect]
 
     func makeUIView(context: Context) -> EdgeScrollRailLayer { layer }
-    func updateUIView(_ view: EdgeScrollRailLayer, context: Context) {}
+    func updateUIView(_ view: EdgeScrollRailLayer, context: Context) {
+        view.touchExclusions = touchExclusions
+    }
 }
 
 /// Hit-test just the strips. Non-touch events pass through to the workspace;
 /// the video view still handles any hardware touches forwarded by a strip.
 private final class EdgeScrollRailLayer: UIView {
     private weak var surface: VideoLayerView.VideoView?
+    var touchExclusions: [CGRect] = []
 
     func install(_ strips: [EdgeScrollStrip], over surface: VideoLayerView.VideoView) {
         self.surface = surface
@@ -7550,6 +7572,8 @@ private final class EdgeScrollRailLayer: UIView {
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let event, event.type != .touches { return nil }
+        // Pane buttons can take their own touches without resizing the rail.
+        guard !touchExclusions.contains(where: { $0.contains(point) }) else { return nil }
         // The strips count as picture touches even though they now live above it.
         // VoiceOver's adjustable actions remain independent of direct hit testing.
         guard let hit = super.hitTest(point, with: event), hit !== self,

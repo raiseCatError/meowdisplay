@@ -133,6 +133,7 @@ final class AdaptiveLayoutTests: XCTestCase {
             let bounds = picture.frame
             return !bounds.isEmpty && (bounds.width > bounds.height) == orientation.isLandscape
         }, "The receiver did not lay out in orientation \(orientation.rawValue)")
+        let receiverBounds = window.frame
 
         func perform(_ action: String, in group: String? = nil) {
             menu.tap()
@@ -147,7 +148,7 @@ final class AdaptiveLayoutTests: XCTestCase {
                 XCTAssertTrue(element.exists, "Missing \($0) in \(orientation.rawValue)")
                 let frame = element.frame
                 XCTAssertFalse(frame.isEmpty, "\($0) must have a rendered frame")
-                XCTAssertTrue(window.frame.contains(frame), "\($0) must stay inside the window: \(frame)")
+                XCTAssertTrue(receiverBounds.contains(frame), "\($0) must stay inside the window: \(frame)")
                 return ($0, frame)
             })
         }
@@ -160,6 +161,8 @@ final class AdaptiveLayoutTests: XCTestCase {
         let canvas = picture.frame
         var moved: [String] = []
         var hiddenRails: [String] = []
+        var changedRails: [String] = []
+        var defaultRails: [String: CGRect]?
         let vertical = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
         let horizontal = app.descendants(matching: .any)["edgeScrollHorizontal"].firstMatch
         let pane = app.descendants(matching: .any).matching(identifier: "workspacePane")
@@ -168,7 +171,20 @@ final class AdaptiveLayoutTests: XCTestCase {
             if !framesMatch(original, current) || picture.frame != canvas {
                 moved.append("\(stage): controls \(current), canvas \(picture.frame)")
             }
-            if railExpected && !vertical.waitForExistence(timeout: 2) { hiddenRails.append(stage) }
+            if railExpected {
+                if vertical.waitForExistence(timeout: 2), horizontal.exists {
+                    let currentRails = ["vertical": vertical.frame, "horizontal": horizontal.frame]
+                    if let defaultRails {
+                        if !framesMatch(defaultRails, currentRails) {
+                            changedRails.append("\(stage): \(currentRails)")
+                        }
+                    } else {
+                        defaultRails = currentRails
+                    }
+                } else {
+                    hiddenRails.append(stage)
+                }
+            }
             let railFrame = vertical.exists ? vertical.frame : .zero
             print("Receiver chrome \(prefix)-\(stage): \(current), canvas \(picture.frame), rail \(railFrame)")
             keep(app, "\(prefix)-\(stage)")
@@ -218,9 +234,16 @@ final class AdaptiveLayoutTests: XCTestCase {
         }
         perform("Show Full Desktop", in: "Panes")
         check("back-to-desktop")
-        perform("Add Display Pane", in: "Panes")
+        perform("Add Google Chrome Pane", in: "Panes")
         XCTAssertEqual(pane.count, 2)
+        let chrome = pane.matching(NSPredicate(format: "label CONTAINS %@", "Google Chrome")).firstMatch
+        XCTAssertTrue(chrome.exists)
+        XCTAssertTrue(chrome.isSelected, "Chrome is the selected pane")
         check("two-panes")
+        perform("Show Trackpad Tab", in: "Panes")
+        check("trackpad-after-chrome")
+        perform("Show Full Desktop", in: "Panes")
+        check("desktop-after-chrome")
         perform("Float Display Pane", in: "Panes")
         XCTAssertTrue(app.descendants(matching: .any)["workspaceFloat"].firstMatch.waitForExistence(timeout: 3))
         check("floating-pane")
@@ -232,6 +255,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         perform("Show Trackpad Tab", in: "Panes")
         check("trackpad-with-float")
         perform("Set Rail Left", in: "Controls")
+        defaultRails = nil
         check("trackpad-left")
         if vertical.exists { XCTAssertLessThan(vertical.frame.midX, app.windows.firstMatch.frame.midX) }
         perform("Toggle Controls", in: "Controls")
@@ -246,6 +270,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         // Report every stage even on the baseline where the old layout moves.
         continueAfterFailure = true
         XCTAssertTrue(moved.isEmpty, "\(prefix) unrailed controls \(original), canvas \(canvas). Moved: \(moved)")
+        XCTAssertTrue(changedRails.isEmpty, "\(prefix) workspace changes moved receiver rails: \(changedRails)")
         XCTAssertTrue(hiddenRails.isEmpty, "\(prefix) rails covered or unreachable: \(hiddenRails)\n\(app.debugDescription)")
         continueAfterFailure = false
     }
