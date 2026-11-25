@@ -719,6 +719,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // it; nil (the layout above, unchanged) in every other case.
         let foldedTray = foldedTrayRow(baseFrame: baseLayout.trayFrame, traySize: traySize, count: count,
                                        collapsed: collapsed, portrait: portrait)
+        let faceDiameter = foldedTray?.item ?? trayItem
         let layout = foldedTray.map { baseLayout.replacingTrayFrame($0.frame) } ?? baseLayout
         let renderedTraySize = foldedTray?.frame.size ?? traySize
         let trayRegions: [CGRect] = autoHiding ? [CGRect.zero] : (foldedTray?.groups ?? [layout.trayFrame])
@@ -866,7 +867,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
                 if index < functionFrames.count {
                     let frame = functionFrames[index]
-                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
+                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical,
+                                         faceDiameter: faceDiameter)
                         .frame(width: frame.width, height: frame.height)
                         .position(x: frame.midX, y: frame.midY)
                         .opacity(autoHideOpacity)
@@ -891,7 +893,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .gesture(controlGesture())
 
             if let arrows {
-                arrowKeysButton(frame: arrows.toggle)
+                arrowKeysButton(frame: arrows.toggle, faceDiameter: faceDiameter)
                     .opacity(autoHideOpacity)
                     .scaleEffect(autoHideScale)
                     .offset(autoHideOffset)
@@ -1113,21 +1115,22 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// e.g. the default Zoom and Edit clusters visually distinct rather
     /// than one continuous panel — never a single solid tray/card
     /// background.
-    private func functionGroupCluster(_ group: [ShortcutItem], axis: Axis) -> some View {
+    private func functionGroupCluster(_ group: [ShortcutItem], axis: Axis, faceDiameter: CGFloat) -> some View {
         let stack = axis == .horizontal
             ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
             : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
         return stack {
-            ForEach(group) { item in functionButton(item) }
+            ForEach(group) { item in functionButton(item, faceDiameter: faceDiameter) }
         }
     }
 
-    private func functionButton(_ item: ShortcutItem) -> some View {
+    private func functionButton(_ item: ShortcutItem, faceDiameter: CGFloat) -> some View {
         // A button, for its pressed state: it still fires on lift, and only
         // when the finger lifts on it.
         Button { performFunctionAction(item) } label: {
-            ShortcutButtonFaceView(face: item.face, diameter: Metrics.trayItem)
+            ShortcutButtonFaceView(face: item.face, diameter: faceDiameter)
                 .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+                .contentShape(Rectangle())
         }
         .buttonStyle(TrayChipButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel(item.title)
@@ -1466,11 +1469,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// A tap opens or closes the keypad; a swipe sends one arrow press; the
     /// face previews the arrow a release would send.
     /// `onBar`: the keyboard bar's item, drawn like the bar's other keys.
-    private func arrowKeysButton(frame: CGRect, onBar: Bool = false) -> some View {
+    private func arrowKeysButton(frame: CGRect, onBar: Bool = false, faceDiameter: CGFloat = Metrics.trayItem) -> some View {
         let preview = arrowButtonDrag.flatMap(ArrowButtonGesture.direction(of:))
         let open = store.arrowKeypadOpen
         let pressed = arrowButtonDrag != nil
-        let diameter = onBar ? min(frame.width, frame.height) : Metrics.trayItem
+        let diameter = onBar ? min(frame.width, frame.height) : faceDiameter
         return Image(systemName: preview?.symbol ?? "arrow.up.and.down.and.arrow.left.and.right")
             .font(.system(size: (preview == nil ? 15 : 18) * diameter / Metrics.trayItem, weight: .semibold))
             .foregroundStyle(open ? Color.black : Color.white)

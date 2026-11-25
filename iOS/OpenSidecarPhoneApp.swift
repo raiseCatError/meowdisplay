@@ -26,9 +26,12 @@ struct OpenSidecarPhoneApp: App {
             } else if ReceiverScreen.chromeFixtureLandscapeSide != nil {
                 // Some simulator cover displays stay portrait when the device rotates.
                 GeometryReader { window in
-                    ReceiverScreen()
-                        .frame(width: window.size.width, height: window.size.width * 0.7)
-                        .position(x: window.size.width / 2, y: window.size.height / 2)
+                    ZStack {
+                        Color.black
+                        ReceiverScreen()
+                            .frame(width: window.size.width, height: window.size.width * 0.7)
+                    }
+                    .frame(width: window.size.width, height: window.size.height)
                 }
                 .ignoresSafeArea()
             } else if ReceiverScreen.chromeFixtureRoomy {
