@@ -90,3 +90,42 @@ enum RemoteConnectRequestIntent {
         return intent
     }
 }
+
+/// Receiver side of "local first, Remote as the fallback". A Connect (or a
+/// recovery run) asks the Mac to dial in two ways at once: the Bonjour `cr`
+/// token on the local network, and an authenticated Remote Access knock at
+/// the Mac's saved address. A knock over Tailscale usually lands first, and
+/// the Mac answers a tunnel knock on the tunnel (`dialOrder`), so a phone at
+/// home on the same Wi-Fi (or in AWDL range) ended up on Remote every time.
+///
+/// While the local network shows this Mac (its `_opendisplay-mac-pair._tcp`
+/// advertisement, over Wi-Fi or peer-to-peer), the knock waits for
+/// `localHeadStart` from the start of the run, so the local dial gets there
+/// first. If no local session started by then the knock goes out as before.
+/// A Mac not visible locally is knocked at once: no extra delay remotely.
+/// Routing only: every route still ends in the same pinned mutual TLS.
+enum LocalFirstKnockPolicy {
+    /// Long enough for the `cr` TXT update to reach the Mac and its pinned
+    /// dial to be adopted on a LAN or AWDL link; short enough that a stale
+    /// local result costs little before Remote is tried.
+    static let localHeadStart: TimeInterval = 3.0
+
+    enum Decision: Equatable {
+        case knockNow
+        case knockAfter(TimeInterval)
+    }
+
+    static func decide(macVisibleLocally: Bool, elapsedSinceRunStart: TimeInterval,
+                       headStart: TimeInterval = localHeadStart) -> Decision {
+        guard macVisibleLocally else { return .knockNow }
+        let remaining = headStart - max(0, elapsedSinceRunStart)
+        return remaining > 0 ? .knockAfter(remaining) : .knockNow
+    }
+
+    /// Whether the receiver's discovery results show `peerID` on the local
+    /// network. `discoveredIDs` are the TXT `id`s of the Macs found by the
+    /// receiver's Bonjour browser (which includes peer-to-peer interfaces).
+    static func isVisibleLocally(peerID: String, discoveredIDs: Set<String>) -> Bool {
+        discoveredIDs.contains(peerID)
+    }
+}

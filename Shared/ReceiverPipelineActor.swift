@@ -139,6 +139,11 @@ actor ReceiverPipelineActor {
     /// `startedRun` is false when the request joined an automatic run that
     /// was already under way.
     private var manualRun: (requestID: UUID, generation: Int, startedRun: Bool)?
+    /// When the current quick recovery run's first attempt started (uptime ms), keyed by its
+    /// generation — the clock `LocalFirstKnockPolicy` measures the local head start against.
+    private var knockRunStart: (generation: Int, atMs: Int64)?
+    /// The one knock held back for the local head start, keyed by the generation it belongs to.
+    private var deferredKnock: (generation: Int, timer: DispatchSourceTimer)?
 
     // MARK: - Dependencies
 
@@ -244,6 +249,10 @@ actor ReceiverPipelineActor {
         /// One `.automatic` knock for the extended recovery, reporting how it ended.
         var remoteRecoveryKnock: @Sendable (_ peerID: String,
                                             _ completion: @escaping @Sendable (RemoteKnockResult) -> Void) -> Void = { _, _ in }
+        /// Whether the local network (Wi-Fi or AWDL) shows `peerID` right now. While it does,
+        /// a run's knock waits for `LocalFirstKnockPolicy.localHeadStart` so the local route
+        /// wins. Discovery metadata only — it never decides trust.
+        var macVisibleLocally: @Sendable (_ peerID: String) -> Bool = { _ in false }
         /// The pinned peer a connection's own certificate resolves to NOW
         /// (`TrustStore.peerID(forSPKI:)`), or nil — its pin was removed
         /// after the handshake, or it has not finished TLS yet. Read-only
@@ -897,12 +906,10 @@ actor ReceiverPipelineActor {
         Log.info("reconnectDebug: attemptStarted generation=\(generation) attempt=\(attempt) delay=\(delay)")
         uiEffects.setStatus("Reconnecting…")
         hostEffects.ensureTLSListening()
-        let reconnect = reconnectContext.current()
-        if let peerID = reconnect.manualConnectPeerID ?? reconnect.authenticatedPeerIDHint ?? recoveryPeerID {
-            let intent = knockIntent(for: peerID, request: reconnect.manualConnectRequest)
-            Log.info("reconnectDebug: knock peer=\(peerID) intent=\(intent.rawValue)")
-            hostEffects.requestRemoteConnect(peerID, intent)
+        if attempt == 1 || knockRunStart?.generation != generation {
+            knockRunStart = (generation, Self.nowMs())
         }
+        knockOrDeferForLocalRoute(generation: generation)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
@@ -911,6 +918,54 @@ actor ReceiverPipelineActor {
         timer.resume()
         reconnectTimer = timer
         Log.info("reconnectDebug: retryScheduled generation=\(generation) in \(delay)s")
+    }
+
+    /// Knocks the Mac over Remote Access for this attempt — at once when the local network
+    /// does not show it, otherwise once the run's local head start is over
+    /// (`LocalFirstKnockPolicy`). A held-back knock is sent only if the run is still
+    /// recovering in the same generation: a local session adopted meanwhile bumps the
+    /// generation, so Remote is never asked to dial over a route that already won.
+    private func knockOrDeferForLocalRoute(generation: Int) {
+        let reconnect = reconnectContext.current()
+        guard let peerID = reconnect.manualConnectPeerID ?? reconnect.authenticatedPeerIDHint ?? recoveryPeerID
+        else { return }
+        let elapsedMs = knockRunStart.map { Self.nowMs() - $0.atMs } ?? 0
+        let decision = LocalFirstKnockPolicy.decide(
+            macVisibleLocally: hostEffects.macVisibleLocally(peerID),
+            elapsedSinceRunStart: TimeInterval(elapsedMs) / 1000)
+        switch decision {
+        case .knockNow:
+            cancelDeferredKnock()
+            let intent = knockIntent(for: peerID, request: reconnect.manualConnectRequest)
+            Log.info("reconnectDebug: knock peer=\(peerID) intent=\(intent.rawValue)")
+            hostEffects.requestRemoteConnect(peerID, intent)
+        case .knockAfter(let delay):
+            if deferredKnock?.generation == generation { return }   // one already waits
+            cancelDeferredKnock()
+            Log.info("routeDebug: Mac peer=\(peerID) visible locally — Remote knock waits \(delay)s for the local route")
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + delay)
+            timer.setEventHandler { [weak self] in
+                Task { await self?.deferredKnockFired(generation: generation) }
+            }
+            timer.resume()
+            deferredKnock = (generation, timer)
+        }
+    }
+
+    private func deferredKnockFired(generation: Int) {
+        guard deferredKnock?.generation == generation else { return }
+        deferredKnock = nil
+        guard sessionState.phase == .reconnecting, sessionState.generation == generation else {
+            Log.info("routeDebug: held-back Remote knock dropped — the run ended or a session was adopted")
+            return
+        }
+        knockOrDeferForLocalRoute(generation: generation)
+    }
+
+    private func cancelDeferredKnock() {
+        deferredKnock?.timer.cancel()
+        deferredKnock = nil
     }
 
     /// What a knock at `peerID` from this attempt declares. `.manual` only
@@ -987,6 +1042,7 @@ actor ReceiverPipelineActor {
 
     func suspendReconnectForBackground() {
         cancelReconnect()
+        cancelDeferredKnock()   // a held-back knock is foreground work too; resume re-decides it
         // Foreground only, as on Android: the extended Remote recovery ends with the app in the back.
         stopRemoteRecovery(reason: "background")
         // Deliberately not through `mutateSession`: the phase is unchanged

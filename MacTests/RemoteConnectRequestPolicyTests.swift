@@ -60,4 +60,46 @@ final class RemoteConnectRequestPolicyTests: XCTestCase {
         XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: .wifi, interfaceName: "utun4"))
         XCTAssertFalse(RemoteConnectRequestPolicy.arrivedOverTunnel(interfaceType: nil, interfaceName: nil))
     }
+
+    // MARK: - Local first (LocalFirstKnockPolicy)
+
+    // At home on the same Wi-Fi (or in AWDL range) the Remote knock waits, so
+    // the local dial gets there first instead of a Tailscale knock winning.
+    func testMacVisibleLocallyHoldsTheKnockForTheHeadStart() {
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: true, elapsedSinceRunStart: 0),
+                       .knockAfter(LocalFirstKnockPolicy.localHeadStart))
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: true, elapsedSinceRunStart: 1, headStart: 3),
+                       .knockAfter(2))
+    }
+
+    // Away from home nothing waits: Remote is the only route.
+    func testMacNotVisibleLocallyIsKnockedAtOnce() {
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: false, elapsedSinceRunStart: 0), .knockNow)
+    }
+
+    // A stale or failing local result costs only the head start: Remote is the fallback.
+    func testKnockGoesOutOnceTheHeadStartIsOver() {
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: true, elapsedSinceRunStart: 3, headStart: 3),
+                       .knockNow)
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: true, elapsedSinceRunStart: 20, headStart: 3),
+                       .knockNow)
+    }
+
+    // A clock that runs backwards never stretches the wait beyond the head start.
+    func testNegativeElapsedTimeNeverExceedsTheHeadStart() {
+        XCTAssertEqual(LocalFirstKnockPolicy.decide(macVisibleLocally: true, elapsedSinceRunStart: -5, headStart: 3),
+                       .knockAfter(3))
+    }
+
+    func testHeadStartIsShortButNonZero() {
+        XCTAssertGreaterThan(LocalFirstKnockPolicy.localHeadStart, 0)
+        XCTAssertLessThanOrEqual(LocalFirstKnockPolicy.localHeadStart, 5)
+    }
+
+    func testVisibilityIsPerPeer() {
+        let ids: Set<String> = ["mac-a"]
+        XCTAssertTrue(LocalFirstKnockPolicy.isVisibleLocally(peerID: "mac-a", discoveredIDs: ids))
+        XCTAssertFalse(LocalFirstKnockPolicy.isVisibleLocally(peerID: "mac-b", discoveredIDs: ids))
+        XCTAssertFalse(LocalFirstKnockPolicy.isVisibleLocally(peerID: "mac-a", discoveredIDs: []))
+    }
 }

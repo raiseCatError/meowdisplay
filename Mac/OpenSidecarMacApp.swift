@@ -2093,6 +2093,24 @@ final class SenderController: ObservableObject {
             }
             Log.info("connectDebug: receiverConnectRequestAccepted peer=\(peerID)")
             let target = ConnectionTarget.wifi(result)
+            // The receiver's Connect also knocks over Remote Access, and a
+            // knock over Tailscale can land first and start a Remote session
+            // (an older receiver knocks at once; a current one gives the
+            // local route a head start, `LocalFirstKnockPolicy`). A fresh
+            // `cr` token means the receiver is on this local link now, so a
+            // Remote owner moves onto it: `RouteArbitration` migrates
+            // Remote -> LAN/AWDL in place. The admission check below would
+            // otherwise call this request already handled and leave the
+            // session on Remote. Routing only: the migrated transport is the
+            // same pinned mutual TLS (`buildTransport`).
+            if let owner = owningSession(for: target),
+               LocalRouteUpgrade.shouldMoveOwner(ownerTier: routeTier(for: owner),
+                                                 localTier: routeTier(for: target)) {
+                Log.info("routeDebug: receiver connect request seen locally while \(owner.id) "
+                    + "is on a worse route — moving it to the local route")
+                connect(to: target, userInitiated: true, initiator: .receiver)
+                continue
+            }
             // Policy and any existing session are judged together — a
             // session this Mac started on its own must not absorb the
             // request (see `ReceiverRequestAdmission`).

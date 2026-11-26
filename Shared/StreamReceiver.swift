@@ -718,6 +718,26 @@ final class AudioPreferenceBox: @unchecked Sendable {
     }
 }
 
+/// The TXT `id`s of the Macs the receiver's Bonjour browser
+/// (`_opendisplay-mac-pair._tcp`, peer-to-peer included) shows right now.
+/// Written from the browser's handler on `queue`, read by the pipeline actor
+/// when it decides whether a knock waits for the local route
+/// (`LocalFirstKnockPolicy`). Discovery metadata only: it decides the order
+/// routes are tried in, never trust. Same `NSLock` idiom as the boxes above.
+final class LocalMacVisibility: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+
+    func update(_ newIDs: Set<String>) {
+        lock.lock(); ids = newIDs; lock.unlock()
+    }
+
+    func isVisible(peerID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return LocalFirstKnockPolicy.isVisibleLocally(peerID: peerID, discoveredIDs: ids)
+    }
+}
+
 /// Lock-protected box holding the lazily-constructed `pipeline` actor
 /// reference, installed once `pipeline`'s own `lazy var` initializer runs.
 /// Exists solely so `makePipelineHostEffects()`'s `ensureTLSListening`
@@ -1562,6 +1582,8 @@ final class StreamReceiver: ObservableObject {
         set { advertisementState.setServiceName(newValue) }
     }
     private let advertisementState = ReceiverAdvertisementState(serviceName: "MeowDisplay")
+    /// See `LocalMacVisibility`: which paired Macs the local network shows now.
+    private let localMacVisibility = LocalMacVisibility()
     private let pipelineBox = ReceiverPipelineActorBox()
     private let selfBox = StreamReceiverSelfBox()
 
@@ -2659,8 +2681,13 @@ final class StreamReceiver: ObservableObject {
         let browser = NWBrowser(for: .bonjourWithTXTRecord(
             type: "_opendisplay-mac-pair._tcp", domain: nil), using: parameters)
         let uiSink = uiSink
+        let localMacVisibility = localMacVisibility
         browser.browseResultsChangedHandler = { results, _ in
             let discovered = Array(results)
+            localMacVisibility.update(Set(discovered.compactMap { result -> String? in
+                if case .bonjour(let txt) = result.metadata { return txt["id"] }
+                return nil
+            }))
             DispatchQueue.main.async {
                 uiSink.publishDiscoveredMacs(discovered)
                 #if DEBUG
@@ -3745,7 +3772,11 @@ final class StreamReceiver: ObservableObject {
         if connected, trackpadLayoutWatching {
             sendUIControl(["type": TrackpadLayoutWire.watch, "on": false])
         }
+        // Window mode: the panes' pointer marks keep the cursor's last place when the Trackpad
+        // goes idle, instead of vanishing.
+        let kept = windowModeActive ? trackpadCursor.location : nil
         clearTrackpadLayout()
+        if let kept { trackpadCursor.location = kept }
     }
 
     @MainActor private func clearTrackpadLayout() {
@@ -6139,6 +6170,7 @@ final class StreamReceiver: ObservableObject {
         let pairingSuppressionState = self.pairingSuppressionState
         let advertisementState = self.advertisementState
         let pipelineBox = self.pipelineBox
+        let localMacVisibility = self.localMacVisibility
         // `selfBox` lets `beginAdoption` below reach `beginAdoptionHostWork`
         // at call time with zero `StreamReceiver` capture — see
         // `StreamReceiverSelfBox`'s doc comment.
@@ -6169,6 +6201,9 @@ final class StreamReceiver: ObservableObject {
                 queue.async {
                     Self.requestRemoteConnect(peerID: peerID, intent: .automatic, queue: queue, completion: completion)
                 }
+            },
+            macVisibleLocally: { peerID in
+                localMacVisibility.isVisible(peerID: peerID)
             },
             resolvePinnedPeerID: { connection in
                 Self.resolveAuthenticatedPeerID(from: connection)
