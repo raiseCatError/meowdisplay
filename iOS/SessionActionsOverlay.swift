@@ -3,7 +3,7 @@ import SwiftUI
 /// Session Actions: opened by touching and holding the session's Settings
 /// control. A modal over the live session (blurred and dimmed, framed by a
 /// thin red outline that follows the screen's corners) with Back to Home —
-/// Keep Connected, Lock Mac (when the Mac supports it), Disconnect from Mac and Cancel. Which actions appear and
+/// Keep Connected, Rearrange Controls, Lock Mac (when the Mac supports it), Disconnect from Mac and Cancel. Which actions appear and
 /// what dismissing restores are decided in `ReceiverSessionActionsState` /
 /// `ReceiverSessionActionsPolicy`; ReceiverScreen keeps every input from the
 /// Mac while this is up.
@@ -146,6 +146,14 @@ struct SessionActionsOverlay: View {
             .accessibilityIdentifier("sessionActionsHome")
         case .lockMac:
             lockMacRow
+        case .rearrangeControls:
+            Button { onAction(.rearrangeControls) } label: {
+                label("Rearrange Controls")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .accessibilityHint(Text("The control buttons wiggle. Drag them into a new order, then choose Done."))
+            .accessibilityIdentifier("sessionActionsRearrange")
         case .disconnect:
             Button(role: .destructive) { onAction(.disconnect) } label: {
                 label("Disconnect from Mac")

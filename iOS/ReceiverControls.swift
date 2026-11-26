@@ -142,6 +142,26 @@ final class ReceiverControlStore: ObservableObject {
         if open { beginAutoHideActivity() } else { scheduleAutoHide() }
     }
 
+    /// Rearrange Controls (Session Actions): the tray buttons wiggle and are
+    /// dragged into a new order (`ControlRearrangeLayer`). Transient, never
+    /// persisted; nothing reaches the Mac while it is on (ReceiverScreen
+    /// folds it into `localInputSurfaceOpen`), and the controls stay up.
+    @Published private(set) var rearrangingControls = false
+
+    func setRearrangingControls(_ on: Bool) {
+        guard rearrangingControls != on else { return }
+        rearrangingControls = on
+        if on { beginAutoHideActivity() } else { scheduleAutoHide() }
+    }
+
+    /// Whether Session Actions offers Rearrange Controls right now.
+    var canRearrangeControls: Bool {
+        ControlRearrangePolicy.available(
+            trayShown: preferences.trayCanBeShown && !preferences.trayCollapsed,
+            functionTrayShown: preferences.functionTrayCanBeShown,
+            customLayout: isPad && effectivePadLayout == .custom)
+    }
+
     func setWorkspaceMenuOpen(_ open: Bool) {
         guard workspaceMenuOpen != open else { return }
         workspaceMenuOpen = open
@@ -176,7 +196,7 @@ final class ReceiverControlStore: ObservableObject {
 
     private var canCountDownToAutoHide: Bool {
         preferences.autoHideEnabled && !arrowKeypadOpen && !moveViewActive
-            && !sessionActionsOpen && !workspaceMenuOpen
+            && !sessionActionsOpen && !workspaceMenuOpen && !rearrangingControls
     }
 
     #if DEBUG
@@ -552,7 +572,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
     var body: some View {
         Group {
-            switch presentation {
+            // Rearrange Controls edits the normal trays; the keyboard closed as it began.
+            switch store.rearrangingControls ? ReceiverControlPresentation.normal : presentation {
             case .keyboardBar:
                 keyboardBarBody
             case .normal:
@@ -652,6 +673,16 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         }
         .onDisappear { closeArrowKeys() }
         .onChange(of: store.preferences.autoHideEnabled) { _ in store.resetAutoHide() }
+        // Rearrange Controls: nothing held or open carries into it, and it
+        // ends by itself once there is nothing left it could rearrange.
+        .onChange(of: store.rearrangingControls) { on in
+            guard on else { return }
+            closeArrowKeys()
+            apply(interaction.resetAll())
+        }
+        .onChange(of: store.canRearrangeControls) { can in
+            if !can { store.setRearrangingControls(false) }
+        }
         .onChange(of: store.preferences.trayCollapsed) { _ in store.resetAutoHide() }
         .onChange(of: store.preferences.trayCanBeShown) { _ in store.resetAutoHide() }
         .onChange(of: store.preferences.padControlLayout) { _ in
@@ -867,7 +898,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-            } else if !autoHiding {
+            } else if !autoHiding && !store.rearrangingControls {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem,
                             fold: foldedTray)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
@@ -875,7 +906,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .transition(autoHideTransition)
             }
 
-            if !autoHiding {
+            if !autoHiding && !store.rearrangingControls {
                 ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
                     if index < functionFrames.count {
                         let frame = functionFrames[index]
@@ -922,6 +953,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 obstacles: [renderedMainTrayFrame] + functionFrames
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { chip(selected: $0) }
+
+            if store.rearrangingControls {
+                phoneRearrangeLayer(trayFrame: layout.trayFrame, horizontal: layout.axis == .horizontal,
+                                    trayItem: trayItem, fold: foldedTray, collapsed: collapsed,
+                                    functionFrames: functionFrames, faceDiameter: faceDiameter)
+            }
 
             #if DEBUG
             if notchDebugOverlayEnabled {
@@ -2127,6 +2164,70 @@ extension ReceiverControlOverlay {
     }
 }
 
+// MARK: - Rearrange Controls
+
+extension ReceiverControlOverlay {
+    /// Edit mode over the iPhone tray: the slots are where `controlsRow` and
+    /// `functionGroupCluster` draw each button this pass.
+    fileprivate func phoneRearrangeLayer(trayFrame: CGRect, horizontal: Bool, trayItem: CGFloat,
+                                         fold: ControlFoldGeometry.TrayRow?, collapsed: Bool,
+                                         functionFrames: [CGRect], faceDiameter: CGFloat) -> some View {
+        let main = collapsed ? [] : controls
+        let mainSlots = fold?.cells ?? ControlRearrangement.stackSlots(
+            center: CGPoint(x: trayFrame.midX, y: trayFrame.midY), horizontal: horizontal,
+            count: main.count, item: trayItem, spacing: Metrics.trayGap)
+        let inset = max(0, (Metrics.functionTarget - faceDiameter) / 2)
+        let functionSlots: [CGRect] = zip(functionGroups, functionFrames).flatMap { group, frame in
+            ControlRearrangement.stackSlots(center: CGPoint(x: frame.midX, y: frame.midY), horizontal: horizontal,
+                                            count: group.count, item: Metrics.functionTarget, spacing: 0)
+                .map { $0.insetBy(dx: inset, dy: inset) }
+        }
+        let functionShown = Array(functionGroups.prefix(functionFrames.count).joined())
+        return rearrangeLayer(main: Array(zip(main, mainSlots)), function: Array(zip(functionShown, functionSlots)))
+    }
+
+    /// Edit mode over the iPad Strip/Overlay rails: the modifiers (the only
+    /// Main rail buttons whose order the profile sets, see
+    /// `PadRailComposition`) and the Function buttons.
+    fileprivate func padRearrangeLayer(mainControls: [PadPlacedControl],
+                                       functionControls: [(item: ShortcutItem, frame: CGRect)]) -> some View {
+        let modifiers: [(ControlTrayItem, CGRect)] = mainControls.compactMap { control in
+            guard case .tray(let item) = control.kind, item.modifier != nil else { return nil }
+            return (item, control.frame)
+        }
+        return rearrangeLayer(main: modifiers, function: functionControls.map { ($0.item, $0.frame) })
+    }
+
+    private func rearrangeLayer(main: [(ControlTrayItem, CGRect)], function: [(ShortcutItem, CGRect)]) -> some View {
+        let mainItems = main.map(\.0)
+        let functionIDs = function.map(\.0.id)
+        let runs = [
+            ControlRearrangeRun(kind: .main, items: mainItems.map {
+                .tray($0, palette: ControlRearrangePolicy.paletteChord(for: $0, in: profile))
+            }, slots: main.map(\.1)),
+            ControlRearrangeRun(kind: .function, items: function.map { .shortcut($0.0) }, slots: function.map(\.1)),
+        ].filter { !$0.items.isEmpty }
+        return ControlRearrangeLayer(
+            containerSize: containerSize, safeInsets: safeInsets, isPad: store.isPad, runs: runs,
+            paletteItems: { chord in store.activeProfile.actions(for: chord).map(ControlRearrangeItem.shortcut) },
+            onMove: { kind, from, to in
+                switch kind {
+                case .main:
+                    store.updateActiveProfile { $0.moveShownTrayItem(shown: mainItems, from: from, to: to) }
+                case .function:
+                    store.updateActiveFunctionTrayProfile { $0.moveShownItem(shown: functionIDs, from: from, to: to) }
+                case .palette(let chord):
+                    store.updateActiveProfile { $0.moveAction(for: chord, from: from, to: to) }
+                }
+            },
+            onHaptic: { haptics.play($0) },
+            onDone: {
+                haptics.play(.confirmation)
+                store.setRearrangingControls(false)
+            })
+    }
+}
+
 // MARK: - iPad presentation (Strip / Overlay / Custom)
 
 /// One placed iPad control, resolved for this layout pass.
@@ -2309,7 +2410,8 @@ extension ReceiverControlOverlay {
             // answers its hit tests even with `.accessibilityHidden`, so
             // VoiceOver and UI tests would still find invisible controls.
             if !autoHiding {
-                ForEach(mainControls) { control in
+                // Rearrange Controls draws the modifiers and Function buttons itself.
+                ForEach(mainControls.filter { !(store.rearrangingControls && $0.kind.modifier != nil) }) { control in
                     Group {
                         if case .function(let id) = control.kind, let item = functionItem(id) {
                             padFunctionChip(item, frame: control.frame, onRail: true,
@@ -2321,10 +2423,12 @@ extension ReceiverControlOverlay {
                     }
                     .transition(.opacity)
                 }
-                ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
-                    padFunctionChip(control.item, frame: control.frame, onRail: true,
-                                    hint: hints ? control.item.title.lowercased() : nil)
-                        .transition(.opacity)
+                if !store.rearrangingControls {
+                    ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
+                        padFunctionChip(control.item, frame: control.frame, onRail: true,
+                                        hint: hints ? control.item.title.lowercased() : nil)
+                            .transition(.opacity)
+                    }
                 }
             }
             if let paletteChord, let wheel {
@@ -2369,6 +2473,9 @@ extension ReceiverControlOverlay {
                 obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: true) }
+            if store.rearrangingControls {
+                padRearrangeLayer(mainControls: mainControls, functionControls: functionControls)
+            }
         }
         .onAppear {
             onCanvasChange(canvasPublication)
