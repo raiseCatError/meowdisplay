@@ -636,6 +636,7 @@ struct ReceiverScreen: View {
                        allowInput: inputReachesMac,
                        videoEnabled: videoEnabled,
                        showCursorLocator: controlStore.preferences.showCursorLocator,
+                       cursorFadesWhenResting: workspaceVisible && model.workspace.windowMode && controlStore.autoHidden,
                        keepPointerOnReceiverDisplay: controlStore.preferences.keepPointerOnReceiverDisplay,
                        pinchTarget: controlStore.preferences.pinchTarget,
                        rotateTarget: controlStore.preferences.rotateTarget,
@@ -883,6 +884,7 @@ struct ReceiverScreen: View {
                                             floatCloseHapticsEnabled: controlStore.preferences.hapticsEnabled,
                                             onMenuVisibilityChange: { controlStore.setWorkspaceMenuOpen($0) },
                                             appMenuBarAutoHidden: controlStore.autoHideIdle,
+                                            controlsHidden: controlStore.autoHidden,
                                             onAppMenuBarActivity: { active in
                                                 if active { controlStore.beginAutoHideActivity() }
                                                 else { controlStore.scheduleAutoHide() }
@@ -892,6 +894,10 @@ struct ReceiverScreen: View {
                             .onPreferenceChange(WorkspaceRailObstaclePreference.self) { occupiedWorkspaceChrome = $0 }
                             .onDisappear { occupiedWorkspaceChrome = [] }
                             .stepsAside(forAllApps: model.workspace.launchpadOpen)
+                        // The Mac's real pointer in Full Desktop panes while the Trackpad drives it.
+                        WorkspaceRealPointerOverlay(model: model.workspace, cursor: model.receiver.trackpadCursor,
+                                                    displays: model.receiver.trackpadDisplayGeometry,
+                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden)
                     }
                     // The rails are receiver chrome above both Trackpad renderers and floats.
                     // Only the strip hit regions take touches.
@@ -902,7 +908,7 @@ struct ReceiverScreen: View {
                         .frame(width: canvas.width, height: canvas.height)
                         .position(x: canvas.midX, y: canvas.midY)
                     if workspaceVisible, controlStore.preferences.windowSwitcher == .rail {
-                        WindowRailView(model: model.workspace)
+                        WindowRailView(model: model.workspace, controlsHidden: controlStore.autoHidden)
                             .padding(effectiveSafeInsets.edgeInsets)
                     }
                     ReceiverControlOverlay(
@@ -3552,6 +3558,8 @@ struct VideoLayerView: UIViewRepresentable {
     let videoEnabled: Bool
     /// An arrow at the picture's edge pointing at a Mac pointer that is out of view.
     let showCursorLocator: Bool
+    /// Window mode with the controls auto-hidden: the drawn pointer fades once it rests too.
+    var cursorFadesWhenResting = false
     let keepPointerOnReceiverDisplay: Bool
     let pinchTarget: ReceiverGestureTarget
     let rotateTarget: ReceiverGestureTarget
@@ -3638,6 +3646,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.setWorkspaceTrackpadSelected(workspaceTrackpadSelected)
         view.setVideoEnabled(videoEnabled)
         view.setCursorLocatorEnabled(showCursorLocator)
+        view.setCursorFadesWhenResting(cursorFadesWhenResting)
         view.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         view.setScrollRailFrames(scrollRailFrames)
         view.touchDivisions = touchDivisions
@@ -3798,6 +3807,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.workspaceOverviewFocused = workspaceOverviewFocused
         uiView.setWorkspaceTrackpadSelected(workspaceTrackpadSelected)
         uiView.setCursorLocatorEnabled(showCursorLocator)
+        uiView.setCursorFadesWhenResting(cursorFadesWhenResting)
         uiView.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
         uiView.setScrollRailFrames(scrollRailFrames)
         uiView.touchDivisions = touchDivisions
@@ -4128,6 +4138,12 @@ struct VideoLayerView: UIViewRepresentable {
         /// two consecutive reports while `cursorPacer` paces it (see `moveCursor`).
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
+        /// See `setCursorFadesWhenResting`.
+        private var cursorFadesWhenResting = false
+        private var cursorLastMoved: CFTimeInterval = 0
+        private var cursorRestCheck: DispatchWorkItem?
+        /// How long the pointer stays after its last move while the controls are hidden.
+        private static let cursorRestDelay: CFTimeInterval = 1.5
         private var cursorPacer = CursorPresentationPacer()
         private var cursorLink: CADisplayLink?
         /// On by default. Launching with `-cursorPacing NO` draws each report on arrival, as
@@ -5420,6 +5436,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func drawCursor(at point: CGPoint) {
+            if point != cursorNorm { noteCursorMoved() }
             cursorNorm = point
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -5536,6 +5553,42 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.setDisableActions(true)
             updateCursorLocator()
             CATransaction.commit()
+        }
+
+        /// Window mode: when the controls tray fades, the drawn pointer fades with it once it has
+        /// rested for `cursorRestDelay`, and comes back as soon as the Mac reports a move.
+        func setCursorFadesWhenResting(_ fades: Bool) {
+            guard fades != cursorFadesWhenResting else { return }
+            cursorFadesWhenResting = fades
+            updateCursorRestingOpacity()
+        }
+
+        private func noteCursorMoved() {
+            cursorLastMoved = CACurrentMediaTime()
+            guard cursorFadesWhenResting else { return }
+            updateCursorRestingOpacity()
+        }
+
+        private func updateCursorRestingOpacity() {
+            cursorRestCheck?.cancel()
+            cursorRestCheck = nil
+            let rested = CACurrentMediaTime() - cursorLastMoved
+            let fade = cursorFadesWhenResting && rested >= Self.cursorRestDelay
+            let target: Float = fade ? 0 : 1
+            if cursorLayer.opacity != target {
+                let animation = CABasicAnimation(keyPath: "opacity")
+                animation.fromValue = cursorLayer.presentation()?.opacity ?? cursorLayer.opacity
+                animation.toValue = target
+                animation.duration = fade ? 0.28 : 0.12
+                animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                cursorLayer.opacity = target
+                cursorLayer.add(animation, forKey: "restingOpacity")
+            }
+            if cursorFadesWhenResting, !fade {
+                let check = DispatchWorkItem { [weak self] in self?.updateCursorRestingOpacity() }
+                cursorRestCheck = check
+                DispatchQueue.main.asyncAfter(deadline: .now() + (Self.cursorRestDelay - rested) + 0.02, execute: check)
+            }
         }
 
         func setCursorLocatorEnabled(_ enabled: Bool) {

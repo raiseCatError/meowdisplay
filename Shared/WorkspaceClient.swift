@@ -4384,3 +4384,44 @@ extension WorkspaceModel {
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }
+
+// MARK: The real Mac pointer in Full Desktop panes
+
+extension WorkspaceModel {
+    /// Where the Mac's real pointer is in each shown Full Desktop pane (picture points), while
+    /// the Trackpad drives it (owner's QA of 9000083): the pane's own picture can lag the
+    /// pointer, so the receiver marks it. `cursor` and `displays` are global Mac points from the
+    /// Trackpad's layout samples. A pane gets a mark only where its picture shows that point
+    /// and no float above it covers it.
+    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect) -> [String: CGPoint] {
+        guard windowMode, picture.width > 0, picture.height > 0,
+              let display = displays.first(where: { $0.bounds.contains(cursor) }), display.bounds.width > 0,
+              display.bounds.height > 0 else { return [:] }
+        let frames = self.frames
+        let floats = layout.visibleFloatIDs
+        func onScreen(_ r: WorkspaceRect) -> CGRect {
+            CGRect(x: picture.minX + r.x * picture.width, y: picture.minY + r.y * picture.height,
+                   width: r.width * picture.width, height: r.height * picture.height)
+        }
+        var marks: [String: CGPoint] = [:]
+        for id in layout.orderedTileIDs + floats {
+            guard let tile = layout.tiles[id], let source = tile.source, source.kind == .display,
+                  self.display(for: source)?.id == display.id,
+                  let frame = frames.tiles[id].map(onScreen), frame.width > 0, frame.height > 0,
+                  let transform = floatContentTransform(id, width: Double(frame.width), height: Double(frame.height))
+            else { continue }
+            let u = (cursor.x - display.bounds.minX) / display.bounds.width
+            let v = (cursor.y - display.bounds.minY) / display.bounds.height
+            let local = transform.canvasPoint(fromSource: WorkspacePoint(x: u * transform.source.width,
+                                                                         y: v * transform.source.height))
+            guard let shown = transform.visibleRect,
+                  shown.contains(local) else { continue }
+            let point = CGPoint(x: frame.minX + local.x, y: frame.minY + local.y)
+            // Under a float that sits above this pane: hidden.
+            let above = layout.isFloat(id) ? floats.drop(while: { $0 != id }).dropFirst() : floats[...]
+            if above.contains(where: { frames.tiles[$0].map(onScreen)?.contains(point) == true }) { continue }
+            marks[id] = point
+        }
+        return marks
+    }
+}
