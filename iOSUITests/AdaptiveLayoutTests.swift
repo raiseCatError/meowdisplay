@@ -112,8 +112,11 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
         XCTAssertEqual(file.frame.minY, toggle.frame.minY, accuracy: 10)
         XCTAssertLessThanOrEqual(file.frame.midX, toggle.frame.minX, "The menus open to the chevron's left")
-        XCTAssertEqual(toggle.frame.maxX, chromePane.frame.maxX, accuracy: 12,
-                       "The chevron sits on the pane's right edge")
+        // The right end of the pane's title row: that row stops short of the edge-scroll rails and
+        // the controls, so on some layouts (the Duo's portrait rail) the chevron ends left of the
+        // pane's own edge.
+        XCTAssertGreaterThan(toggle.frame.midX, chromePane.frame.midX, "The chevron sits on the pane's right side")
+        XCTAssertLessThanOrEqual(toggle.frame.maxX, chromePane.frame.maxX + 1)
         toggle.tap()
         XCTAssertFalse(file.exists)
         XCTAssertEqual(toggle.label, "Show App Menu Bar")
@@ -145,7 +148,8 @@ final class AdaptiveLayoutTests: XCTestCase {
         keep(app, "app-menu-bar-after-inactivity")
         XCTAssertTrue(autoHid, "After inactivity: File exists=\(file.exists), Settings hittable=\(settings.isHittable) "
                       + "\(settings.exists ? "\(settings.frame) \(settings.elementType.rawValue) \(settings.identifier)" : "")")
-        XCTAssertTrue(toggle.isHittable)
+        // The folded chevron fades with the controls tray (owner's QA of 9000083); only the tabs stay.
+        XCTAssertFalse(toggle.isHittable, "The folded chevron fades with the controls tray")
         keep(app, "app-menu-bar-auto-hidden")
         XCTAssertEqual(buttons.value as? String, afterManualCollapse, "Local menus must not click the Mac")
 
@@ -198,6 +202,13 @@ final class AdaptiveLayoutTests: XCTestCase {
             NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "workspacePane", "Trackpad")).firstMatch
         XCTAssertTrue(trackpad.waitForExistence(timeout: 5))
         keep(app, "roomy-phone-trackpad-tab-full-canvas")
+        if trackpad.frame.isNull || trackpad.frame.isEmpty {
+            // Diagnostics for Xcode Cloud runs, which keep the log but show no screenshots.
+            print("ROOMY-TRACKPAD frame=\(trackpad.frame) panes:")
+            let panes = app.descendants(matching: .any).matching(identifier: "workspacePane")
+            for i in 0..<panes.count { print("  \(panes.element(boundBy: i).label) \(panes.element(boundBy: i).frame)") }
+            print(app.debugDescription)
+        }
         XCTAssertEqual(trackpad.frame.minX, window.frame.minX, accuracy: 1)
         XCTAssertEqual(trackpad.frame.maxX, window.frame.maxX, accuracy: 1)
         XCTAssertEqual(trackpad.frame.minY, window.frame.minY, accuracy: 1)
