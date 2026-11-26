@@ -400,6 +400,8 @@ struct ReceiverScreen: View {
         return AnyView(TrackpadSurfaceDecoration(
             showDots: controlStore.preferences.showSurfaceGrid,
             showBorder: controlStore.preferences.showTrackpadBorder,
+            touchTrail: controlStore.preferences.trackpadTouchTrail && inputReachesMac
+                && model.workspace.activeTrackpadID == id,
             dotAreas: [bounds], guideArea: bounds,
             displays: subscribed ? model.receiver.trackpadDisplayGeometry : [],
             cursor: model.receiver.trackpadCursor, feedback: scrollFeedback)
@@ -789,6 +791,7 @@ struct ReceiverScreen: View {
                         TrackpadSurfaceDecoration(
                             showDots: controlStore.preferences.showSurfaceGrid,
                             showBorder: controlStore.preferences.showTrackpadBorder,
+                            touchTrail: controlStore.preferences.trackpadTouchTrail && inputReachesMac,
                             dotAreas: padPieces.map { $0.offsetBy(dx: -padArea.minX, dy: -padArea.minY) },
                             guideArea: guideArea.offsetBy(dx: -padArea.minX, dy: -padArea.minY),
                             displays: showsTrackpadGuide ? model.receiver.trackpadDisplayGeometry : [],
@@ -7397,52 +7400,100 @@ private extension View {
 private struct TrackpadSurfaceDecoration: View {
     let showDots: Bool
     let showBorder: Bool
+    /// A quiet trail under each finger (`TrackpadTouchTrail`), only while touches reach the Mac.
+    var touchTrail = false
     let dotAreas: [CGRect]
     let guideArea: CGRect
     let displays: [TrackpadDisplayGeometry]
     let cursor: TrackpadCursorPresentation
     @ObservedObject var feedback: TrackpadScrollFeedback
+    @StateObject private var trail = TrackpadTouchTrail()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let result = TrackpadDisplayGuideGeometry.layout(
-            displays: displays.map(\.bounds), cursor: nil, in: guideArea.size)
-        let outlines = result.outlines.map { $0.offsetBy(dx: guideArea.minX, dy: guideArea.minY) }
-        ZStack(alignment: .topLeading) {
-            if showDots {
-                TrackpadDots(areas: dotAreas, outlines: outlines,
-                             velocity: reduceMotion ? .zero : feedback.velocity)
-            }
-            decoration(outlines: outlines)
-            ForEach(Array(zip(displays, outlines)), id: \.0.id) { display, outline in
-                if let name = display.name, outline.width >= 52, outline.height >= 24 {
-                    Text(verbatim: name)
-                        .font(.caption2)
-                        .lineLimit(1)
-                        .foregroundStyle(.white.opacity(0.30))
-                        .frame(width: outline.width - 12, alignment: .leading)
-                        .position(x: outline.midX, y: outline.minY + 11)
+        GeometryReader { proxy in
+            let frame = proxy.frame(in: .global)
+            let areas = dotAreas.filter { $0.width > 1 && $0.height > 1 }
+            let guide = guideArea
+            let shapes = outlineShapes(areas, origin: frame.origin)
+            let result = TrackpadDisplayGuideGeometry.layout(
+                displays: displays.map(\.bounds), cursor: nil, in: guide.size)
+            let outlines = result.outlines.map { $0.offsetBy(dx: guide.minX, dy: guide.minY) }
+            let trailOn = touchTrail && !reduceMotion
+            ZStack(alignment: .topLeading) {
+                if showDots {
+                    // Masked to the pad's own outline: no dot shows past its border or its
+                    // rounded corners.
+                    TrackpadDots(areas: areas, outlines: outlines,
+                                 velocity: reduceMotion ? .zero : feedback.velocity)
+                        .mask(TrackpadAreasShape(shapes: shapes).fill(style: FillStyle(eoFill: false)))
                 }
+                if trailOn {
+                    TrackpadTouchTrailView(trail: trail, origin: frame.origin)
+                        .mask(TrackpadAreasShape(shapes: shapes).fill(style: FillStyle(eoFill: false)))
+                }
+                if showBorder { border(shapes) }
+                guideOutlines(outlines)
+                ForEach(Array(zip(displays, outlines)), id: \.0.id) { display, outline in
+                    if let name = display.name, outline.width >= 52, outline.height >= 24 {
+                        Text(verbatim: name)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(.white.opacity(0.30))
+                            .frame(width: outline.width - 12, alignment: .leading)
+                            .position(x: outline.midX, y: outline.minY + 11)
+                    }
+                }
+                if !displays.isEmpty, !guide.isEmpty { TrackpadCursorMarker(cursor: cursor, displays: displays, area: guide) }
             }
-            if !displays.isEmpty { TrackpadCursorMarker(cursor: cursor, displays: displays, area: guideArea) }
+            .background {
+                if trailOn { TrackpadTouchTrailWatch(trail: trail).allowsHitTesting(false).accessibilityHidden(true) }
+            }
+            .onAppear { trail.regions = areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) } }
+            .onChange(of: areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) }) { trail.regions = $0 }
         }
     }
 
-    private func decoration(outlines: [CGRect]) -> some View {
+    /// Each area's outline, drawn in place: on the display's own edges where it reaches them,
+    /// curving with the glass in a screen corner, twelve points everywhere else.
+    private func outlineShapes(_ areas: [CGRect], origin: CGPoint) -> [(area: CGRect, shape: PaneOutlineShape)] {
+        let screen = PaneOutlineShape.screenBounds
+        let screenRadius = PaneOutlineShape.screenCornerRadius
+        return areas.map { area in
+            (area, PaneOutlineShape.following(screen: screen, screenRadius: screenRadius,
+                                              rect: area.offsetBy(dx: origin.x, dy: origin.y), inner: 12))
+        }
+    }
+
+    private func border(_ shapes: [(area: CGRect, shape: PaneOutlineShape)]) -> some View {
         Canvas { context, _ in
-            if showBorder {
-                // Restore the original one-point separator and twelve-point radius.
-                for area in dotAreas {
-                    guard area.width > 1, area.height > 1 else { continue }
-                    context.stroke(Path(roundedRect: area.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 12),
-                                   with: .color(Color(uiColor: .separator)), lineWidth: 1)
-                }
+            for (area, shape) in shapes {
+                context.stroke(shape.inset(by: 0.75).path(in: area),
+                               with: .color(Color(uiColor: .separator)), lineWidth: 1.5)
             }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func guideOutlines(_ outlines: [CGRect]) -> some View {
+        Canvas { context, _ in
             for outline in outlines {
                 context.stroke(Path(roundedRect: outline, cornerRadius: 3),
                                with: .color(.white.opacity(0.18)), lineWidth: 1)
             }
         }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The pad's areas as one shape (each with its own outline's corners), for masking.
+private struct TrackpadAreasShape: Shape {
+    let shapes: [(area: CGRect, shape: PaneOutlineShape)]
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for (area, shape) in shapes { path.addPath(shape.path(in: area)) }
+        return path
     }
 }
 

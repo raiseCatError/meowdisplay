@@ -509,7 +509,7 @@ struct WorkspaceChromeView: View {
     private func tileView(id: String, tile: WorkspaceTile, rect: CGRect, multi: Bool, frames: WorkspaceFrames) -> some View {
         let active = model.active == id
         let hovered = model.hovered == id && !active
-        let corners = outerCorners(rect)
+        let outline = paneOutline(rect)
         ZStack(alignment: .topLeading) {
             if tile.source?.isTrackpad == true, let localTrackpad {
                 localTrackpad(id, rect)
@@ -517,7 +517,7 @@ struct WorkspaceChromeView: View {
                     .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
                     .allowsHitTesting(false)
             }
-            PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
+            outline
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
                 // A float's window is in the video, under this outline: the outline steps aside
@@ -591,16 +591,13 @@ struct WorkspaceChromeView: View {
         return CGRect(x: row.minX, y: row.minY, width: min(row.width, width), height: 44)
     }
 
-    /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
-    /// every other corner stays square. (topLeading, topTrailing, bottomTrailing, bottomLeading)
-    private func outerCorners(_ rect: CGRect) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
-        let radius = PaneOutlineShape.screenCornerRadius
-        guard radius > 0, let screen = PaneOutlineShape.screenBounds, model.pictureGlobal.width > 0 else { return (0, 0, 0, 0) }
+    /// A pane's outline: where it meets a corner of the phone's rounded screen it curves with the
+    /// display (`ScreenCornerRounding`); every other corner stays square.
+    private func paneOutline(_ rect: CGRect) -> PaneOutlineShape {
+        guard model.pictureGlobal.width > 0 else { return PaneOutlineShape() }
         let g = rect.offsetBy(dx: model.pictureGlobal.minX - picture.minX, dy: model.pictureGlobal.minY - picture.minY)
-        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 2 }
-        let left = near(g.minX, screen.minX), right = near(g.maxX, screen.maxX)
-        let top = near(g.minY, screen.minY), bottom = near(g.maxY, screen.maxY)
-        return (left && top ? radius : 0, right && top ? radius : 0, right && bottom ? radius : 0, left && bottom ? radius : 0)
+        return .following(screen: PaneOutlineShape.screenBounds, screenRadius: PaneOutlineShape.screenCornerRadius,
+                          rect: g, inner: 0)
     }
 
     @ViewBuilder
@@ -2234,6 +2231,14 @@ struct PaneOutlineShape: InsettableShape {
         var copy = self
         copy.inset += amount
         return copy
+    }
+
+    /// An outline for `rect` (global coordinates) that meets the screen's rounded corners as
+    /// `ScreenCornerRounding` says: on the display's edges, curving with the glass.
+    static func following(screen: CGRect?, screenRadius: CGFloat, rect: CGRect, inner: CGFloat) -> PaneOutlineShape {
+        let r = ScreenCornerRounding.radii(rect: rect, screen: screen, screenRadius: screenRadius, inner: inner)
+        return PaneOutlineShape(topLeading: r.topLeading, topTrailing: r.topTrailing,
+                                bottomTrailing: r.bottomTrailing, bottomLeading: r.bottomLeading)
     }
 
     /// The screen in global coordinates (nil off iOS). UIKit scene state: main actor only.

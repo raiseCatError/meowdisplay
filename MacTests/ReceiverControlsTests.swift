@@ -482,6 +482,7 @@ final class ReceiverControlsTests: XCTestCase {
         XCTAssertEqual(preferences.edgeScrolling, .off)
         XCTAssertFalse(preferences.showSurfaceGrid)
         XCTAssertTrue(preferences.showTrackpadBorder)
+        XCTAssertTrue(preferences.trackpadTouchTrail)
         XCTAssertTrue(preferences.scrollMomentumEnabled)
         XCTAssertFalse(preferences.scrollMotionFeedback)
         preferences.edgeScrolling = .manual
@@ -489,8 +490,10 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.horizontalEdgeScrolling = true
         preferences.horizontalScrollEdge = .top
         preferences.showTrackpadBorder = false
+        preferences.trackpadTouchTrail = false
         let data = try JSONEncoder().encode(preferences)
         preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
+        XCTAssertFalse(preferences.trackpadTouchTrail)
         XCTAssertEqual(preferences.activeScrollEdges(trackpad: false), [.left, .top])
         XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.left, .top])
         XCTAssertFalse(preferences.showTrackpadBorder)

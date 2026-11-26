@@ -1086,10 +1086,9 @@ enum WorkspaceOverlayPlacement {
     }
 
     static func floatPillClearingRails(_ pill: CGRect, safe: CGRect?, picture: CGRect,
-                                       rails: [CGRect], closeSpace: CGRect? = nil) -> CGRect {
+                                       rails: [CGRect]) -> CGRect {
         ControlTrayGeometry.avoidingReservedRegions(pill, obstacles: rails,
-                                                   within: usable(picture: picture, safe: safe),
-                                                   alsoAvoiding: closeSpace.map { [$0] } ?? [])
+                                                   within: usable(picture: picture, safe: safe))
     }
 
     /// The centre of a float's grabber (a 28 pt tall touch area under the window): just below it,
@@ -1131,5 +1130,32 @@ enum WorkspaceOverlayPlacement {
             y = below
         }
         return CGRect(x: centred, y: top, width: w, height: h)
+    }
+}
+
+/// How an outline drawn on the phone's screen meets the screen's rounded corners: it lies on the
+/// display's own edges, and a corner that sits in a corner of the screen takes the display's
+/// radius, so the line follows the glass all the way round instead of being cut off by it. Every
+/// other corner keeps `inner`. With no rounded screen (`screenRadius` 0) every corner keeps `inner`.
+enum ScreenCornerRounding {
+    struct Radii: Equatable {
+        var topLeading: CGFloat
+        var topTrailing: CGFloat
+        var bottomTrailing: CGFloat
+        var bottomLeading: CGFloat
+    }
+
+    /// `rect` and `screen` in the same (global) coordinates.
+    static func radii(rect: CGRect, screen: CGRect?, screenRadius: CGFloat, inner: CGFloat,
+                      tolerance: CGFloat = 2) -> Radii {
+        guard screenRadius > 0, let screen else {
+            return Radii(topLeading: inner, topTrailing: inner, bottomTrailing: inner, bottomLeading: inner)
+        }
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < tolerance }
+        let left = near(rect.minX, screen.minX), right = near(rect.maxX, screen.maxX)
+        let top = near(rect.minY, screen.minY), bottom = near(rect.maxY, screen.maxY)
+        func corner(_ outer: Bool) -> CGFloat { outer ? screenRadius : inner }
+        return Radii(topLeading: corner(left && top), topTrailing: corner(right && top),
+                     bottomTrailing: corner(right && bottom), bottomLeading: corner(left && bottom))
     }
 }

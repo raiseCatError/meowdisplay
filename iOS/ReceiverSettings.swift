@@ -375,6 +375,8 @@ private struct DisplaySettingsPage: View {
                 Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
                     .settingsAnchor("trackpadDots")
                 Toggle("Trackpad Border", isOn: preferenceBinding(controlStore, \.showTrackpadBorder))
+                Toggle("Touch Trail", isOn: preferenceBinding(controlStore, \.trackpadTouchTrail))
+                    .settingsAnchor("trackpadTouchTrail")
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.trackpadDisplayLayoutOptIn))
                     SettingNote("Shows the Mac pointer and display outlines with video off. Surface dots stay outside the outlines.")

@@ -1046,6 +1046,8 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var scrollMomentumEnabled = true
     var scrollMotionFeedback = false
     var showTrackpadBorder = true
+    /// A short trail follows each finger on the Trackpad. Drawing only; it never changes input.
+    var trackpadTouchTrail = true
 
     func activeScrollEdges(trackpad: Bool) -> [ScrollStripEdge] {
         switch edgeScrolling {
@@ -1230,6 +1232,7 @@ struct ReceiverControlPreferences: Codable, Equatable {
         scrollMomentumEnabled = try value(.scrollMomentumEnabled, fallback.scrollMomentumEnabled)
         scrollMotionFeedback = try value(.scrollMotionFeedback, fallback.scrollMotionFeedback)
         showTrackpadBorder = try value(.showTrackpadBorder, fallback.showTrackpadBorder)
+        trackpadTouchTrail = (try? value(.trackpadTouchTrail, fallback.trackpadTouchTrail)) ?? fallback.trackpadTouchTrail
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
         keepPointerOnReceiverDisplay = try value(.keepPointerOnReceiverDisplay, fallback.keepPointerOnReceiverDisplay)
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)

@@ -388,4 +388,50 @@ final class WorkspaceOverlayPlacementTests: XCTestCase {
         XCTAssertEqual(offset(900), offset(700))
         XCTAssertEqual(offset(632.001), offset(632), accuracy: 0.01)
     }
+
+    // MARK: Float pill beside a rail (iPhone 14 Pro Max QA, landscape, 2026-11-26)
+
+    /// The landscape float the receiver chrome test floats and the right rail, as measured on the
+    /// phone. The pill is centred on the float's top edge; the close dot no longer moves it.
+    private let landscapeRail = CGRect(x: 833, y: 8, width: 32, height: 362)
+    private let landscapeFloat = CGRect(x: 551.67, y: 206, width: 354, height: 200)
+
+    func testAFloatsPillStaysOnItsTopEdgeAndClearOfTheRightRail() {
+        let size = CGSize(width: 306, height: 30)   // the pill as measured on the phone
+        let pill = P.floatPill(content: landscapeFloat, size: size, safe: landscapeSafe, picture: landscape)
+        let placed = P.floatPillClearingRails(pill, safe: landscapeSafe, picture: landscape, rails: [landscapeRail])
+        XCTAssertFalse(placed.intersects(landscapeRail))
+        XCTAssertEqual(placed.midY, pill.midY, "it stays on the float's top edge")
+        XCTAssertLessThanOrEqual(placed.maxX, landscapeSafe.maxX)
+    }
+}
+
+/// Outlines (pane, selected-pane highlight, Trackpad border) where they meet the phone's rounded
+/// screen. Owner's iPhone QA of 9000083: square corners were cut off by the display's rounding,
+/// and the border must lie on the display's own edges, no gap.
+final class TrackpadBorderCornerTests: XCTestCase {
+    private typealias R = ScreenCornerRounding
+    private let screen = CGRect(x: 0, y: 0, width: 430, height: 932)
+    private let radius: CGFloat = 53.75
+
+    private func all(_ v: CGFloat) -> R.Radii { R.Radii(topLeading: v, topTrailing: v, bottomTrailing: v, bottomLeading: v) }
+
+    func testAFullScreenOutlineTakesTheDisplaysOwnRadius() {
+        XCTAssertEqual(R.radii(rect: screen, screen: screen, screenRadius: radius, inner: 12), all(radius))
+    }
+
+    func testOnlyCornersInAScreenCornerCurveWithTheDisplay() {
+        let lower = CGRect(x: 0, y: 466, width: 430, height: 466)
+        XCTAssertEqual(R.radii(rect: lower, screen: screen, screenRadius: radius, inner: 12),
+                       R.Radii(topLeading: 12, topTrailing: 12, bottomTrailing: radius, bottomLeading: radius))
+        let landscape = CGRect(x: 0, y: 0, width: 932, height: 430)
+        XCTAssertEqual(R.radii(rect: CGRect(x: 0, y: 0, width: 466, height: 430), screen: landscape, screenRadius: radius, inner: 0),
+                       R.Radii(topLeading: radius, topTrailing: 0, bottomTrailing: 0, bottomLeading: radius))
+    }
+
+    func testAnInsetAreaOrASquareScreenKeepsTheInnerRadius() {
+        XCTAssertEqual(R.radii(rect: CGRect(x: 20, y: 80, width: 390, height: 700), screen: screen, screenRadius: radius, inner: 12), all(12))
+        XCTAssertEqual(R.radii(rect: screen, screen: screen, screenRadius: 0, inner: 12), all(12))
+        XCTAssertEqual(R.radii(rect: screen, screen: nil, screenRadius: radius, inner: 12), all(12))
+    }
 }
