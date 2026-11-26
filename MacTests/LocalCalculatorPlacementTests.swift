@@ -197,10 +197,10 @@ final class LocalCalculatorPlacementTests: XCTestCase {
 
     // MARK: Defaults and compatibility
 
-    func testTheCalculatorButtonIsAvailableButNotShownByDefault() {
-        XCTAssertFalse(ReceiverControlPreferences().showsCalculatorButton)
-        XCTAssertFalse(ReceiverControlPreferences.initial(isPad: false).showsCalculatorButton)
-        XCTAssertFalse(ReceiverControlPreferences.initial(isPad: true).showsCalculatorButton)
+    func testTheCalculatorButtonIsShownByDefault() {
+        XCTAssertTrue(ReceiverControlPreferences().showsCalculatorButton)
+        XCTAssertTrue(ReceiverControlPreferences.initial(isPad: false).showsCalculatorButton)
+        XCTAssertTrue(ReceiverControlPreferences.initial(isPad: true).showsCalculatorButton)
         for slot in ControlProfileSlot.allCases {
             XCTAssertFalse(FunctionTrayProfile.canonical(slot: slot).items.contains { $0.id.contains("calc") },
                            "not a Function Tray action, so no profile ever carries it")
@@ -220,13 +220,14 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "LocalCalculatorPlacementTests-\(UUID().uuidString)"))
         defaults.set(try JSONSerialization.data(withJSONObject: object), forKey: ReceiverControlPreferencesRepository.defaultsKey)
         let loaded = ReceiverControlPreferencesRepository(defaults: defaults).load(initial: .initial(isPad: true))
-        XCTAssertFalse(loaded.showsCalculatorButton)
+        XCTAssertTrue(loaded.showsCalculatorButton, "on by default since 2.2")
         XCTAssertFalse(loaded.trayEnabled)
         XCTAssertEqual(loaded.customLayouts, older.customLayouts, "saved layouts are neither reset nor given a calculator")
     }
 
     func testTurningTheButtonOnNeverTouchesProfilesOrLayouts() throws {
         var preferences = ReceiverControlPreferences.initial(isPad: true)
+        preferences.showsCalculatorButton = false
         preferences.createCustomLayout()
         var shown = preferences
         shown.showsCalculatorButton = true
@@ -241,11 +242,25 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertEqual(decoded, shown)
     }
 
+    func testSettingsSavedWhileTheCalculatorWasOffByDefaultShowItOnce() throws {
+        var older = ReceiverControlPreferences.initial(isPad: false)
+        older.showsCalculatorButton = false
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(older)) as? [String: Any])
+        object["calculatorDefaultRevision"] = nil
+        let migrated = try JSONDecoder().decode(ReceiverControlPreferences.self,
+                                                from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertTrue(migrated.showsCalculatorButton, "turned on once")
+        var removed = migrated
+        removed.showsCalculatorButton = false
+        let again = try JSONDecoder().decode(ReceiverControlPreferences.self, from: JSONEncoder().encode(removed))
+        XCTAssertFalse(again.showsCalculatorButton, "a later choice to remove it is kept")
+    }
+
     func testADowngradeAndSaveLosesOnlyTheButtonChoice() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "LocalCalculatorPlacementTests-\(UUID().uuidString)"))
         let repository = ReceiverControlPreferencesRepository(defaults: defaults)
         var preferences = ReceiverControlPreferences.initial(isPad: false)
-        preferences.showsCalculatorButton = true
+        preferences.showsCalculatorButton = false
         preferences.hapticsEnabled = false
         repository.save(preferences)
         // An older build (same schema) re-saves what it knows: everything
@@ -258,9 +273,9 @@ final class LocalCalculatorPlacementTests: XCTestCase {
             over: defaults.data(forKey: ReceiverControlPreferencesRepository.defaultsKey))
         defaults.set(olderSave, forKey: ReceiverControlPreferencesRepository.defaultsKey)
         let back = repository.load(initial: .initial(isPad: false))
-        XCTAssertFalse(back.showsCalculatorButton, "back to not shown")
+        XCTAssertTrue(back.showsCalculatorButton, "back to the default: shown")
         var expected = preferences
-        expected.showsCalculatorButton = false
+        expected.showsCalculatorButton = true
         XCTAssertEqual(back, expected, "nothing else changed")
     }
 

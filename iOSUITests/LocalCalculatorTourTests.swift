@@ -28,14 +28,18 @@ final class LocalCalculatorTourTests: XCTestCase {
     @MainActor
     private func tour(prefix: String) {
         enterDemo()
-        revealControls(element("Settings"))
-        XCTAssertFalse(calculatorButton.exists, "not shown until added")
-        snapshot("\(prefix)-01-not-added")
-
-        addCalculatorFromFunctionTrayEditor()
         revealControls(calculatorButton)
-        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added from Edit Function Tray")
-        snapshot("\(prefix)-02-button")
+        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "shown by default")
+        snapshot("\(prefix)-01-default")
+
+        setCalculatorInFunctionTrayEditor(shown: false)
+        revealControls(element("Settings"))
+        XCTAssertFalse(calculatorButton.exists, "removed from Edit Function Tray")
+        snapshot("\(prefix)-02-removed")
+
+        setCalculatorInFunctionTrayEditor(shown: true)
+        revealControls(calculatorButton)
+        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added back from Edit Function Tray")
 
         calculatorButton.tap()
         let result = element("Result")
@@ -101,7 +105,7 @@ final class LocalCalculatorTourTests: XCTestCase {
     }
 
     @MainActor
-    private func addCalculatorFromFunctionTrayEditor() {
+    private func setCalculatorInFunctionTrayEditor(shown: Bool) {
         revealControls(element("Settings"))
         element("Settings").tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
@@ -125,8 +129,8 @@ final class LocalCalculatorTourTests: XCTestCase {
         snapshot("function-tray-editor-utilities")
         // The switch itself, not the label or a screen coordinate.
         let control = toggle.switches.firstMatch
-        (control.exists ? control : toggle).tap()
-        XCTAssertEqual(toggle.value as? String, "1")
+        if (toggle.value as? String == "1") != shown { (control.exists ? control : toggle).tap() }
+        XCTAssertEqual(toggle.value as? String, shown ? "1" : "0")
         // Back out of the pushed pages (Edit Function Tray, then Controls), then close Settings.
         // The system Back button is found by its identifier: on current iOS it isn't a child of
         // the navigation bar's element (see DemoModeSmokeTests).

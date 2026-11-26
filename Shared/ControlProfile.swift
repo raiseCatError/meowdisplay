@@ -1135,11 +1135,17 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var customLayouts: [CustomControlLayout] = []
     var activeCustomLayoutID: String?
     /// The receiver-local Calculator's button (iPhone, and the iPad Strip
-    /// and Overlay), added from the Function Tray editor. Off until the
-    /// person adds it; a Custom layout places its own. Not a Function Tray
-    /// item: it sends nothing to the Mac, so it lives beside the profiles
-    /// rather than in them, and older builds see only a key they ignore.
-    var showsCalculatorButton = false
+    /// and Overlay). On by default since 2.2 (it can be removed from the
+    /// Function Tray editor); a Custom layout places its own. Not a Function
+    /// Tray item: it sends nothing to the Mac, so it lives beside the
+    /// profiles rather than in them, and older builds see only a key they
+    /// ignore.
+    var showsCalculatorButton = true
+    /// 1 once the on-by-default change has been applied to these settings,
+    /// so settings saved while it was off by default show it once, and a
+    /// later choice to remove it is kept.
+    var calculatorDefaultRevision = Self.currentCalculatorDefaultRevision
+    static let currentCalculatorDefaultRevision = 1
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -1284,8 +1290,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
         customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
             .elements.prefix(CustomControlLayout.maximumCount))
         activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
-        // Absent (added 2026-11-05): not shown. Nothing to migrate.
         showsCalculatorButton = try value(.showsCalculatorButton, fallback.showsCalculatorButton)
+        // Saved before the calculator was on by default (2.2): turn it on
+        // once. Afterwards the person's choice stands.
+        calculatorDefaultRevision = try value(.calculatorDefaultRevision, 0)
+        if calculatorDefaultRevision < Self.currentCalculatorDefaultRevision {
+            showsCalculatorButton = true
+            calculatorDefaultRevision = Self.currentCalculatorDefaultRevision
+        }
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
