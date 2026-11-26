@@ -2308,24 +2308,29 @@ extension ReceiverControlOverlay {
             if let gearFrame {
                 padControlChip(.tray(.settings), frame: gearFrame, onRail: false, hint: nil)
             }
-            ForEach(mainControls) { control in
-                Group {
-                    if case .function(let id) = control.kind, let item = functionItem(id) {
-                        padFunctionChip(item, frame: control.frame, onRail: true,
-                                        hint: hints ? item.title.lowercased() : nil)
-                    } else {
-                        padControlChip(control.kind, frame: control.frame, onRail: true,
-                                       hint: hints ? padHint(control.kind) : nil)
+            // Auto-hide takes the rail's chips out of the tree (fading, see the
+            // container's `.animation(value: store.autoHidden)`), not only to
+            // opacity 0: a mounted chip stays in the accessibility tree and
+            // answers its hit tests even with `.accessibilityHidden`, so
+            // VoiceOver and UI tests would still find invisible controls.
+            if !autoHiding {
+                ForEach(mainControls) { control in
+                    Group {
+                        if case .function(let id) = control.kind, let item = functionItem(id) {
+                            padFunctionChip(item, frame: control.frame, onRail: true,
+                                            hint: hints ? item.title.lowercased() : nil)
+                        } else {
+                            padControlChip(control.kind, frame: control.frame, onRail: true,
+                                           hint: hints ? padHint(control.kind) : nil)
+                        }
                     }
+                    .transition(.opacity)
                 }
-                .opacity(autoHiding ? 0 : 1)
-                .allowsHitTesting(!autoHiding)
-            }
-            ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
-                padFunctionChip(control.item, frame: control.frame, onRail: true,
-                                hint: hints ? control.item.title.lowercased() : nil)
-                    .opacity(autoHiding ? 0 : 1)
-                    .allowsHitTesting(!autoHiding)
+                ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
+                    padFunctionChip(control.item, frame: control.frame, onRail: true,
+                                    hint: hints ? control.item.title.lowercased() : nil)
+                        .transition(.opacity)
+                }
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,

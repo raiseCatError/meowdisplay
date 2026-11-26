@@ -168,6 +168,10 @@ final class AdaptiveLayoutTests: XCTestCase {
         let revealed = waitUntil { file.isHittable && settings.isHittable }
         keep(app, "app-menu-bar-revealed")
         logAutoHide("after the reveal")
+        if !revealed {
+            // What sits over the gear in the accessibility tree, for Xcode Cloud logs.
+            print("AUTOHIDE-REVEAL settings=\(settings.debugDescription)\nAUTOHIDE-REVEAL tree=\(app.debugDescription)")
+        }
         XCTAssertTrue(revealed, "After the reveal: File exists=\(file.exists) hittable=\(file.isHittable) "
                       + "\(file.exists ? "\(file.frame)" : ""), Settings hittable=\(settings.isHittable)")
         XCTAssertEqual(buttons.value as? String, afterManualCollapse + ";" + leftClick,

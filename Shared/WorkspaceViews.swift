@@ -12,13 +12,24 @@ private let workspaceAccent = Color(red: 0.50, green: 0.70, blue: 1.0)
 private let workspaceChip = Color(white: 0.11, opacity: 0.8)
 
 extension View {
-    /// Fades out (and stops taking touches) while the controls tray is auto-hidden, and back in
-    /// with it.
+    /// Fades out while the controls tray is auto-hidden, and back in with it. The view leaves the
+    /// tree while hidden: one kept at opacity 0 stays in the accessibility tree and answers its
+    /// hit tests even with `.accessibilityHidden`, so VoiceOver and UI tests would still reach it.
     func fadesWithControls(_ hidden: Bool) -> some View {
-        opacity(hidden ? 0 : 1)
-            .allowsHitTesting(!hidden)
-            .accessibilityHidden(hidden)
-            .animation(.easeInOut(duration: 0.28), value: hidden)
+        modifier(FadesWithControls(hidden: hidden))
+    }
+}
+
+private struct FadesWithControls: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        ZStack {
+            if !hidden {
+                content.transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.28), value: hidden)
     }
 }
 
