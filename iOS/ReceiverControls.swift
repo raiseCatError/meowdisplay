@@ -179,6 +179,17 @@ final class ReceiverControlStore: ObservableObject {
             && !sessionActionsOpen && !workspaceMenuOpen
     }
 
+    #if DEBUG
+    /// The inputs of Auto-hide, for the UI-test fixture's readout.
+    var autoHideDebugState: String {
+        "idle=\(autoHideIdle) hidden=\(autoHidden) countdown=\(autoHideTask != nil) "
+            + "enabled=\(preferences.autoHideEnabled) trayCanBeShown=\(preferences.trayCanBeShown) "
+            + "trayCollapsed=\(preferences.trayCollapsed) moveView=\(moveViewActive) "
+            + "sessionActions=\(sessionActionsOpen) menuOpen=\(workspaceMenuOpen) arrows=\(arrowKeypadOpen) "
+            + "isPad=\(isPad) layout=\(effectivePadLayout)"
+    }
+    #endif
+
     /// Cancels any pending countdown and clears auto-hidden state, then
     /// restarts the countdown from now. The shared "something happened"
     /// entry point for state transitions (new session, profile switch, a

@@ -1703,6 +1703,12 @@ extension ReceiverScreen {
                     .accessibilityValue(chromeFixturePointerButtons.joined(separator: ";"))
                     .allowsHitTesting(false)
             }
+            // What decides the tray's Auto-hide, for UI-test logs (Xcode Cloud keeps no screenshots).
+            Text("Auto-hide state")
+                .font(.system(size: 4))
+                .accessibilityIdentifier("receiverChromeFixtureAutoHide")
+                .accessibilityValue(controlStore.autoHideDebugState)
+                .allowsHitTesting(false)
             Spacer()
         }
         .padding(.top, 68)

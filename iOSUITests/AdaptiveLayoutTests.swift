@@ -141,15 +141,21 @@ final class AdaptiveLayoutTests: XCTestCase {
         let openMenuDisappeared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
                                                             object: submenu)
         XCTAssertEqual(XCTWaiter.wait(for: [openMenuDisappeared], timeout: 10), .timedOut)
+        // The fixture's Auto-hide inputs, for Xcode Cloud logs (which keep no screenshots).
+        let autoHideState = app.descendants(matching: .any)["receiverChromeFixtureAutoHide"].firstMatch
+        func logAutoHide(_ moment: String) {
+            print("AUTOHIDE-STATE \(moment): \(autoHideState.exists ? "\(autoHideState.value ?? "")" : "missing")")
+        }
+        logAutoHide("before the menu item")
         submenu.tap()
+        logAutoHide("after the menu item")
         // Report the reveal checks below even when the hide check fails.
         continueAfterFailure = true
         let autoHid = waitUntil(15) { !file.exists && !settings.isHittable }
         keep(app, "app-menu-bar-after-inactivity")
+        logAutoHide("after inactivity")
         if !autoHid {
-            // Diagnostics for Xcode Cloud runs, which keep the log but show no screenshots.
             print("AUTOHIDE-INACTIVITY settings=\(settings.debugDescription)")
-            print(app.debugDescription)
         }
         XCTAssertTrue(autoHid, "After inactivity: File exists=\(file.exists), Settings hittable=\(settings.isHittable) "
                       + "\(settings.exists ? "\(settings.frame) \(settings.elementType.rawValue) \(settings.identifier)" : "")")
@@ -161,6 +167,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         chromeSurface.tap()
         let revealed = waitUntil { file.isHittable && settings.isHittable }
         keep(app, "app-menu-bar-revealed")
+        logAutoHide("after the reveal")
         XCTAssertTrue(revealed, "After the reveal: File exists=\(file.exists) hittable=\(file.isHittable) "
                       + "\(file.exists ? "\(file.frame)" : ""), Settings hittable=\(settings.isHittable)")
         XCTAssertEqual(buttons.value as? String, afterManualCollapse + ";" + leftClick,
