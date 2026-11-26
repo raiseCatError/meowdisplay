@@ -332,7 +332,7 @@ final class LiveDisplayOverviewQATests: XCTestCase {
     @MainActor
     private func mainWindow(_ app: XCUIApplication) -> XCUIElement {
         app.windows.allElementsBoundByIndex
-            .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height } ?? app.windows.firstMatch
+            .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height } ?? app.receiverWindow
     }
 
     /// Scrolls the gallery until `element` can be tapped. False when it never appears.
