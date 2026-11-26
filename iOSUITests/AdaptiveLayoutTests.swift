@@ -107,17 +107,18 @@ final class AdaptiveLayoutTests: XCTestCase {
         XCTAssertTrue(waitUntil { buttons.value as? String == leftClick }, "\(buttons.value ?? "")")
         keep(app, "app-menu-bar-expanded")
         XCTAssertEqual(toggle.label, "Hide App Menu Bar")
-        let menuAnchor = toggle.frame.minX
+        let menuAnchor = toggle.frame.maxX
         XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
         XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
         XCTAssertEqual(file.frame.minY, toggle.frame.minY, accuracy: 10)
-        XCTAssertGreaterThanOrEqual(file.frame.midX, toggle.frame.maxX)
-        XCTAssertLessThan(file.frame.minX - toggle.frame.maxX, 16)
+        XCTAssertLessThanOrEqual(file.frame.midX, toggle.frame.minX, "The menus open to the chevron's left")
+        XCTAssertEqual(toggle.frame.maxX, chromePane.frame.maxX, accuracy: 12,
+                       "The chevron sits on the pane's right edge")
         toggle.tap()
         XCTAssertFalse(file.exists)
         XCTAssertEqual(toggle.label, "Show App Menu Bar")
-        XCTAssertEqual(toggle.frame.minX, menuAnchor, accuracy: 1,
-                       "Collapsing the menu keeps the affordance beside the app")
+        XCTAssertEqual(toggle.frame.maxX, menuAnchor, accuracy: 1,
+                       "Collapsing the menu keeps the chevron on the pane's right edge")
         XCTAssertLessThan(toggle.frame.width, chromePane.frame.width / 2,
                           "The collapsed button uses only its own compact hit area")
         keep(app, "app-menu-bar-manually-collapsed")

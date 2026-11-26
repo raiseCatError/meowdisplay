@@ -234,6 +234,9 @@ struct WorkspaceFloatLayer: View {
     var closeHapticsEnabled = true
     var closeAvoiding: [CGRect] = []
     var railFrames: [CGRect] = []
+    /// The controls tray is auto-hidden: the floats' handles, grips and close dot fade with it
+    /// (their title pills stay, like the panes' tabs).
+    var controlsHidden = false
     /// Pane titles and floats' title pills: the first-use tip keeps clear of them.
     var tipAvoiding: [CGRect] = []
     /// Where the drag's placement chip is drawn: the tip goes beside or below it.
@@ -312,7 +315,7 @@ struct WorkspaceFloatLayer: View {
                 // Coming back out of its edge: drawn as its edge picture until it's out.
                 if motion.edges[f.id]?.kind != .restoring {
                     floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
-                    if let target = closeTargets[f.id] { closeButton(f.id, at: target) }
+                    if let target = closeTargets[f.id] { closeButton(f.id, at: target).fadesWithControls(controlsHidden) }
                 }
             }
             // Tucked floats, each its own window at its own size just behind its edge.
@@ -488,9 +491,14 @@ struct WorkspaceFloatLayer: View {
             let grab = grabberFrame(rect, held: held)
             if docked || !covered(grab) {
                 grabber(id, at: CGPoint(x: grab.midX, y: grab.midY), active: active, docked: docked)
+                    .fadesWithControls(controlsHidden && !docked)
             }
-            if !docked, !covered(gripFrame(rect, leading: true)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
-            if !docked, !covered(gripFrame(rect, leading: false)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
+            if !docked, !covered(gripFrame(rect, leading: true)) {
+                grip(id, rect: rect, corner: .bottomLeading, active: active).fadesWithControls(controlsHidden)
+            }
+            if !docked, !covered(gripFrame(rect, leading: false)) {
+                grip(id, rect: rect, corner: .bottomTrailing, active: active).fadesWithControls(controlsHidden)
+            }
         }
         let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)
         if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }

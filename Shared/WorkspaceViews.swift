@@ -11,6 +11,17 @@ import UIKit
 private let workspaceAccent = Color(red: 0.50, green: 0.70, blue: 1.0)
 private let workspaceChip = Color(white: 0.11, opacity: 0.8)
 
+extension View {
+    /// Fades out (and stops taking touches) while the controls tray is auto-hidden, and back in
+    /// with it.
+    func fadesWithControls(_ hidden: Bool) -> some View {
+        opacity(hidden ? 0 : 1)
+            .allowsHitTesting(!hidden)
+            .accessibilityHidden(hidden)
+            .animation(.easeInOut(duration: 0.28), value: hidden)
+    }
+}
+
 extension WorkspaceRect {
     func onScreen(_ picture: CGRect) -> CGRect {
         CGRect(x: picture.minX + x * picture.width, y: picture.minY + y * picture.height,
@@ -105,6 +116,9 @@ struct WorkspaceChromeView: View {
     var floatCloseHapticsEnabled = true
     var onMenuVisibilityChange: ((Bool) -> Void)?
     var appMenuBarAutoHidden = false
+    /// The controls tray is auto-hidden: the workspace's own controls fade with it, except the
+    /// panes' tabs (owner's QA of 9000083).
+    var controlsHidden = false
     var onAppMenuBarActivity: ((Bool) -> Void)?
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
@@ -215,7 +229,7 @@ struct WorkspaceChromeView: View {
                         : pane
                     PaneMenuBar(menus: model.menus, pane: barPane,
                                 top: pane.minY + (besideTitle ? 5 : 36), bounds: picture,
-                                automaticallyHidden: appMenuBarAutoHidden,
+                                automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
                                 showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
                 }
                 let titles = titleZones(frames)
@@ -226,7 +240,7 @@ struct WorkspaceChromeView: View {
                                         onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
                                         closeHapticsEnabled: floatCloseHapticsEnabled,
                                         closeAvoiding: divisions + controls,
-                                        railFrames: railFrames,
+                                        railFrames: railFrames, controlsHidden: controlsHidden,
                                         tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
@@ -1323,6 +1337,8 @@ private extension WorkspaceDropTarget {
 /// The collapsible rail: a thin handle at rest, a strip of windows when open.
 struct WindowRailView: View {
     @ObservedObject var model: WorkspaceModel
+    /// The controls tray is auto-hidden: the folded rail's handle fades with it.
+    var controlsHidden = false
 
     var body: some View {
         if model.available {
@@ -1335,7 +1351,7 @@ struct WindowRailView: View {
             }
             ZStack(alignment: alignment) {
                 Color.clear.allowsHitTesting(false)
-                if model.railExpanded { expanded(vertical: vertical) } else { handle(vertical: vertical) }
+                if model.railExpanded { expanded(vertical: vertical) } else { handle(vertical: vertical).fadesWithControls(controlsHidden) }
             }
         }
     }
@@ -2291,6 +2307,8 @@ struct PaneMenuBar: View {
     let top: CGFloat
     let bounds: CGRect
     var automaticallyHidden = false
+    /// The controls tray is auto-hidden: a folded bar's chevron fades with it.
+    var controlsHidden = false
     var showsCollapsedAppName = false
     var onActivity: ((Bool) -> Void)?
     @State private var titleFrames: [Int: CGRect] = [:]
@@ -2348,10 +2366,10 @@ struct PaneMenuBar: View {
         }
     }
 
+    /// On the pane's right edge (owner's QA of 9000083): a `<` that opens the menus to its left,
+    /// and a `>` that folds them back. The tabs keep the row's left end.
     private var inlineBar: some View {
         HStack(alignment: .top, spacing: 0) {
-            disclosure
-                .workspaceRailObstacle()
             if expanded {
                 titles
                     .frame(width: pane.width - 12 - Self.toggleSize)
@@ -2360,6 +2378,9 @@ struct PaneMenuBar: View {
                     .workspaceRailObstacle()
                     .transition(.opacity)
             }
+            disclosure
+                .fadesWithControls(controlsHidden && !expanded)
+                .workspaceRailObstacle()
         }
         .background(alignment: .top) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -2367,6 +2388,7 @@ struct PaneMenuBar: View {
                 .frame(height: Self.height)
                 .allowsHitTesting(false)
         }
+        .frame(width: pane.width - 12, alignment: .topTrailing)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: expanded)
     }
 
@@ -2379,19 +2401,19 @@ struct PaneMenuBar: View {
             onActivity?(false)
         } label: {
             HStack(spacing: 0) {
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.caption.weight(.semibold))
-                    .frame(width: Self.toggleSize, height: Self.height)
                 if !expanded, showsCollapsedAppName, !menus.app.isEmpty {
                     Text(menus.app)
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .frame(maxWidth: max(0, min(120, pane.width - Self.toggleSize - 20)), alignment: .leading)
-                        .padding(.trailing, 8)
+                        .frame(maxWidth: max(0, min(120, pane.width - Self.toggleSize - 20)), alignment: .trailing)
+                        .padding(.leading, 8)
                         .fixedSize(horizontal: true, vertical: false)
                         .transition(.opacity)
                 }
+                Image(systemName: expanded ? "chevron.right" : "chevron.left")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: Self.toggleSize, height: Self.height)
             }
             .foregroundStyle(.white)
             .frame(height: Self.toggleSize, alignment: .top)
