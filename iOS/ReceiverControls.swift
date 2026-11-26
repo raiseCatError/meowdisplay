@@ -702,16 +702,17 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             count: count, length: portrait ? containerSize.width : containerSize.height,
             preferred: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack)
         let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count, item: trayItem)
-        // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
-        // tray content out in place rather than removing it — `collapsed`
-        // above is untouched by it, since `store.autoHidden` can only ever
-        // be true while `collapsed` is false (see `ReceiverControlStore.
-        // scheduleAutoHide`'s guard). Reduce Motion drops the positional/
-        // scale nudge and shortens the animation to a near-instant fade.
+        // Auto-hide takes the tray content out of the tree with a fade
+        // (`autoHideTransition`): kept mounted at opacity 0, it stayed in the
+        // accessibility tree and answered hit tests even with
+        // `.accessibilityHidden`, so VoiceOver and UI tests still reached the
+        // invisible controls (Duo, Xcode Cloud). `collapsed` above is untouched
+        // by it, since `store.autoHidden` can only ever be true while
+        // `collapsed` is false (see `ReceiverControlStore.scheduleAutoHide`'s
+        // guard). Reduce Motion drops the positional/scale nudge and shortens
+        // the animation to a near-instant fade.
         let autoHiding = store.autoHidden
         let autoHideRetreat: CGFloat = reduceMotion ? 0 : 3
-        let autoHideOpacity: Double = autoHiding ? 0 : 1
-        let autoHideScale: CGFloat = autoHiding && !reduceMotion ? 0.98 : 1
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
         let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
@@ -737,12 +738,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let trayRegions: [CGRect] = autoHiding ? [CGRect.zero] : (foldedTray?.groups ?? [layout.trayFrame])
         // Retreats toward the edge the tray actually uses this pass, which a
         // fold can move away from the stored preference.
-        let autoHideOffset: CGSize = autoHiding
-            ? (portrait
-                ? CGSize(width: 0, height: autoHideRetreat)
-                : CGSize(width: layout.side == .leading
-                                 ? -autoHideRetreat : autoHideRetreat, height: 0))
-            : .zero
+        let autoHideOffset: CGSize = portrait
+            ? CGSize(width: 0, height: autoHideRetreat)
+            : CGSize(width: layout.side == .leading ? -autoHideRetreat : autoHideRetreat, height: 0)
+        let autoHideTransition: AnyTransition = .opacity
+            .combined(with: .scale(scale: reduceMotion ? 1 : 0.98))
+            .combined(with: .offset(autoHideOffset))
         let rawLayout = ControlTrayGeometry.layout(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
@@ -866,31 +867,25 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-            } else {
+            } else if !autoHiding {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem,
                             fold: foldedTray)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-                    .opacity(autoHideOpacity)
-                    .scaleEffect(autoHideScale)
-                    .offset(autoHideOffset)
-                    .allowsHitTesting(!autoHiding)
-                    .accessibilityHidden(autoHiding)
+                    .transition(autoHideTransition)
             }
 
-            ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
-                if index < functionFrames.count {
-                    let frame = functionFrames[index]
-                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical,
-                                         faceDiameter: faceDiameter)
-                        .frame(width: frame.width, height: frame.height)
-                        .position(x: frame.midX, y: frame.midY)
-                        .opacity(autoHideOpacity)
-                        .scaleEffect(autoHideScale)
-                        .offset(autoHideOffset)
-                        .allowsHitTesting(!autoHiding)
-                        .accessibilityHidden(autoHiding)
-                        .animation(.snappy(duration: 0.24), value: frame)
+            if !autoHiding {
+                ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
+                    if index < functionFrames.count {
+                        let frame = functionFrames[index]
+                        functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical,
+                                             faceDiameter: faceDiameter)
+                            .frame(width: frame.width, height: frame.height)
+                            .position(x: frame.midX, y: frame.midY)
+                            .transition(autoHideTransition)
+                            .animation(.snappy(duration: 0.24), value: frame)
+                    }
                 }
             }
 
@@ -908,13 +903,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .gesture(controlGesture())
 
             if let arrows {
-                arrowKeysButton(frame: arrows.toggle, faceDiameter: faceDiameter)
-                    .opacity(autoHideOpacity)
-                    .scaleEffect(autoHideScale)
-                    .offset(autoHideOffset)
-                    .allowsHitTesting(!autoHiding)
-                    .accessibilityHidden(autoHiding)
-                    .animation(.snappy(duration: 0.24), value: arrows.toggle)
+                if !autoHiding {
+                    arrowKeysButton(frame: arrows.toggle, faceDiameter: faceDiameter)
+                        .transition(autoHideTransition)
+                        .animation(.snappy(duration: 0.24), value: arrows.toggle)
+                }
                 arrowKeypadCluster(arrows, frozen: computedArrows)
             }
             // The full tray's gear fades out with Auto-hide (a tap there
@@ -1865,7 +1858,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                         store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
                     }))
                 .position(x: frame.midX, y: frame.midY)
-                .accessibilityHidden(true)
+                // No accessibility modifier: a plain clear view adds nothing to the tree, like the
+                // control gesture layer under it. `.accessibilityHidden(true)` made a hidden node over
+                // the gear that accessibility hit tests found first, so the gear read as covered.
         }
     }
 
