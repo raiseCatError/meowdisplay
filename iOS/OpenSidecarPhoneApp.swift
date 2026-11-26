@@ -1115,15 +1115,6 @@ struct ReceiverScreen: View {
         // The Mac's answer to Request Control, or the session going away, moves the Lock Mac flow on.
         .onChange(of: controlStore.sessionInputState) { _ in model.workspace.lockFlowInputsChanged() }
         .onChange(of: model.receiver.session.allowsLiveInput) { _ in model.workspace.lockFlowInputsChanged() }
-        // Auto-hide hides the tray, the folded menu chevron and the rail handle from VoiceOver inside
-        // an animated update, and the accessibility tree otherwise kept the previous state until the
-        // next change: hidden controls stayed focusable and revealed ones unreachable. Once the fade
-        // is over, say the layout changed so the tree matches what is on screen.
-        .onChange(of: controlStore.autoHidden) { _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                UIAccessibility.post(notification: .layoutChanged, argument: nil)
-            }
-        }
         .onReceive(NotificationCenter.default.publisher(for: .meowOpenWindowOverview)) { _ in
             showSettings = false
             model.workspace.openOverview()
