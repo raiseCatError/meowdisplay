@@ -1,0 +1,36 @@
+{
+  "configurations" : [
+    {
+      "id" : "6C5E2B0A-8E43-4C2E-9F27-1D0A9C2B5E11",
+      "name" : "iPhone Duo",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "defaultTestExecutionTimeAllowance" : 300,
+    "environmentVariableEntries" : [
+      {
+        "key" : "MEOW_NO_LIVE_MAC",
+        "value" : "1"
+      }
+    ],
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "selectedTests" : [
+        "AdaptiveLayoutTests",
+        "DemoModeSmokeTests",
+        "LocalCalculatorTourTests"
+      ],
+      "target" : {
+        "containerPath" : "container:MeowDisplay.xcodeproj",
+        "identifier" : "093A52E516B82DF5B1586C19",
+        "name" : "OpenSidecariOSUITests"
+      }
+    }
+  ],
+  "version" : 1
+}
