@@ -19,3 +19,10 @@ xcodegen --version | grep -q '2\.46\.' || echo "warning: XcodeGen is not 2.46; c
 
 export DEVELOPMENT_TEAM
 xcodegen generate --spec project.yml
+
+# Xcode Cloud doesn't resolve packages on its own: it needs the resolved file inside the project.
+# The generated project has none, so copy in the committed one. Its pins are project.yml's exact
+# versions; refresh it (from a ./generate-local.sh project) whenever those change.
+resolved=MeowDisplay.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+mkdir -p "$resolved"
+cp ci_scripts/Package.resolved "$resolved/Package.resolved"
