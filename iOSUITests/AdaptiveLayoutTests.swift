@@ -146,6 +146,11 @@ final class AdaptiveLayoutTests: XCTestCase {
         continueAfterFailure = true
         let autoHid = waitUntil(15) { !file.exists && !settings.isHittable }
         keep(app, "app-menu-bar-after-inactivity")
+        if !autoHid {
+            // Diagnostics for Xcode Cloud runs, which keep the log but show no screenshots.
+            print("AUTOHIDE-INACTIVITY settings=\(settings.debugDescription)")
+            print(app.debugDescription)
+        }
         XCTAssertTrue(autoHid, "After inactivity: File exists=\(file.exists), Settings hittable=\(settings.isHittable) "
                       + "\(settings.exists ? "\(settings.frame) \(settings.elementType.rawValue) \(settings.identifier)" : "")")
         // The folded chevron fades with the controls tray (owner's QA of 9000083); only the tabs stay.

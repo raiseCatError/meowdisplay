@@ -538,8 +538,14 @@ struct WorkspaceChromeView: View {
                 // where a float (or its title) is, instead of showing through it.
                 .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
                 .allowsHitTesting(false)
-                // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
-                // never a tap through to the Mac.
+                .accessibilityHidden(true)
+            // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
+            // never a tap through to the Mac. Its own pane-sized shape, not the outline: a lone
+            // pane's outline draws nothing, and an element that draws nothing has no frame.
+            Color.clear
+                .frame(width: rect.width, height: rect.height)
+                .contentShape(Rectangle())
+                .allowsHitTesting(false)
                 .accessibilityElement()
                 .accessibilityLabel(String(localized: "\(tile.source.map { labelText($0, in: tile, id: id) } ?? String(localized: "Empty")) pane"))
                 .accessibilityIdentifier("workspacePane")
