@@ -206,7 +206,17 @@ struct DemoWindowModeView: View {
     private var toolbarCentreY: CGFloat {
         let bottom = min(area.maxY, safe.maxY, reservations.screen.height > 0
                          ? reservations.screen.height - CGFloat(WorkspaceFloatGeometry.systemEdgeClearance) : area.maxY)
-        let y = bottom - CGFloat(WorkspaceFloatGeometry.touchDepth + WorkspaceFloatGeometry.tabSpacing) - 4 - toolbarHeight / 2
+        var y = bottom - CGFloat(WorkspaceFloatGeometry.touchDepth + WorkspaceFloatGeometry.tabSpacing) - 4 - toolbarHeight / 2
+        // Above the receiver's controls under it, lowest first: on the Duo's Strip it sat on the
+        // tray's top row (9000088).
+        let half = max(toolbarFrame.width, 200) / 2
+        let origin = reservations.screen.origin
+        let controls = reservations.controls.map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
+            .filter { $0.minX < area.midX + half && $0.maxX > area.midX - half && $0.midY > area.midY }
+            .sorted { $0.maxY > $1.maxY }
+        for control in controls where control.minY < y + toolbarHeight / 2 + 4 {
+            y = min(y, control.minY - 8 - toolbarHeight / 2)
+        }
         return max(y, area.minY + toolbarHeight / 2)
     }
 

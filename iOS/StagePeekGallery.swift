@@ -819,40 +819,56 @@ struct StagePeekGallery: View {
     /// Arrange… (the Mac also asks its owner every time).
     private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
         let overview = arrangementOverview(displays)
-        return HStack(spacing: 12) {
-            sectionTitle(String(localized: "Displays"))
-            Spacer(minLength: 8)
-            if let overview {
-                if inputAllowed, model.canArrangeDisplays {
-                    Button { arrangeOverview = overview } label: {
-                        Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(meowAccent)
-                    .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
-                    .accessibilityIdentifier("displayArrangeButton")
+        // One row when the actions fit beside the title, else the actions on their own row: on the
+        // Duo's narrow column they wrapped into stacks and broke "Overview" mid-word (9000088).
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                sectionTitle(String(localized: "Displays"))
+                Spacer(minLength: 8)
+                if let overview { displaysHeaderActions(overview) }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                sectionTitle(String(localized: "Displays"))
+                if let overview {
+                    HStack(spacing: 16) { displaysHeaderActions(overview) }
                 }
-                if model.offersOverviewPane {
-                    // Every display at once, live, as one pane (one per layout: an Overview pane
-                    // already there is selected).
-                    Button { onAddTile(model.overviewWindow) } label: {
-                        Text("Add as Pane").font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(meowAccent)
-                    .accessibilityLabel(Text("Add Overview as Pane"))
-                    .accessibilityHint(Text("Shows every display in one pane, controlled like a trackpad."))
-                    .accessibilityIdentifier("displayOverviewAddAsPane")
-                }
-                Button { showDisplayOverview = true } label: {
-                    Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
-                        .shadow(color: .black.opacity(0.5), radius: 2)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("displayOverviewButton")
             }
         }
+    }
+
+    @ViewBuilder
+    private func displaysHeaderActions(_ overview: DisplayOverviewModel) -> some View {
+        if inputAllowed, model.canArrangeDisplays {
+            Button { arrangeOverview = overview } label: {
+                Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(meowAccent)
+            .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
+            .accessibilityIdentifier("displayArrangeButton")
+        }
+        if model.offersOverviewPane {
+            // Every display at once, live, as one pane (one per layout: an Overview pane
+            // already there is selected).
+            Button { onAddTile(model.overviewWindow) } label: {
+                Text("Add as Pane").font(.subheadline.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(meowAccent)
+            .accessibilityLabel(Text("Add Overview as Pane"))
+            .accessibilityHint(Text("Shows every display in one pane, controlled like a trackpad."))
+            .accessibilityIdentifier("displayOverviewAddAsPane")
+        }
+        Button { showDisplayOverview = true } label: {
+            Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                .shadow(color: .black.opacity(0.5), radius: 2)
+                .lineLimit(1).fixedSize()
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("displayOverviewButton")
     }
 
     private func displayGrid(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
