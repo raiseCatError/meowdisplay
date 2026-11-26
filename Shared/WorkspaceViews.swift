@@ -274,12 +274,9 @@ struct WorkspaceChromeView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // Every item reachable: placed by its measured height inside the safe area (below the
                     // label when it fits, moved up when not), scrolling when taller than the screen.
-                    let room = (safeArea.map { $0.intersection(picture) } ?? picture).insetBy(dx: 8, dy: 8)
-                    let height = min(menuHeight, room.height)
-                    let top = min(max(rect.minY + 40, room.minY), room.maxY - height)
-                    paneMenu(m, tile: tile, maxHeight: room.height)
-                        .position(x: min(max(rect.minX + 132, room.minX + 126), room.maxX - 126),
-                                  y: top + height / 2)
+                    let place = paneMenuPlacement(below: rect)
+                    paneMenu(m, tile: tile, maxHeight: place.maxHeight)
+                        .position(place.centre)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity))
                 }
                 if model.localFullscreen != nil { fullscreenStrip }
@@ -1188,6 +1185,30 @@ struct WorkspaceChromeView: View {
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.4)) { stripVisible = false }
         }
+    }
+
+    /// Where the pane menu for a pane at `rect` goes: below its label when it fits, moved up when
+    /// not, inside the safe area and above any control under it (the demo Window view's toolbar drew
+    /// over its last rows on the Duo, 9000088). It scrolls when taller than the room.
+    private func paneMenuPlacement(below rect: CGRect) -> (centre: CGPoint, maxHeight: CGFloat) {
+        let screen = (safeArea.map { $0.intersection(picture) } ?? picture).insetBy(dx: 8, dy: 8)
+        let x = min(max(rect.minX + 132, screen.minX + 126), screen.maxX - 126)
+        let room = Self.paneMenuRoom(screen, column: (x - 126)...(x + 126), controls: controls)
+        let height = min(menuHeight, room.height)
+        let top = min(max(rect.minY + 40, room.minY), room.maxY - height)
+        return (CGPoint(x: x, y: top + height / 2), room.height)
+    }
+
+    /// `screen` ending above any control in its lower half that `column` crosses. A control too
+    /// close to the top to leave a usable menu is ignored.
+    static func paneMenuRoom(_ screen: CGRect, column: ClosedRange<CGFloat>, controls: [CGRect]) -> CGRect {
+        var bottom = screen.maxY
+        for control in controls where control.minX < column.upperBound && control.maxX > column.lowerBound
+            && control.midY > screen.midY && control.minY < bottom {
+            bottom = control.minY - 8
+        }
+        guard bottom - screen.minY >= 160 else { return screen }
+        return CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: bottom - screen.minY)
     }
 
     // MARK: Haptics

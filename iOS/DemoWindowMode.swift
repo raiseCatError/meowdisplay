@@ -226,7 +226,8 @@ struct DemoWindowModeView: View {
                 .accessibilityLabel(Text("Sample Mac windows"))
                 .accessibilityValue(Text("\(workspace.drawn.count) windows drawn"))
                 .accessibilityIdentifier("demoWindowPicture")
-            WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: safe)
+            WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: safe,
+                                controls: localToolbarFrame.map { [$0] } ?? [])
                 .stepsAside(forAllApps: model.launchpadOpen)
             toolbar
                 .background(GeometryReader { g in
@@ -240,6 +241,14 @@ struct DemoWindowModeView: View {
         .onAppear { workspace.start(); publishReservations() }
         .onChange(of: reservations) { _ in publishReservations() }
         .onChange(of: toolbarFrame) { _ in publishReservations() }
+    }
+
+    /// The toolbar in this view's own space (it is placed at `toolbarCentreY`), so pane menus and
+    /// chips keep clear of it. Nil until it has been measured.
+    private var localToolbarFrame: CGRect? {
+        guard !toolbarFrame.isEmpty else { return nil }
+        return CGRect(x: area.midX - toolbarFrame.width / 2, y: toolbarCentreY - toolbarHeight / 2,
+                      width: toolbarFrame.width, height: toolbarHeight)
     }
 
     private func publishReservations() {
