@@ -12,7 +12,7 @@ struct StreamingSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Video Streaming", isOn: Binding(
                         get: { controller.videoEnabled },
-                        set: { controller.requestVideoEnabled($0) }))
+                        set: { controller.requestVideoEnabled($0, preserveCaptureMode: true) }))
                     Text("Stop screen capture and streaming while keeping connected-device controls active.")
                         .font(.caption)
                         .foregroundStyle(.secondary)

@@ -599,7 +599,12 @@ class DependencyGraph(unittest.TestCase):
 
     def test_a_change_to_anything_a_target_compiles_selects_its_jobs(self):
         targets, outside = project_targets((ROOT / "project.yml").read_text(encoding="utf-8"))
-        self.assertEqual(outside, set(), "project.yml references files outside its targets")
+        # A scheme may name a file (a test plan) in a directory a target already compiles: a
+        # change there selects that target's jobs. Anything else outside the targets is unmapped.
+        compiled = set().union(*(roots for roots, _ in targets.values()))
+        self.assertEqual(outside - compiled, set(), "project.yml references files outside its targets")
+        for path in ["iOSUITests/DuoUITests.xctestplan"]:
+            self.assertLessEqual(TARGET_JOBS["OpenSidecariOSUITests"], jobs([path]))
         for target, (roots, deps) in targets.items():
             needed = set(TARGET_JOBS[target])
             for dep in deps:

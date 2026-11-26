@@ -288,6 +288,7 @@ struct StagePeekMachine: Equatable {
 
     /// `cardAt` answers which card is frontmost under a point (a tap target).
     mutating func touchEnded(id: AnyHashable, at point: CGPoint, time: TimeInterval,
+                             projectedVerticalTravel: CGFloat = 0,
                              cardAt: (CGPoint) -> Int?) -> [StagePeekEffect] {
         if consumed.remove(id) != nil { return [] }
         guard id == touchID else { return [] }
@@ -300,6 +301,13 @@ struct StagePeekMachine: Equatable {
             phase = .closed
             return wasTap ? openDirectly() : []
         case .scrubbing:
+            if expansion < StagePeekConfig.expandKeep, projectedVerticalTravel.isFinite {
+                // SwiftUI supplies the inertial projection of the vertical drag.
+                // Settle on a whole card within the list rather than running another decelerator.
+                let travel = Double(projectedVerticalTravel / StagePeekConfig.scrubPitch)
+                let projected = position + (naturalScrolling ? -travel : travel)
+                position = min(max(0, projected), Double(max(0, ids.count - 1)))
+            }
             settleAfterLift()
             resetTouch()   // the next touch is a fresh tap candidate
             return []
@@ -455,6 +463,7 @@ struct StagePeekMachine: Equatable {
     private mutating func settleAfterLift() {
         phase = .open
         position = Double(highlighted)
+        lastHighlighted = highlighted
         if !expanded {
             expanded = expansion >= StagePeekConfig.expandKeep
             expansion = expanded ? 1 : 0
@@ -542,13 +551,18 @@ enum StagePeekLayout {
     /// `fitsRegion`: the compact cards are also no taller than `StagePeekCompactBand` allows
     /// for that band, so a short landscape band still holds the highlighted card and its
     /// neighbours (#130). Off, and for the Normal Dock, the sizes are what they always were.
+    static func compactCardWidth(in safe: CGRect, isPad: Bool, metadataOnly: Bool) -> CGFloat {
+        if metadataOnly { return min(max(1, safe.width - 32), isPad ? 360 : 270) }
+        return min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+    }
+
     static func cards(aspects: [Double], position: Double, expansion: Double, edge: StagePeekEdge,
                       safe: CGRect, isPad: Bool, reduceMotion: Bool, region: CGRect? = nil,
-                      fitsRegion: Bool = false) -> [StagePeekCard] {
+                      fitsRegion: Bool = false, metadataOnly: Bool = false) -> [StagePeekCard] {
         guard !aspects.isEmpty, safe.width > 0, safe.height > 0 else { return [] }
         let e = CGFloat(min(max(expansion, 0), 1))
         func lerp(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * e }
-        let compactWidth = min(max(safe.width * (isPad ? 0.24 : 0.36), 110), isPad ? 300 : 210)
+        let compactWidth = compactCardWidth(in: safe, isPad: isPad, metadataOnly: metadataOnly)
         let expandedWidth = min(max(safe.width * 0.6, compactWidth), isPad ? 640 : 420)
         let maxWidth = lerp(compactWidth, expandedWidth)
         var compactHeight = safe.height * 0.26
@@ -558,7 +572,7 @@ enum StagePeekLayout {
         func cardSize(_ i: Int) -> CGSize {
             let aspect = CGFloat(min(max(aspects[i], 0.5), 2.2))
             var w = maxWidth, h = w / aspect
-            if h > maxHeight { h = maxHeight; w = h * aspect }
+            if h > maxHeight { h = maxHeight; if !metadataOnly { w = h * aspect } }
             return CGSize(width: w, height: h)
         }
         let focusSize = cardSize(focus)

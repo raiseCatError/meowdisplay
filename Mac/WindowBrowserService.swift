@@ -1,13 +1,14 @@
 import AppKit
 import CoreImage
+import os
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 // Browsing for one receiver session, in EVERY display mode: Stage Peek, search
 // and Launchpad open over Mirror and Extend without switching to Window mode,
 // so the Mac must list windows, displays and apps (and send stills) there too.
-// Read-only, except `launch`, which needs the session's input grant. The Window
-// mode engine shares this service's identity ledger, so a window keeps one
+// Launch, close, and restore use the session's input grant. The Window mode
+// engine shares this service's identity ledger, so a window keeps one
 // `gen` across modes and a tile picked in Mirror is accepted in Window mode.
 
 /// What the thumbnail scheduler should do with one request, given the cache.
@@ -136,6 +137,7 @@ struct DisplayCatalogEntry: Equatable, Sendable {
     var isMeow = false
     /// A virtual display owned by this session (implies `isMeow`).
     var isOwn = false
+    var displayUUID: String? = nil
 
     var wire: [String: Any] {
         var out: [String: Any] = [
@@ -147,6 +149,7 @@ struct DisplayCatalogEntry: Equatable, Sendable {
         if let scale { out["scale"] = scale }
         if refreshHz > 0 { out["hz"] = refreshHz }
         if let mirrorOf { out["mirrorOf"] = Int(mirrorOf) }
+        if let displayUUID { out["uuid"] = displayUUID }
         return out
     }
 
@@ -181,6 +184,8 @@ final class WindowBrowserService: @unchecked Sendable {
     private var refreshQueuedCatalog: Bool?
     private var lastCatalogRequestAt: TimeInterval = 0
     private var active = true
+    private let allowsStills: Bool
+    private let stillAuthority: OSAllocatedUnfairLock<(active: Bool, generation: UInt64)>
     private var stopped = false
     private var scheduler = ThumbnailScheduler()
     private var stills: [UInt32: Data] = [:]
@@ -210,12 +215,28 @@ final class WindowBrowserService: @unchecked Sendable {
     /// A new listing shortly after a launch, so the app's window reaches the receiver (tests turn it off).
     var refreshesAfterLaunch = true
 
-    init(hostID: String) { self.hostID = hostID }
+    init(hostID: String, allowsStills: Bool = true) {
+        self.hostID = hostID
+        self.allowsStills = allowsStills
+        stillAuthority = OSAllocatedUnfairLock(initialState: (allowsStills, 0))
+    }
+
+    private func setStillCaptureActive(_ active: Bool) {
+        stillAuthority.withLock {
+            guard $0.active != active else { return }
+            $0 = (active, $0.generation &+ 1)
+        }
+    }
+
+    private var stillCaptureGeneration: UInt64? {
+        stillAuthority.withLock { $0.active ? $0.generation : nil }
+    }
 
     /// Paused, Video Off or not admitted: no listings or stills leave the Mac. Active again (a new
     /// admitted connection, or a resume): icons are answered afresh, since the receiver may have
     /// restarted and lost them while this session stayed.
     func setActive(_ value: Bool) {
+        setStillCaptureActive(value && allowsStills)
         queue.async { [self] in
             if value, !active { icons.reset() }
             active = value
@@ -224,6 +245,7 @@ final class WindowBrowserService: @unchecked Sendable {
     }
 
     func stop() {
+        setStillCaptureActive(false)
         queue.async { [self] in
             stopped = true; active = false
             stopCursorWatch()
@@ -260,10 +282,11 @@ final class WindowBrowserService: @unchecked Sendable {
 
     /// `controlStillAllowed`: the session's control asked again (side-effect free) right before an
     /// app opens.
-    func handle(type: String, message obj: [String: Any], inputGranted: Bool,
+    func handle(type: String, message obj: [String: Any], inputGranted: Bool, trackpadPeek: Bool = false,
                 controlStillAllowed: @escaping @Sendable () -> Bool = { false }) {
         queue.async { [self] in
             guard active, !stopped else { return }
+            if trackpadPeek, !controlStillAllowed() { return }
             switch type {
             case WireMessage.windowCatalogRequest:
                 let now = ProcessInfo.processInfo.systemUptime
@@ -271,6 +294,16 @@ final class WindowBrowserService: @unchecked Sendable {
                 lastCatalogRequestAt = now
                 refresh(sendCatalog: true)
             case WireMessage.windowThumbnailRequest:
+                if trackpadPeek {
+                    // An icon-only request may reuse the installed-app icon path.
+                    // No request fields can enter either still-capture path.
+                    if let bundles = obj["icons"] as? [String] {
+                        let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
+                        if !fresh.isEmpty { sendIcons(fresh, stillAllowed: controlStillAllowed) }
+                    }
+                    return
+                }
+                guard allowsStills else { return }
                 let ids = (obj["ids"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
                 let width = min(max(obj["max"] as? Int ?? 240, 64), 640)
                 requestStills(Array(ids.prefix(48)), width: width)
@@ -278,7 +311,9 @@ final class WindowBrowserService: @unchecked Sendable {
                     let fresh = icons.admit(bundles, now: ProcessInfo.processInfo.systemUptime)
                     if !fresh.isEmpty { sendIcons(fresh) }
                 }
-                if let ds = obj["displays"] as? [Int] { sendDisplayStills(ds.compactMap { UInt32(exactly: $0) }.prefix(8), width: width) }
+                let ds = (obj["displays"] as? [Int] ?? []).compactMap { UInt32(exactly: $0) }
+                let detail = OverviewDisplayDetailRequest.parse(obj["detail"])
+                if !ds.isEmpty || detail != nil { sendDisplayStills(ds, width: width, detail: detail) }
             case WireMessage.appCatalogRequest:
                 let rev = obj["rev"] as? Int
                 AppCatalog.shared.current { [weak self] apps, revision in
@@ -308,6 +343,9 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
             case WireMessage.windowClose:
                 closeWindow(obj, inputGranted: inputGranted)
+            case WireMessage.windowAction:
+                restoreListedWindow(obj, inputGranted: inputGranted, trackpadPeek: trackpadPeek,
+                                    controlStillAllowed: controlStillAllowed)
             case DisplayActionsWire.identify:
                 identifyDisplays()
             case DisplayActionsWire.moveCursor:
@@ -448,6 +486,30 @@ final class WindowBrowserService: @unchecked Sendable {
         }
     }
 
+    private func restoreListedWindow(_ obj: [String: Any], inputGranted: Bool, trackpadPeek: Bool,
+                                     controlStillAllowed: @escaping @Sendable () -> Bool) {
+        guard inputGranted, obj["action"] as? String == "activate", obj["ifOffscreen"] as? Bool == true,
+              let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }),
+              let gen = (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }),
+              let entry = snapshot?.windows.first(where: { $0.windowID == id && $0.generation == gen }),
+              trackpadPeek || entry.availability == .offscreen, knows(windowID: id, generation: gen) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, controlStillAllowed(), self.knows(windowID: id, generation: gen),
+                  CGPreflightScreenCaptureAccess() else { return }
+            if entry.availability == .offscreen {
+                WindowWorkspaceEngine.restoreOffscreen(entry, stillAllowed: controlStillAllowed)
+            } else if !MissionControlMonitor.isOpenNow(),
+                      let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first,
+                      (info[kCGWindowNumber as String] as? UInt32) == id,
+                      (info[kCGWindowOwnerPID as String] as? Int32) == entry.pid,
+                      let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                      let frame = CGRect(dictionaryRepresentation: bounds), controlStillAllowed() {
+                WindowWorkspaceEngine.raise(pid: entry.pid, frame: frame)
+            }
+            self.refresh(sendCatalog: true)
+        }
+    }
+
     // MARK: Listing
 
     /// Builds a listing (one at a time) and hands it to the engine; sends it when asked.
@@ -467,9 +529,15 @@ final class WindowBrowserService: @unchecked Sendable {
             refreshStartedAt = ProcessInfo.processInfo.systemUptime
             let ledgerIn = ledgerLock.withLock { ledger }
             let includeOwn = includeOwnProcessForTesting
+            let includeDisplays = allowsStills
             Task { [weak self] in
                 let built = try? await WindowCatalogBuilder.build(ledger: ledgerIn, includeOwnProcess: includeOwn)
-                let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                let content: SCShareableContent?
+                if includeDisplays {
+                    content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                } else {
+                    content = nil
+                }
                 self?.queue.async {
                     guard let self else { return }
                     self.refreshInFlight = false
@@ -506,22 +574,29 @@ final class WindowBrowserService: @unchecked Sendable {
                 || (screen?.localizedName.contains("MeowDisplay") ?? false)
             let mode = CGDisplayCopyDisplayMode(d.displayID)
             let mirror = CGDisplayMirrorsDisplay(d.displayID)
-            return DisplayCatalogEntry.make(
+            var entry = DisplayCatalogEntry.make(
                 id: d.displayID, name: screen?.localizedName ?? "Display \(d.displayID)",
                 frame: CGDisplayBounds(d.displayID), isMain: d.displayID == main, isVirtual: isVirtual,
                 pixelWidth: mode?.pixelWidth ?? 0, refreshHz: mode?.refreshRate ?? 0,
                 mirrorOf: mirror == kCGNullDirectDisplay ? nil : mirror, meowIDs: meowIDs, ownIDs: ownIDs)
+            if (!entry.isVirtual && !entry.isMeow) || ownIDs.contains(d.displayID) {
+                entry.displayUUID = MirrorDisplayIdentity.uuidString(for: d.displayID)
+            }
+            return entry
         }.sorted { ($0.isMain ? 0 : 1, $0.displayID) < ($1.isMain ? 0 : 1, $1.displayID) }
     }
 
     private func sendCatalogMessage(_ snap: WindowCatalogSnapshot) {
-        sendMessage?([
+        var message: [String: Any] = [
             "type": WireMessage.windowCatalog,
-            "host": hostID,
-            "windows": snap.windows.prefix(120).map(\.wire),
-            "apps": snap.apps.prefix(60).map(\.wire),
-            "displays": displays.prefix(8).map(\.wire),
-        ])
+            "windows": snap.windows.prefix(120).map { allowsStills ? $0.wire : $0.trackpadWire },
+        ]
+        if allowsStills {
+            message["host"] = hostID
+            message["apps"] = snap.apps.prefix(60).map(\.wire)
+            message["displays"] = displays.prefix(8).map(\.wire)
+        }
+        sendMessage?(message)
         Log.info("workspace: catalog sent enumerated=\(snap.windows.count) displays=\(displays.count) apps=\(snap.apps.count)")
     }
 
@@ -536,14 +611,16 @@ final class WindowBrowserService: @unchecked Sendable {
         var list = apps.map { a -> [String: Any] in
             var m: [String: Any] = ["bundle": a.bundleID, "name": String(a.name.prefix(80))]
             if running[a.bundleID] != nil { m["running"] = true }
-            if let n = windowCounts[a.bundleID] { m["windows"] = n }
-            if let used = a.lastUsed { m["used"] = Int(used.timeIntervalSince1970) }
+            if allowsStills, let n = windowCounts[a.bundleID] { m["windows"] = n }
+            if allowsStills, let used = a.lastUsed { m["used"] = Int(used.timeIntervalSince1970) }
             return m
         }
         // Running apps that aren't installed in an app folder (a dev build, a helper) still belong in the list.
         let known = Set(apps.map(\.bundleID))
         for r in snapshot?.apps ?? [] where !known.contains(r.bundleID) {
-            list.append(["bundle": r.bundleID, "name": String(r.name.prefix(80)), "running": true, "windows": windowCounts[r.bundleID] ?? 0])
+            var app: [String: Any] = ["bundle": r.bundleID, "name": String(r.name.prefix(80)), "running": true]
+            if allowsStills { app["windows"] = windowCounts[r.bundleID] ?? 0 }
+            list.append(app)
         }
         sendMessage?(["type": WireMessage.appCatalog, "rev": revision, "apps": Array(list.prefix(AppCatalog.wireLimit))])
         lastAppRevisionSent = revision
@@ -566,6 +643,7 @@ final class WindowBrowserService: @unchecked Sendable {
     }
 
     private func pump() {
+        guard let authority = stillCaptureGeneration else { return }
         while active, !stopped, inFlight < Self.maxConcurrentStills, let id = scheduler.next() {
             guard let snap = snapshot, active, let entry = snap.windows.first(where: { $0.windowID == id }),
                   let window = snap.scWindows[id] else { scheduler.forget(id); continue }
@@ -582,7 +660,7 @@ final class WindowBrowserService: @unchecked Sendable {
                 let window = job.window
                 if let live = job.live { image = Self.downscale(live.0, content: live.1, width: width) } else if inStrip {
                     image = nil
-                } else {
+                } else if self?.stillCaptureGeneration == authority {
                     let cfg = SCStreamConfiguration()
                     let aspect = realFrame.height / max(realFrame.width, 1)
                     cfg.width = width
@@ -596,11 +674,14 @@ final class WindowBrowserService: @unchecked Sendable {
                         Log.info("workspace: still failed window=\(id) app=\(entry.bundleID) state=\(entry.availability.rawValue) code=\((error as NSError).code)")
                         image = nil
                     }
+                } else {
+                    image = nil
                 }
                 let jpeg = image.flatMap { Self.jpeg($0, quality: 0.62) }
                 self?.queue.async {
                     guard let self else { return }
                     self.inFlight -= 1
+                    guard self.stillCaptureGeneration == authority else { self.pump(); return }
                     var msg: [String: Any] = ["type": WireMessage.windowThumbnail, "id": Int(id), "gen": Int(entry.generation)]
                     if inStrip, let jpeg {
                         // A paused pane's last frame: real, but not current.
@@ -629,44 +710,76 @@ final class WindowBrowserService: @unchecked Sendable {
     private var lastDisplayStillsAt: TimeInterval = 0
 
     /// One display batch at a time, at most every 2 s (a display still is a full-screen capture).
-    private func sendDisplayStills(_ ids: ArraySlice<UInt32>, width: Int) {
+    private func sendDisplayStills(_ ids: [UInt32], width: Int, detail: OverviewDisplayDetailRequest?) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard !displayStillsBusy, now - lastDisplayStillsAt >= 2 else { return }
-        let wanted = ids.compactMap { scDisplays[$0] }
+        guard let authority = stillCaptureGeneration, !displayStillsBusy, now - lastDisplayStillsAt >= 2 else { return }
+        let detail = detail.flatMap { request in
+            displays.contains(where: { $0.displayID == request.id && !$0.isMeow && !$0.isOwn }) ? request : nil
+        }
+        let ordered = detail.map { request in [request.id] + ids.filter { $0 != request.id } } ?? ids
+        let wanted = ordered.prefix(8).compactMap { scDisplays[$0] }
         guard !wanted.isEmpty else { return }
         displayStillsBusy = true
         lastDisplayStillsAt = now
         Task { [weak self] in
             defer { self?.queue.async { self?.displayStillsBusy = false } }
             for d in wanted {
-                guard let self, await self.isActive() else { return }
+                guard let self, self.stillCaptureGeneration == authority else { return }
                 // No display still while the Mac asks for its password: it could show the prompt.
                 guard !PrivacyShieldWindows.isUnlocking else { continue }
                 let cfg = SCStreamConfiguration()
-                cfg.width = width
-                cfg.height = max(Int(Double(width) * Double(d.height) / Double(max(d.width, 1))) & ~1, 2)
+                let requestedDetail = detail?.id == d.displayID ? detail : nil
+                let display = CGRect(x: 0, y: 0, width: max(d.width, 1), height: max(d.height, 1))
+                if let requestedDetail {
+                    let crop = requestedDetail.region?.rect(in: display) ?? display
+                    if requestedDetail.region != nil { cfg.sourceRect = crop }
+                    let aspect = crop.height / crop.width
+                    let nativeWidth = CGFloat(CGDisplayPixelsWide(d.displayID)) * crop.width / display.width
+                    let nativeHeight = CGFloat(CGDisplayPixelsHigh(d.displayID)) * crop.height / display.height
+                    let nativeSide = max(nativeWidth, nativeHeight)
+                    let requestedSide = CGFloat(requestedDetail.maxSide)
+                    let side = nativeSide > 0 ? min(nativeSide, requestedSide) : requestedSide
+                    cfg.width = max(Int(side / max(1, aspect)) & ~1, 2)
+                    cfg.height = max(Int(side * min(1, aspect)) & ~1, 2)
+                } else {
+                    cfg.width = width
+                    cfg.height = max(Int(CGFloat(width) * display.height / display.width) & ~1, 2)
+                }
                 cfg.showsCursor = false
                 // MeowDisplay's own windows (prompts, privacy cover) never appear in a still.
                 let own = (try? await ShareableContent.content())?
                     .applications.filter { $0.processID == ProcessInfo.processInfo.processIdentifier } ?? []
                 let filter = SCContentFilter(display: d, excludingApplications: own, exceptingWindows: [])
-                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg),
-                      let jpeg = Self.jpeg(image, quality: 0.6) else { continue }
+                guard self.stillCaptureGeneration == authority, !PrivacyShieldWindows.isUnlocking else { return }
+                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) else { continue }
+                let jpeg = requestedDetail == nil ? Self.jpeg(image, quality: 0.6) : Self.detailJPEG(image)
+                guard let jpeg else { continue }
                 self.queue.async { [weak self] in
-                    guard let self, self.active else { return }
-                    self.sendMessage?(["type": WireMessage.displayThumbnail, "id": Int(d.displayID), "jpeg": jpeg.base64EncodedString()])
+                    guard let self, self.stillCaptureGeneration == authority, !PrivacyShieldWindows.isUnlocking else { return }
+                    var message: [String: Any] = ["type": WireMessage.displayThumbnail, "id": Int(d.displayID),
+                                                  "jpeg": jpeg.base64EncodedString()]
+                    if let requestedDetail {
+                        message["detail"] = requestedDetail.maxSide
+                        if let region = requestedDetail.region { message["detailRegion"] = region.edges }
+                    }
+                    self.sendMessage?(message)
                 }
             }
         }
     }
 
-    private func isActive() async -> Bool {
-        await withCheckedContinuation { c in queue.async { [self] in c.resume(returning: active && !stopped) } }
+    private static func detailJPEG(_ image: CGImage) -> Data? {
+        for quality in [0.78, 0.60, 0.45] {
+            if let data = jpeg(image, quality: quality),
+               (data.count + 2) / 3 * 4 <= OverviewDisplayDetailRequest.maxBase64 { return data }
+        }
+        return nil
     }
 
-    private func sendIcons(_ bundles: [String]) {
+    private func sendIcons(_ bundles: [String], stillAllowed: @escaping @Sendable () -> Bool = { true }) {
         DispatchQueue.main.async { [weak self] in
             for bundle in bundles {
+                guard stillAllowed() else { return }
                 // The listed copy's icon (an app on an external drive or behind a link may not be
                 // the copy Launch Services knows); nothing when no copy is there.
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first != nil
@@ -678,7 +791,7 @@ final class WindowBrowserService: @unchecked Sendable {
                 }
                 let msg: [String: Any] = ["type": WireMessage.appIcon, "bundle": bundle, "png": png.base64EncodedString()]
                 self?.queue.async {
-                    guard let self, self.active else { return }
+                    guard let self, self.active, stillAllowed() else { return }
                     self.icons.sent(bundle)
                     self.sendMessage?(msg)
                 }

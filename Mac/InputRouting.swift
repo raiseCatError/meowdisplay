@@ -19,6 +19,17 @@ enum InputTargetResolver {
 }
 
 enum InputCoordinateMapper {
+    /// A Trackpad move is in Quartz points, independent of the video source. At a gap or
+    /// outside the desktop, stop at the current display's edge.
+    static func desktopRelativePoint(from cursor: CGPoint, dx: Double, dy: Double,
+                                     displayAt: (CGPoint) -> CGRect?) -> CGPoint? {
+        let target = CGPoint(x: cursor.x + dx, y: cursor.y + dy)
+        guard target.x.isFinite, target.y.isFinite else { return nil }
+        if displayAt(target) != nil { return target }
+        guard let current = displayAt(cursor) else { return nil }
+        return clamp(target, into: current)
+    }
+
     /// Map top-left-origin normalized video coordinates into global CG bounds, kept on the
     /// display: 1.0, or anything outside 0...1, lands on its edge pixel and never on the
     /// neighbouring display that starts at `maxX`/`maxY`. `pixelScale` is the display's

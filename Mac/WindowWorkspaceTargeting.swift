@@ -121,8 +121,7 @@ enum WorkspaceRequestValidator {
             let zoom = WorkspacePaneZoom(wire: item["zoom"]) ?? .identity
             let epoch = min(max(item["view"] as? Int ?? 0, 0), Int(Int32.max))
             if (item["overview"] as? Bool) == true {
-                // Every listed display, once in the layout. Never turned or filled; the zoom's
-                // scale is the person's (1x-8x), its centre the Mac's (it follows the cursor).
+                // Every listed display, once in the layout. Fit and the viewport follow the pane request.
                 guard !displays.isEmpty else { rejected[id] = "unavailable"; continue }
                 let key = WorkspaceSource.overviewKey
                 guard !accepted.contains(where: { $0.isOverview }) else { rejected[id] = "duplicateWindow"; continue }
@@ -133,10 +132,9 @@ enum WorkspaceRequestValidator {
                     generation = nextGeneration
                     nextGeneration += 1
                 }
-                let scale = OverviewPaneLayout.clampZoom(zoom.scale)
                 accepted.append(WorkspaceTileAssignment(
                     tileID: id, rect: rect, windowID: key, windowGeneration: 0, pid: 0, bundleID: "", follow: .window,
-                    rotation: .none, fit: .fit, zoom: WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5),
+                    rotation: .none, fit: fit, zoom: zoom,
                     viewEpoch: epoch, assignmentGeneration: generation, isOverview: true, isFloat: isFloat, z: z, isLifted: lifted))
                 continue
             }
@@ -436,6 +434,22 @@ struct WorkspaceInputTargeting: Equatable, Sendable {
 
     /// Re-resolve at the current pointer (pointer buttons press where the cursor is).
     mutating func resolveAtPointer(_ phase: Phase) -> Target? { resolve(phase, at: pointer) }
+
+    /// A relative Overview click stays bound to its pane even when its real cursor is off-canvas.
+    mutating func resolveOverviewButton(_ phase: InputMapPhase, tile: String) -> Bool {
+        guard assignment(tile)?.isOverview == true, (boundTile ?? activeTile) == tile else { return false }
+        switch phase {
+        case .down:
+            boundTile = tile
+            return true
+        case .up:
+            guard boundTile == tile else { return false }
+            boundTile = nil
+            return true
+        case .hover, .drag, .scroll:
+            return false
+        }
+    }
 
     /// The keyboard target: the active tile, if it still has a live window.
     var keyboardTarget: WorkspaceTileAssignment? {

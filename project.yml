@@ -39,6 +39,16 @@ schemes:
     test:
       targets:
         - OpenSidecariOSUITests
+  # Xcode Cloud's iPhone Duo run (docs/ci/xcode-cloud-duo.md): the classes the GitHub ios-duo
+  # job runs, with no live Mac. A scheme of its own, so the others and their runs are unchanged.
+  OpenSidecariOSDuo:
+    build:
+      targets:
+        OpenSidecariOS: all
+    test:
+      testPlans:
+        - path: iOSUITests/DuoUITests.xctestplan
+          defaultPlan: true
   OpenSidecarMacReceiver:
     build:
       targets:

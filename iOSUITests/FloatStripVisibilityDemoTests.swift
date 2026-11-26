@@ -366,7 +366,7 @@ private struct ScreenPixels {
     @MainActor
     init?(_ app: XCUIApplication) {
         let image = app.screenshot().image
-        let points = app.windows.firstMatch.frame.size
+        let points = app.receiverWindow.frame.size
         let size = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
         let w = Int(size.width.rounded()), h = Int(size.height.rounded())
         // Portrait only: the screenshot and the window must agree on which way is up.

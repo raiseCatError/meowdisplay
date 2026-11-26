@@ -230,6 +230,13 @@ struct WorkspaceFloatLayer: View {
     let inputAllowed: Bool
     /// Close Window on Mac… (asks first, in the chrome).
     var onClose: (String) -> Void
+    var localTrackpad: ((String, CGRect) -> AnyView)? = nil
+    var closeHapticsEnabled = true
+    var closeAvoiding: [CGRect] = []
+    var railFrames: [CGRect] = []
+    /// The controls tray is auto-hidden: the floats' handles, grips and close dot fade with it
+    /// (their title pills stay, like the panes' tabs).
+    var controlsHidden = false
     /// Pane titles and floats' title pills: the first-use tip keeps clear of them.
     var tipAvoiding: [CGRect] = []
     /// Where the drag's placement chip is drawn: the tip goes beside or below it.
@@ -244,6 +251,10 @@ struct WorkspaceFloatLayer: View {
     @State private var moving: Set<String> = []
     @State private var samples: [String: [Sample]] = [:]
     @State private var lastTap: (id: String, at: Date)?
+    @State private var quickClose = WorkspaceFloatQuickClose()
+    @State private var closeExpiry: Task<Void, Never>?
+    @State private var armedCloseLayout: WorkspaceLayout?
+    @State private var accessibleCloseID: String?
     /// Circling toward the other placement: where the finger is and how far along.
     @State private var ring: Ring?
     /// The float folded into a card while it's being docked (`model.dockingFloat`, circled while
@@ -292,12 +303,19 @@ struct WorkspaceFloatLayer: View {
         let docking = model.dockingFloat
         let shown = frames.floats.compactMap { id in (motion.frames[id] ?? frames.tiles[id]).map { (id: id, rect: $0.screen(in: picture)) } }
         let covers = WorkspaceFloatLayering.covers(backToFront: shown.map { WorkspaceRect($0.id == docking ? .zero : $0.rect) })
+        let closeTargets = shown.enumerated().reduce(into: [String: CGRect]()) { targets, item in
+            let (index, float) = item
+            if let target = closeTarget(float.id, rect: float.rect, covers: coverRects(covers, shown.map(\.id), index)) {
+                targets[float.id] = target
+            }
+        }
         ZStack(alignment: .topLeading) {
             Color.clear.allowsHitTesting(false)
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
                 // Coming back out of its edge: drawn as its edge picture until it's out.
                 if motion.edges[f.id]?.kind != .restoring {
                     floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
+                    if let target = closeTargets[f.id] { closeButton(f.id, at: target).fadesWithControls(controlsHidden) }
                 }
             }
             // Tucked floats, each its own window at its own size just behind its edge.
@@ -318,7 +336,35 @@ struct WorkspaceFloatLayer: View {
             }
             if model.placementTipVisible { placementTip }
         }
-        .onAppear { motion.model = model; publishHandles(handles) }
+        .onAppear {
+            motion.model = model
+            publishHandles(handles)
+            publishCloseTargets(closeTargets)
+        }
+        .onChange(of: closeTargets) { targets in
+            publishCloseTargets(targets)
+            if let armed = quickClose.armedID, targets[armed] == nil { cancelQuickClose() }
+        }
+        .onChange(of: toGlobal) { _ in publishCloseTargets(closeTargets) }
+        .onChange(of: model.floatCloseCancellationGeneration) { _ in cancelQuickClose() }
+        .onChange(of: model.active) { _ in cancelQuickClose() }
+        .onChange(of: model.layout) { _ in cancelQuickClose() }
+        .onChange(of: picture) { _ in cancelQuickClose() }
+        .onDisappear {
+            cancelQuickClose()
+            model.floatCloseTargetsGlobal = []
+        }
+        .alert("Close Floating Pane?", isPresented: Binding(get: { accessibleCloseID != nil }, set: { if !$0 { accessibleCloseID = nil } }),
+               presenting: accessibleCloseID) { id in
+            Button("Close Pane", role: .destructive) { confirmQuickClose(id) }
+            Button("Cancel", role: .cancel) { cancelQuickClose() }
+        } message: { id in
+            if model.layout.tiles[id]?.source?.isDisplay == true {
+                Text("Remove “\(title(id))” from this device.")
+            } else {
+                Text("Remove “\(title(id))” from this device. Its window stays open on the Mac.")
+            }
+        }
         .onChange(of: handles.map(\.tab.rect)) { _ in publishHandles(handles) }
         .onChange(of: handlesHeld) { _ in
             // A touch on a strip the system cancelled (no end event): a peek or a pull goes back
@@ -353,6 +399,9 @@ struct WorkspaceFloatLayer: View {
     // MARK: A float
 
     private func title(_ id: String) -> String {
+        if let source = model.layout.tiles[id]?.source, source.isTrackpad, let item = model.windowItem(source) {
+            return item.title
+        }
         if let s = model.tileState(id) { return s.title.isEmpty ? s.app : s.title }
         if let w = model.layout.tiles[id]?.source?.windowID, let item = model.catalog?.windows.first(where: { $0.id == w }) {
             return item.title.isEmpty ? item.app : item.title
@@ -394,7 +443,11 @@ struct WorkspaceFloatLayer: View {
         ZStack {
             if !docked {
                 Group {
-                    if drawnHere, let image = model.backdrop(id)?.image,
+                    if model.layout.tiles[id]?.source?.isTrackpad == true, let localTrackpad {
+                        localTrackpad(id, rect)
+                            .frame(width: rect.width, height: rect.height)
+                            .clipShape(RoundedRectangle(cornerRadius: floatCorner, style: .continuous))
+                    } else if drawnHere, let image = model.backdrop(id)?.image,
                        let view = model.floatContentTransform(id, width: rect.width, height: rect.height) {
                         FloatStill(image: image, view: view, size: rect.size, corner: floatCorner)
                     } else if drawnHere {
@@ -430,18 +483,22 @@ struct WorkspaceFloatLayer: View {
         // the finger took it: they never jump from under it. Being docked: only its card is drawn;
         // the pill and grabber stay, empty and taking no new touch (the docking move lives there).
         let held = start[id].map { $0.screen(in: picture) } ?? rect
-        let pill = WorkspaceOverlayPlacement.floatPill(
-            content: held, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size, safe: safeArea, picture: picture)
-            .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
+        let pill = pillFrame(rect, held: held)
         if docked || !covered(pill) {
-            titlePill(id, rect: rect, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline, docked: docked)
+            titlePill(id, width: pill.width, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline, docked: docked)
         }
         if handles {
-            let grab = CGPoint(x: rect.midX, y: WorkspaceOverlayPlacement.grabberMidY(content: held, picture: picture, safe: safeArea)
-                + rect.maxY - held.maxY)
-            if docked || !covered(CGRect(x: grab.x - 38, y: grab.y - 14, width: 76, height: 28)) { grabber(id, at: grab, active: active, docked: docked) }
-            if !docked, !covered(CGRect(x: rect.minX - 28, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomLeading, active: active) }
-            if !docked, !covered(CGRect(x: rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)) { grip(id, rect: rect, corner: .bottomTrailing, active: active) }
+            let grab = grabberFrame(rect, held: held)
+            if docked || !covered(grab) {
+                grabber(id, at: CGPoint(x: grab.midX, y: grab.midY), active: active, docked: docked)
+                    .fadesWithControls(controlsHidden && !docked)
+            }
+            if !docked, !covered(gripFrame(rect, leading: true)) {
+                grip(id, rect: rect, corner: .bottomLeading, active: active).fadesWithControls(controlsHidden)
+            }
+            if !docked, !covered(gripFrame(rect, leading: false)) {
+                grip(id, rect: rect, corner: .bottomTrailing, active: active).fadesWithControls(controlsHidden)
+            }
         }
         let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)
         if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }
@@ -453,6 +510,107 @@ struct WorkspaceFloatLayer: View {
                 .frame(maxWidth: max(rect.width - 24, 120))
                 .position(x: rect.midX, y: rect.minY + 34)
         }
+    }
+
+    /// The title pill on the float's top edge. It is placed the same way whether or not the close
+    /// dot shows: the dot sits on the float's corner and never moves the pill.
+    private func pillFrame(_ rect: CGRect, held: CGRect) -> CGRect {
+        let size = WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size
+        let pill = WorkspaceOverlayPlacement.floatPill(content: held, size: size, safe: safeArea, picture: picture)
+            .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
+        return WorkspaceOverlayPlacement.floatPillClearingRails(pill, safe: safeArea, picture: picture, rails: railFrames)
+    }
+
+    private func grabberFrame(_ rect: CGRect, held: CGRect) -> CGRect {
+        let y = WorkspaceOverlayPlacement.grabberMidY(content: held, picture: picture, safe: safeArea)
+            + rect.maxY - held.maxY
+        return CGRect(x: rect.midX - 38, y: y - 14, width: 76, height: 28)
+    }
+
+    private func gripFrame(_ rect: CGRect, leading: Bool) -> CGRect {
+        CGRect(x: leading ? rect.minX - 28 : rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)
+    }
+
+    /// The selected float's close dot, on its rounded top-left corner. Other floats show none.
+    /// It steps aside (hides) where its spot is taken: a float in front, a control, a rail, the
+    /// float's own title pill or grips.
+    private func closeTarget(_ id: String, rect: CGRect, covers: [CGRect]) -> CGRect? {
+        guard model.active == id, model.dockingFloat != id, motion.edges[id] == nil, motion.frames[id] == nil,
+              start[id] == nil, resizeStart[id] == nil else { return nil }
+        let obstacles = covers + closeAvoiding + railFrames
+            + [pillFrame(rect, held: rect), gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
+        return WorkspaceFloatLayering.closeTarget(onCornerOf: rect, cornerRadius: floatCorner,
+                                                  safe: safeArea ?? picture, avoiding: obstacles)
+    }
+
+    private func publishCloseTargets(_ targets: [String: CGRect]) {
+        let origin = toGlobal
+        model.floatCloseTargetsGlobal = targets.values.map { $0.offsetBy(dx: origin.x, dy: origin.y) }
+    }
+
+    private func closeButton(_ id: String, at target: CGRect) -> some View {
+        let armed = quickClose.armedID == id
+        return Button { tapClose(id) } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(armed ? 1 : 0))
+                .frame(width: armed ? 20 : 15, height: armed ? 20 : 15)
+                .background(Color(red: 0.88, green: 0.24, blue: 0.29).opacity(armed ? 1 : 0.76), in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(highContrast ? 0.8 : 0.32), lineWidth: 1))
+                .frame(width: 24, height: 24)
+                .frame(width: target.width, height: target.height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .hoverEffect(.highlight)
+        .accessibilityLabel(armed ? Text("Confirm Close Floating Pane") : Text("Close Floating Pane"))
+        .accessibilityValue(Text(title(id)))
+        .accessibilityHint("Removes this pane from the receiver layout.")
+        .accessibilityIdentifier("floatQuickClose-\(id)")
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: armed)
+        .workspaceRailObstacle()
+        .position(x: target.midX, y: target.midY)
+    }
+
+    private func tapClose(_ id: String) {
+        if UIAccessibility.isVoiceOverRunning || UIAccessibility.isSwitchControlRunning || UIAccessibility.isAssistiveTouchRunning {
+            cancelQuickClose()
+            accessibleCloseID = id
+            return
+        }
+        if armedCloseLayout != nil, armedCloseLayout != model.layout { cancelQuickClose() }
+        closeExpiry?.cancel()
+        if quickClose.tap(id, at: CACurrentMediaTime()) {
+            closeExpiry = nil
+            confirmQuickClose(id)
+        } else {
+            if closeHapticsEnabled { Self.haptic(.toggle) }
+            armedCloseLayout = model.layout
+            model.floatCloseArmed = true
+            let generation = quickClose.generation
+            closeExpiry = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(WorkspaceFloatQuickClose.confirmationSeconds))
+                guard !Task.isCancelled else { return }
+                quickClose.cancel(generation: generation)
+                model.floatCloseArmed = false
+            }
+        }
+    }
+
+    private func confirmQuickClose(_ id: String) {
+        if closeHapticsEnabled { Self.haptic(.drop) }
+        armedCloseLayout = nil
+        model.floatCloseArmed = false
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.14)) { model.removeFloat(id) }
+    }
+
+    private func cancelQuickClose() {
+        closeExpiry?.cancel()
+        closeExpiry = nil
+        armedCloseLayout = nil
+        model.floatCloseArmed = false
+        quickClose.cancel()
+        accessibleCloseID = nil
     }
 
     /// Typing to this float paused: the Mac's focus moved to another app or window after its
@@ -481,9 +639,9 @@ struct WorkspaceFloatLayer: View {
         VStack(spacing: 8) {
             Text("\(app.isEmpty ? "This window" : app) is minimized, hidden or in another Space on the Mac")
                 .font(.callout.weight(.semibold)).foregroundStyle(.white).multilineTextAlignment(.center)
-            if inputAllowed, !model.missionControlOpen {
+            if let action = model.showOnMacTitle(id) {
                 Button { model.showOnMac(id) } label: {
-                    Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                    Label(action, systemImage: "macwindow").font(.callout.weight(.semibold))
                         .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
                         .background(Color.white.opacity(0.18), in: Capsule())
                 }
@@ -501,14 +659,13 @@ struct WorkspaceFloatLayer: View {
     /// at an edge to tuck); tap to select, double-tap for Fullscreen on This Device; ⋯ for options.
     /// `docked`: the float is being docked (only its card shows): the pill draws nothing and takes
     /// no new touch, but stays, because the move that docks it lives here.
-    private func titlePill(_ id: String, rect: CGRect, at centre: CGPoint, active: Bool, outline: Color, docked: Bool) -> some View {
-        let maxWidth = max(min(rect.width - 28, 280), 90)
+    private func titlePill(_ id: String, width maxWidth: CGFloat, at centre: CGPoint, active: Bool, outline: Color, docked: Bool) -> some View {
         return HStack(spacing: 4) {
             HStack(spacing: 6) {
-                appIcon(id, size: 14)
+                if maxWidth >= 90 { appIcon(id, size: 14) }
                 Text(title(id)).font(.caption.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(Color.white.opacity(active ? 1 : 0.8))
-                    .frame(maxWidth: max(maxWidth - 64, 40))
+                    .frame(maxWidth: max(maxWidth - 64, 12))
             }
             .opacity(docked ? 0 : 1)
             .padding(.leading, 10)
@@ -534,6 +691,7 @@ struct WorkspaceFloatLayer: View {
         .overlay(Capsule().strokeBorder(outline, lineWidth: active ? 2 : 1).opacity(docked ? 0 : 1).allowsHitTesting(false))
         .environment(\.colorScheme, .dark)
         .accessibilityHidden(docked)
+        .workspaceRailObstacle(!docked)
         .position(centre)
     }
 
@@ -546,6 +704,7 @@ struct WorkspaceFloatLayer: View {
             .opacity(docked ? 0 : 1)
             .frame(width: 76, height: 28)
             .contentShape(FloatTouchArea(on: !docked))
+            .workspaceRailObstacle(!docked)
             .position(centre)
             .gesture(moveGesture(id))
             .hoverEffect(.highlight)
@@ -561,6 +720,7 @@ struct WorkspaceFloatLayer: View {
             .shadow(color: .black.opacity(0.55), radius: 1.5)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
+            .workspaceRailObstacle()
             .position(x: x, y: rect.maxY + 6)
             .gesture(resizeGesture(id, corner: corner))
             .modifier(FloatResizePointer(leading: leading))
@@ -774,31 +934,52 @@ struct WorkspaceFloatLayer: View {
             act(String(localized: "Tuck Left"), "sidebar.left") { tuck(id, .left) },
             act(String(localized: "Tuck Right"), "sidebar.right") { tuck(id, .right) },
         ])
-        let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: [
+        let source = model.layout.tiles[id]?.source
+        let isOverview = source?.isOverview == true
+        let isTrackpad = source?.isTrackpad == true
+        let resetView = act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) }
+        let view = UIMenu(title: "", options: .displayInline, preferredElementSize: .medium, children: isOverview ? [resetView] : [
             filled ? act(String(localized: "Whole Window"), "rectangle.arrowtriangle.2.inward") { model.toggleFit(id) }
                    : act(String(localized: "Fill Viewport"), "rectangle.arrowtriangle.2.outward") { model.toggleFit(id) },
             act(String(localized: "Rotate"), "rotate.right") { model.rotate(id) },
-            act(String(localized: "Reset View"), "arrow.counterclockwise") { model.resetView(id) },
+            resetView,
         ])
         var local: [UIMenuElement] = []
         if !front {
             local.append(act(String(localized: "Bring to Front"), "square.3.layers.3d.top.filled") { model.raiseFloat(id); model.focus(id, raise: false) })
         }
+        if let tile = model.layout.tiles[id], tile.tabs.count > 1 {
+            let tabs = tile.tabs.enumerated().map { index, source in
+                UIAction(title: model.windowItem(source)?.title ?? String(localized: "Window"),
+                         state: source == tile.source ? .on : .off) { _ in
+                    model.switchTab(id, to: index)
+                }
+            }
+            local.append(UIMenu(title: String(localized: "Tabs"), image: UIImage(systemName: "rectangle.on.rectangle"),
+                                children: tabs))
+        }
         local.append(act(String(localized: "Add to Layout"), "rectangle.split.2x1") { model.addFloatToLayout(id) })
-        local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"), children: [
+        var sizes = [
             act(String(localized: "Small"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.45 : 0.3) },
             act(String(localized: "Medium"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.65 : 0.45) },
             act(String(localized: "Large"), "rectangle.inset.filled") { model.sizeFloat(id, widthShare: narrow ? 0.9 : 0.65) },
-            act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) },
-        ]))
+        ]
+        if !isOverview, !isTrackpad {
+            sizes.append(act(String(localized: "Match Window"), "aspectratio") { model.matchWindowShape(id) })
+        }
+        local.append(UIMenu(title: String(localized: "Size"), image: UIImage(systemName: "arrow.up.left.and.down.right.magnifyingglass"),
+                            children: sizes))
         local.append(act(String(localized: "Change Window…"), "macwindow.on.rectangle") { model.openOverview(replacing: id) })
         local.append(act(String(localized: "Remove from This Device"), "rectangle.badge.minus") { model.removeFloat(id) })
+        let localMenu = UIMenu(title: "", options: .displayInline, children: local)
+        if isTrackpad { return [placement, localMenu] }
+        if isOverview { return [placement, view, localMenu] }
 
         // The real window on the Mac: needs control, and says so.
         let off: UIMenuElement.Attributes = inputAllowed ? [] : [.disabled]
         var mac: [UIMenuElement] = []
-        if model.tileState(id)?.status == .offscreen {
-            mac.append(act(String(localized: "Show on Mac"), "macwindow", off) { model.showOnMac(id) })
+        if model.tileState(id)?.status == .offscreen, let title = model.showOnMacTitle(id) {
+            mac.append(act(title, "macwindow") { model.showOnMac(id) })
         }
         if model.offersWindowFrameOnMac(id) {
             // The real Mac window, not this float's view: only from these items, never a gesture.
@@ -813,7 +994,7 @@ struct WorkspaceFloatLayer: View {
         let onMac = UIMenu(title: String(localized: "On Your Mac"), image: UIImage(systemName: "desktopcomputer"), children: mac)
         onMac.subtitle = inputAllowed ? String(localized: "Changes the real window") : String(localized: "Needs control of the Mac")
 
-        return [placement, view, UIMenu(title: "", options: .displayInline, children: local),
+        return [placement, view, localMenu,
                 UIMenu(title: "", options: .displayInline, children: [onMac])]
     }
 
@@ -1171,6 +1352,7 @@ struct WorkspaceFloatLayer: View {
             .accessibilityAction(named: Text("Restore")) { restore(id) }
             .accessibilityAction(named: Text("Remove from This Device")) { model.removeFloat(id) }
             .accessibilityIdentifier("floatTuckHandle")
+            .workspaceRailObstacle()
             .position(x: target.midX, y: target.midY)
             .transition(.opacity)
     }
@@ -1209,6 +1391,7 @@ struct WorkspaceFloatLayer: View {
                                            accessibilityIdentifier: "floatTuckHandle") {
             tab.ids.map { id in UIAction(title: String(localized: "Restore \(title(id))")) { _ in restore(id) } }
         })
+        .workspaceRailObstacle()
         .position(x: centre.x, y: centre.y)
         .transition(.opacity)
     }

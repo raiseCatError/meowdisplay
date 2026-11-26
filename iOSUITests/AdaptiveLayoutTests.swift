@@ -13,6 +13,454 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testReceiverChromeFramesStayStableInPortrait() {
+        checkReceiverChromeFrames(in: .portrait)
+    }
+
+    @MainActor
+    func testReceiverChromeFramesStayStableInLandscapeLeft() {
+        checkReceiverChromeFrames(in: .landscapeLeft)
+    }
+
+    @MainActor
+    func testReceiverChromeFramesStayStableInLandscapeRight() {
+        checkReceiverChromeFrames(in: .landscapeRight)
+    }
+
+    @MainActor
+    func testNaturalTouchClicksWithForegroundRailsAndTrackpadTab() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_POINTER_BUTTONS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let fixture = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(fixture.waitForExistence(timeout: 10))
+        let window = app.receiverWindow
+        let surface = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.48))
+        let buttons = app.staticTexts["receiverChromeFixturePointerButtons"]
+        let leftClick = "down left 1;up left 1"
+
+        surface.tap()
+        XCTAssertTrue(waitUntil { buttons.value as? String == leftClick }, "\(buttons.value ?? "")")
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Set Rail Right"].tap()
+        let rail = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+        XCTAssertTrue(rail.waitForExistence(timeout: 5))
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Trackpad Tab"].tap()
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Show Full Desktop"].tap()
+
+        let beforeDoubleTap = buttons.value as? String ?? ""
+        XCTAssertEqual(beforeDoubleTap, leftClick, "Local fixture controls must not click the Mac")
+        surface.doubleTap()
+        let doubleTap = leftClick + ";" + leftClick + ";down left 2;up left 2"
+        XCTAssertTrue(waitUntil { buttons.value as? String == doubleTap }, "\(buttons.value ?? "")")
+
+        surface.press(forDuration: 0.7)
+        let afterHold = doubleTap + ";down right 1;up right 1"
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterHold }, "\(buttons.value ?? "")")
+
+        let dragEnd = window.coordinate(withNormalizedOffset: CGVector(dx: 0.68, dy: 0.54))
+        surface.press(forDuration: 0.32, thenDragTo: dragEnd)
+        let afterDrag = afterHold + ";down left 1;up left 0"
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterDrag }, "\(buttons.value ?? "")")
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Revoke Control"].tap()
+        XCTAssertTrue(waitUntil { !rail.exists })
+        surface.tap()
+        XCTAssertEqual(buttons.value as? String, afterDrag, "Revoked touches must stay local")
+    }
+
+    @MainActor
+    func testAppMenuBarCanCollapseAndFollowsControlInactivity() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_POINTER_BUTTONS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let fixture = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(fixture.waitForExistence(timeout: 10))
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Google Chrome Pane"].tap()
+
+        let toggle = app.buttons["paneMenuBarToggle"]
+        let file = app.buttons["File"]
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        let chromePane = app.descendants(matching: .any).matching(identifier: "workspacePane").matching(
+            NSPredicate(format: "label CONTAINS %@", "Google Chrome")).firstMatch
+        let chromeSurface = chromePane.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let buttons = app.staticTexts["receiverChromeFixturePointerButtons"]
+        let leftClick = "down left 1;up left 1"
+        XCTAssertTrue(file.waitForExistence(timeout: 5))
+        chromeSurface.tap()
+        XCTAssertTrue(waitUntil { buttons.value as? String == leftClick }, "\(buttons.value ?? "")")
+        keep(app, "app-menu-bar-expanded")
+        XCTAssertEqual(toggle.label, "Hide App Menu Bar")
+        let menuAnchor = toggle.frame.maxX
+        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        XCTAssertEqual(file.frame.minY, toggle.frame.minY, accuracy: 10)
+        XCTAssertLessThanOrEqual(file.frame.midX, toggle.frame.minX, "The menus open to the chevron's left")
+        // The right end of the pane's title row: that row stops short of the edge-scroll rails and
+        // the controls, so on some layouts (the Duo's portrait rail) the chevron ends left of the
+        // pane's own edge.
+        XCTAssertGreaterThan(toggle.frame.midX, chromePane.frame.midX, "The chevron sits on the pane's right side")
+        XCTAssertLessThanOrEqual(toggle.frame.maxX, chromePane.frame.maxX + 1)
+        toggle.tap()
+        XCTAssertFalse(file.exists)
+        XCTAssertEqual(toggle.label, "Show App Menu Bar")
+        XCTAssertEqual(toggle.frame.maxX, menuAnchor, accuracy: 1,
+                       "Collapsing the menu keeps the chevron on the pane's right edge")
+        XCTAssertLessThan(toggle.frame.width, chromePane.frame.width / 2,
+                          "The collapsed button uses only its own compact hit area")
+        keep(app, "app-menu-bar-manually-collapsed")
+        chromeSurface.tap()
+        XCTAssertFalse(file.exists, "A manual collapse survives activity on the Mac surface")
+        let afterManualCollapse = leftClick + ";" + leftClick
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterManualCollapse }, "\(buttons.value ?? "")")
+        toggle.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5))
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Enable Auto-hide"].tap()
+        file.tap()
+        let submenu = app.buttons["New Window"]
+        XCTAssertTrue(submenu.waitForExistence(timeout: 5))
+        let openMenuDisappeared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                                            object: submenu)
+        XCTAssertEqual(XCTWaiter.wait(for: [openMenuDisappeared], timeout: 10), .timedOut)
+        // The fixture's Auto-hide inputs, for Xcode Cloud logs (which keep no screenshots).
+        let autoHideState = app.descendants(matching: .any)["receiverChromeFixtureAutoHide"].firstMatch
+        func logAutoHide(_ moment: String) {
+            print("AUTOHIDE-STATE \(moment): \(autoHideState.exists ? "\(autoHideState.value ?? "")" : "missing")")
+        }
+        logAutoHide("before the menu item")
+        submenu.tap()
+        logAutoHide("after the menu item")
+        // Report the reveal checks below even when the hide check fails.
+        continueAfterFailure = true
+        let autoHid = waitUntil(15) { !file.exists && !settings.isHittable }
+        keep(app, "app-menu-bar-after-inactivity")
+        logAutoHide("after inactivity")
+        if !autoHid {
+            print("AUTOHIDE-INACTIVITY settings=\(settings.debugDescription)")
+        }
+        XCTAssertTrue(autoHid, "After inactivity: File exists=\(file.exists), Settings hittable=\(settings.isHittable) "
+                      + "\(settings.exists ? "\(settings.frame) \(settings.elementType.rawValue) \(settings.identifier)" : "")")
+        // The folded chevron fades with the controls tray (owner's QA of 9000083); only the tabs stay.
+        XCTAssertFalse(toggle.isHittable, "The folded chevron fades with the controls tray")
+        keep(app, "app-menu-bar-auto-hidden")
+        XCTAssertEqual(buttons.value as? String, afterManualCollapse, "Local menus must not click the Mac")
+
+        chromeSurface.tap()
+        let revealed = waitUntil { file.isHittable && settings.isHittable }
+        keep(app, "app-menu-bar-revealed")
+        logAutoHide("after the reveal")
+        if !revealed {
+            // What sits over the gear in the accessibility tree, for Xcode Cloud logs.
+            print("AUTOHIDE-REVEAL settings=\(settings.debugDescription)\nAUTOHIDE-REVEAL tree=\(app.debugDescription)")
+        }
+        XCTAssertTrue(revealed, "After the reveal: File exists=\(file.exists) hittable=\(file.isHittable) "
+                      + "\(file.exists ? "\(file.frame)" : ""), Settings hittable=\(settings.isHittable)")
+        XCTAssertEqual(buttons.value as? String, afterManualCollapse + ";" + leftClick,
+                       "The touch that reveals the menu must reach the Mac")
+        XCTAssertEqual(toggle.label, "Hide App Menu Bar")
+
+        // The revealed gear takes a real touch where it is drawn.
+        let gear = settings.frame
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: gear.midX, dy: gear.midY)).tap()
+        XCTAssertTrue(app.buttons["Input"].firstMatch.waitForExistence(timeout: 5), "Settings opens from the revealed gear")
+        keep(app, "app-menu-bar-settings-after-reveal")
+        XCTAssertEqual(buttons.value as? String, afterManualCollapse + ";" + leftClick, "Settings must not click the Mac")
+    }
+
+    @MainActor
+    func testRoomyPhoneUsesTheIPhoneTrayAcrossTheFullCanvas() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "iPad offers a docked Strip")
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_ROOMY"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        let window = app.receiverWindow
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        let command = app.descendants(matching: .any)["Command"].firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        XCTAssertTrue(picture.waitForExistence(timeout: 5))
+        XCTAssertTrue(settings.exists)
+        XCTAssertTrue(command.exists)
+        keep(app, "roomy-phone-window-right-edge")
+        XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+        XCTAssertEqual(settings.frame.midY, command.frame.midY, accuracy: 1,
+                       "The unfolded phone keeps Settings and modifiers in the iPhone tray")
+        XCTAssertGreaterThan(settings.frame.midY, window.frame.midY)
+
+        menu.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Trackpad Tab"].tap()
+        let trackpad = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "workspacePane", "Trackpad")).firstMatch
+        XCTAssertTrue(trackpad.waitForExistence(timeout: 5))
+        keep(app, "roomy-phone-trackpad-tab-full-canvas")
+        if trackpad.frame.isNull || trackpad.frame.isEmpty {
+            // Diagnostics for Xcode Cloud runs, which keep the log but show no screenshots.
+            print("ROOMY-TRACKPAD frame=\(trackpad.frame) panes:")
+            let panes = app.descendants(matching: .any).matching(identifier: "workspacePane")
+            for i in 0..<panes.count { print("  \(panes.element(boundBy: i).label) \(panes.element(boundBy: i).frame)") }
+            print(app.debugDescription)
+        }
+        XCTAssertEqual(trackpad.frame.minX, window.frame.minX, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.minY, window.frame.minY, accuracy: 1)
+        XCTAssertEqual(trackpad.frame.maxY, window.frame.maxY, accuracy: 1)
+
+        menu.tap()
+        app.buttons["Toggle Video"].tap()
+        keep(app, "roomy-phone-trackpad-right-edge")
+        XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+        XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+    }
+
+    @MainActor
+    func testDividedReceiverCanvasReachesBothWindowEdges() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_FOLD"] = "vertical"
+        app.launch()
+        defer { app.terminate() }
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        let fold = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        let window = app.receiverWindow
+        XCTAssertTrue(picture.waitForExistence(timeout: 10))
+        XCTAssertTrue(fold.waitForExistence(timeout: 3))
+
+        menu.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Set Rail Right"].tap()
+
+        for mode in ["window", "video-off"] {
+            XCTAssertEqual(picture.frame.minX, window.frame.minX, accuracy: 1)
+            XCTAssertEqual(picture.frame.maxX, window.frame.maxX, accuracy: 1)
+            keep(app, "receiver-chrome-fold-\(mode)")
+            let vertical = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+            XCTAssertTrue(vertical.waitForExistence(timeout: 3), app.debugDescription)
+            XCTAssertGreaterThanOrEqual(vertical.frame.minX, fold.frame.maxX)
+            let horizontal = app.descendants(matching: .any)["edgeScrollHorizontal"].firstMatch
+            XCTAssertTrue(horizontal.exists)
+            XCTAssertFalse(horizontal.frame.intersects(fold.frame))
+            if mode == "window" {
+                menu.tap()
+                app.buttons["Toggle Video"].tap()
+            }
+        }
+    }
+
+    @MainActor
+    private func checkReceiverChromeFrames(in orientation: UIDeviceOrientation) {
+        XCUIDevice.shared.orientation = orientation
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let menu = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        XCUIDevice.shared.orientation = orientation
+        let window = app.receiverWindow
+        let picture = app.descendants(matching: .any)["Mac screen"].firstMatch
+        #if targetEnvironment(simulator)
+        if orientation.isLandscape, !waitUntil(2, { window.frame.width > window.frame.height }) {
+            app.terminate()
+            app.launchEnvironment["MEOW_UITEST_RECEIVER_LANDSCAPE"] =
+                orientation == .landscapeLeft ? "leading" : "trailing"
+            app.launch()
+            XCTAssertTrue(menu.waitForExistence(timeout: 10))
+        }
+        #endif
+        XCTAssertTrue(picture.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntil {
+            let bounds = picture.frame
+            return !bounds.isEmpty && (bounds.width > bounds.height) == orientation.isLandscape
+        }, "The receiver did not lay out in orientation \(orientation.rawValue)")
+        let receiverBounds = window.frame
+
+        func perform(_ action: String, in group: String? = nil) {
+            menu.tap()
+            if let group {
+                app.buttons[group].tap()
+                // A fixture menu rebuilt while a new float settles closes its open submenu.
+                if !app.buttons[action].waitForExistence(timeout: 2) {
+                    if !app.buttons[group].exists { menu.tap() }
+                    app.buttons[group].tap()
+                }
+            }
+            app.buttons[action].tap()
+        }
+
+        func frames() -> [String: CGRect] {
+            let controls = ["Settings", "Command", "Option", "Keyboard", "Arrow Keys", "Zoom In", "Zoom Out", "Redo", "Return"]
+            return Dictionary(uniqueKeysWithValues: controls.map {
+                let element = app.descendants(matching: .any)[$0].firstMatch
+                XCTAssertTrue(element.exists, "Missing \($0) in \(orientation.rawValue)")
+                let frame = element.frame
+                XCTAssertFalse(frame.isEmpty, "\($0) must have a rendered frame")
+                XCTAssertTrue(receiverBounds.contains(frame), "\($0) must stay inside the window: \(frame)")
+                return ($0, frame)
+            })
+        }
+
+        let prefix = "receiver-chrome-\(orientation.rawValue)"
+        let original = frames()
+        for control in ["Zoom In", "Zoom Out", "Redo", "Return", "Arrow Keys"] {
+            guard let frame = original[control] else { continue }
+            XCTAssertGreaterThanOrEqual(frame.width, 44, "\(control) needs a full touch target")
+            XCTAssertGreaterThanOrEqual(frame.height, 44, "\(control) needs a full touch target")
+        }
+        if let redo = original["Redo"], let returnKey = original["Return"] {
+            XCTAssertTrue(redo.intersection(returnKey).isEmpty, "Redo and Return must have separate hit targets")
+        }
+        let canvas = picture.frame
+        var moved: [String] = []
+        var hiddenRails: [String] = []
+        var changedRails: [String] = []
+        var defaultRails: [String: CGRect]?
+        let vertical = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+        let horizontal = app.descendants(matching: .any)["edgeScrollHorizontal"].firstMatch
+        let pane = app.descendants(matching: .any).matching(identifier: "workspacePane")
+        func check(_ stage: String, railExpected: Bool = true) {
+            let current = frames()
+            if !framesMatch(original, current) || picture.frame != canvas {
+                moved.append("\(stage): controls \(current), canvas \(picture.frame)")
+            }
+            if railExpected {
+                if vertical.waitForExistence(timeout: 2), horizontal.exists {
+                    let currentRails = ["vertical": vertical.frame, "horizontal": horizontal.frame]
+                    if let defaultRails {
+                        if !framesMatch(defaultRails, currentRails) {
+                            changedRails.append("\(stage): \(currentRails)")
+                        }
+                    } else {
+                        defaultRails = currentRails
+                    }
+                } else {
+                    hiddenRails.append(stage)
+                }
+            }
+            let railFrame = vertical.exists ? vertical.frame : .zero
+            print("Receiver chrome \(prefix)-\(stage): \(current), canvas \(picture.frame), rail \(railFrame)")
+            keep(app, "\(prefix)-\(stage)")
+        }
+
+        check("full-desktop-rail-off", railExpected: false)
+        perform("Set Rail Right", in: "Controls")
+        check("full-desktop-right")
+        if vertical.exists { XCTAssertGreaterThan(vertical.frame.midX, app.receiverWindow.frame.midX) }
+        if orientation == .portrait, UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertEqual(vertical.frame.maxX, window.frame.maxX - 8, accuracy: 1,
+                           "A corner camera must not inset the whole right rail")
+            XCTAssertGreaterThanOrEqual(horizontal.frame.width, window.frame.width * 0.6,
+                                        "Keep the horizontal rail usable beside the control rows")
+        }
+        perform("Add Trackpad Tab", in: "Panes")
+        perform("Show Full Desktop", in: "Panes")
+        check("trackpad-added")
+        perform("Show Trackpad Tab", in: "Panes")
+        check("trackpad-selected")
+        XCTAssertTrue(pane.matching(NSPredicate(format: "label CONTAINS %@", "Trackpad")).firstMatch.exists)
+        if orientation.isLandscape {
+            let desktopTab = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Full Desktop, tab")).firstMatch
+            XCTAssertTrue(desktopTab.exists)
+            if let zoom = original["Zoom In"] {
+                XCTAssertFalse(desktopTab.frame.intersects(zoom), "The pane tab and the Zoom In control must be distinct")
+            }
+        }
+        if vertical.exists, horizontal.exists {
+            for (rail, a, b) in [
+                (vertical, CGVector(dx: 0.5, dy: 0.75), CGVector(dx: 0.5, dy: 0.25)),
+                (horizontal, CGVector(dx: 0.75, dy: 0.5), CGVector(dx: 0.25, dy: 0.5)),
+            ] {
+                let start = rail.coordinate(withNormalizedOffset: a)
+                let end = rail.coordinate(withNormalizedOffset: b)
+                start.press(forDuration: 0.2, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+                XCTAssertEqual(rail.value as? String, "Expanded", "the Trackpad pane must pass scroll touches to the rail")
+                keep(app, "\(prefix)-\(rail.identifier)-expanded")
+                // Accessibility snapshots can pause while the simulator is busy.
+                // The unit test pins the one-second hold from momentum end.
+                XCTAssertTrue(waitUntil(12) { rail.exists && rail.value as? String != "Expanded" },
+                              "\(rail.identifier) stayed expanded")
+            }
+        } else {
+            hiddenRails.append("trackpad: drag both axes")
+        }
+        perform("Show Full Desktop", in: "Panes")
+        check("back-to-desktop")
+        perform("Add Google Chrome Pane", in: "Panes")
+        XCTAssertEqual(pane.count, 2)
+        let chrome = pane.matching(NSPredicate(format: "label CONTAINS %@", "Google Chrome")).firstMatch
+        XCTAssertTrue(chrome.exists)
+        XCTAssertTrue(chrome.isSelected, "Chrome is the selected pane")
+        check("two-panes")
+        perform("Show Trackpad Tab", in: "Panes")
+        check("trackpad-after-chrome")
+        perform("Show Full Desktop", in: "Panes")
+        check("desktop-after-chrome")
+        perform("Float Display Pane", in: "Panes")
+        XCTAssertTrue(app.descendants(matching: .any)["workspaceFloat"].firstMatch.waitForExistence(timeout: 3))
+        check("floating-pane")
+        let floatOptions = app.descendants(matching: .any)["floatOptions"].firstMatch
+        XCTAssertTrue(floatOptions.exists)
+        let floatFrame = app.descendants(matching: .any)["workspaceFloat"].firstMatch.frame
+        for rail in [vertical, horizontal] where rail.exists {
+            XCTAssertFalse(rail.frame.intersects(floatOptions.frame),
+                           "The rail \(rail.frame) covers the floating pane menu \(floatOptions.frame) (float \(floatFrame))")
+        }
+        // With a float up, the fixture's Panes submenu doesn't open on a device; choose the tab
+        // the way a person does, on its own label.
+        let trackpadTab = app.buttons["Trackpad, tab"].firstMatch
+        XCTAssertTrue(trackpadTab.waitForExistence(timeout: 3))
+        trackpadTab.tap()
+        XCTAssertTrue(waitUntil { pane.matching(NSPredicate(format: "label CONTAINS %@", "Trackpad")).firstMatch.exists })
+        check("trackpad-with-float")
+        perform("Set Rail Left", in: "Controls")
+        defaultRails = nil
+        check("trackpad-left")
+        if vertical.exists { XCTAssertLessThan(vertical.frame.midX, app.receiverWindow.frame.midX) }
+        perform("Toggle Controls", in: "Controls")
+        keep(app, "\(prefix)-controls-hidden")
+        perform("Toggle Controls", in: "Controls")
+        check("controls-restored")
+
+        perform("Toggle Video")
+        if !vertical.waitForExistence(timeout: 2) { hiddenRails.append("video-off") }
+        keep(app, "\(prefix)-video-off")
+
+        // Report every stage even on the baseline where the old layout moves.
+        continueAfterFailure = true
+        XCTAssertTrue(moved.isEmpty, "\(prefix) unrailed controls \(original), canvas \(canvas). Moved: \(moved)")
+        XCTAssertTrue(changedRails.isEmpty, "\(prefix) workspace changes moved receiver rails: \(changedRails)")
+        XCTAssertTrue(hiddenRails.isEmpty, "\(prefix) rails covered or unreachable: \(hiddenRails)\n\(app.debugDescription)")
+        continueAfterFailure = false
+    }
+
+    @MainActor
     func testDemoStreamControlsStayInsideTheWindowInBothOrientations() {
         let app = XCUIApplication()
         app.launch()
@@ -28,9 +476,9 @@ final class AdaptiveLayoutTests: XCTestCase {
             XCUIDevice.shared.orientation = orientation
             sleep(1)   // let the layout and the announced panel settle
             // The controls hide themselves after a few idle seconds; a touch brings them back.
-            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            app.receiverWindow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
             sleep(1)
-            let window = app.windows.firstMatch.frame
+            let window = app.receiverWindow.frame
             XCTAssertFalse(window.isEmpty)
             print("AdaptiveLayout: orientation \(orientation.rawValue) window \(window)")
             for name in ["Exit Demo", "Settings"] {
@@ -52,7 +500,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         // the stream first, as a person would: that always reveals the tray and restarts the
         // countdown. Then tap Settings as soon as it can be reached.
         let settings = app.descendants(matching: .any)["Settings"].firstMatch
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+        app.receiverWindow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
         let reachable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: settings)
         XCTAssertEqual(XCTWaiter.wait(for: [reachable], timeout: 5), .completed, "Settings is reachable after a touch")
         settings.tap()
@@ -68,12 +516,11 @@ final class AdaptiveLayoutTests: XCTestCase {
 
     // MARK: - Size-class dependent controls
 
-    /// Roomy (the iPad-style layouts) is decided by the window's size classes, never by the
-    /// device or its orientation: regular in both directions. An unfolded iPhone Duo can be
-    /// roomy; the same app on a phone, or folded, is compact.
+    /// iPad uses its own controls when the window is regular in both directions.
     @MainActor
     private func isRoomy(_ app: XCUIApplication) throws -> Bool {
-        let window = app.windows.firstMatch
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return false }
+        let window = app.receiverWindow
         try XCTSkipIf(window.horizontalSizeClass == .unspecified || window.verticalSizeClass == .unspecified,
                       "The window does not report its size classes")
         print("AdaptiveLayout: size classes \(window.horizontalSizeClass.rawValue)/\(window.verticalSizeClass.rawValue)")
@@ -169,7 +616,7 @@ final class AdaptiveLayoutTests: XCTestCase {
             openSettings(app)
             openControlsPage(app)
             let hasLayout = controlsPageHas(app, "controlLayoutPicker")
-            XCTAssertEqual(hasLayout, roomy, "Control Layout is offered exactly on a roomy window (\(orientation.rawValue))")
+            XCTAssertEqual(hasLayout, roomy, "Control Layout is offered on roomy iPad windows (\(orientation.rawValue))")
             // Back to the top of the page for the next row: reopen it.
             leaveSettings(app)
             openSettings(app)
@@ -193,7 +640,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         let bar = app.navigationBars["Settings"]
         if bar.exists {
             let start = bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            let end = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+            let end = app.receiverWindow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
             start.press(forDuration: 0.1, thenDragTo: end)
         } else {
             app.swipeDown(velocity: .fast)
@@ -220,9 +667,9 @@ final class AdaptiveLayoutTests: XCTestCase {
         for orientation in orientations {
             XCUIDevice.shared.orientation = orientation
             sleep(1)
-            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
+            app.receiverWindow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).tap()
             sleep(1)
-            let window = app.windows.firstMatch.frame
+            let window = app.receiverWindow.frame
             XCTAssertFalse(window.isEmpty)
             print("AdaptiveLayout: requested \(orientation.rawValue), window \(window)")
             for name in ["Exit Demo", "Settings"] {
@@ -258,7 +705,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         let element = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
         XCTAssertTrue(element.waitForExistence(timeout: 5), "the synthetic fold seam is on (a Debug build)")
         let band = element.frame
-        let window = app.windows.firstMatch.frame
+        let window = app.receiverWindow.frame
         print("AdaptiveLayout: fold band \(band) in window \(window)")
         XCTAssertTrue(window.intersects(band), "the fold band crosses the window")
         if vertical {
@@ -276,7 +723,7 @@ final class AdaptiveLayoutTests: XCTestCase {
     /// there is not a touch on the stream). Without a band it is the usual spot below the middle.
     @MainActor
     private func wakeControls(_ app: XCUIApplication) {
-        let window = app.windows.firstMatch
+        let window = app.receiverWindow
         let frame = window.frame
         var offset = CGVector(dx: 0.5, dy: 0.6)
         let bandElement = app.descendants(matching: .any)["uitestFoldBand"].firstMatch
@@ -331,7 +778,7 @@ final class AdaptiveLayoutTests: XCTestCase {
         let woke = XCTWaiter.wait(for: [reachable], timeout: 5)
         if woke != .completed { reportReachableControls(app, "settings-not-reachable-\(context)") }
         XCTAssertEqual(woke, .completed, "Settings is reachable (\(context))")
-        let window = app.windows.firstMatch.frame
+        let window = app.receiverWindow.frame
         // Half a point of rounding either way: frames come back in fractional points.
         let fold = band.insetBy(dx: 0.5, dy: 0.5)
         let query = app.descendants(matching: .any).matching(
@@ -423,10 +870,10 @@ final class AdaptiveLayoutTests: XCTestCase {
         _ = foldBand(app, vertical: true)
         openSettings(app)
         keep(app, "fold-settings-before-rotation")
-        let before = app.windows.firstMatch.frame
+        let before = app.receiverWindow.frame
         XCUIDevice.shared.orientation = .landscapeLeft
-        let rotated = waitUntil(3) { app.windows.firstMatch.frame.size != before.size }
-        print("AdaptiveLayout: window \(before) -> \(app.windows.firstMatch.frame) (rotated: \(rotated))")
+        let rotated = waitUntil(3) { app.receiverWindow.frame.size != before.size }
+        print("AdaptiveLayout: window \(before) -> \(app.receiverWindow.frame) (rotated: \(rotated))")
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5)
                       || app.staticTexts["Settings"].waitForExistence(timeout: 5),
                       "Settings stays open through the window change")
@@ -567,6 +1014,28 @@ final class AdaptiveLayoutTests: XCTestCase {
         keep(app, "overview-pane-display-shown")
     }
 
+    @MainActor
+    func testLiveOverviewTabOpensDirectlyFromDisplays() {
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK"] = "1"
+        app.launchEnvironment["MEOW_UITEST_STAGE_PEEK_PANES"] = "1"
+        app.launch()
+        XCTAssertTrue(workspacePane(app, "Full Desktop").waitForExistence(timeout: 10))
+
+        openStagePeekFromTheEdge(app)
+        let expand = app.buttons["stagePeekExpand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 3))
+        if expand.label != "Compact" { expand.tap() }
+        XCTAssertTrue(waitUntil(5) { expand.label == "Compact" })
+        let add = app.buttons["displayOverviewAddAsTab"]
+        for _ in 0..<6 where !(add.exists && add.isHittable) { app.swipeUp(velocity: .slow) }
+        XCTAssertTrue(add.exists && add.isHittable)
+        add.tap()
+        XCTAssertTrue(workspacePane(app, "Overview").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil(5) { !app.buttons["stagePeekClose"].exists })
+        keep(app, "overview-tab-from-displays")
+    }
+
     // MARK: - Multi-Display Overview fixture (DEBUG seam `MEOW_UITEST_OVERVIEW`)
     //
     // The overview needs a Mac's display catalog, which the demo has not got, so the app opens it
@@ -576,12 +1045,13 @@ final class AdaptiveLayoutTests: XCTestCase {
     private static let leadingChrome = ["displayOverviewDone", "Previous Display", "Next Display",
                                         "displayOverviewShowInPane"]
     private static let trailingChrome = ["displayOverviewFitAll", "displayOverviewIdentify",
-                                         "displayOverviewAddPane", "displayOverviewMoveCursor"]
+                                         "displayOverviewAddPane"]
 
     @MainActor
-    private func launchOverviewFixture(fold: String? = nil) -> XCUIApplication {
+    private func launchOverviewFixture(fold: String? = nil, controlGranted: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["MEOW_UITEST_OVERVIEW"] = "1"
+        if controlGranted { app.launchEnvironment["MEOW_UITEST_OVERVIEW_CONTROL"] = "1" }
         if let fold { app.launchEnvironment["MEOW_UITEST_FOLD"] = fold }
         app.launch()
         XCTAssertTrue(app.buttons["displayOverviewDone"].waitForExistence(timeout: 10),
@@ -607,7 +1077,7 @@ final class AdaptiveLayoutTests: XCTestCase {
     /// The canvas lies between the toolbar and the action bar: below Done, above Show in Pane.
     @MainActor
     private func overviewCanvas(_ app: XCUIApplication) -> CGRect {
-        let window = app.windows.firstMatch.frame
+        let window = app.receiverWindow.frame
         let top = app.buttons["displayOverviewDone"].frame.maxY
         let bottom = app.buttons["displayOverviewShowInPane"].frame.minY
         return CGRect(x: window.minX, y: top, width: window.width, height: max(0, bottom - top))
@@ -615,17 +1085,17 @@ final class AdaptiveLayoutTests: XCTestCase {
 
     @MainActor
     private func tap(_ app: XCUIApplication, at point: CGPoint) {
-        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: point.x - app.windows.firstMatch.frame.minX,
-                                 dy: point.y - app.windows.firstMatch.frame.minY))
+        app.receiverWindow.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - app.receiverWindow.frame.minX,
+                                 dy: point.y - app.receiverWindow.frame.minY))
             .tap()
     }
 
     @MainActor
     private func doubleTap(_ app: XCUIApplication, at point: CGPoint) {
-        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: point.x - app.windows.firstMatch.frame.minX,
-                                 dy: point.y - app.windows.firstMatch.frame.minY))
+        app.receiverWindow.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x - app.receiverWindow.frame.minX,
+                                 dy: point.y - app.receiverWindow.frame.minY))
             .doubleTap()
     }
 
@@ -644,7 +1114,7 @@ final class AdaptiveLayoutTests: XCTestCase {
     func testOverviewChromeSplitsAroundAVerticalFold() throws {
         let app = launchOverviewFixture(fold: "vertical")
         let band = foldBand(app, vertical: true)
-        let window = app.windows.firstMatch.frame
+        let window = app.receiverWindow.frame
         let fold = band.insetBy(dx: 0.5, dy: 0.5)
         for required in ["displayOverviewDone", "displayOverviewFitAll", "displayOverviewShowInPane"] {
             XCTAssertTrue(app.buttons[required].waitForExistence(timeout: 5), "\(required) is shown")
@@ -677,12 +1147,14 @@ final class AdaptiveLayoutTests: XCTestCase {
     func testOverviewChromeKeepsOneLineWithoutAFold() throws {
         let app = launchOverviewFixture()
         XCTAssertFalse(app.descendants(matching: .any)["uitestFoldBand"].exists, "no synthetic fold without the seam")
-        let window = app.windows.firstMatch.frame
+        let window = app.receiverWindow.frame
         let done = app.buttons["displayOverviewDone"]
         let fitAll = app.buttons["displayOverviewFitAll"]
         let show = app.buttons["displayOverviewShowInPane"]
         XCTAssertTrue(fitAll.waitForExistence(timeout: 5))
         XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(show.frame.height, 44, "the primary action has a comfortable tap target")
+        XCTAssertLessThan(show.frame.width, window.width / 2, "the primary action stays compact")
         for name in Self.leadingChrome + Self.trailingChrome where app.buttons[name].exists {
             XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(app.buttons[name].frame),
                           "\(name) \(app.buttons[name].frame) is inside the window \(window)")
@@ -700,12 +1172,25 @@ final class AdaptiveLayoutTests: XCTestCase {
         keep(app, "overview-no-fold")
     }
 
+    @MainActor
+    func testOverviewWithControlKeepsTwoPaneActions() {
+        let app = launchOverviewFixture(controlGranted: true)
+        let show = app.buttons["displayOverviewShowInPane"]
+        let add = app.buttons["displayOverviewAddPane"]
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        XCTAssertEqual(add.label, "Add as New Pane")
+        XCTAssertFalse(app.buttons["displayOverviewMoveCursor"].exists)
+        XCTAssertLessThan(show.frame.maxX, add.frame.minX)
+        keep(app, "overview-control-actions")
+    }
+
     /// Selection, zoom, pan, Fit All and double-tap in the overview, and taps that land on the
     /// display under the finger after the camera moved.
     @MainActor
     func testOverviewSelectionZoomPanFitAllAndTapTargeting() throws {
         let app = launchOverviewFixture()
-        let window = app.windows.firstMatch
+        let window = app.receiverWindow
         let tiles = app.descendants(matching: .any).matching(identifier: "displayOverviewTile")
         XCTAssertTrue(waitUntil { tiles.count == 3 }, "the three sample displays are drawn (found \(tiles.count))")
         let show = app.buttons["displayOverviewShowInPane"]

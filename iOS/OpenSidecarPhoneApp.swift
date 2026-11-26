@@ -21,6 +21,23 @@ struct OpenSidecarPhoneApp: App {
                 UITestOverviewFixtureHost()
             } else if UITestStagePeekFixture.isEnabled {
                 UITestStagePeekFixtureHost()
+            } else if let count = UITestTrackpadFixture.displayCount {
+                UITestTrackpadFixture(displayCount: count)
+            } else if ReceiverScreen.chromeFixtureLandscapeSide != nil {
+                // Some simulator cover displays stay portrait when the device rotates.
+                GeometryReader { window in
+                    ZStack {
+                        Color.black
+                        ReceiverScreen()
+                            .frame(width: window.size.width, height: window.size.width * 0.7)
+                    }
+                    .frame(width: window.size.width, height: window.size.height)
+                }
+                .ignoresSafeArea()
+            } else if ReceiverScreen.chromeFixtureRoomy {
+                ReceiverScreen()
+                    .environment(\.horizontalSizeClass, .regular)
+                    .environment(\.verticalSizeClass, .regular)
             } else {
                 ReceiverScreen().uiTestFoldBandMarker()
             }
@@ -49,9 +66,15 @@ extension UIWindow {
 // MARK: - Root screen
 
 struct ReceiverScreen: View {
-    @StateObject private var model = ReceiverModel()
+    @StateObject private var model: ReceiverModel
     @StateObject private var versionGate = VersionGate()
-    @StateObject private var controlStore = ReceiverControlStore()
+    @StateObject private var controlStore: ReceiverControlStore
+    @State private var scrollFeedback = TrackpadScrollFeedback()
+    @State private var foregroundScrollRails = EdgeScrollRailLayer()
+    #if DEBUG
+    @State private var chromeFixturePointerButtons: [String] = []
+    #endif
+    @State private var trackpadPeekOpen = false
     @State private var showSettings = false
     @State private var showPairedToast = false
     @State private var showOnboarding = false
@@ -70,11 +93,14 @@ struct ReceiverScreen: View {
     // single-sided physical notch (see that type's doc).
     @State private var physicalNotchSide: LandscapeTraySide?
     @State private var occupiedControlFrames: [CGRect] = []
+    @State private var occupiedWorkspaceChrome: [CGRect] = []
     /// iPad: where the Mac canvas sits (a Strip rail reserves an edge).
     /// `nil` means the whole screen.
     @State private var padCanvas: PadCanvasPublication?
     /// The on-surface Request Control affordance — see `ReceiverInputPrompt`.
     @State private var inputPrompt = ReceiverInputPrompt()
+    @State private var videoOffChoiceDismissed = false
+    @State private var privacyNoticeDismissed = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -107,6 +133,20 @@ struct ReceiverScreen: View {
     @State private var keyboardBeforeHome = false
     /// Touch and hold Settings: Back to Home or Disconnect, over the session.
     @State private var sessionActions = ReceiverSessionActionsState()
+
+    init() {
+        #if DEBUG
+        if Self.chromeFixtureEnabled {
+            let defaults = Self.chromeFixtureDefaults
+            _model = StateObject(wrappedValue: ReceiverModel(workspace: WorkspaceModel(defaults: defaults)))
+            _controlStore = StateObject(wrappedValue: ReceiverControlStore(
+                repository: ReceiverControlPreferencesRepository(defaults: defaults)))
+            return
+        }
+        #endif
+        _model = StateObject(wrappedValue: ReceiverModel())
+        _controlStore = StateObject(wrappedValue: ReceiverControlStore())
+    }
 
     private var haptics: ReceiverHaptics {
         ReceiverHaptics { controlStore.preferences.hapticsEnabled }
@@ -337,6 +377,42 @@ struct ReceiverScreen: View {
             && model.receiver.macLock == nil && model.receiver.macSupportsVideoControl
     }
 
+    private var showsVideoOffChoice: Bool {
+        videoOffStatusShown && !videoOffChoiceDismissed
+    }
+
+    private func turnVideoOnToWindow() {
+        dismissVideoOffChoice()
+        model.receiver.requestVideoEnabled(true, resumeWindow: model.workspace.available)
+    }
+
+    private var trackpadGuideContext: Bool? {
+        guard route == .receiver, localInputSurfaceOpen, inputReachesMac,
+              controlStore.preferences.trackpadDisplayLayoutOptIn else { return nil }
+        if !model.receiver.videoEnabled { return false }
+        if model.workspace.windowMode, model.workspace.activeTrackpadID != nil { return true }
+        return nil
+    }
+
+    private func windowTrackpad(_ id: String, rect: CGRect) -> AnyView {
+        let bounds = CGRect(origin: .zero, size: rect.size)
+        let subscribed = inputReachesMac && model.workspace.activeTrackpadID == id && controlStore.preferences.trackpadDisplayLayoutOptIn
+        return AnyView(TrackpadSurfaceDecoration(
+            showDots: controlStore.preferences.showSurfaceGrid,
+            showBorder: controlStore.preferences.showTrackpadBorder,
+            touchTrail: controlStore.preferences.trackpadTouchTrail && inputReachesMac
+                && model.workspace.activeTrackpadID == id,
+            dotAreas: [bounds], guideArea: bounds,
+            displays: subscribed ? model.receiver.trackpadDisplayGeometry : [],
+            cursor: model.receiver.trackpadCursor, feedback: scrollFeedback)
+            .background(Color(white: 0.07))
+            .accessibilityHidden(true))
+    }
+
+    private func dismissVideoOffChoice() {
+        withAnimation(.easeOut(duration: 0.2)) { videoOffChoiceDismissed = true }
+    }
+
     /// Whether the receiver surface can be used at all: the app is active,
     /// Home and Session Actions don't cover it, and the picture isn't in
     /// Picture in Picture (which is view-only). Mirrored into the receiver
@@ -363,14 +439,11 @@ struct ReceiverScreen: View {
     /// (control tray, function tray, shortcut column, keypads, calculator), folds, and Stage
     /// Peek's edge handle, placed from the very values Stage Peek places it with. Stage Peek
     /// itself doesn't dodge the handles, so neither chases the other along an edge.
-    private func workspaceEdgeReservations(geo: GeometryProxy, canvas: CGRect, peekSafe: CGRect, peekAvoiding: [CGRect],
+    private func workspaceEdgeReservations(geo: GeometryProxy, stagePeekHandle: CGRect?,
                                            reservedRegions: [ControlReservedRegion]) -> WorkspaceEdgeReservations {
         let origin = geo.frame(in: .global).origin
         var controls = occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions)
-        if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available,
-           let strip = StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding) {
-            controls.append(strip.offsetBy(dx: canvas.minX, dy: canvas.minY))
-        }
+        if let stagePeekHandle { controls.append(stagePeekHandle) }
         return WorkspaceEdgeReservations(
             screen: CGRect(origin: origin, size: geo.size),
             controls: controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: origin.x, dy: origin.y) })
@@ -468,16 +541,19 @@ struct ReceiverScreen: View {
         }
     }
 
-    private func requestInputFromPrompt() {
+    @discardableResult
+    private func requestInputFromPrompt() -> Bool {
         withAnimation(.easeOut(duration: 0.2)) {
             performPromptEffects(inputPrompt.requestTapped(now: uptime))
         }
     }
 
-    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) {
-        guard effects.contains(.sendRequest) else { return }
+    @discardableResult
+    private func performPromptEffects(_ effects: [ReceiverInputPrompt.Effect]) -> Bool {
+        guard effects.contains(.sendRequest) else { return false }
         controlStore.noteInputTurnedOffByUser(false)
         model.receiver.requestAllowInput(true)
+        return true
     }
 
     @ViewBuilder
@@ -543,6 +619,105 @@ struct ReceiverScreen: View {
     }
     #endif
 
+    private func receiverVideoSurface(canvas: CGRect, videoEnabled: Bool, workspaceVisible: Bool,
+                                      scrollRailFrames: [ScrollStripEdge: CGRect], divisions: [CGRect]) -> some View {
+        return VideoLayerView(displayLayer: model.receiver.displayLayer,
+                       receiver: model.receiver,
+                       useMetal: metalRenderer,
+                       zoomWhileTyping: zoomWhileTyping,
+                       lockScreenShowing: lockScreenShowing,
+                       freshFrame: model.receiver.freshFrameSinceVideoReset,
+                       keyboardRequested: keyboardActive,
+                       inputMode: videoEnabled ? controlStore.preferences.inputMode : .trackpad,
+                       trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
+                       smartTouchEnabled: controlStore.preferences.smartTouchEnabled
+                           && model.receiver.macSupportsSmartTouch,
+                       touchStyle: controlStore.preferences.touchStyle,
+                       allowInput: inputReachesMac,
+                       videoEnabled: videoEnabled,
+                       showCursorLocator: controlStore.preferences.showCursorLocator,
+                       cursorFadesWhenResting: workspaceVisible && model.workspace.windowMode && controlStore.autoHidden,
+                       keepPointerOnReceiverDisplay: controlStore.preferences.keepPointerOnReceiverDisplay,
+                       pinchTarget: controlStore.preferences.pinchTarget,
+                       rotateTarget: controlStore.preferences.rotateTarget,
+                       snapRotation: controlStore.preferences.snapRotation,
+                       appGestureCommands: controlStore.preferences.appGestureCommands,
+                       onRotationSnap: { haptics.play(.selection) },
+                       smartTouchHapticsEnabled: SmartTouchHapticPolicy.isEnabled(
+                           haptics: controlStore.preferences.hapticsEnabled,
+                           smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
+                       onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
+                       onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
+                       onActivityBegan: {
+                           model.workspace.cancelFloatClose()
+                           controlStore.beginAutoHideActivity()
+                           // A touch on the Mac closes the arrow keypad; the touch still goes through.
+                           controlStore.noteSurfaceTouch()
+                       },
+                       onActivityEnded: { controlStore.scheduleAutoHide() },
+                       onEdgeScrollBegan: {
+                           model.workspace.cancelFloatClose()
+                           controlStore.beginAutoHideActivity()
+                       },
+                       preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
+                       moveViewActive: videoEnabled && controlStore.moveViewActive,
+                       viewportResetGeneration: controlStore.viewportResetGeneration,
+                       allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
+                       // Window mode: the picture is every tile at once, so pinch and pan go to
+                       // the tile under the fingers instead of zooming the whole picture.
+                       onWorkspacePinch: workspaceVisible && model.workspace.windowMode
+                           ? { began, ended, pinch, initial, current, scale, turn, snap in
+                               model.workspace.pinch(began: began, ended: ended, isPinch: pinch,
+                                                     initial: WorkspacePoint(x: initial.x, y: initial.y),
+                                                     current: WorkspacePoint(x: current.x, y: current.y),
+                                                     scale: Double(scale), turn: Double(turn), snapTurn: snap) }
+                           : nil,
+                       onWorkspaceTouch: workspaceVisible && model.workspace.windowMode
+                           ? { p in
+                               model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
+                               return model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
+                           } : nil,
+                       workspaceZoomPreview: workspaceVisible && model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
+                       onWorkspaceViewReset: workspaceVisible && model.workspace.windowMode
+                           ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                       workspacePaneKind: workspaceVisible && model.workspace.windowMode
+                           ? { p in model.workspace.paneKind(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
+                       workspaceOverviewFocused: workspaceVisible && model.workspace.windowMode
+                           ? { model.workspace.activeIsOverview } : nil,
+                       workspaceTrackpadSelected: workspaceVisible && model.workspace.activeTrackpadID != nil,
+                       invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
+                       invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
+                       scrollRailFrames: scrollRailFrames,
+                       foregroundScrollRails: foregroundScrollRails,
+                       touchDivisions: divisions.map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) },
+                       edgeScrollSensitivity: controlStore.preferences.edgeScrollSensitivity,
+                       scrollMomentumEnabled: controlStore.preferences.scrollMomentumEnabled,
+                       scrollFeedback: (!videoEnabled || model.workspace.activeTrackpadID != nil) && controlStore.preferences.scrollMotionFeedback
+                           && controlStore.preferences.showSurfaceGrid ? scrollFeedback : nil,
+                       onBlockedInputAttempt: { noteBlockedInputAttempt() },
+                       threeFingerHoldEnabled: workspaceVisible && model.workspace.available,
+                       onThreeFingerHold: { model.workspace.openOverview() },
+                       onHardwarePointer: { point in
+                           if workspaceVisible { model.workspace.hover(at: point) }
+                       },
+                       onBackToHome: { showHomeKeepingSession() })
+            .id(metalRenderer)   // rebuild the layer tree on toggle
+            .frame(width: canvas.width, height: canvas.height)
+            .position(x: canvas.midX, y: canvas.midY)
+            .ignoresSafeArea()
+            // Allow Input OFF: touches still arrive (for Local
+            // View Navigation and the Request Control prompt), but
+            // `VideoView` routes nothing to the Mac: pointer/
+            // touch/Pencil routing stops at `routeTouches`, the
+            // remote-only recognizers are parked by
+            // `ReceiverMultiFingerGestureGate`, two-finger routes
+            // follow `TwoFingerRoutingPolicy`, and hover is
+            // dropped (SETTINGS / ALLOW INPUT INVARIANTS).
+            // The surface always takes touches so a blocked one
+            // can offer Request Control; what they may do is
+            // decided inside `VideoView`.
+    }
+
     var body: some View {
         GeometryReader { geo in
             let proxySafeInsets = ControlSafeInsets(
@@ -555,105 +730,80 @@ struct ReceiverScreen: View {
             // Re-read from the proxy on every pass: a fold or resize yields a
             // complete new snapshot, never an update to the previous one.
             let reservedRegions = ControlReservedRegion.active(in: geo)
-            let canvas = canvas(in: geo.size)
+            let videoEnabled = model.receiver.videoEnabled
+            let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+            let canvas = divisions.isEmpty ? canvas(in: geo.size) : CGRect(origin: .zero, size: geo.size)
+            let workspaceVisible = videoEnabled && !lockScreenShowing
+            let workspaceEditing = workspaceVisible && (model.workspace.drag != nil || model.workspace.arranging)
+            let workspaceOverlayOpen = trackpadPeekOpen || (workspaceVisible &&
+                (model.workspace.overviewOpen || model.workspace.stagePeekOpen || model.workspace.launchpadOpen))
+            let safeCanvas = effectiveSafeInsets.safeRect(in: geo.size).intersection(canvas)
+            let visibleCanvas = shownKeyboardRect.map { $0.offsetBy(dx: canvas.minX, dy: canvas.minY) } ?? canvas
+            let padArea = canvas.intersection(visibleCanvas)
+            let safePadArea = safeCanvas.intersection(visibleCanvas)
+            let peekSafe = safeCanvas.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+            let peekAvoiding = (occupiedControlFrames + divisions).map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
+            let stagePeekHandle = controlStore.preferences.windowSwitcher == .stagePeek && model.workspace.available
+                ? StagePeekLayout.strip(edge: controlStore.preferences.stagePeekEdge, safe: peekSafe, avoiding: peekAvoiding)
+                    .map { $0.offsetBy(dx: canvas.minX, dy: canvas.minY) } : nil
+            let receiverOrigin = geo.frame(in: .global).origin
+            let workspaceControls = workspaceVisible ? occupiedWorkspaceChrome.map {
+                $0.offsetBy(dx: -receiverOrigin.x, dy: -receiverOrigin.y)
+            } : []
+            let occlusions = ControlReservedRegion.frames(of: .occlusion, in: reservedRegions)
+            let railArea = EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safeCanvas,
+                                                                occlusions: occlusions)
+            let scrollRailFrames = EdgeScrollStripGeometry.frames(
+                edges: model.receiver.macSupportsScrollAtCursor
+                    ? controlStore.preferences.activeScrollEdges(trackpad: !videoEnabled) : [],
+                in: railArea,
+                avoiding: occupiedControlFrames + divisions + occlusions + (stagePeekHandle.map { [$0] } ?? []))
+            let railsVisible = inputReachesMac && !lockScreenShowing && !showSettings
+                && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
+                && !(workspaceVisible && controlStore.workspaceMenuOpen)
+                && !controlStore.moveViewActive && !controlStore.autoHidden
+            let visibleRailFrames = railsVisible
+                ? scrollRailFrames.mapValues { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) } : [:]
+            let padPieces = VideoOffSurfaceGeometry.usablePieces(of: padArea, removing: divisions)
+            let guideArea = VideoOffSurfaceGeometry.usablePiece(of: safePadArea, removing: divisions)
+            let choiceArea = VideoOffSurfaceGeometry.choicePiece(of: safePadArea, removing: divisions)
+            let showsTrackpadGuide = inputReachesMac && controlStore.preferences.trackpadDisplayLayoutOptIn
             ZStack {
                 if showsReceiverSurface {
                     ReceiverSafeAreaProbe { insets, notchSide in
+                        #if DEBUG
+                        if let side = Self.chromeFixtureLandscapeSide {
+                            runtimeSafeInsets = ControlSafeInsets(top: 0,
+                                leading: side == .leading ? 48 : 0, bottom: 16,
+                                trailing: side == .trailing ? 48 : 0)
+                            physicalNotchSide = side
+                            return
+                        }
+                        #endif
                         runtimeSafeInsets = insets
                         physicalNotchSide = notchSide
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
                     Color.black.ignoresSafeArea()
-                    VideoLayerView(displayLayer: model.receiver.displayLayer,
-                                   receiver: model.receiver,
-                                   useMetal: metalRenderer,
-                                   zoomWhileTyping: zoomWhileTyping,
-                                   lockScreenShowing: lockScreenShowing,
-                                   freshFrame: model.receiver.freshFrameSinceVideoReset,
-                                   keyboardRequested: keyboardActive,
-                                   inputMode: controlStore.preferences.inputMode,
-                                   trackpadSensitivity: controlStore.preferences.trackpadSensitivity,
-                                   smartTouchEnabled: controlStore.preferences.smartTouchEnabled
-                                       && model.receiver.macSupportsSmartTouch,
-                                   touchStyle: controlStore.preferences.touchStyle,
-                                   allowInput: inputReachesMac,
-                                   videoEnabled: model.receiver.videoEnabled,
-                                   // The dotted trackpad only while touches reach the Mac: with video
-                                   // and control both unavailable, nothing suggests a working pad.
-                                   showSurfaceGrid: controlStore.preferences.showSurfaceGrid && inputReachesMac,
-                                   showCursorLocator: controlStore.preferences.showCursorLocator,
-                                   pinchTarget: controlStore.preferences.pinchTarget,
-                                   rotateTarget: controlStore.preferences.rotateTarget,
-                                   snapRotation: controlStore.preferences.snapRotation,
-                                   appGestureCommands: controlStore.preferences.appGestureCommands,
-                                   safeInsets: effectiveSafeInsets,
-                                   // Controls report screen coordinates; the
-                                   // surface may sit beside a Strip rail.
-                                   occupiedControlFrames: occupiedControlFrames.map {
-                                       $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
-                                   },
-                                   reservedDivisions: ControlReservedRegion.frames(of: .division,
-                                                                                   in: reservedRegions),
-                                   onRotationSnap: { haptics.play(.selection) },
-                                   smartTouchHapticsEnabled: SmartTouchHapticPolicy.isEnabled(
-                                       haptics: controlStore.preferences.hapticsEnabled,
-                                       smartTouchHaptics: controlStore.preferences.smartTouchLongPressHapticEnabled),
-                                   onKeyboardVisibleRectChange: { keyboardVisibleRect = $0 },
-                                   onKeyboardPictureRectChange: { keyboardPictureRect = $0 },
-                                   onActivityBegan: {
-                                       controlStore.beginAutoHideActivity()
-                                       // A touch on the Mac closes the arrow keypad; the touch still goes through.
-                                       controlStore.noteSurfaceTouch()
-                                   },
-                                   onActivityEnded: { controlStore.scheduleAutoHide() },
-                                   preferMeowDisplayGestures: controlStore.preferences.preferMeowDisplayGestures,
-                                   moveViewActive: controlStore.moveViewActive,
-                                   viewportResetGeneration: controlStore.viewportResetGeneration,
-                                   allowLocalViewNavigation: controlStore.preferences.allowLocalViewNavigation,
-                                   // Window mode: the picture is every tile at once, so pinch and pan go to
-                                   // the tile under the fingers instead of zooming the whole picture.
-                                   onWorkspacePinch: model.workspace.windowMode
-                                       ? { began, ended, pinch, initial, current, scale, turn, snap in
-                                           model.workspace.pinch(began: began, ended: ended, isPinch: pinch,
-                                                                 initial: WorkspacePoint(x: initial.x, y: initial.y),
-                                                                 current: WorkspacePoint(x: current.x, y: current.y),
-                                                                 scale: Double(scale), turn: Double(turn), snapTurn: snap) }
-                                       : nil,
-                                   onWorkspaceTouch: model.workspace.windowMode
-                                       ? { p in
-                                           model.workspace.noteSurfaceTouch()   // reveals the fullscreen strip; the touch still goes on
-                                           return model.workspace.selectTile(at: WorkspacePoint(x: p.x, y: p.y))
-                                       } : nil,
-                                   workspaceZoomPreview: model.workspace.windowMode ? { model.workspace.liveZoom() } : nil,
-                                   onWorkspaceViewReset: model.workspace.windowMode
-                                       ? { p in model.workspace.resetView(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
-                                   workspacePaneKind: model.workspace.windowMode
-                                       ? { p in model.workspace.paneKind(at: WorkspacePoint(x: p.x, y: p.y)) } : nil,
-                                   workspaceOverviewFocused: model.workspace.windowMode
-                                       ? { model.workspace.activeIsOverview } : nil,
-                                   invertVerticalScroll: controlStore.preferences.invertVerticalScroll,
-                                   invertHorizontalScroll: controlStore.preferences.invertHorizontalScroll,
-                                   onBlockedInputAttempt: { noteBlockedInputAttempt() },
-                                   threeFingerHoldEnabled: model.workspace.available,
-                                   onThreeFingerHold: { model.workspace.openOverview() },
-                                   onHardwarePointer: { model.workspace.hover(at: $0) },
-                                   onBackToHome: { showHomeKeepingSession() })
-                        .id(metalRenderer)   // rebuild the layer tree on toggle
-                        .frame(width: canvas.width, height: canvas.height)
-                        .position(x: canvas.midX, y: canvas.midY)
-                        .ignoresSafeArea()
-                        // Allow Input OFF: touches still arrive (for Local
-                        // View Navigation and the Request Control prompt), but
-                        // `VideoView` routes nothing to the Mac: pointer/
-                        // touch/Pencil routing stops at `routeTouches`, the
-                        // remote-only recognizers are parked by
-                        // `ReceiverMultiFingerGestureGate`, two-finger routes
-                        // follow `TwoFingerRoutingPolicy`, and hover is
-                        // dropped (SETTINGS / ALLOW INPUT INVARIANTS).
-                        // The surface always takes touches so a blocked one
-                        // can offer Request Control; what they may do is
-                        // decided inside `VideoView`.
+                    receiverVideoSurface(canvas: canvas, videoEnabled: videoEnabled, workspaceVisible: workspaceVisible,
+                                         scrollRailFrames: visibleRailFrames, divisions: divisions)
+                    if videoOffStatusShown, !padPieces.isEmpty {
+                        TrackpadSurfaceDecoration(
+                            showDots: controlStore.preferences.showSurfaceGrid,
+                            showBorder: controlStore.preferences.showTrackpadBorder,
+                            touchTrail: controlStore.preferences.trackpadTouchTrail && inputReachesMac,
+                            dotAreas: padPieces.map { $0.offsetBy(dx: -padArea.minX, dy: -padArea.minY) },
+                            guideArea: guideArea.offsetBy(dx: -padArea.minX, dy: -padArea.minY),
+                            displays: showsTrackpadGuide ? model.receiver.trackpadDisplayGeometry : [],
+                            cursor: model.receiver.trackpadCursor,
+                            feedback: scrollFeedback)
+                            .frame(width: padArea.width, height: padArea.height)
+                            .position(x: padArea.midX, y: padArea.midY)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+
+                    }
                     if model.pictureInPicture.isShowingWindow {
                         ReceiverPictureInPicturePlaceholder()
                     }
@@ -664,7 +814,7 @@ struct ReceiverScreen: View {
                             model.receiver.disconnect()
                         }
                     }
-                    if showAnalytics {
+                    if showAnalytics && videoEnabled {
                         VStack {
                             Spacer()
                             PerfOverlay(stats: model.receiver.perf,
@@ -713,32 +863,52 @@ struct ReceiverScreen: View {
                     let picture = workspacePicture(canvas: canvas)
                     // Stage Peek's safe area and what it keeps clear of (overlay coordinates): the
                     // same values place its edge handle and reserve it from tucked floats' handles.
-                    let peekSafe = CGRect(x: effectiveSafeInsets.leading, y: effectiveSafeInsets.top,
-                                          width: geo.size.width - effectiveSafeInsets.leading - effectiveSafeInsets.trailing,
-                                          height: geo.size.height - effectiveSafeInsets.top - effectiveSafeInsets.bottom)
-                        .intersection(canvas).offsetBy(dx: -canvas.minX, dy: -canvas.minY)
-                    let peekAvoiding = (occupiedControlFrames + ControlReservedRegion.frames(of: .division, in: reservedRegions))
-                        .map { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) }
-                    let edgeReservations = workspaceEdgeReservations(geo: geo, canvas: canvas, peekSafe: peekSafe,
-                                                                     peekAvoiding: peekAvoiding, reservedRegions: reservedRegions)
+                    let edgeReservations = workspaceEdgeReservations(geo: geo, stagePeekHandle: stagePeekHandle,
+                                                                     reservedRegions: reservedRegions)
                     // What a drag's drop bar and Arrange's bar keep clear of: the controls (the gear
                     // too) and a docked keyboard (its visible rect is in the canvas's coordinates).
                     let keyboardCover = shownKeyboardRect.map { visible -> CGRect in
                         let top = canvas.minY + visible.maxY
                         return CGRect(x: canvas.minX, y: top, width: canvas.width, height: max(0, geo.size.height - top))
                     }
-                    WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
-                                        layoutPicture: picture.layout, inputAllowed: inputReachesMac,
-                                        divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
-                                        safeArea: effectiveSafeInsets.safeRect(in: geo.size),
-                                        controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
-                                        onSettings: { showSettings = true },
-                                        onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) })
-                        .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
-                        .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
-                        .stepsAside(forAllApps: model.workspace.launchpadOpen)
-                    if controlStore.preferences.windowSwitcher == .rail {
-                        WindowRailView(model: model.workspace)
+                    if workspaceVisible {
+                        WorkspaceChromeView(model: model.workspace, picture: picture.drawn,
+                                            layoutPicture: picture.layout, inputAllowed: inputReachesMac,
+                                            divisions: ControlReservedRegion.frames(of: .division, in: reservedRegions),
+                                            safeArea: effectiveSafeInsets.safeRect(in: geo.size),
+                                            controls: occupiedControlFrames + (keyboardCover.map { [$0] } ?? []),
+                                            railFrames: Array(scrollRailFrames.values),
+                                            onSettings: { showSettings = true },
+                                            onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) },
+                                            localTrackpad: { id, rect in windowTrackpad(id, rect: rect) },
+                                            floatCloseHapticsEnabled: controlStore.preferences.hapticsEnabled,
+                                            onMenuVisibilityChange: { controlStore.setWorkspaceMenuOpen($0) },
+                                            appMenuBarAutoHidden: controlStore.autoHideIdle,
+                                            controlsHidden: controlStore.autoHidden,
+                                            onAppMenuBarActivity: { active in
+                                                if active { controlStore.beginAutoHideActivity() }
+                                                else { controlStore.scheduleAutoHide() }
+                                            })
+                            .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
+                            .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
+                            .onPreferenceChange(WorkspaceRailObstaclePreference.self) { occupiedWorkspaceChrome = $0 }
+                            .onDisappear { occupiedWorkspaceChrome = [] }
+                            .stepsAside(forAllApps: model.workspace.launchpadOpen)
+                        // The Mac's real pointer in Full Desktop panes while the Trackpad drives it.
+                        WorkspaceRealPointerOverlay(model: model.workspace, cursor: model.receiver.trackpadCursor,
+                                                    displays: model.receiver.trackpadDisplayGeometry,
+                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden)
+                    }
+                    // The rails are receiver chrome above both Trackpad renderers and floats.
+                    // Only the strip hit regions take touches.
+                    ReceiverEdgeScrollOverlay(layer: foregroundScrollRails,
+                                              touchExclusions: workspaceControls.map {
+                                                  $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY)
+                                              })
+                        .frame(width: canvas.width, height: canvas.height)
+                        .position(x: canvas.midX, y: canvas.midY)
+                    if workspaceVisible, controlStore.preferences.windowSwitcher == .rail {
+                        WindowRailView(model: model.workspace, controlsHidden: controlStore.autoHidden)
                             .padding(effectiveSafeInsets.edgeInsets)
                     }
                     ReceiverControlOverlay(
@@ -758,37 +928,40 @@ struct ReceiverScreen: View {
                         surfaceOrigin: canvas.origin,
                         onSessionActions: sessionActionsAvailable ? { openSessionActions() } : nil)
                         // Stage Peek's All Apps covers the controls (`StagePeekAllAppsLayering`).
-                        .stepsAside(forAllApps: model.workspace.launchpadOpen)
-                    if let kind = inputPrompt.kind {
+                        .stepsAside(forAllApps: workspaceVisible && model.workspace.launchpadOpen)
+                    if let kind = inputPrompt.kind, !workspaceEditing, !workspaceOverlayOpen, !showsVideoOffChoice,
+                       !safeCanvas.isNull, !safeCanvas.isEmpty {
                         // Window mode: inside the selected pane, near its bottom, so it's clear which
                         // window needs control; the pane, its tabs, zoom and pan stay as they are.
-                        let paneAnchor = model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
+                        let paneAnchor = workspaceVisible && model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
                             let pic = workspacePicture(canvas: canvas).drawn
                             return CGPoint(x: pic.minX + r.midX * pic.width,
                                            y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
                         } : nil
+                        let promptWidth = min(280, max(44, safeCanvas.width - 24))
+                        let halfPromptWidth = promptWidth / 2
+                        let promptX = min(max(paneAnchor?.x ?? canvas.midX, safeCanvas.minX + halfPromptWidth),
+                                          safeCanvas.maxX - halfPromptWidth)
                         let promptCentre = clearOfFolds(
-                            CGPoint(x: paneAnchor?.x ?? canvas.midX,
+                            CGPoint(x: promptX,
                                     y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
                                         ?? geo.size.height - effectiveSafeInsets.bottom - 76),
-                            size: CGSize(width: 260, height: 44), container: geo.size,
+                            size: CGSize(width: promptWidth, height: 44), container: geo.size,
                             regions: reservedRegions)
-                        InputPromptButton(kind: kind) { requestInputFromPrompt() }
+                        InputPromptButton(kind: kind) { _ = requestInputFromPrompt() }
+                            .frame(maxWidth: promptWidth)
                             .position(promptCentre)
                             .transition(slideTransition(from: .bottom))
-                            // Stage Peek has its own Request Control; this one drew under its
-                            // Compact/Close bar, both legible at once (owner's screenshot, 2026-11-15).
-                            .stepsAside(forAllApps: model.workspace.launchpadOpen || model.workspace.stagePeekOpen)
                     }
-                    if videoOffStatusShown {
-                        // Video off is the user's choice: one quiet line saying so, with the way back.
-                        // Control is its own state (the prompt above), never implied by this.
-                        VideoOffStatus(onTurnOn: { model.receiver.requestVideoEnabled(true) })
-                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
-                                                   size: CGSize(width: 300, height: 44), container: geo.size,
-                                                   regions: reservedRegions))
+                    if showsVideoOffChoice, !choiceArea.isEmpty {
+                        VideoOffStatus(onTurnOn: turnVideoOnToWindow, onUseTrackpad: {
+                            dismissVideoOffChoice()
+                            if !inputReachesMac { requestInputFromPrompt() }
+                        }, onDismiss: dismissVideoOffChoice)
+                            .frame(maxWidth: min(400, max(0, choiceArea.width - 24)),
+                                   maxHeight: choiceArea.height, alignment: .top)
+                            .position(x: choiceArea.midX, y: choiceArea.midY)
                             .transition(slideTransition(from: .top))
-                            .stepsAside(forAllApps: model.workspace.launchpadOpen)
                     }
                     if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
                        controlStore.preferences.touchStyle == .natural,
@@ -804,7 +977,7 @@ struct ReceiverScreen: View {
                                                    container: geo.size, regions: reservedRegions))
                             .transition(.opacity)
                     }
-                    if controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                    if workspaceVisible, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
                         // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
                         // Opening, browsing, searching and expanding never change the mode; only
                         // tapping a window switches (to Window mode, with that window).
@@ -818,13 +991,27 @@ struct ReceiverScreen: View {
                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
                             dock: controlStore.preferences.stagePeekDock,
                             inputAllowed: inputReachesMac,
-                            onDisplay: { _ in
-                                // Mirror/Extend: the desktop already shows, nothing changes. (Window mode puts
-                                // the desktop in a pane; "View Full Screen" is in a desktop pane's menu.)
+                            onDisplay: { display in
+                                guard model.receiver.confirmedDisplayMode == .mirror, let display,
+                                      let state = model.receiver.mirrorDisplayState,
+                                      let entry = WorkspaceModel.mirrorEntry(for: display,
+                                          catalog: model.workspace.catalog?.displays ?? [], entries: state.displays)
+                                else { return }
+                                model.receiver.requestMirrorDisplaySelection(entry.uuid)
                             })
-                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { requestInputFromPrompt() }))
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
                     }
-                    if model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
+                    if !videoEnabled, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                        StagePeekOverlay(model: model.workspace, edge: controlStore.preferences.stagePeekEdge,
+                                         frame: canvas, safe: peekSafe, avoiding: peekAvoiding,
+                                         hapticsEnabled: controlStore.preferences.hapticsEnabled,
+                                         naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                                         dock: controlStore.preferences.stagePeekDock, inputAllowed: inputReachesMac,
+                                         onDisplay: { _ in }, trackpad: TrackpadStagePeekConfiguration(
+                                             open: $trackpadPeekOpen, turnVideoOn: turnVideoOnToWindow))
+                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
+                    }
+                    if workspaceVisible, model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
                        !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown, !model.workspace.launchpadOpen {
                         // Full-desktop view: offer Window mode once per launch, never forced.
                         WindowModePrompt(
@@ -835,11 +1022,16 @@ struct ReceiverScreen: View {
                                                    size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
                             .transition(slideTransition(from: .top))
                     }
-                    WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
-                                       inputAllowed: inputReachesMac,
-                                       onMirror: { model.receiver.requestDisplayMode(.mirror) },
-                                       onExtend: { model.receiver.requestDisplayMode(.extend) },
-                                       safeInsets: effectiveSafeInsets.edgeInsets)
+                    if workspaceVisible {
+                        WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
+                                           inputAllowed: inputReachesMac,
+                                           onMirror: { model.receiver.requestDisplayMode(.mirror) },
+                                           onExtend: { model.receiver.requestDisplayMode(.extend) },
+                                           safeInsets: effectiveSafeInsets.edgeInsets)
+                    }
+                    #if DEBUG
+                    if Self.chromeFixtureEnabled { chromeFixtureMenu(viewport: geo.size) }
+                    #endif
                     }
                 } else if route == .demo, let demo, let demoControlStore {
                     DemoReceiverScreen(demo: demo, store: demoControlStore, showSettings: $showSettings,
@@ -861,7 +1053,17 @@ struct ReceiverScreen: View {
                 #endif
                 model.panelSettler.windowChanged(points: points, scale: scale)
             })
-            .onAppear { updateControlLayoutClass() }
+            .onAppear {
+                updateControlLayoutClass()
+                #if DEBUG
+                if Self.chromeFixtureEnabled { updateChromeFixtureViewport(geo.size) }
+                #endif
+            }
+            #if DEBUG
+            .onChange(of: geo.size) { size in
+                if Self.chromeFixtureEnabled { updateChromeFixtureViewport(size) }
+            }
+            #endif
             .onChange(of: horizontalSizeClass) { _ in updateControlLayoutClass() }
             .onChange(of: verticalSizeClass) { _ in updateControlLayoutClass() }
             .sheet(isPresented: $showOnboarding) {
@@ -870,6 +1072,7 @@ struct ReceiverScreen: View {
         }
         .ignoresSafeArea(edges: fullScreenSurface ? .all : [])
         .statusBarHidden(fullScreenSurface)
+        .overlay(alignment: .bottom) { WorkspaceWindowShowStatus(model: model.workspace) }
         .persistentSystemOverlays(fullScreenSurface ? .hidden : .automatic)
         .overlay {
             if route == .sessionHome {
@@ -973,19 +1176,41 @@ struct ReceiverScreen: View {
                 .padding(.horizontal, 16)
         }
         .overlay(alignment: .top) {
-            if let on = model.workspace.privacyShieldNotice {
-                Label(on ? "Privacy Shield is on: the Mac's screen is covered" : "Privacy Shield is off: the Mac's screen shows this session",
-                      systemImage: on ? "eye.slash.fill" : "eye")
-                    .font(.footnote.weight(.semibold))
-                    .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(.top, 52)
-                    .transition(slideTransition(from: .top))
-                    .accessibilityAddTraits(.isStaticText)
+            if let on = model.workspace.privacyShieldNotice, !privacyNoticeDismissed {
+                let dismissNotice = { withAnimation(.easeOut(duration: 0.2)) { privacyNoticeDismissed = true } }
+                HStack(spacing: 8) {
+                    Label(on ? "Privacy Shield is on: the Mac's screen is covered" : "Privacy Shield is off: the Mac's screen shows this session",
+                          systemImage: on ? "eye.slash.fill" : "eye")
+                        .font(.footnote.weight(.semibold))
+                    BannerCloseButton(onDismiss: dismissNotice)
+                }
+                .padding(.leading, 14).padding(.trailing, 4)
+                .background(.regularMaterial, in: Capsule())
+                .dismissibleSessionNotice(onDismiss: dismissNotice)
+                .padding(.top, 52).padding(.horizontal, 16)
+                .transition(slideTransition(from: .top))
             }
         }
+        .task(id: trackpadGuideContext) {
+            guard let inWindow = trackpadGuideContext else { model.receiver.stopTrackpadLayout(); return }
+            while !Task.isCancelled {
+                model.receiver.requestTrackpadLayout(inWindow: inWindow)
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        .onDisappear { model.receiver.stopTrackpadLayout() }
         .animation(.easeInOut(duration: 0.25), value: model.workspace.privacyShieldNotice)
-        .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { requestInputFromPrompt() }))
+        .onChange(of: model.workspace.privacyShieldNotice) { _ in privacyNoticeDismissed = false }
+        .onChange(of: model.receiver.videoEnabled) { enabled in
+            if enabled { videoOffChoiceDismissed = false }
+        }
+        .task(id: showsVideoOffChoice && route == .receiver && !showSettings) {
+            guard showsVideoOffChoice, route == .receiver, !showSettings else { return }
+            try? await Task.sleep(for: .seconds(voiceOverEnabled ? 30 : 12))
+            guard !Task.isCancelled else { return }
+            dismissVideoOffChoice()
+        }
+        .modifier(WorkspaceAppDropDialogs(model: model.workspace, onRequestControl: { _ = requestInputFromPrompt() }))
         .modifier(WorkspaceDragGuard(model: model.workspace))
         // The Mac's screen is locked: nothing of it shows, over every mode and pane (SECURITY.md).
         .overlay {
@@ -1195,12 +1420,17 @@ struct ReceiverScreen: View {
                      + "displayState=\(model.receiver.displayState)")
             #endif
             if !allowed { keyboardActive = false }
+            if !allowed { model.workspace.clearTrackpadPeek() }
         }
         .onAppear {
             inputPrompt.setSessionLive(model.receiver.session.allowsLiveInput)
             // Actions the Mac carries out (Stage Manager, Lock Mac) follow its confirmed decision.
             model.workspace.controlState = { [weak controlStore] in controlStore?.sessionInputState ?? .off }
-            model.workspace.requestControl = { requestInputFromPrompt() }
+            model.workspace.requestControl = { _ = requestInputFromPrompt() }
+            model.workspace.requestControlForWindowShow = { requestInputFromPrompt() }
+            model.workspace.withdrawControlForWindowShow = { [weak receiver = model.receiver] in
+                receiver?.requestAllowInput(false)
+            }
         }
         .onChange(of: model.receiver.session.allowsLiveInput) { live in
             withAnimation { inputPrompt.setSessionLive(live) }
@@ -1289,9 +1519,19 @@ struct ReceiverScreen: View {
             // always wins over whatever this receiver had stored, so there
             // is exactly one source of truth once connected. See
             // `ReceiverControlStore.applySessionInputState`.
-            model.receiver.onAllowInputStateChange = { state in
+            model.receiver.onAllowInputStateChange = { [weak workspace = model.workspace] state in
                 controlStore.applySessionInputState(state)
+                workspace?.windowShowControlChanged(state)
+                if state != .allowed { workspace?.clearTrackpadPeek() }
             }
+            #if DEBUG
+            if Self.chromeFixtureEnabled {
+                // The inner geometry can prepare the simulated session before this
+                // callback is installed. Publish its grant again once it can be observed.
+                model.receiver.applyAllowInputStateChangeUpdate(.allowed)
+                return
+            }
+            #endif
             // Control is the Mac's decision for one session: never restored from a previous
             // launch (the stored preference said Allowed while the Mac would drop the input).
             controlStore.applySessionInputState(.off)
@@ -1309,7 +1549,10 @@ struct ReceiverScreen: View {
         }
         // Nor kept after the session ends: the next Mac says for itself.
         .onChange(of: model.receiver.connected) { connected in
-            if !connected { controlStore.applySessionInputState(.off) }
+            if !connected {
+                controlStore.applySessionInputState(.off)
+                videoOffChoiceDismissed = false
+            }
         }
         .onChange(of: controlStore.preferences) { preferences in
             model.receiver.setReceiverUIPreferencesForHello(
@@ -1319,6 +1562,180 @@ struct ReceiverScreen: View {
         }
     }
 }
+
+#if DEBUG
+extension ReceiverScreen {
+    fileprivate static let chromeFixtureEnabled =
+        ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_CHROME"] == "1"
+    private static let chromeFixtureTracesPointerButtons = chromeFixtureEnabled
+        && ProcessInfo.processInfo.environment["MEOW_UITEST_POINTER_BUTTONS"] == "1"
+    fileprivate static let chromeFixtureRoomy = chromeFixtureEnabled
+        && ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_ROOMY"] == "1"
+    fileprivate static let chromeFixtureLandscapeSide: LandscapeTraySide? = chromeFixtureEnabled
+        ? ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_LANDSCAPE"].flatMap(LandscapeTraySide.init(rawValue:))
+        : nil
+    private static let chromeFixtureWindow = CatalogWindowItem(
+        id: 310, generation: 1, bundleID: "com.google.Chrome", app: "Google Chrome",
+        title: "Google Chrome", width: 1120, height: 690, minimized: false, active: true)
+    private static let chromeFixtureDefaults = {
+        let suite = "uitest.receiverChrome"
+        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }()
+
+    private func updateChromeFixtureViewport(_ size: CGSize) {
+        guard size.width >= 1, size.height >= 1 else { return }
+        if !model.receiver.session.allowsLiveInput {
+            prepareChromeFixture(viewport: size)
+        } else if model.receiver.videoEnabled {
+            setChromeFixtureVideo(true, viewport: size)
+        }
+    }
+
+    /// Feed the real receiver and workspace UI a session without opening a listener.
+    private func prepareChromeFixture(viewport: CGSize) {
+        let workspace = model.workspace
+        let receiver = model.receiver
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature,
+                                     WorkspaceTrackpadWire.feature, WireMessage.scrollAtCursor,
+                                     AppMenuWire.welcomeFeature]
+        workspace.menus.send = { [weak menus = workspace.menus] request in
+            guard request["type"] as? String == WireMessage.menuRequest,
+                  let path = request["path"] as? [Int] else { return false }
+            let items = path.isEmpty ? [AppMenuEntry(index: 1, title: "File"), AppMenuEntry(index: 2, title: "Edit")]
+                : [AppMenuEntry(index: 1, title: "New Window")]
+            let reply = AppMenuReply(tile: request["tile"] as? String, path: path, app: "Google Chrome",
+                                    items: items, ok: true, error: nil, req: request["req"] as? Int)
+            Task { @MainActor in menus?.apply(reply) }
+            return true
+        }
+        workspace.apply(.connected(peerID: "uitest-chrome-mac"))
+        workspace.apply(.features(features))
+        workspace.apply(.catalog(WorkspaceCatalogMessage(host: nil, windows: [Self.chromeFixtureWindow], apps: [], installed: [],
+                                                         unavailable: false, displays: UITestOverviewFixture.displays)))
+        workspace.apply(.mode(window: true))
+        workspace.choose(workspace.displayWindow(UITestOverviewFixture.displays[0]), asNewTile: false)
+        if let desktop = workspace.layout.orderedTileIDs.first { publishChromeFixtureFocus(desktop) }
+        receiver.noteWorkspaceEvent(.features(features))
+        receiver.noteWorkspaceEvent(.mode(window: true))
+        receiver.applyMacProtocolVersionUpdate(WireProtocol.version)
+        receiver.applyAllowInputStateChangeUpdate(.allowed)
+        if Self.chromeFixtureTracesPointerButtons {
+            receiver.onFixturePointerButton = { button in
+                DispatchQueue.main.async { chromeFixturePointerButtons.append(button) }
+            }
+        }
+        setChromeFixtureVideo(true, viewport: viewport)
+        var session = ReceiverSessionState()
+        _ = session.connectionEstablished()
+        receiver.applyUISessionSnapshot(session)
+        receiver.applyConnectedUIMirrorFields(true)
+        controlStore.update {
+            $0.autoHideEnabled = false
+            $0.arrowKeysEnabled = true
+            $0.naturalTouchHintShown = true
+            $0.edgeScrolling = .off
+            if Self.chromeFixtureTracesPointerButtons {
+                $0.inputMode = .direct
+                $0.touchStyle = .natural
+            }
+            if Self.chromeFixtureRoomy {
+                $0.padControlLayout = .strip
+                $0.padMainEdge = .trailing
+                $0.padFunctionEdge = .trailing
+            }
+        }
+    }
+
+    // The Mac's Window stream is composed to the receiver viewport. A fixed
+    // desktop aspect ratio would letterbox the workspace and its Trackpad tab.
+    private func setChromeFixtureVideo(_ enabled: Bool, viewport: CGSize) {
+        model.receiver.applyVideoStateUpdate(width: enabled ? Int(viewport.width.rounded()) : nil,
+                                             height: enabled ? Int(viewport.height.rounded()) : nil,
+                                             enabled: enabled)
+    }
+
+    private func chromeFixtureMenu(viewport: CGSize) -> some View {
+        let workspace = model.workspace
+        return VStack {
+            Menu {
+                Menu("Panes") {
+                    Button("Add Trackpad Tab") { workspace.addTrackpadTab() }
+                    Button("Show Trackpad Tab") { selectChromeFixtureTab(trackpad: true) }
+                    Button("Show Full Desktop") { selectChromeFixtureTab(trackpad: false) }
+                    Button("Add Google Chrome Pane") {
+                        workspace.choose(Self.chromeFixtureWindow, asNewTile: true)
+                        if let tile = workspace.layout.orderedTileIDs.first(where: {
+                            workspace.layout.tiles[$0]?.source?.windowID == Self.chromeFixtureWindow.id
+                        }) {
+                            publishChromeFixtureFocus(tile)
+                        }
+                    }
+                    Button("Float Display Pane") {
+                        if let pane = workspace.layout.orderedTileIDs.last { workspace.floatPane(pane) }
+                    }
+                }
+                Menu("Controls") {
+                    Button("Set Rail Left") { setChromeFixtureRail(.left) }
+                    Button("Set Rail Right") { setChromeFixtureRail(.right) }
+                    Button("Toggle Controls") { controlStore.update { $0.trayCollapsed.toggle() } }
+                    Button("Enable Auto-hide") { controlStore.update { $0.autoHideEnabled = true } }
+                    if Self.chromeFixtureTracesPointerButtons {
+                        Button("Revoke Control") { model.receiver.applyAllowInputStateChangeUpdate(.off) }
+                    }
+                }
+                Button("Toggle Video") {
+                    let enabled = !model.receiver.videoEnabled
+                    videoOffChoiceDismissed = !enabled
+                    setChromeFixtureVideo(enabled, viewport: viewport)
+                }
+            } label: {
+                Image(systemName: "testtube.2")
+                    .padding(12)
+                    .background(.regularMaterial, in: Capsule())
+                    .accessibilityLabel("Receiver QA")
+            }
+            .accessibilityIdentifier("receiverChromeFixtureMenu")
+            if Self.chromeFixtureTracesPointerButtons {
+                Text("Pointer button events")
+                    .accessibilityIdentifier("receiverChromeFixturePointerButtons")
+                    .accessibilityValue(chromeFixturePointerButtons.joined(separator: ";"))
+                    .allowsHitTesting(false)
+            }
+            // What decides the tray's Auto-hide, for UI-test logs (Xcode Cloud keeps no screenshots).
+            Text("Auto-hide state")
+                .font(.system(size: 4))
+                .accessibilityIdentifier("receiverChromeFixtureAutoHide")
+                .accessibilityValue(controlStore.autoHideDebugState)
+                .allowsHitTesting(false)
+            Spacer()
+        }
+        .padding(.top, 68)
+    }
+
+    private func selectChromeFixtureTab(trackpad: Bool) {
+        let workspace = model.workspace
+        guard let tile = workspace.layout.tiles.values.first(where: { $0.tabs.contains(where: \.isTrackpad) }),
+              let index = tile.tabs.firstIndex(where: { $0.isTrackpad == trackpad }) else { return }
+        workspace.switchTab(tile.id, to: index)
+        publishChromeFixtureFocus(tile.id)
+    }
+
+    private func publishChromeFixtureFocus(_ tile: String) {
+        model.workspace.apply(.state(WorkspaceStateMessage(host: nil, tiles: [], active: tile,
+                                                          hostFocus: .deliver, rejected: [:])))
+    }
+
+    private func setChromeFixtureRail(_ side: VerticalScrollEdge) {
+        controlStore.update {
+            $0.edgeScrolling = .manual
+            $0.verticalScrollEdge = side
+            $0.horizontalEdgeScrolling = true
+        }
+    }
+}
+#endif
 
 /// UIKit remains authoritative for physical window safe-area insets even
 /// while the streaming SwiftUI tree deliberately renders edge-to-edge.
@@ -2650,7 +3067,7 @@ final class ReceiverModel: ObservableObject {
 
     let receiver: StreamReceiver
     /// Window mode: this device's arrangement of Mac windows (PROTOCOL.md 6.10).
-    let workspace = WorkspaceModel()
+    let workspace: WorkspaceModel
     let wakeConnect: WakeConnectCoordinator
     let pictureInPicture: ReceiverPictureInPictureController
     /// Turns this window's size into the panel the Mac's Extend display takes (iPhone Duo,
@@ -2787,7 +3204,8 @@ final class ReceiverModel: ObservableObject {
         }
     }
 
-    init() {
+    init(workspace: WorkspaceModel = WorkspaceModel()) {
+        self.workspace = workspace
         // maximumFramesPerSecond reports this specific screen's real
         // hardware ceiling (60 on a standard panel, up to 120 on ProMotion)
         // — never assume every iPhone is 120Hz (high-refresh milestone).
@@ -2839,6 +3257,7 @@ final class ReceiverModel: ObservableObject {
         workspace.requestWindowMode = { [weak receiver] in receiver?.requestWindowMode() ?? false }
         workspace.requestDisplayMode = { [weak receiver] mode in receiver?.requestDisplayMode(mode) ?? false }
         workspace.inputAllowed = { [weak receiver] in receiver?.session.allowsLiveInput ?? false }
+        workspace.trackpadPeekAllowed = { [weak receiver] in receiver?.canBrowseTrackpadStagePeek ?? false }
         workspace.mirroring = { [weak receiver] in receiver?.confirmedDisplayMode == .mirror }
         workspace.extending = { [weak receiver] in receiver?.confirmedDisplayMode == .extend }
         workspace.mirrorChoice = { [weak receiver] in
@@ -3143,17 +3562,15 @@ struct VideoLayerView: UIViewRepresentable {
     /// Mac-confirmed capture/encode/transmit state. The UIKit host stays live
     /// while this is false because it is also the mapped input surface.
     let videoEnabled: Bool
-    let showSurfaceGrid: Bool
     /// An arrow at the picture's edge pointing at a Mac pointer that is out of view.
     let showCursorLocator: Bool
+    /// Window mode with the controls auto-hidden: the drawn pointer fades once it rests too.
+    var cursorFadesWhenResting = false
+    let keepPointerOnReceiverDisplay: Bool
     let pinchTarget: ReceiverGestureTarget
     let rotateTarget: ReceiverGestureTarget
     let snapRotation: Bool
     let appGestureCommands: AppGestureCommands
-    let safeInsets: ControlSafeInsets
-    let occupiedControlFrames: [CGRect]
-    /// Active fold/division frames — see `VideoOffSurfaceGeometry.usablePiece`.
-    let reservedDivisions: [CGRect]
     let onRotationSnap: () -> Void
     /// Whether Smart Touch hold feedback plays — see `SmartTouchHapticPolicy`.
     let smartTouchHapticsEnabled: Bool
@@ -3164,6 +3581,7 @@ struct VideoLayerView: UIViewRepresentable {
     /// reveal from any receiver-surface interaction, not only a tray touch.
     let onActivityBegan: () -> Void
     let onActivityEnded: () -> Void
+    var onEdgeScrollBegan: (() -> Void)?
     /// Prefer MeowDisplay Gestures — see `ReceiverEditingInteractionPolicy`.
     var preferMeowDisplayGestures = true
     /// Move View: the surface navigates the local viewport instead of
@@ -3188,8 +3606,15 @@ struct VideoLayerView: UIViewRepresentable {
     var workspacePaneKind: ((CGPoint) -> WorkspaceSource.Kind?)?
     /// Window mode: the focused pane is an Overview pane (the Mac's cursor is drawn there, larger).
     var workspaceOverviewFocused: (() -> Bool)?
+    var workspaceTrackpadSelected = false
     var invertVerticalScroll = true
     var invertHorizontalScroll = true
+    var scrollRailFrames: [ScrollStripEdge: CGRect] = [:]
+    fileprivate var foregroundScrollRails: EdgeScrollRailLayer?
+    var touchDivisions: [CGRect] = []
+    var edgeScrollSensitivity = EdgeScrollSensitivity.defaultValue
+    var scrollMomentumEnabled = true
+    var scrollFeedback: TrackpadScrollFeedback?
     /// See `VideoView.onBlockedInputAttempt`.
     var onBlockedInputAttempt: @MainActor () -> Void = {}
     /// Window mode: three fingers held still open the window overview.
@@ -3201,7 +3626,7 @@ struct VideoLayerView: UIViewRepresentable {
     var onBackToHome: (() -> Void)?
 
     func makeUIView(context: Context) -> VideoView {
-        let view = VideoView()
+        let view = VideoView(foregroundScrollRails: foregroundScrollRails)
         view.backgroundColor = .black
         view.isMultipleTouchEnabled = true
         view.receiver = receiver
@@ -3224,10 +3649,14 @@ struct VideoLayerView: UIViewRepresentable {
         view.workspaceViewReset = onWorkspaceViewReset
         view.workspacePaneKind = workspacePaneKind
         view.workspaceOverviewFocused = workspaceOverviewFocused
-        view.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        view.setWorkspaceTrackpadSelected(workspaceTrackpadSelected)
+        view.setVideoEnabled(videoEnabled)
         view.setCursorLocatorEnabled(showCursorLocator)
-        view.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
-                               reservedDivisions: reservedDivisions)
+        view.setCursorFadesWhenResting(cursorFadesWhenResting)
+        view.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
+        view.setScrollRailFrames(scrollRailFrames)
+        view.touchDivisions = touchDivisions
+        view.setScrollOptions(momentum: scrollMomentumEnabled, sensitivity: edgeScrollSensitivity, feedback: scrollFeedback)
         view.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                    snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                    onRotationSnap: onRotationSnap)
@@ -3235,6 +3664,7 @@ struct VideoLayerView: UIViewRepresentable {
         view.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         view.onActivityBegan = onActivityBegan
         view.onActivityEnded = onActivityEnded
+        view.onEdgeScrollBegan = onEdgeScrollBegan
         view.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         view.preferMeowDisplayGestures = preferMeowDisplayGestures
         view.onBlockedInputAttempt = onBlockedInputAttempt
@@ -3374,16 +3804,20 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setTouchStyle(touchStyle)
         uiView.setAllowInput(allowInput)
         uiView.setLocalNavigationAllowed(allowLocalViewNavigation)
+        uiView.setVideoEnabled(videoEnabled)
         uiView.setWorkspacePinch(onWorkspacePinch)
         uiView.workspaceTouch = onWorkspaceTouch
         uiView.workspaceZoomPreview = workspaceZoomPreview
         uiView.workspaceViewReset = onWorkspaceViewReset
         uiView.workspacePaneKind = workspacePaneKind
         uiView.workspaceOverviewFocused = workspaceOverviewFocused
-        uiView.setVideoEnabled(videoEnabled, showGrid: showSurfaceGrid)
+        uiView.setWorkspaceTrackpadSelected(workspaceTrackpadSelected)
         uiView.setCursorLocatorEnabled(showCursorLocator)
-        uiView.setSurfaceContext(safeInsets: safeInsets, occupiedControlFrames: occupiedControlFrames,
-                                 reservedDivisions: reservedDivisions)
+        uiView.setCursorFadesWhenResting(cursorFadesWhenResting)
+        uiView.keepPointerOnReceiverDisplay = keepPointerOnReceiverDisplay
+        uiView.setScrollRailFrames(scrollRailFrames)
+        uiView.touchDivisions = touchDivisions
+        uiView.setScrollOptions(momentum: scrollMomentumEnabled, sensitivity: edgeScrollSensitivity, feedback: scrollFeedback)
         uiView.setGesturePreferences(pinchTarget: pinchTarget, rotateTarget: rotateTarget,
                                      snapRotation: snapRotation, appGestureCommands: appGestureCommands,
                                      onRotationSnap: onRotationSnap)
@@ -3391,6 +3825,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.onKeyboardPictureRectChange = onKeyboardPictureRectChange
         uiView.onActivityBegan = onActivityBegan
         uiView.onActivityEnded = onActivityEnded
+        uiView.onEdgeScrollBegan = onEdgeScrollBegan
         uiView.smartTouchHaptics.isEnabled = smartTouchHapticsEnabled
         uiView.preferMeowDisplayGestures = preferMeowDisplayGestures
         uiView.onBlockedInputAttempt = onBlockedInputAttempt
@@ -3448,6 +3883,7 @@ struct VideoLayerView: UIViewRepresentable {
             let r = UILongPressGestureRecognizer(target: self, action: #selector(threeFingerHeld(_:)))
             r.numberOfTouchesRequired = 3
             r.minimumPressDuration = 0.5
+            r.delegate = self
             r.allowableMovement = 12
             // The held touches are cancelled, so they never become a Mac gesture.
             r.cancelsTouchesInView = true
@@ -3466,8 +3902,10 @@ struct VideoLayerView: UIViewRepresentable {
             r.allowedTouchTypes = []   // wheel and trackpad scrolls only, never touches
             return r
         }()
-        private var heldPointerButtons: [ObjectIdentifier: PointerButton] = [:]
+        private var heldPointerButtons: [ObjectIdentifier: (button: PointerButton, windowTrackpad: Bool)] = [:]
+        private var relativeHardwarePointerLocation: CGPoint?
         private var lastPointerScroll = CGPoint.zero
+        private var hardwareScrollOnTrackpad: Bool?
         let hardwareKeyboard = HardwareKeyboardForwarder()
 
         private func normalizedPicturePoint(_ p: CGPoint) -> CGPoint? {
@@ -3482,27 +3920,60 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         @objc private func pointerHovered(_ r: UIHoverGestureRecognizer) {
-            let n = (r.state == .ended || r.state == .cancelled) ? nil : normalizedPicturePoint(r.location(in: self))
+            let location = r.location(in: self)
+            let n = (r.state == .ended || r.state == .cancelled) ? nil : normalizedPicturePoint(location)
+            let windowTrackpad = n.map { workspacePaneKind?($0) == .trackpad } ?? false
+            if !videoEnabled || windowTrackpad {
+                onHardwarePointer?(n)
+                guard allowsInput, heldPointerButtons.isEmpty, r.state == .began || r.state == .changed else {
+                    relativeHardwarePointerLocation = nil
+                    return
+                }
+                moveRelativeHardwarePointer(to: location, windowTrackpad: windowTrackpad)
+                return
+            }
+            relativeHardwarePointerLocation = nil
             onHardwarePointer?(n)
             guard allowsInput, let n else { return }
             receiver?.sendPointerMove(x: n.x, y: n.y)
         }
 
         @objc private func pointerScrolled(_ r: UIPanGestureRecognizer) {
-            guard allowsInput, let video = receiver?.videoSize, let scale = pointsPerRemotePixel(video: video), scale > 0 else { return }
+            guard allowsInput else { hardwareScrollOnTrackpad = nil; return }
             if r.state == .began {
                 lastPointerScroll = .zero
-                if let n = normalizedPicturePoint(r.location(in: self)) { receiver?.sendPointerMove(x: n.x, y: n.y) }
+                let n = normalizedPicturePoint(r.location(in: self))
+                let windowTrackpad = videoEnabled && (n.map { workspacePaneKind?($0) == .trackpad } ?? false)
+                hardwareScrollOnTrackpad = windowTrackpad
+                if videoEnabled, let n, !windowTrackpad {
+                    receiver?.sendPointerMove(x: n.x, y: n.y)
+                }
             }
+            defer {
+                if r.state == .ended || r.state == .cancelled || r.state == .failed { hardwareScrollOnTrackpad = nil }
+            }
+            guard let windowTrackpad = hardwareScrollOnTrackpad,
+                  let scale = windowTrackpad ? 1 : ordinaryRemoteScrollScale else { return }
             let t = r.translation(in: self)
             let d = CGPoint(x: t.x - lastPointerScroll.x, y: t.y - lastPointerScroll.y)
             lastPointerScroll = t
-            if d != .zero { sendRemoteScroll(dx: d.x / scale, dy: d.y / scale) }
+            if d != .zero { sendRemoteScroll(dx: d.x / scale, dy: d.y / scale, hardwareTrackpad: windowTrackpad) }
         }
 
-        /// Mouse/trackpad clicks (UIApplicationSupportsIndirectInputEvents): real
-        /// pointer presses at the pointer, right button from the button mask,
-        /// the platform's click count; a drag stays a drag. Never the touch pipeline.
+        private func moveRelativeHardwarePointer(to location: CGPoint, windowTrackpad: Bool) {
+            let previous = relativeHardwarePointerLocation
+            relativeHardwarePointerLocation = location
+            guard let previous, previous != location, let receiver else { return }
+            let dx = location.x - previous.x
+            let dy = location.y - previous.y
+            if receiver.macProtocolVersion >= WireProtocol.trackpadPointsWireVersion {
+                receiver.sendPointerMoveRelative(dx: dx, dy: dy, trackpad: true, workspaceTrackpad: windowTrackpad)
+            } else if let scale = ordinaryRemoteScrollScale, !windowTrackpad {
+                receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+            }
+        }
+
+        /// Native mouse/trackpad presses have their own route, latched at button down.
         private func handlePointerTouches(_ touches: Set<UITouch>, _ event: UIEvent?) {
             guard let receiver else { return }
             for t in touches {
@@ -3510,27 +3981,51 @@ struct VideoLayerView: UIViewRepresentable {
                 let location = t.location(in: self)
                 switch t.phase {
                 case .began:
-                    let n = normalizedPicturePoint(location)
-                    onHardwarePointer?(n)
-                    guard allowsInput, let n else { continue }
                     let button: PointerButton = event?.buttonMask.contains(.secondary) == true ? .right : .left
-                    receiver.sendPointerMove(x: n.x, y: n.y)
-                    receiver.sendPointerDown(button: button, clickCount: max(t.tapCount, 1))
-                    heldPointerButtons[key] = button
-                case .moved:
-                    guard heldPointerButtons[key] != nil, let n = currentTransform.remotePoint(forView: location) else { continue }
-                    receiver.sendPointerMove(x: min(max(n.x, 0), 1), y: min(max(n.y, 0), 1))
-                default:
-                    if let button = heldPointerButtons.removeValue(forKey: key) {
-                        receiver.sendPointerUp(button: button, clickCount: max(t.tapCount, 1))
+                    let n = normalizedPicturePoint(location)
+                    let windowTrackpad = videoEnabled && (n.map { workspacePaneKind?($0) == .trackpad } ?? false)
+                    onActivityBegan?()
+                    if videoEnabled, !windowTrackpad {
+                        onHardwarePointer?(n)
+                        guard let n else { continue }
+                        guard allowsInput else {
+                            _ = workspaceTouch?(n)
+                            continue
+                        }
+                        receiver.sendPointerMove(x: n.x, y: n.y)
+                        receiver.sendPointerDown(button: button, clickCount: max(t.tapCount, 1),
+                                                 workspacePoint: workspaceTouch == nil ? nil : n)
+                    } else {
+                        if let n, windowTrackpad { _ = workspaceTouch?(n) }
+                        guard allowsInput else { continue }
+                        relativeHardwarePointerLocation = location
+                        receiver.sendPointerDown(button: button, clickCount: max(t.tapCount, 1),
+                                                 trackpad: receiver.macProtocolVersion >= WireProtocol.trackpadPointsWireVersion,
+                                                 workspaceTrackpad: windowTrackpad)
                     }
+                    heldPointerButtons[key] = (button, windowTrackpad)
+                case .moved:
+                    guard allowsInput, let held = heldPointerButtons[key] else { continue }
+                    if !videoEnabled || held.windowTrackpad {
+                        moveRelativeHardwarePointer(to: location, windowTrackpad: held.windowTrackpad)
+                    } else if let n = currentTransform.remotePoint(forView: location) {
+                        receiver.sendPointerMove(x: min(max(n.x, 0), 1), y: min(max(n.y, 0), 1))
+                    }
+                default:
+                    if let held = heldPointerButtons.removeValue(forKey: key) {
+                        relativeHardwarePointerLocation = nil
+                        receiver.sendPointerUp(button: held.button, clickCount: max(t.tapCount, 1))
+                    }
+                    onActivityEnded?()
                 }
             }
         }
 
         private func releaseHardwareInput() {
-            for button in heldPointerButtons.values { receiver?.sendPointerUp(button: button, clickCount: 1) }
+            for held in heldPointerButtons.values { receiver?.sendPointerUp(button: held.button, clickCount: 1) }
             heldPointerButtons.removeAll()
+            relativeHardwarePointerLocation = nil
+            hardwareScrollOnTrackpad = nil
             hardwareKeyboard.releaseAll()
         }
         var metalRenderer: MetalVideoRenderer?
@@ -3546,16 +4041,14 @@ struct VideoLayerView: UIViewRepresentable {
         // view's black background — no mirrored, blurred letterbox fill.
         private let videoContentView = UIView()
         private var videoLayer: CALayer?
-        private let surfaceLayer = CAShapeLayer()
-        private let surfaceGridLayer = CAShapeLayer()
+        private let scrollStrips = [ScrollStripEdge.left, .right, .top, .bottom].map { EdgeScrollStrip(edge: $0) }
+        private weak var scrollFeedback: TrackpadScrollFeedback?
+        private var scrollMomentumEnabled = true
+        private var edgeScrollSensitivity = EdgeScrollSensitivity.defaultValue
+        private var momentumEdge: ScrollStripEdge?
+        private var touchesBlockedByStrip: Set<ObjectIdentifier> = []
         private var videoEnabled = true
-        private var showSurfaceGrid = true
-        private var surfaceSafeInsets = ControlSafeInsets.zero
-        private var occupiedControlFrames: [CGRect] = []
-        private var reservedDivisions: [CGRect] = []
-        #if DEBUG
-        private var lastLoggedTrackpadRect: CGRect?
-        #endif
+        private var scrollRailFrames: [ScrollStripEdge: CGRect] = [:]
         private var surfaceAdmission = SurfaceTouchAdmission<ObjectIdentifier>()
         private var pinchTarget = ReceiverGestureTarget.viewport
         private var rotateTarget = ReceiverGestureTarget.viewport
@@ -3642,7 +4135,8 @@ struct VideoLayerView: UIViewRepresentable {
         /// The ring is 14 pt across; the extra 4 pt holds the outline's outer half.
         static let resumeMarkerSize = CGSize(width: 18, height: 18)
         private var cursorOffDisplay: CursorLocatorTarget?
-        private var cursorLocatorEnabled = true
+        private var cursorLocatorEnabled = false
+        var keepPointerOnReceiverDisplay = false
         private var cursorNormSize = CGSize.zero
         /// Window mode: the sprite's size from the pane under it (nil: Mirror/Extend).
         private var cursorPaneSize: CursorPaneSize?
@@ -3650,6 +4144,12 @@ struct VideoLayerView: UIViewRepresentable {
         /// two consecutive reports while `cursorPacer` paces it (see `moveCursor`).
         private var cursorNorm = CGPoint(x: 0.5, y: 0.5)
         private var cursorVisible = false
+        /// See `setCursorFadesWhenResting`.
+        private var cursorFadesWhenResting = false
+        private var cursorLastMoved: CFTimeInterval = 0
+        private var cursorRestCheck: DispatchWorkItem?
+        /// How long the pointer stays after its last move while the controls are hidden.
+        private static let cursorRestDelay: CFTimeInterval = 1.5
         private var cursorPacer = CursorPresentationPacer()
         private var cursorLink: CADisplayLink?
         /// On by default. Launching with `-cursorPacing NO` draws each report on arrival, as
@@ -3725,6 +4225,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// actually over, not after each individual finger in a multi-touch
         /// gesture.
         var onActivityEnded: (() -> Void)?
+        var onEdgeScrollBegan: (() -> Void)?
         // Most recent meaningful primary interaction, in normalized
         // remote-display coordinates — the typing-focus anchor. Never
         // updated from multi-finger/system gestures, Pencil hover, the
@@ -3787,8 +4288,8 @@ struct VideoLayerView: UIViewRepresentable {
         private let pointerEngine = PointerGestureEngine()
         private var pointerPollTimer: DispatchWorkItem?
 
-        override init(frame: CGRect) {
-            super.init(frame: frame)
+        fileprivate init(foregroundScrollRails: EdgeScrollRailLayer? = nil) {
+            super.init(frame: .zero)
             // Keyboard notifications fire globally regardless of which
             // responder triggered them — `keyboardRequested` (above) is
             // what keeps this from reacting to somebody else's keyboard.
@@ -3810,14 +4311,39 @@ struct VideoLayerView: UIViewRepresentable {
             videoContentView.backgroundColor = .clear
             videoContentView.isUserInteractionEnabled = false
             addSubview(videoContentView)
-            surfaceLayer.fillColor = UIColor.secondarySystemBackground.cgColor
-            surfaceLayer.strokeColor = UIColor.separator.cgColor
-            surfaceLayer.lineWidth = 1
-            surfaceLayer.isHidden = true
-            surfaceGridLayer.fillColor = UIColor.tertiaryLabel.withAlphaComponent(0.35).cgColor
-            surfaceGridLayer.isHidden = true
-            layer.insertSublayer(surfaceLayer, at: 0)
-            layer.insertSublayer(surfaceGridLayer, above: surfaceLayer)
+            foregroundScrollRails?.install(scrollStrips, over: self)
+            for strip in scrollStrips {
+                let edge = strip.edge
+                if foregroundScrollRails == nil { addSubview(strip) }
+                strip.isHidden = true
+                strip.surface = self
+                strip.mayBegin = { [weak self] in
+                    guard let self else { return false }
+                    return self.allowsInput && self.scrollRailFrames[edge] != nil && self.activeFingerTouchIDs.isEmpty
+                        && !self.inputEngine.hasActivePen && !self.scrollStrips.contains(where: \.isTracking)
+                }
+                strip.onBegan = { [weak self] in
+                    guard let self else { return }
+                    self.cancelScrollMomentum()
+                    self.scrollVelocityTracker.reset()
+                    self.scrollVelocityTracker.record(dx: 0, dy: 0, at: CACurrentMediaTime())
+                    (self.onEdgeScrollBegan ?? self.onActivityBegan)?()
+                }
+                strip.onDelta = { [weak self] delta in
+                    guard let self, self.allowsInput, self.scrollRailFrames[edge] != nil else { return }
+                    let dx = edge.isVertical ? 0 : delta
+                    let dy = edge.isVertical ? delta : 0
+                    self.sendRemoteScroll(dx: dx, dy: dy, atCurrentCursor: true)
+                    self.recordScroll(dx: dx, dy: dy)
+                }
+                strip.onEnded = { [weak self] released in
+                    guard let self else { return false }
+                    if released { self.beginScrollMomentum(edge: edge) }
+                    if self.scrollMomentumSession == nil { self.scrollFeedback?.stop() }
+                    self.onActivityEnded?()
+                    return self.momentumEdge == edge
+                }
+            }
             addGestureRecognizer(threeFingerHoldRecognizer)
             addGestureRecognizer(pointerHoverRecognizer)
             addGestureRecognizer(pointerScrollRecognizer)
@@ -3954,11 +4480,36 @@ struct VideoLayerView: UIViewRepresentable {
         /// Every remote scroll (two-finger, momentum, Smart Touch/Trackpad)
         /// goes through here, so the per-axis direction applies everywhere
         /// and local viewport panning never does.
-        private func sendRemoteScroll(dx: CGFloat, dy: CGFloat) {
-            let directed = ScrollDirectionPolicy.apply(dx: Double(dx), dy: Double(dy),
+        private func sendRemoteScroll(dx: CGFloat, dy: CGFloat, atCurrentCursor: Bool = false, hardwareTrackpad: Bool? = nil) {
+            // Scale output alone. Sampling and decay stay in touch points,
+            // so raising sensitivity changes distance without extending the coast.
+            let delta = CGVector(dx: dx, dy: dy)
+            let output = atCurrentCursor ? EdgeScrollSensitivity.output(for: delta, gain: edgeScrollSensitivity) : delta
+            let directed = ScrollDirectionPolicy.apply(dx: Double(output.dx), dy: Double(output.dy),
                                                        invertVertical: invertVerticalScroll,
                                                        invertHorizontal: invertHorizontalScroll)
-            receiver?.sendScroll(dx: directed.dx, dy: directed.dy)
+            guard let receiver else { return }
+            let inWindowTrackpad = atCurrentCursor ? workspaceTrackpadSelected : (hardwareTrackpad ?? (sequencePaneKind == .trackpad))
+            let trackpadPoints = hardwareTrackpad.map { $0 || (!receiver.windowModeActive && usesTrackpadPoints(receiver)) }
+                ?? usesTrackpadPoints(receiver)
+            receiver.sendScroll(dx: directed.dx, dy: directed.dy,
+                                trackpad: !atCurrentCursor && trackpadPoints,
+                                confined: keepPointerOnReceiverDisplay, atCurrentCursor: atCurrentCursor,
+                                workspaceTrackpad: inWindowTrackpad)
+        }
+
+        private func usesTrackpadPoints(_ receiver: StreamReceiver) -> Bool {
+            pointerEngine.inputMode == .trackpad && receiver.macProtocolVersion >= WireProtocol.trackpadPointsWireVersion
+                && (!videoEnabled || !receiver.windowModeActive || sequencePaneKind == .trackpad)
+        }
+
+        private var remoteScrollScale: CGFloat? {
+            sequencePaneKind == .trackpad ? 1 : ordinaryRemoteScrollScale
+        }
+
+        private var ordinaryRemoteScrollScale: CGFloat? {
+            guard let receiver else { return nil }
+            return pointsPerRemotePixel(video: receiver.videoSize) ?? (videoEnabled ? nil : 1)
         }
 
         // MARK: - Local View Navigation
@@ -3988,6 +4539,25 @@ struct VideoLayerView: UIViewRepresentable {
         private var preferredInputMode: PointerInputMode = .direct
         /// What the pane the current touch sequence started in shows (nil outside Window mode).
         private var sequencePaneKind: WorkspaceSource.Kind?
+        private var workspaceTrackpadSelected = false
+
+        func setWorkspaceTrackpadSelected(_ selected: Bool) {
+            guard selected != workspaceTrackpadSelected else { return }
+            workspaceTrackpadSelected = selected
+            cancelScrollMomentum()
+            scrollStrips.forEach { $0.cancelScroll() }
+            if !selected, hardwareScrollOnTrackpad == true || heldPointerButtons.values.contains(where: \.windowTrackpad) {
+                releaseHardwareInput()
+            }
+            if !selected, sequencePaneKind == .trackpad {
+                twoFingerActive = false
+                cancelRecognizer(.twoFingerViewport)
+                scrollVelocityTracker.reset()
+                cancelPointerAndLegacyTouchState()
+                sequencePaneKind = nil
+                applyInputMode()
+            }
+        }
         /// The current two-finger gesture belongs to a tile (decided when it begins).
         private var workspaceGestureOwned = false
         /// Hybrid zoom: a still of the picture, clipped to the pane and scaled by the fingers,
@@ -4032,14 +4602,14 @@ struct VideoLayerView: UIViewRepresentable {
             let turn = pinch && rotateTarget != .disabled ? recognizer.rotationDelta * 180 / .pi : 0
             switch recognizer.state {
             case .began:
-                // A plain two-finger drag scrolls the Mac while this device controls it, even over a
-                // zoomed or filled pane (owner report 2026-10-31: it only panned). It moves the pane
-                // only in View Only (pan stays local), with Move View on, or as part of a pinch.
-                if WorkspaceTwoFingerPolicy.scrollsMac(isPinch: pinch, inputReachesMac: allowsInput, moveViewActive: moveViewActive) {
+                // An Overview drag may pan from its empty canvas even with control.
+                let start = norm(recognizer.initialMidpoint)
+                if workspacePaneKind?(start) != .overview,
+                   WorkspaceTwoFingerPolicy.scrollsMac(isPinch: pinch, inputReachesMac: allowsInput, moveViewActive: moveViewActive) {
                     workspaceGestureOwned = false
                     return false
                 }
-                workspaceGestureOwned = workspacePinch(true, false, pinch, norm(recognizer.initialMidpoint), norm(recognizer.midpoint),
+                workspaceGestureOwned = workspacePinch(true, false, pinch, start, norm(recognizer.midpoint),
                                                        pinch ? recognizer.scaleRatio : 1, turn, snapRotation)
                 if workspaceGestureOwned { updateZoomPreview(base: base, began: true, ended: false) }
                 return workspaceGestureOwned || pinch   // a pinch never zooms the whole picture in Window mode
@@ -4258,10 +4828,16 @@ struct VideoLayerView: UIViewRepresentable {
 
         private var pictureTouch = ScreenReaderPictureTouch(screenReaderRunning: UIAccessibility.isVoiceOverRunning)
 
+        fileprivate func allowsPictureTouch(at point: CGPoint) -> Bool {
+            pictureTouch.picturePassesTouches && !touchDivisions.contains(where: { $0.contains(point) })
+        }
+
         /// While VoiceOver runs without Direct Touch, touches pass through
         /// this view (nothing here sees them, so nothing reaches the Mac).
+        var touchDivisions: [CGRect] = []
+
         override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            guard pictureTouch.picturePassesTouches else { return nil }
+            guard allowsPictureTouch(at: point) else { return nil }
             return super.hitTest(point, with: event)
         }
 
@@ -4307,6 +4883,28 @@ struct VideoLayerView: UIViewRepresentable {
                     back()
                     return true
                 })
+            }
+            if allowsInput {
+                if let strip = scrollStrips.first(where: { $0.edge.isVertical && !$0.isHidden }) {
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Up")) { _ in
+                        strip.accessibilityDecrement()
+                        return true
+                    })
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Down")) { _ in
+                        strip.accessibilityIncrement()
+                        return true
+                    })
+                }
+                if let strip = scrollStrips.first(where: { !$0.edge.isVertical && !$0.isHidden }) {
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Left")) { _ in
+                        strip.accessibilityDecrement()
+                        return true
+                    })
+                    actions.append(UIAccessibilityCustomAction(name: String(localized: "Scroll Right")) { _ in
+                        strip.accessibilityIncrement()
+                        return true
+                    })
+                }
             }
             accessibilityCustomActions = actions.isEmpty ? nil : actions
         }
@@ -4441,27 +5039,30 @@ struct VideoLayerView: UIViewRepresentable {
             clearInputStateForPause()
         }
 
-        func setVideoEnabled(_ enabled: Bool, showGrid: Bool) {
-            guard enabled != videoEnabled || showGrid != showSurfaceGrid else { return }
-            if enabled != videoEnabled { clearInputStateForPause() }
+        func setVideoEnabled(_ enabled: Bool) {
+            guard enabled != videoEnabled else { return }
+            clearInputStateForPause()
             videoEnabled = enabled
-            showSurfaceGrid = showGrid
             videoContentView.isHidden = !enabled
-            surfaceLayer.isHidden = enabled
-            surfaceGridLayer.isHidden = enabled || !showGrid
-            backgroundColor = .black
+            backgroundColor = enabled ? .black : UIColor(white: 0.07, alpha: 1)
+            cursorLayer.isHidden = !enabled || !cursorVisible || cursorLayer.contents == nil
             setNeedsLayout()
         }
 
-        func setSurfaceContext(safeInsets: ControlSafeInsets,
-                               occupiedControlFrames: [CGRect],
-                               reservedDivisions: [CGRect]) {
-            guard safeInsets != surfaceSafeInsets || occupiedControlFrames != self.occupiedControlFrames
-                    || reservedDivisions != self.reservedDivisions else { return }
-            surfaceSafeInsets = safeInsets
-            self.occupiedControlFrames = occupiedControlFrames
-            self.reservedDivisions = reservedDivisions
+        func setScrollRailFrames(_ frames: [ScrollStripEdge: CGRect]) {
+            guard frames != scrollRailFrames else { return }
+            scrollRailFrames = frames
+            if let momentumEdge, frames[momentumEdge] == nil { cancelScrollMomentum() }
+            for strip in scrollStrips where frames[strip.edge] == nil { strip.cancelScroll() }
             setNeedsLayout()
+        }
+
+        func setScrollOptions(momentum: Bool, sensitivity: Double, feedback: TrackpadScrollFeedback?) {
+            edgeScrollSensitivity = sensitivity
+            scrollMomentumEnabled = momentum
+            if !momentum, scrollMomentumSession != nil { cancelScrollMomentum() }
+            if scrollFeedback !== feedback { scrollFeedback?.stop(immediately: true) }
+            scrollFeedback = feedback
         }
 
         func setGesturePreferences(pinchTarget: ReceiverGestureTarget,
@@ -4550,6 +5151,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         func clearInputStateForPause() {
             releaseHardwareInput()
+            for strip in scrollStrips { strip.cancelScroll() }
             twoFingerActive = false
             discardPendingDown()
             inputEngine.cancelForDisplayPause()
@@ -4611,8 +5213,8 @@ struct VideoLayerView: UIViewRepresentable {
             if locatorLayer.superlayer == nil { layer.addSublayer(locatorLayer) }
             if resumeMarkerLayer.superlayer == nil { layer.addSublayer(resumeMarkerLayer) }
             updateCursorLayout()
-            updateSurfaceLayout()
             CATransaction.commit()
+            layoutScrollStrips()
             // Rotation diagnostics — one line per layout change.
             let video = receiver?.videoSize ?? .zero
             let displayed = currentTransform.displayedRect
@@ -4625,34 +5227,22 @@ struct VideoLayerView: UIViewRepresentable {
             }
         }
 
-        private func updateSurfaceLayout() {
-            surfaceLayer.frame = bounds
-            surfaceGridLayer.frame = bounds
-            let rect = currentTransform.displayedRect.intersection(bounds).insetBy(dx: 0.5, dy: 0.5)
-            guard !videoEnabled, !rect.isNull, rect.width > 1, rect.height > 1 else {
-                surfaceLayer.path = nil
-                surfaceGridLayer.path = nil
-                return
-            }
-            surfaceLayer.path = UIBezierPath(roundedRect: rect, cornerRadius: 12).cgPath
-            guard showSurfaceGrid else {
-                surfaceGridLayer.path = nil
-                return
-            }
-            let dots = UIBezierPath()
-            let spacing: CGFloat = 28
-            let radius: CGFloat = 1.1
-            var y = rect.minY + spacing
-            while y < rect.maxY - spacing / 2 {
-                var x = rect.minX + spacing
-                while x < rect.maxX - spacing / 2 {
-                    dots.append(UIBezierPath(ovalIn: CGRect(x: x - radius, y: y - radius,
-                                                           width: radius * 2, height: radius * 2)))
-                    x += spacing
+        private func layoutScrollStrips() {
+            var visibilityChanged = false
+            for strip in scrollStrips {
+                let clipped = scrollRailFrames[strip.edge]?.intersection(bounds) ?? .zero
+                let frame = clipped.isNull ? .zero : clipped
+                if frame != strip.frame {
+                    if momentumEdge == strip.edge { cancelScrollMomentum() }
+                    strip.cancelScroll()
+                    strip.frame = frame
                 }
-                y += spacing
+                if strip.isHidden != frame.isEmpty {
+                    strip.isHidden = frame.isEmpty
+                    visibilityChanged = true
+                }
             }
-            surfaceGridLayer.path = dots.cgPath
+            if visibilityChanged { refreshPictureAccessibility() }
         }
 
         private func updateCurrentTransform() {
@@ -4762,42 +5352,15 @@ struct VideoLayerView: UIViewRepresentable {
         /// `presentationBase` moves, so there is exactly one place that
         /// decides between `.normal`/`.keyboardOpen`.
         private func unzoomedBaseTransform() -> RemoteViewportTransform {
-            guard let video = receiver?.videoSize, video != .zero,
-                  bounds.width > 0, bounds.height > 0 else {
-                return .invalid
-            }
+            guard !bounds.isEmpty else { return .invalid }
             if !videoEnabled {
-                let portrait = bounds.height > bounds.width
-                let rect = VideoOffSurfaceGeometry.interactionRect(
-                    container: bounds,
-                    safeInsets: surfaceSafeInsets,
-                    occupiedControlFrames: occupiedControlFrames,
-                    portrait: portrait,
-                    inputMode: pointerEngine.inputMode,
-                    remoteAspectSize: video,
-                    divisions: reservedDivisions)
-                #if DEBUG
-                // TRACKPAD REGRESSION forensics: this is the ONE call site
-                // that decides between Trackpad's tall free-form portrait
-                // rect and Direct Touch's aspect-locked one (see
-                // `VideoOffSurfaceGeometry.interactionRect`'s `inputMode ==
-                // .direct` branch). Logging every input here on the next
-                // physical retest tells us immediately whether a wide/
-                // landscape rect in Portrait+Video-Off+Trackpad comes from
-                // `inputMode` unexpectedly reading `.direct`, from
-                // `portrait` being wrong, or from `occupiedControlFrames`
-                // being stale/empty — this file's own logic was audited and
-                // reads correctly for the intended Trackpad case.
-                if rect != lastLoggedTrackpadRect {
-                    lastLoggedTrackpadRect = rect
-                    Log.info("trackpadGeometry: portrait=\(portrait) inputMode=\(pointerEngine.inputMode) "
-                        + "bounds=\(bounds) occupied=\(occupiedControlFrames.count) rect=\(rect)")
-                }
-                #endif
+                let visible = bounds.intersection(keyboardVisibleRect ?? bounds)
+                guard !visible.isNull, !visible.isEmpty else { return .invalid }
                 return RemoteViewportTransform(
                     remoteCrop: CGRect(x: 0, y: 0, width: 1, height: 1),
-                    displayedRect: rect)
+                    displayedRect: visible)
             }
+            guard let video = receiver?.videoSize, video != .zero else { return .invalid }
             if let keyboardVisibleRect, lockScreenShowing {
                 lastCaretBase = nil
                 return RemoteViewportCalculator.lockScreenKeyboardOpen(
@@ -4879,10 +5442,11 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func drawCursor(at point: CGPoint) {
+            if point != cursorNorm { noteCursorMoved() }
             cursorNorm = point
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            cursorLayer.isHidden = !cursorVisible || cursorLayer.contents == nil
+            cursorLayer.isHidden = !videoEnabled || !cursorVisible || cursorLayer.contents == nil
             updateCursorLayout()
             CATransaction.commit()
         }
@@ -4921,7 +5485,10 @@ struct VideoLayerView: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             // Off screen: stop pacing and show the newest report when the view returns.
-            guard window == nil, cursorLink != nil else { return }
+            guard window == nil else { return }
+            for strip in scrollStrips { strip.cancelScroll() }
+            cancelScrollMomentum()
+            guard cursorLink != nil else { return }
             stopCursorLink()
             cursorPacer.settle()
             if let newest = cursorPacer.newest { drawCursor(at: newest) }
@@ -4950,7 +5517,7 @@ struct VideoLayerView: UIViewRepresentable {
             cursorLayer.contents = image
             cursorLayer.anchorPoint = anchor
             cursorNormSize = normSize
-            cursorLayer.isHidden = !cursorVisible
+            cursorLayer.isHidden = !videoEnabled || !cursorVisible
             updateCursorLayout()
             CATransaction.commit()
             #if DEBUG
@@ -4994,6 +5561,42 @@ struct VideoLayerView: UIViewRepresentable {
             CATransaction.commit()
         }
 
+        /// Window mode: when the controls tray fades, the drawn pointer fades with it once it has
+        /// rested for `cursorRestDelay`, and comes back as soon as the Mac reports a move.
+        func setCursorFadesWhenResting(_ fades: Bool) {
+            guard fades != cursorFadesWhenResting else { return }
+            cursorFadesWhenResting = fades
+            updateCursorRestingOpacity()
+        }
+
+        private func noteCursorMoved() {
+            cursorLastMoved = CACurrentMediaTime()
+            guard cursorFadesWhenResting else { return }
+            updateCursorRestingOpacity()
+        }
+
+        private func updateCursorRestingOpacity() {
+            cursorRestCheck?.cancel()
+            cursorRestCheck = nil
+            let rested = CACurrentMediaTime() - cursorLastMoved
+            let fade = cursorFadesWhenResting && rested >= Self.cursorRestDelay
+            let target: Float = fade ? 0 : 1
+            if cursorLayer.opacity != target {
+                let animation = CABasicAnimation(keyPath: "opacity")
+                animation.fromValue = cursorLayer.presentation()?.opacity ?? cursorLayer.opacity
+                animation.toValue = target
+                animation.duration = fade ? 0.28 : 0.12
+                animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                cursorLayer.opacity = target
+                cursorLayer.add(animation, forKey: "restingOpacity")
+            }
+            if cursorFadesWhenResting, !fade {
+                let check = DispatchWorkItem { [weak self] in self?.updateCursorRestingOpacity() }
+                cursorRestCheck = check
+                DispatchQueue.main.asyncAfter(deadline: .now() + (Self.cursorRestDelay - rested) + 0.02, execute: check)
+            }
+        }
+
         func setCursorLocatorEnabled(_ enabled: Bool) {
             guard enabled != cursorLocatorEnabled else { return }
             cursorLocatorEnabled = enabled
@@ -5015,7 +5618,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// Mac (view-only has no spot to take over). It goes with the report, so it is gone
         /// once the pointer is back.
         private func updateResumeMarker() {
-            guard cursorLocatorEnabled, allowsInput, currentTransform.isValid,
+            guard videoEnabled, cursorLocatorEnabled, allowsInput, currentTransform.isValid,
                   let resume = cursorOffDisplay?.resume else {
                 resumeMarkerLayer.isHidden = true
                 return
@@ -5032,7 +5635,7 @@ struct VideoLayerView: UIViewRepresentable {
         private func updateLocatorArrow() {
             // Where the pointer is: on another display, or the drawn one (maybe out of view).
             let target = cursorOffDisplay?.point ?? (cursorVisible && cursorLayer.contents != nil ? cursorNorm : nil)
-            guard cursorLocatorEnabled, currentTransform.isValid, let target else {
+            guard videoEnabled, cursorLocatorEnabled, currentTransform.isValid, let target else {
                 locatorLayer.isHidden = true
                 return
             }
@@ -5398,9 +6001,10 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func beginScroll(at midpoint: CGPoint) {
-            guard let video = receiver?.videoSize, video != .zero else { return }
+            guard remoteScrollScale != nil else { return }
             cancelScrollMomentum()   // touching again immediately cancels any active momentum
             scrollVelocityTracker.reset()
+            scrollVelocityTracker.record(dx: 0, dy: 0, at: CACurrentMediaTime())
             twoFingerActive = true
             lastPan = .zero
             // macOS delivers scroll to whatever sits under the cursor, and
@@ -5420,8 +6024,7 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private func continueScroll(_ recognizer: TwoFingerViewportGestureRecognizer) {
-            guard twoFingerActive, let video = receiver?.videoSize, video != .zero,
-                  let scale = pointsPerRemotePixel(video: video) else { return }
+            guard twoFingerActive, let scale = remoteScrollScale else { return }
             // Cumulative translation since the gesture started, matching
             // `UIPanGestureRecognizer.translation(in:)`'s convention (this
             // recognizer isn't one, so it's derived from the midpoint here
@@ -5435,35 +6038,52 @@ struct VideoLayerView: UIViewRepresentable {
             // Recorded in view points (pre-scale), matching the domain
             // `cancelScrollMomentum`/`beginScrollMomentum` convert from —
             // see `tickScrollMomentum`.
-            scrollVelocityTracker.record(dx: stepX, dy: stepY, at: CACurrentMediaTime())
+            recordScroll(dx: stepX, dy: stepY)
             lastPan = t
         }
 
         /// Starts a decaying momentum phase from the velocity estimated
         /// over the just-ended scroll's recent samples — a no-op if the
         /// release was too slow to clear `ScrollMomentumConfig.minReleaseVelocity`.
-        private func beginScrollMomentum() {
+        private func recordScroll(dx: CGFloat, dy: CGFloat) {
+            let time = CACurrentMediaTime()
+            scrollVelocityTracker.record(dx: dx, dy: dy, at: time)
+            if let scrollFeedback {
+                scrollFeedback.update(scrollVelocityTracker.releaseVelocity(at: time) ?? .zero)
+            }
+        }
+
+        private func beginScrollMomentum(edge: ScrollStripEdge? = nil) {
             let releaseTime = CACurrentMediaTime()
             defer { scrollVelocityTracker.reset() }
-            guard let velocity = scrollVelocityTracker.releaseVelocity(at: releaseTime),
-                  let session = ScrollMomentumSession(initialVelocity: velocity, at: releaseTime) else { return }
+            guard scrollMomentumEnabled, allowsInput,
+                  edge.map({ scrollRailFrames[$0] != nil }) ?? true,
+                  let velocity = scrollVelocityTracker.releaseVelocity(at: releaseTime),
+                  let session = ScrollMomentumSession(initialVelocity: velocity, at: releaseTime) else {
+                scrollFeedback?.stop()
+                return
+            }
+            momentumEdge = edge
             scrollMomentumSession = session
             scrollMomentumDisplayLink?.invalidate()
             let link = CADisplayLink(target: self, selector: #selector(tickScrollMomentum))
+            // Remote input needs no more packets than the standard UIKit refresh cadence.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
             link.add(to: .main, forMode: .common)
             scrollMomentumDisplayLink = link
         }
 
         @objc private func tickScrollMomentum() {
-            guard let session = scrollMomentumSession, let video = receiver?.videoSize, video != .zero,
-                  let scale = pointsPerRemotePixel(video: video) else {
+            let scale: CGFloat? = momentumEdge == nil ? remoteScrollScale : 1
+            guard allowsInput, let session = scrollMomentumSession, let scale else {
                 cancelScrollMomentum()
                 return
             }
             let (delta, alive) = session.tick(now: CACurrentMediaTime())
             if delta.dx != 0 || delta.dy != 0 {
-                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale)
+                sendRemoteScroll(dx: delta.dx / scale, dy: delta.dy / scale, atCurrentCursor: momentumEdge != nil)
             }
+            scrollFeedback?.update(session.velocity, tracking: false)
             if !alive { cancelScrollMomentum() }
         }
 
@@ -5476,6 +6096,12 @@ struct VideoLayerView: UIViewRepresentable {
             scrollMomentumDisplayLink?.invalidate()
             scrollMomentumDisplayLink = nil
             scrollMomentumSession = nil
+            let finishedEdge = momentumEdge
+            momentumEdge = nil
+            if let finishedEdge {
+                scrollStrips.first { $0.edge == finishedEdge }?.momentumEnded()
+            }
+            scrollFeedback?.stop()
         }
 
         /// Toggles between the normal 1x viewport and the most recent
@@ -5571,7 +6197,8 @@ struct VideoLayerView: UIViewRepresentable {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldReceive touch: UITouch) -> Bool {
-            if !videoEnabled && !currentTransform.containsViewPoint(touch.location(in: self)) {
+            if (touch.type == .direct && (touch.view is EdgeScrollStrip || scrollStrips.contains(where: \.isTracking))) ||
+                (!videoEnabled && !currentTransform.containsViewPoint(touch.location(in: self))) {
                 return false
             }
             if gestureRecognizer === threeFingerPanRecognizer
@@ -5875,21 +6502,23 @@ struct VideoLayerView: UIViewRepresentable {
             }
             #endif
             guard !commands.isEmpty, let receiver else { return }
-            // Only `.moveRelative` needs a valid video size (to convert
-            // through the viewport scale) — button down/up MUST still post
-            // even if it's momentarily unknown, so this isn't a guard on
-            // the whole function (a dropped mouseUp would leave the Mac
-            // with a stuck button).
-            let video = receiver.videoSize
+            let trackpad = usesTrackpadPoints(receiver)
             for command in commands {
                 switch command {
                 case .moveAbsolute(let x, let y):
-                    receiver.sendPointerMove(x: x, y: y)
+                    if videoEnabled { receiver.sendPointerMove(x: x, y: y) }
                 case .moveRelative(let dx, let dy):
-                    guard let scale = pointsPerRemotePixel(video: video) else { continue }
-                    receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+                    if trackpad {
+                        receiver.sendPointerMoveRelative(dx: dx, dy: dy, trackpad: true,
+                                                         confined: keepPointerOnReceiverDisplay,
+                                                         workspaceTrackpad: sequencePaneKind == .trackpad)
+                    } else if let scale = remoteScrollScale {
+                        receiver.sendPointerMoveRelative(dx: dx / scale, dy: dy / scale)
+                    }
                 case .mouseDown(let button, let clickCount):
-                    receiver.sendPointerDown(button: button, clickCount: clickCount)
+                    receiver.sendPointerDown(button: button, clickCount: clickCount, trackpad: trackpad,
+                                             confined: keepPointerOnReceiverDisplay,
+                                             workspaceTrackpad: sequencePaneKind == .trackpad)
                     if button == .right {
                         // Preempt the legacy scroll/pinch recognizer from
                         // also claiming these same two touches — see
@@ -5906,9 +6535,9 @@ struct VideoLayerView: UIViewRepresentable {
                 case .scroll(let dx, let dy):
                     // Same units, direction, and momentum sampling as the
                     // two-finger scroll path (`continueScroll`).
-                    guard let scale = pointsPerRemotePixel(video: video) else { continue }
+                    guard let scale = remoteScrollScale else { continue }
                     sendRemoteScroll(dx: CGFloat(dx) / scale, dy: CGFloat(dy) / scale)
-                    scrollVelocityTracker.record(dx: CGFloat(dx), dy: CGFloat(dy), at: CACurrentMediaTime())
+                    recordScroll(dx: CGFloat(dx), dy: CGFloat(dy))
                 case .scrollEnded(let momentum):
                     if momentum {
                         beginScrollMomentum()
@@ -5996,7 +6625,7 @@ struct VideoLayerView: UIViewRepresentable {
             let allFingers = routedTouches.filter { isFinger($0) }
             let usePencilWire = receiver?.macSupportsPencilWire ?? false
 
-            if !pencil.isEmpty {
+            if videoEnabled, !pencil.isEmpty {
                 if usePencilWire {
                     inputEngine.handle(pencil, event: event, ended: ended)
                 } else {
@@ -6046,16 +6675,27 @@ struct VideoLayerView: UIViewRepresentable {
             if !finger.isEmpty && !inputEngine.hasActivePen {
                 if receiver?.macSupportsPointerWire ?? false {
                     handlePointerFingerTouches(phase, finger, event)
-                } else {
+                } else if videoEnabled {
                     send(phase, finger, event)
                 }
             }
         }
 
+        private func surfaceTouches(_ touches: Set<UITouch>, phase: UITouch.Phase) -> Set<UITouch> {
+            if phase == .began, scrollStrips.contains(where: \.isTracking) {
+                touchesBlockedByStrip.formUnion(touches.map(ObjectIdentifier.init))
+            }
+            let allowed = touches.filter { !touchesBlockedByStrip.contains(ObjectIdentifier($0)) }
+            if phase == .ended || phase == .cancelled {
+                touchesBlockedByStrip.subtract(touches.map(ObjectIdentifier.init))
+            }
+            return allowed
+        }
+
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .began)
             guard !touches.isEmpty else { return }
             if workspaceTouch != nil || workspacePaneKind != nil, let first = touches.first {
                 // The pane under the finger as drawn, mid-slide too, so the
@@ -6097,7 +6737,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .moved)
             guard !touches.isEmpty else { return }
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
                 routeNavigationTouches(touches, ended: false)
@@ -6108,7 +6748,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .ended)
             guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
@@ -6125,7 +6765,7 @@ struct VideoLayerView: UIViewRepresentable {
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
             let pointer = touches.filter { $0.type == .indirectPointer }
             if !pointer.isEmpty { handlePointerTouches(pointer, event) }
-            let touches = touches.subtracting(pointer)
+            let touches = surfaceTouches(touches.subtracting(pointer), phase: .cancelled)
             guard !touches.isEmpty else { return }
             trackBlockedSequence(touches, began: false, ended: true)
             if moveViewActive || touches.contains(where: { navigationTouches[ObjectIdentifier($0)] != nil }) {
@@ -6712,48 +7352,544 @@ private struct InputPromptButton: View {
     }
 }
 
-/// "Video is off" on a live session, with the way to turn it back on (#255). Control is the
-/// Request Control prompt's own state, never implied here: with control the dotted trackpad shows,
-/// without it the surface stays plain.
+/// The one-time choice at the start of a video-off episode.
 private struct VideoOffStatus: View {
     let onTurnOn: () -> Void
+    let onUseTrackpad: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
-        // One line when it fits; at large text sizes or on a narrow window the button goes under
-        // the words instead of either being cut off.
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                status.lineLimit(1)
-                turnOn
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Video is off", systemImage: "video.slash.fill")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                BannerCloseButton(onDismiss: onDismiss)
             }
-            VStack(spacing: 6) {
-                status.multilineTextAlignment(.center)
-                turnOn
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    turnOn.fixedSize(horizontal: true, vertical: false)
+                    useTrackpad.fixedSize(horizontal: true, vertical: false)
+                }
+                VStack(spacing: 6) {
+                    turnOn
+                    useTrackpad
+                }
             }
-            .padding(.vertical, 4)
         }
-        .foregroundStyle(.white)
-        .padding(.leading, 14)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color(white: 0.16).opacity(0.94)))
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
-        .padding(.horizontal, 8)
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.primary.opacity(0.12), lineWidth: 0.75))
+        .padding(.top, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("videoOffStatus")
-    }
-
-    private var status: some View {
-        Label(String(localized: "Video is off"), systemImage: "video.slash.fill")
-            .font(.subheadline.weight(.semibold))
+        .dismissibleSessionNotice(onDismiss: onDismiss)
     }
 
     private var turnOn: some View {
-        Button(String(localized: "Turn Video On"), action: onTurnOn)
-            .font(.subheadline.weight(.semibold))
+        Button("Turn Video On", action: onTurnOn)
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
             .accessibilityIdentifier("videoOffTurnOn")
+    }
+
+    private var useTrackpad: some View {
+        Button("Use as Trackpad", action: onUseTrackpad)
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("videoOffUseTrackpad")
+    }
+}
+
+private struct BannerCloseButton: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        Button(action: onDismiss) {
+            Image(systemName: "xmark")
+                .font(.footnote.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Dismiss")
+    }
+}
+
+private extension View {
+    func dismissibleSessionNotice(onDismiss: @escaping () -> Void) -> some View {
+        simultaneousGesture(DragGesture(minimumDistance: 20).onEnded { drag in
+            let distance = drag.translation
+            if distance.height < -30 || abs(distance.width) > 45 { onDismiss() }
+        })
+        .accessibilityAction(named: Text("Dismiss"), onDismiss)
+    }
+}
+
+/// The Mac's pointer and screen arrangement are presentation-only. Receiver touches
+/// on this area still go directly to the relative-input surface behind it.
+@MainActor final class TrackpadScrollFeedback: ObservableObject {
+    @Published private(set) var velocity = CGVector.zero
+    private var idle: Task<Void, Never>?
+
+    func update(_ sample: CGVector, tracking: Bool = true) {
+        guard !UIAccessibility.isReduceMotionEnabled, !ProcessInfo.processInfo.isLowPowerModeEnabled else {
+            stop(immediately: true)
+            return
+        }
+        idle?.cancel()
+        if sample != velocity { velocity = sample }
+        if tracking, sample != .zero {
+            idle = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(ScrollMomentumConfig.velocitySampleWindow))
+                guard !Task.isCancelled else { return }
+                self?.stop()
+            }
+        }
+    }
+
+    func stop(immediately: Bool = false) {
+        idle?.cancel()
+        idle = nil
+        guard velocity != .zero else { return }
+        withAnimation(immediately ? nil : .easeOut(duration: ScrollMomentumConfig.velocitySampleWindow)) {
+            velocity = .zero
+        }
+    }
+}
+
+private struct TrackpadSurfaceDecoration: View {
+    let showDots: Bool
+    let showBorder: Bool
+    /// A quiet trail under each finger (`TrackpadTouchTrail`), only while touches reach the Mac.
+    var touchTrail = false
+    let dotAreas: [CGRect]
+    let guideArea: CGRect
+    let displays: [TrackpadDisplayGeometry]
+    let cursor: TrackpadCursorPresentation
+    @ObservedObject var feedback: TrackpadScrollFeedback
+    @StateObject private var trail = TrackpadTouchTrail()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GeometryReader { proxy in
+            let frame = proxy.frame(in: .global)
+            let areas = dotAreas.filter { $0.width > 1 && $0.height > 1 }
+            let guide = guideArea
+            let shapes = outlineShapes(areas, origin: frame.origin)
+            let result = TrackpadDisplayGuideGeometry.layout(
+                displays: displays.map(\.bounds), cursor: nil, in: guide.size)
+            let outlines = result.outlines.map { $0.offsetBy(dx: guide.minX, dy: guide.minY) }
+            let trailOn = touchTrail && !reduceMotion
+            ZStack(alignment: .topLeading) {
+                if showDots {
+                    // Masked to the pad's own outline: no dot shows past its border or its
+                    // rounded corners.
+                    TrackpadDots(areas: areas, outlines: outlines,
+                                 velocity: reduceMotion ? .zero : feedback.velocity)
+                        .mask(TrackpadAreasShape(shapes: shapes).fill(style: FillStyle(eoFill: false)))
+                }
+                if trailOn {
+                    TrackpadTouchTrailView(trail: trail, origin: frame.origin)
+                        .mask(TrackpadAreasShape(shapes: shapes).fill(style: FillStyle(eoFill: false)))
+                }
+                if showBorder { border(shapes) }
+                guideOutlines(outlines)
+                ForEach(Array(zip(displays, outlines)), id: \.0.id) { display, outline in
+                    if let name = display.name, outline.width >= 52, outline.height >= 24 {
+                        Text(verbatim: name)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundStyle(.white.opacity(0.30))
+                            .frame(width: outline.width - 12, alignment: .leading)
+                            .position(x: outline.midX, y: outline.minY + 11)
+                    }
+                }
+                if !displays.isEmpty, !guide.isEmpty { TrackpadCursorMarker(cursor: cursor, displays: displays, area: guide) }
+            }
+            .background {
+                if trailOn { TrackpadTouchTrailWatch(trail: trail).allowsHitTesting(false).accessibilityHidden(true) }
+            }
+            .onAppear { trail.regions = areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) } }
+            .onChange(of: areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) }) { trail.regions = $0 }
+        }
+    }
+
+    /// Each area's outline, drawn in place: on the display's own edges where it reaches them,
+    /// curving with the glass in a screen corner, twelve points everywhere else.
+    private func outlineShapes(_ areas: [CGRect], origin: CGPoint) -> [(area: CGRect, shape: PaneOutlineShape)] {
+        let screen = PaneOutlineShape.screenBounds
+        let screenRadius = PaneOutlineShape.screenCornerRadius
+        return areas.map { area in
+            (area, PaneOutlineShape.following(screen: screen, screenRadius: screenRadius,
+                                              rect: area.offsetBy(dx: origin.x, dy: origin.y), inner: 12))
+        }
+    }
+
+    private func border(_ shapes: [(area: CGRect, shape: PaneOutlineShape)]) -> some View {
+        Canvas { context, _ in
+            for (area, shape) in shapes {
+                context.stroke(shape.inset(by: 0.75).path(in: area),
+                               with: .color(Color(uiColor: .separator)), lineWidth: 1.5)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func guideOutlines(_ outlines: [CGRect]) -> some View {
+        Canvas { context, _ in
+            for outline in outlines {
+                context.stroke(Path(roundedRect: outline, cornerRadius: 3),
+                               with: .color(.white.opacity(0.18)), lineWidth: 1)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The pad's areas as one shape (each with its own outline's corners), for masking.
+private struct TrackpadAreasShape: Shape {
+    let shapes: [(area: CGRect, shape: PaneOutlineShape)]
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for (area, shape) in shapes { path.addPath(shape.path(in: area)) }
+        return path
+    }
+}
+
+/// Cursor samples invalidate only the marker while the dot grid and video keep their own cadence.
+private struct TrackpadCursorMarker: View {
+    @ObservedObject var cursor: TrackpadCursorPresentation
+    let displays: [TrackpadDisplayGeometry]
+    let area: CGRect
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let result = TrackpadDisplayGuideGeometry.layout(
+            displays: displays.map(\.bounds), cursor: cursor.location, in: area.size)
+        if let marker = result.cursor, let point = cursor.location,
+           let target = displays.first(where: { $0.bounds.contains(point) }) {
+            let topology = displays.flatMap { display in
+                [CGFloat(display.id), display.bounds.minX, display.bounds.minY,
+                 display.bounds.width, display.bounds.height]
+            }
+            Circle().fill(.white.opacity(0.65))
+                .frame(width: 6, height: 6)
+                .position(x: area.minX + marker.x, y: area.minY + marker.y)
+                .animation(reduceMotion ? nil : .linear(duration: TrackpadLayoutWire.sampleInterval), value: marker)
+                .id(topology + [CGFloat(target.id), area.minX, area.minY, area.width, area.height])
+        }
+    }
+}
+
+private nonisolated struct TrackpadDots: View, Animatable {
+    let areas: [CGRect]
+    let outlines: [CGRect]
+    var velocity: CGVector
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { .init(velocity.dx, velocity.dy) }
+        set { velocity = .init(dx: newValue.first, dy: newValue.second) }
+    }
+
+    var body: some View {
+        Canvas { context, _ in
+            let radius = TrackpadDisplayGuideGeometry.dotRadius
+            // Limit the longest dimension to 1.6× the resting dot, even at fast flick speed.
+            let speed = hypot(velocity.dx, velocity.dy)
+            let fullStretch = min(1, speed / (ScrollMomentumConfig.maxReleaseVelocity / 4))
+            let maximumRadius = TrackpadDisplayGuideGeometry.stretchedDotRadius
+            let longRadius = radius + (maximumRadius - radius) * fullStretch
+            let ellipse = Path(ellipseIn: CGRect(x: -longRadius, y: -radius,
+                                                width: 2 * longRadius, height: 2 * radius))
+                .applying(CGAffineTransform(rotationAngle: atan2(velocity.dy, velocity.dx)))
+            var dots = Path()
+            for area in areas {
+                for center in TrackpadDisplayGuideGeometry.dotCenters(in: area, excluding: outlines) {
+                    dots.addPath(ellipse, transform: CGAffineTransform(translationX: center.x, y: center.y))
+                }
+            }
+            context.fill(dots, with: .color(.white.opacity(0.28)))
+        }
+    }
+}
+
+#if DEBUG
+/// An offline fixture for the actual Video Off presentation. The only state
+/// it changes is local to the fixture; there is no connection or input.
+private struct UITestTrackpadFixture: View {
+    static var displayCount: Int? {
+        ProcessInfo.processInfo.environment["MEOW_UITEST_TRACKPAD_DISPLAYS"].flatMap(Int.init)
+    }
+
+    let displayCount: Int
+    @State private var showChoice = true
+    @State private var videoOn = false
+    @State private var feedback = TrackpadScrollFeedback()
+    private let scrollMode = ProcessInfo.processInfo.environment["MEOW_UITEST_EDGE_SCROLL"]
+
+    var body: some View {
+        let displays = Array([
+            TrackpadDisplayGeometry(id: 1, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982), name: "Built-in Display"),
+            TrackpadDisplayGeometry(id: 2, bounds: CGRect(x: 1530, y: -260, width: 1920, height: 1080), name: "Studio Display"),
+        ].prefix(max(0, displayCount)))
+        ZStack(alignment: .top) {
+            Color(white: 0.07).ignoresSafeArea()
+                .accessibilityHidden(true)
+            if videoOn {
+                Text("Video on").accessibilityIdentifier("uitestTrackpadVideoOn")
+            } else {
+                GeometryReader { proxy in
+                    let area = CGRect(origin: .zero, size: proxy.size)
+                    let divisions = ControlReservedRegion.frames(of: .division, in: ControlReservedRegion.active(in: proxy))
+                    ZStack {
+                        if let scrollMode {
+                            UITestEdgeScrollSurface(area: area, divisions: divisions, mode: scrollMode, feedback: feedback)
+                        }
+                        TrackpadSurfaceDecoration(
+                            showDots: ProcessInfo.processInfo.environment["MEOW_UITEST_TRACKPAD_DOTS"] != "0",
+                            showBorder: true,
+                            dotAreas: VideoOffSurfaceGeometry.usablePieces(of: area, removing: divisions),
+                            guideArea: VideoOffSurfaceGeometry.usablePiece(of: area, removing: divisions),
+                            displays: displays, cursor: TrackpadCursorPresentation(location: displays.last.map {
+                                CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)
+                            }), feedback: feedback)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                if showChoice, scrollMode == nil {
+                    VideoOffStatus(onTurnOn: { videoOn = true }, onUseTrackpad: dismiss, onDismiss: dismiss)
+                        .frame(maxWidth: 400)
+                        .padding(.horizontal, 12)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .preferredColorScheme(.dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("uitestTrackpadSurface")
+    }
+
+    private func dismiss() { showChoice = false }
+}
+
+private struct UITestEdgeScrollSurface: UIViewRepresentable {
+    let area: CGRect
+    let divisions: [CGRect]
+    let mode: String
+    let feedback: TrackpadScrollFeedback
+
+    func makeUIView(context: Context) -> VideoLayerView.VideoView {
+        let view = VideoLayerView.VideoView()
+        view.setVideoEnabled(false)
+        view.isAccessibilityElement = false
+        return view
+    }
+
+    func updateUIView(_ view: VideoLayerView.VideoView, context: Context) {
+        let preferences = ReceiverControlPreferences()
+        let edges: [ScrollStripEdge] = mode == "hidden" ? [] : preferences.activeScrollEdges(trackpad: mode != "video")
+        view.setScrollRailFrames(EdgeScrollStripGeometry.frames(edges: edges, in: area, avoiding: divisions))
+        view.setScrollOptions(momentum: true, sensitivity: EdgeScrollSensitivity.defaultValue, feedback: feedback)
+    }
+}
+#endif
+
+private struct ReceiverEdgeScrollOverlay: UIViewRepresentable {
+    let layer: EdgeScrollRailLayer
+    let touchExclusions: [CGRect]
+
+    func makeUIView(context: Context) -> EdgeScrollRailLayer { layer }
+    func updateUIView(_ view: EdgeScrollRailLayer, context: Context) {
+        view.touchExclusions = touchExclusions
+    }
+}
+
+/// Hit-test just the strips. Non-touch events pass through to the workspace;
+/// the video view still handles any hardware touches forwarded by a strip.
+private final class EdgeScrollRailLayer: UIView {
+    private weak var surface: VideoLayerView.VideoView?
+    var touchExclusions: [CGRect] = []
+
+    func install(_ strips: [EdgeScrollStrip], over surface: VideoLayerView.VideoView) {
+        self.surface = surface
+        subviews.forEach { $0.removeFromSuperview() }
+        strips.forEach { addSubview($0) }
+    }
+
+    override var next: UIResponder? { surface ?? super.next }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if let event, event.type != .touches { return nil }
+        // Pane buttons can take their own touches without resizing the rail.
+        guard !touchExclusions.contains(where: { $0.contains(point) }) else { return nil }
+        // The strips count as picture touches even though they now live above it.
+        // VoiceOver's adjustable actions remain independent of direct hit testing.
+        guard let hit = super.hitTest(point, with: event), hit !== self,
+              let surface, surface.window === window,
+              surface.allowsPictureTouch(at: convert(point, to: surface)) else { return nil }
+        return hit
+    }
+}
+
+/// Touch ownership stays with the strip from contact to release.
+private final class EdgeScrollStrip: UIView {
+    let edge: ScrollStripEdge
+    weak var surface: VideoLayerView.VideoView?
+    var mayBegin: (() -> Bool)?
+    var onBegan: (() -> Void)?
+    var onDelta: ((CGFloat) -> Void)?
+    var onEnded: ((Bool) -> Bool)?
+    private weak var activeTouch: UITouch?
+    private var position: CGFloat = 0
+    private var interaction = EdgeScrollInteraction()
+    private var holdTask: Task<Void, Never>?
+    private let rail = UIView()
+    private let contact = UIView()
+    var isTracking: Bool { activeTouch != nil }
+
+    init(edge: ScrollStripEdge) {
+        self.edge = edge
+        super.init(frame: .zero)
+        rail.backgroundColor = .white
+        rail.layer.shadowColor = UIColor.black.cgColor
+        rail.layer.shadowOpacity = 0.45
+        rail.layer.shadowRadius = 1
+        rail.layer.shadowOffset = .zero
+        rail.isUserInteractionEnabled = false
+        contact.backgroundColor = .white
+        contact.isUserInteractionEnabled = false
+        addSubview(rail)
+        rail.addSubview(contact)
+        isAccessibilityElement = true
+        accessibilityLabel = edge.isVertical ? String(localized: "Vertical Scrollbar") : String(localized: "Horizontal Scrollbar")
+        accessibilityIdentifier = edge.isVertical ? "edgeScrollVertical" : "edgeScrollHorizontal"
+        accessibilityTraits = .adjustable
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        updateAppearance()
+    }
+
+    private func updateAppearance(animated: Bool = false) {
+        let expanded = interaction.isExpanded
+        accessibilityValue = expanded ? String(localized: "Expanded") : nil
+        let frames = EdgeScrollStripGeometry.visualFrames(edge: edge, size: bounds.size,
+                                                           expanded: expanded, position: position)
+        let update = {
+            self.rail.frame = frames.rail
+            self.rail.layer.cornerRadius = min(frames.rail.width, frames.rail.height) / 2
+            self.rail.backgroundColor = UIColor.white.withAlphaComponent(expanded ? 0.62 : 0.27)
+            self.contact.frame = frames.contact
+            self.contact.layer.cornerRadius = min(frames.contact.width, frames.contact.height) / 2
+            self.contact.alpha = self.isTracking ? 0.85 : 0
+        }
+        if animated && !UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.24, delay: 0, usingSpringWithDamping: 0.88,
+                           initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction],
+                           animations: update)
+        } else {
+            update()
+        }
+    }
+
+    private func location(of touch: UITouch) -> CGFloat {
+        let point = touch.location(in: self)
+        return edge.isVertical ? point.y : point.x
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesBegan(otherTouches, with: event) }
+        guard activeTouch == nil, let touch = touches.first(where: { $0.type == .direct }),
+              mayBegin?() != false,
+              event?.allTouches?.contains(where: {
+                  $0.view === surface && $0.phase != .ended && $0.phase != .cancelled
+              }) != true else { return }
+        activeTouch = touch
+        position = location(of: touch)
+        holdTask?.cancel()
+        holdTask = nil
+        interaction.begin()
+        onBegan?()
+        updateAppearance(animated: true)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesMoved(otherTouches, with: event) }
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        let next = location(of: touch)
+        let delta = next - position
+        position = next
+        updateAppearance()
+        if delta != 0 { onDelta?(delta) }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesEnded(otherTouches, with: event) }
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        finish(released: true)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let otherTouches = touches.filter { $0.type != .direct }
+        if !otherTouches.isEmpty { super.touchesCancelled(otherTouches, with: event) }
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        finish(released: false)
+    }
+
+    override func accessibilityIncrement() { accessibilityScrollStep(-40) }
+    override func accessibilityDecrement() { accessibilityScrollStep(40) }
+
+    private func accessibilityScrollStep(_ delta: CGFloat) {
+        guard mayBegin?() != false else { return }
+        holdTask?.cancel()
+        holdTask = nil
+        interaction.begin()
+        onBegan?()
+        onDelta?(delta)
+        finish(released: false)
+    }
+
+    func cancelScroll() {
+        let wasTracking = isTracking
+        activeTouch = nil
+        holdTask?.cancel()
+        holdTask = nil
+        interaction.reset()
+        updateAppearance()
+        if wasTracking { _ = onEnded?(false) }
+    }
+
+    func momentumEnded() {
+        interaction.momentumEnded(now: CACurrentMediaTime())
+        scheduleIdle()
+    }
+
+    private func finish(released: Bool) {
+        activeTouch = nil
+        let coasting = onEnded?(released) ?? false
+        interaction.end(coasting: coasting, now: CACurrentMediaTime())
+        updateAppearance(animated: true)
+        scheduleIdle()
+    }
+
+    private func scheduleIdle() {
+        guard let holdUntil = interaction.holdUntil else { return }
+        holdTask?.cancel()
+        holdTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, holdUntil - CACurrentMediaTime())))
+            guard let self, !Task.isCancelled else { return }
+            self.holdTask = nil
+            self.interaction.settle(now: CACurrentMediaTime())
+            self.updateAppearance(animated: true)
+        }
     }
 }
 

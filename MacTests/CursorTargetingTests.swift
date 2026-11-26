@@ -118,6 +118,35 @@ final class CursorTargetingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(events.posted.last).location, here)
     }
 
+    func testDesktopTrackpadDragCrossesDisplaysAndRevocationReleasesIt() throws {
+        let left = CGRect(x: 0, y: 0, width: 100, height: 80)
+        let right = CGRect(x: 100, y: -20, width: 200, height: 120)
+        let cursor = CGPoint(x: 95, y: 40)
+        let injector = makeInjector(cursor: cursor)
+        injector.desktopDisplayBounds = { point in
+            [left, right].first { $0.contains(point) }
+        }
+
+        injector.handlePointerDown(button: .left, clickCount: 1, desktopTrackpad: true)
+        injector.handlePointerMoveRelative(dx: 10, dy: 10, trackpadPoints: true, desktopTrackpad: true)
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseDragged])
+        XCTAssertEqual(events.posted.last?.location, CGPoint(x: 105, y: 50))
+
+        grant.set(false)
+        injector.cancelActiveInput()
+        injector.handlePointerMoveRelative(dx: 10, dy: 10, trackpadPoints: true, desktopTrackpad: true)
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseDragged, .leftMouseUp])
+    }
+
+    func testDesktopTrackpadDoesNotJumpIntoAGapInTheDisplayArrangement() {
+        let display = CGRect(x: -100, y: 0, width: 100, height: 100)
+        let cursor = CGPoint(x: -4, y: 20)
+        let bounds: (CGPoint) -> CGRect? = { display.contains($0) ? display : nil }
+        XCTAssertEqual(InputCoordinateMapper.desktopRelativePoint(from: cursor, dx: 20, dy: 10, displayAt: bounds),
+                       CGPoint(x: -1, y: 30))
+        XCTAssertNil(InputCoordinateMapper.desktopRelativePoint(from: cursor, dx: .infinity, dy: 0, displayAt: bounds))
+    }
+
     func testAPressWithTheCursorElsewhereNeverClicksAnotherDisplay() throws {
         try XCTSkipIf(display.isEmpty, "needs a display")
         let injector = makeInjector(cursor: elsewhere)
@@ -184,6 +213,73 @@ final class CursorTargetingTests: XCTestCase {
 
     // MARK: - Window mode binding
 
+    func testEdgeStripScrollsAtTheCurrentCursorWithoutRetargetingAndStopsOnRevocation() {
+        let actual = CGPoint(x: 45, y: 60)
+        let injector = makeInjector(cursor: actual)
+        let mapper = BindingMapper()
+        var mappings = 0
+        mapper.onMap = { _, _ in
+            mappings += 1
+            return CGPoint(x: 200, y: 400)
+        }
+        injector.setTargetMapper(mapper)
+        injector.handleScroll(dx: 0, dy: 40, atCurrentCursor: true)
+        grant.set(false)
+        injector.handleScroll(dx: 0, dy: 40, atCurrentCursor: true)
+        XCTAssertEqual(mappings, 0)
+        XCTAssertEqual(events.posted.map(\.type), [.scrollWheel])
+        XCTAssertEqual(events.posted.first?.location, actual)
+    }
+
+    func testHorizontalEdgeScrollPostsOnlyWheelTwoAtTheCurrentCursor() throws {
+        let actual = CGPoint(x: 45, y: 60)
+        let injector = makeInjector(cursor: actual)
+        let mapper = BindingMapper()
+        mapper.onMap = { _, _ in
+            XCTFail("An edge rail must scroll at the real cursor without consulting the pane mapper")
+            return CGPoint(x: 200, y: 400)
+        }
+        injector.setTargetMapper(mapper)
+
+        injector.handleScroll(dx: -40, dy: 0, atCurrentCursor: true)
+
+        XCTAssertEqual(events.posted.map(\.type), [.scrollWheel])
+        let scroll = try XCTUnwrap(events.posted.first)
+        XCTAssertEqual(scroll.location, actual)
+        XCTAssertEqual(scroll.wheel1PointDelta, 0)
+        XCTAssertEqual(scroll.wheel2PointDelta, -40)
+    }
+
+    func testWorkspacePressUsesItsOwnPointAndPostsOnce() {
+        let mapper = BindingMapper()
+        let injector = makeInjector(cursor: CGPoint(x: 20, y: 30))
+        injector.setTargetMapper(mapper)
+        let pressed = CGPoint(x: 0.8, y: 0.3)
+        let mapped = CGPoint(x: 680, y: 150)
+        var presses: [CGPoint] = []
+        mapper.onMap = { phase, point in
+            if phase == .down, let point { presses.append(point) }
+            return mapped
+        }
+        injector.handlePointerDown(button: .left, clickCount: 1, workspacePoint: pressed)
+        injector.handlePointerUp(button: .left, clickCount: 1)
+        XCTAssertEqual(presses, [pressed])
+        XCTAssertEqual(events.posted.map(\.type), [.leftMouseDown, .leftMouseUp])
+        XCTAssertEqual(events.posted.first?.location, mapped)
+    }
+
+    func testWorkspacePressIsRefusedIfControlIsRevokedWhileMapping() {
+        let mapper = BindingMapper()
+        let injector = makeInjector(cursor: .zero)
+        injector.setTargetMapper(mapper)
+        mapper.onMap = { [grant] _, _ in
+            grant.set(false)
+            return CGPoint(x: 680, y: 150)
+        }
+        injector.handlePointerDown(button: .left, clickCount: 1, workspacePoint: CGPoint(x: 0.8, y: 0.3))
+        XCTAssertTrue(events.posted.isEmpty)
+    }
+
     func testCancellingInputEndsTheWorkspaceDragBinding() {
         let mapper = BindingMapper()
         let injector = makeInjector(cursor: .zero)
@@ -204,20 +300,33 @@ final class CursorTargetingTests: XCTestCase {
     }
 }
 
-/// Records each posted event's type and location.
+/// Records event coordinates and scroll deltas without posting to the desktop.
 private final class LocatedEventSink: SyntheticEventSink, @unchecked Sendable {
-    struct Posted { let type: CGEventType; let location: CGPoint }
+    struct Posted {
+        let type: CGEventType
+        let location: CGPoint
+        let wheel1PointDelta: Int64
+        let wheel2PointDelta: Int64
+    }
     private let lock = NSLock()
     private var entries: [Posted] = []
     var posted: [Posted] { lock.withLock { entries } }
     func post(_ event: CGEvent) {
-        lock.withLock { entries.append(Posted(type: event.type, location: event.location)) }
+        let posted = Posted(type: event.type, location: event.location,
+                            wheel1PointDelta: event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1),
+                            wheel2PointDelta: event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2))
+        lock.withLock { entries.append(posted) }
     }
 }
 
 private final class BindingMapper: InputTargetMapper, @unchecked Sendable {
     var cancels = 0
-    func mapPointer(phase: InputMapPhase, x: Double?, y: Double?, dx: Double, dy: Double) -> CGPoint? { nil }
+    var onMap: ((InputMapPhase, CGPoint?) -> CGPoint?)?
+    func mapPointer(phase: InputMapPhase, x: Double?, y: Double?, dx: Double, dy: Double) -> CGPoint? {
+        let point: CGPoint?
+        if let x, let y { point = CGPoint(x: x, y: y) } else { point = nil }
+        return onMap?(phase, point)
+    }
     func scrollVector(dx: Double, dy: Double) -> CGVector { .zero }
     func keyboardTargetReady() -> Bool { true }
     func locate(x: Double, y: Double) -> CGPoint? { nil }

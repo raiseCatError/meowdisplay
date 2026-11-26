@@ -247,6 +247,14 @@ final class ReceiverUISink: Sendable {
         target?.applyVideoStateUpdate(width: width, height: height, enabled: enabled)
     }
 
+    func publishTrackpadLayoutSupport(_ supported: Bool) {
+        target?.applyTrackpadLayoutSupport(supported)
+    }
+
+    func publishTrackpadLayout(_ sample: TrackpadLayoutWire.Sample) {
+        target?.applyTrackpadLayout(sample)
+    }
+
     func publishActiveStreamCodec(_ codec: StreamCodec) {
         target?.applyActiveStreamCodecUpdate(codec)
     }

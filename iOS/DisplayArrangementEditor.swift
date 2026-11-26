@@ -55,6 +55,13 @@ struct DisplayArrangementEditor: View {
             if busy { model.revertDisplayArrangement() }
         }
         .onChange(of: model.catalog?.displays ?? []) { displays in catalogChanged(displays) }
+        .onChange(of: status) { newStatus in
+            switch newStatus {
+            case .finished(.kept, _): edit.acceptKeptArrangement()
+            case .finished(.reverted, _): edit.reset()
+            default: break
+            }
+        }
     }
 
     /// Kept or reverted: the editor's starting point is no longer the Mac's arrangement.
@@ -92,6 +99,8 @@ struct DisplayArrangementEditor: View {
         DragGesture(minimumDistance: 2)
             .onChanged { value in
                 if drag?.id != display.id {
+                    model.clearDisplayArrangeStatus()
+                    restarted = false
                     drag = (display.id, display.frame.origin)
                     frozenCamera = camera
                 }
@@ -126,10 +135,9 @@ struct DisplayArrangementEditor: View {
         let overview = DisplayOverviewModel(catalog: displays)
         guard overview.drawnDisplays.count >= 2, overview.hasArrangement else { return }
         let next = DisplayArrangementEdit(model: overview)
-        guard next.original != edit.original else { return }
+        guard next.original.sorted(by: { $0.id < $1.id }) != edit.original.sorted(by: { $0.id < $1.id }) else { return }
         restarted = edit.isChanged && !isFinishedChange
         edit = next
-        if isFinishedChange { model.clearDisplayArrangeStatus() }
     }
 
     /// Fit-all around where the displays started and where they are now.
@@ -179,7 +187,7 @@ private struct DisplayArrangementEditorHeader: View {
             Spacer()
             Button("Apply", action: onApply)
                 .fontWeight(.semibold)
-                .disabled(!canApply || finished)
+                .disabled(!canApply)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

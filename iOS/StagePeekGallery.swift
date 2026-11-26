@@ -283,6 +283,26 @@ private struct StagePeekDockScrollKey: PreferenceKey {
 
 // MARK: - Cards
 
+struct StagePeekRestoreButton: View {
+    @ObservedObject var model: WorkspaceModel
+    let window: CatalogWindowItem
+
+    var body: some View {
+        if let action = model.minimizedWindowAction(window) {
+            Button { model.showMinimizedWindow(window) } label: {
+                Image(systemName: action == .show ? "macwindow" : "hand.raised")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.65), in: Circle())
+            .accessibilityLabel(Text(action.title))
+            .accessibilityIdentifier("stagePeekShowOnMac")
+        }
+    }
+}
+
 struct StagePeekWindowCard: View {
     @ObservedObject var model: WorkspaceModel
     let window: CatalogWindowItem
@@ -496,6 +516,57 @@ struct StagePeekArrangementPlaceholderTile: View {
 
 // MARK: - Expanded gallery
 
+private struct ExtendedDisplaySetup: View {
+    @ObservedObject var model: WorkspaceModel
+    let size: CGSize
+    let scale: CGFloat
+    @State private var shape = ExtendDisplayShape.automatic
+    @State private var desktopSize = ExtendDesktopSize.standard
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Aspect Ratio", selection: $shape) {
+                    Text("Match Receiver").tag(ExtendDisplayShape.automatic)
+                    Text(ExtendDisplayShape.r16x10.title).tag(ExtendDisplayShape.r16x10)
+                    Text(ExtendDisplayShape.r16x9.title).tag(ExtendDisplayShape.r16x9)
+                    Text(ExtendDisplayShape.r4x3.title).tag(ExtendDisplayShape.r4x3)
+                }
+                Picker("Resolution", selection: $desktopSize) {
+                    Text("Automatic").tag(ExtendDesktopSize.standard)
+                    Text(ExtendDesktopSize.larger.title).tag(ExtendDesktopSize.larger)
+                    Text(ExtendDesktopSize.largest.title).tag(ExtendDesktopSize.largest)
+                }
+                Text("The Mac adds the display as a tab. The display stays available while this Window session is connected.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if model.extendedDisplayBusy {
+                    ProgressView("Adding Extended Display…")
+                }
+                if let notice = model.extendedDisplayNotice { Text(notice).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("Add Extended Display")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(model.extendedDisplayBusy)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        model.requestExtendedDisplay(size: size, scale: scale,
+                                                     shape: shape, desktopSize: desktopSize)
+                    }
+                    .disabled(model.extendedDisplayBusy || model.controlState() != .allowed)
+                }
+            }
+        }
+        .interactiveDismissDisabled(model.extendedDisplayBusy)
+        .onChange(of: model.extendedDisplayBusy) { busy in
+            if !busy, model.extendedDisplayNotice == nil, model.extendedDisplayID != nil { dismiss() }
+        }
+    }
+}
+
 struct StagePeekGallery: View {
     @ObservedObject var model: WorkspaceModel
     let query: String
@@ -505,8 +576,10 @@ struct StagePeekGallery: View {
     let topInset: CGFloat
     let onWindow: (CatalogWindowItem) -> Void
     let onDisplay: (CatalogDisplayItem) -> Void
+    let onAddDisplayFromMirror: (CatalogDisplayItem, Bool) -> Void
     let onApp: (MacAppItem) -> Void
     let onAddTile: (CatalogWindowItem) -> Void
+    var onAddOverviewTab: (() -> Void)?
     /// A card was dropped (or the drag ended): the peek decides whether to close.
     var onDragEnded: (Bool) -> Void = { _ in }
     /// Search the Mac's approved folders for the query (Remote Finder), when the Mac offers it.
@@ -522,6 +595,7 @@ struct StagePeekGallery: View {
     var onFloat: ((CatalogWindowItem) -> Void)?
     /// Open Fullscreen for the app shown (its header, its empty state; nil: not offered).
     var onFullscreen: ((MacAppItem) -> Void)? = nil
+    var receiverSize: CGSize = .zero
     @AppStorage(StagePeekExpandedLayout.storageKey) private var expandedLayout = StagePeekExpandedLayout.gallery.rawValue
     @State private var spatialPage = 0
     @State private var visible: [UInt32] = []
@@ -538,6 +612,9 @@ struct StagePeekGallery: View {
     @State private var cardGestureClock = CardGestureClock()
     /// The arrangement the Arrange… editor opened with (nil: closed).
     @State private var arrangeOverview: DisplayOverviewModel?
+    @State private var showExtendedDisplaySetup = false
+    @State private var confirmRemoveExtendedDisplay = false
+    @Environment(\.displayScale) private var displayScale
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
     @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
@@ -599,7 +676,23 @@ struct StagePeekGallery: View {
                 } else {
                     if let displays = model.catalog?.displays, !displays.isEmpty {
                         displaysHeader(displays)
+                        if model.overviewTabTarget != nil, let onAddOverviewTab {
+                            Button(action: onAddOverviewTab) {
+                                Label("Add Overview as Tab", systemImage: "rectangle.on.rectangle")
+                            }
+                            .accessibilityHint("Shows the live Mac displays as a tab in the current pane.")
+                            .accessibilityIdentifier("displayOverviewAddAsTab")
+                        }
                         displaysSection(displays, cols)
+                    }
+                    if model.windowMode, model.extendedDisplaySupported, receiverSize.width > 0 {
+                        extendedDisplayAction
+                    }
+                    if model.windowMode, model.workspaceTrackpadSupported {
+                        Button { model.addTrackpadTab() } label: {
+                            Label("Add Trackpad", systemImage: "trackpad")
+                        }
+                        .accessibilityIdentifier("stagePeekAddTrackpad")
                     }
                     sectionTitle(String(localized: "Windows"))
                     if allWindows.isEmpty {
@@ -627,7 +720,10 @@ struct StagePeekGallery: View {
         })
         .onChange(of: visible) { model.thumbnailPriority = $0 }
         .modifier(DisplayOverviewPresentation(isPresented: $showDisplayOverview, model: model, onShowInPane: onDisplay,
-                                              onAddAsNewPane: { d in onAddTile(model.displayWindow(d)) }))
+                                              onAddAsNewPane: { d in
+                                                  if model.canAddDisplayFromMirror(d) { onAddDisplayFromMirror(d, false) }
+                                                  else { onAddTile(model.displayWindow(d)) }
+                                              }))
         .onChange(of: model.closingWindows) { closing in if let r = revealed, closing.contains(r) { revealed = nil } }
         .confirmationDialog(menuWindow.map { $0.title.isEmpty ? $0.app : $0.title } ?? "",
                             isPresented: Binding(get: { menuWindow != nil }, set: { if !$0 { menuWindow = nil } }),
@@ -647,6 +743,36 @@ struct StagePeekGallery: View {
             Text("Only this window closes; its app keeps running. If it has unsaved changes, the app asks on the Mac.")
         }
         .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangeOverview))
+        .sheet(isPresented: $showExtendedDisplaySetup) {
+            ExtendedDisplaySetup(model: model, size: receiverSize, scale: displayScale)
+        }
+        .confirmationDialog("Remove Extended Display?", isPresented: $confirmRemoveExtendedDisplay) {
+            Button("Remove Extended Display", role: .destructive) { model.removeExtendedDisplay() }
+        }
+    }
+
+    private var extendedDisplayAction: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if inputAllowed {
+                if model.extendedDisplayID != nil {
+                    Button(role: .destructive) { confirmRemoveExtendedDisplay = true } label: {
+                        Label("Remove Extended Display…", systemImage: "minus.rectangle")
+                    }
+                } else {
+                    Button { showExtendedDisplaySetup = true } label: {
+                        Label("Add Extended Display", systemImage: "plus.rectangle")
+                    }
+                    .accessibilityIdentifier("stagePeekAddExtendedDisplay")
+                }
+            } else {
+                MoreActionsNeedControl(detail: String(localized: "Request control to add an extended display."))
+            }
+            if model.extendedDisplayBusy, !showExtendedDisplaySetup { ProgressView() }
+            if let notice = model.extendedDisplayNotice, !showExtendedDisplaySetup {
+                Text(notice).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(model.extendedDisplayBusy)
     }
 
     /// The Mac's displays: in their real arrangement when the Mac sent it for two or more of them,
@@ -656,6 +782,29 @@ struct StagePeekGallery: View {
             arrangementMap(overview, displays)
         } else {
             displayGrid(displays, cols)
+        }
+        if !model.windowMode, model.mirroring() {
+            ForEach(displays.filter { model.canAddDisplayFromMirror($0) }) { display in
+                Menu {
+                    Button { onDisplay(display) } label: {
+                        Label("Switch Current Mirror Source", systemImage: "display")
+                    }
+                    if model.canSplitDesktop {
+                        Button { onAddDisplayFromMirror(display, false) } label: {
+                            Label("Add as New Pane", systemImage: "rectangle.split.2x1")
+                        }
+                    }
+                    Button { onAddDisplayFromMirror(display, true) } label: {
+                        Label("Add as Tab", systemImage: "rectangle.on.rectangle")
+                    }
+                } label: {
+                    Label(display.name, systemImage: "ellipsis.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(minHeight: 44, alignment: .leading)
+                }
+                .accessibilityHint("Switch Mirror or keep both displays in Window view.")
+                .accessibilityIdentifier("stagePeekMirrorDisplayActions-\(display.id)")
+            }
         }
     }
 
@@ -670,40 +819,56 @@ struct StagePeekGallery: View {
     /// Arrange… (the Mac also asks its owner every time).
     private func displaysHeader(_ displays: [CatalogDisplayItem]) -> some View {
         let overview = arrangementOverview(displays)
-        return HStack(spacing: 12) {
-            sectionTitle(String(localized: "Displays"))
-            Spacer(minLength: 8)
-            if let overview {
-                if inputAllowed, model.canArrangeDisplays {
-                    Button { arrangeOverview = overview } label: {
-                        Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(meowAccent)
-                    .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
-                    .accessibilityIdentifier("displayArrangeButton")
+        // One row when the actions fit beside the title, else the actions on their own row: on the
+        // Duo's narrow column they wrapped into stacks and broke "Overview" mid-word (9000088).
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                sectionTitle(String(localized: "Displays"))
+                Spacer(minLength: 8)
+                if let overview { displaysHeaderActions(overview) }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                sectionTitle(String(localized: "Displays"))
+                if let overview {
+                    HStack(spacing: 16) { displaysHeaderActions(overview) }
                 }
-                if model.offersOverviewPane {
-                    // Every display at once, live, as one pane (one per layout: an Overview pane
-                    // already there is selected).
-                    Button { onAddTile(model.overviewWindow) } label: {
-                        Text("Add as Pane").font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(meowAccent)
-                    .accessibilityLabel(Text("Add Overview as Pane"))
-                    .accessibilityHint(Text("Shows every display in one pane, controlled like a trackpad."))
-                    .accessibilityIdentifier("displayOverviewAddAsPane")
-                }
-                Button { showDisplayOverview = true } label: {
-                    Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
-                        .shadow(color: .black.opacity(0.5), radius: 2)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("displayOverviewButton")
             }
         }
+    }
+
+    @ViewBuilder
+    private func displaysHeaderActions(_ overview: DisplayOverviewModel) -> some View {
+        if inputAllowed, model.canArrangeDisplays {
+            Button { arrangeOverview = overview } label: {
+                Text("Arrange (Beta)…").font(.subheadline.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(meowAccent)
+            .accessibilityHint(Text("Move the Mac's displays. The Mac asks before anything changes."))
+            .accessibilityIdentifier("displayArrangeButton")
+        }
+        if model.offersOverviewPane {
+            // Every display at once, live, as one pane (one per layout: an Overview pane
+            // already there is selected).
+            Button { onAddTile(model.overviewWindow) } label: {
+                Text("Add as Pane").font(.subheadline.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(meowAccent)
+            .accessibilityLabel(Text("Add Overview as Pane"))
+            .accessibilityHint(Text("Shows every display in one pane, controlled like a trackpad."))
+            .accessibilityIdentifier("displayOverviewAddAsPane")
+        }
+        Button { showDisplayOverview = true } label: {
+            Label("Overview (Beta)", systemImage: "arrow.up.left.and.arrow.down.right")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.85))
+                .shadow(color: .black.opacity(0.5), radius: 2)
+                .lineLimit(1).fixedSize()
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("displayOverviewButton")
     }
 
     private func displayGrid(_ displays: [CatalogDisplayItem], _ cols: [GridItem]) -> some View {
@@ -711,13 +876,13 @@ struct StagePeekGallery: View {
             ForEach(displays) { d in
                 let source = model.displayWindow(d)
                 StagePeekDisplayCard(model: model, display: d,
-                                     current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain)
+                                     current: model.windowMode ? model.containsDisplayView(d) : model.desktopDisplay?.id == d.id)
                     .scaleEffect(held == source.id ? 1.04 : 1)
                     // The desktop is a pane source too: hold and drag it onto a pane.
                     .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onDisplay(d) }
-                    .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+                    .accessibilityAction(named: model.mirroring() ? Text("Switch Current Mirror Source") : Text("Show in Pane")) { onDisplay(d) }
             }
         }
     }
@@ -758,7 +923,7 @@ struct StagePeekGallery: View {
             thumbnail: model.displayThumbnails[d.id], name: d.name,
             label: mirrored ? String(localized: "\(name), mirrored") : name,
             isMain: tile.isMain, isMirrored: mirrored,
-            current: model.windowMode ? tiled.contains(WorkspaceSource.displayKey(d.id)) : d.isMain,
+            current: model.windowMode ? model.containsDisplayView(d) : model.desktopDisplay?.id == d.id,
             showsName: tile.rect.height >= 28)
             .frame(width: tile.rect.width, height: tile.rect.height)
             .scaleEffect(held == source.id ? 1.04 : 1)
@@ -766,7 +931,7 @@ struct StagePeekGallery: View {
             .overlay(cardGestures(source, onTap: { onDisplay(d) }, swipe: false))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onDisplay(d) }
-            .accessibilityAction(named: "Show in Pane") { onDisplay(d) }
+            .accessibilityAction(named: model.mirroring() ? Text("Switch Current Mirror Source") : Text("Show in Pane")) { onDisplay(d) }
             .offset(x: tile.rect.minX, y: tile.rect.minY)
     }
 
@@ -849,6 +1014,7 @@ struct StagePeekGallery: View {
         .accessibilityAction(named: "Open as Floating Window") { if canFloat(w) { float(w) } }
         .accessibilityAction(named: "Close Window") { if model.canCloseWindows { confirmClose = w } }
         .accessibilityIdentifier("spatialWindowCard")
+        .overlay(alignment: .topTrailing) { StagePeekRestoreButton(model: model, window: w) }
     }
 
     private func grid(_ windows: [CatalogWindowItem], _ cols: [GridItem]) -> some View {
@@ -895,6 +1061,9 @@ struct StagePeekGallery: View {
                     }
                 }
                 .offset(x: dx)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if dx == 0 { StagePeekRestoreButton(model: model, window: w) }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: revealed)
         .onAppear { if !visible.contains(w.id) { visible.append(w.id) } }

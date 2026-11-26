@@ -257,6 +257,8 @@ final class ReceiverControlsTests: XCTestCase {
         preferences.allowInput = false
         preferences.inputMode = .trackpad
         preferences.showSurfaceGrid = false
+        preferences.edgeScrolling = .off
+        preferences.trackpadDisplayLayoutOptIn = false
         var profile1 = preferences.profile(for: .profile1)
         profile1.trayItems[0].isVisible = false
         preferences.updateProfile(profile1)
@@ -322,6 +324,257 @@ final class ReceiverControlsTests: XCTestCase {
         let migrated = repository.load()
         XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
         XCTAssertTrue(migrated.showSurfaceGrid)
+    }
+
+    func testCursorLocatorStartsOffAndOptInSurvivesRelaunch() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+
+        var preferences = repository.load()
+        XCTAssertFalse(preferences.showCursorLocator)
+        preferences.showCursorLocator = true
+        repository.save(preferences)
+        XCTAssertTrue(ReceiverControlPreferencesRepository(defaults: defaults).load().showCursorLocator)
+    }
+
+    func testVideoOffDefaultsToDotsWithAnOptInDisplayGuide() throws {
+        let legacy = Data(#"{"version":24,"showTrackpadDisplayLayout":true}"#.utf8)
+        let decoded = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertTrue(decoded.showSurfaceGrid)
+        XCTAssertFalse(decoded.trackpadDisplayLayoutOptIn, "the QA default did not record an explicit opt-in")
+        XCTAssertEqual(decoded.edgeScrolling, .automatic)
+        var customized = decoded
+        customized.showSurfaceGrid = false
+        customized.trackpadDisplayLayoutOptIn = true
+        let saved = try JSONDecoder().decode(ReceiverControlPreferences.self, from: JSONEncoder().encode(customized))
+        XCTAssertFalse(saved.showSurfaceGrid)
+        XCTAssertTrue(saved.trackpadDisplayLayoutOptIn)
+    }
+
+    func testDotsUseBothSidesOfAnObstructedFoldAndStayOutsideDisplayOutlines() {
+        let pad = CGRect(x: 0, y: 0, width: 640, height: 600)
+        let fold = CGRect(x: 310, y: 0, width: 20, height: 600)
+        let outline = CGRect(x: 380, y: 180, width: 210, height: 140)
+        let pieces = VideoOffSurfaceGeometry.usablePieces(of: pad, removing: [fold])
+        XCTAssertEqual(pieces.count, 2)
+        for piece in pieces {
+            let full = TrackpadDisplayGuideGeometry.dotCenters(in: piece, excluding: [])
+            let dots = TrackpadDisplayGuideGeometry.dotCenters(in: piece, excluding: [outline])
+            XCTAssertFalse(dots.isEmpty)
+            XCTAssertFalse(dots.contains { fold.contains($0) || outline.contains($0) })
+            if piece.intersects(outline) { XCTAssertLessThan(dots.count, full.count) }
+            else { XCTAssertEqual(dots, full) }
+        }
+        let tableFold = CGRect(x: 0, y: 360, width: 640, height: 12)
+        let choice = VideoOffSurfaceGeometry.choicePiece(of: pad, removing: [tableFold])
+        XCTAssertGreaterThan(choice.minY, tableFold.maxY)
+    }
+
+    func testTrackpadDisplayGuideUsesFullSurfaceForOneDisplay() throws {
+        let size = CGSize(width: 280, height: 600)
+        let display = CGRect(x: -1024, y: -768, width: 1024, height: 768)
+        let result = TrackpadDisplayGuideGeometry.layout(displays: [display],
+            cursor: CGPoint(x: -256, y: -576), in: size)
+        XCTAssertTrue(result.outlines.isEmpty)
+        XCTAssertEqual(result.cursor, CGPoint(x: 210, y: 150))
+        let unavailable = TrackpadDisplayGuideGeometry.layout(displays: [], cursor: .zero, in: size)
+        XCTAssertTrue(unavailable.outlines.isEmpty)
+        XCTAssertNil(unavailable.cursor)
+    }
+
+    func testTrackpadDisplayGuideFitsWithAccurateOffsetsAndNoCursorInDisplayGap() throws {
+        let left = CGRect(x: -200, y: 0, width: 100, height: 200)
+        let right = CGRect(x: 0, y: -50, width: 200, height: 100)
+        for size in [CGSize(width: 300, height: 600), CGSize(width: 600, height: 300)] {
+            let result = TrackpadDisplayGuideGeometry.layout(displays: [left, right],
+                cursor: CGPoint(x: 100, y: 0), in: size)
+            XCTAssertEqual(result.outlines.count, 2)
+            let leftOutline = try XCTUnwrap(result.outlines.first)
+            let rightOutline = try XCTUnwrap(result.outlines.last)
+            XCTAssertEqual(rightOutline.width, leftOutline.width * 2, accuracy: 0.001)
+            XCTAssertEqual(rightOutline.minX - leftOutline.maxX, leftOutline.width, accuracy: 0.001)
+            XCTAssertEqual(leftOutline.minY - rightOutline.minY, leftOutline.width / 2, accuracy: 0.001)
+            let cursor = try XCTUnwrap(result.cursor)
+            XCTAssertEqual(cursor.x, rightOutline.midX, accuracy: 0.001)
+            XCTAssertEqual(cursor.y, rightOutline.midY, accuracy: 0.001)
+            let gap = TrackpadDisplayGuideGeometry.layout(displays: [left, right],
+                cursor: CGPoint(x: -50, y: 0), in: size)
+            XCTAssertNil(gap.cursor)
+        }
+    }
+
+    func testRightEdgeScrollStripLeavesControlsAndFoldClear() throws {
+        for size in [CGSize(width: 390, height: 780), CGSize(width: 720, height: 310),
+                     CGSize(width: 175, height: 180)] {
+            let safe = CGRect(origin: CGPoint(x: 15, y: 10), size: size)
+            let controls = CGRect(x: safe.maxX - 45, y: safe.maxY - 60, width: 45, height: 60)
+            let strip = try XCTUnwrap(EdgeScrollStripGeometry.frame(in: safe, avoiding: [controls]))
+            XCTAssertTrue(safe.contains(strip))
+            XCTAssertFalse(strip.intersects(controls))
+            XCTAssertEqual(strip.maxX, safe.maxX - 8)
+            XCTAssertGreaterThanOrEqual(strip.height, 44)
+            XCTAssertGreaterThan(strip.height, safe.height * 0.55)
+        }
+        let landscape = CGRect(x: 0, y: 0, width: 700, height: 350)
+        let verticalTray = CGRect(x: 650, y: 0, width: 50, height: 350)
+        let besideTray = try XCTUnwrap(EdgeScrollStripGeometry.frame(in: landscape, avoiding: [verticalTray]))
+        XCTAssertEqual(besideTray.maxX, verticalTray.minX - 4)
+        XCTAssertFalse(besideTray.intersects(verticalTray))
+        let narrow = CGRect(x: 0, y: 0, width: 60, height: 190)
+        let blockedEdge = CGRect(x: 34, y: 0, width: 26, height: 190)
+        XCTAssertNil(EdgeScrollStripGeometry.frame(in: narrow, avoiding: [blockedEdge]))
+    }
+
+    func testEdgeScrollStripSupportsOppositeAndPerpendicularEdges() throws {
+        let safe = CGRect(x: 10, y: 20, width: 390, height: 780)
+        let left = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .left, in: safe, avoiding: []))
+        XCTAssertEqual(left.minX, safe.minX + 8)
+        XCTAssertEqual(left.height, safe.height - 16)
+        let bottom = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .bottom, in: safe, avoiding: [left]))
+        XCTAssertEqual(bottom.maxY, safe.maxY - 8)
+        XCTAssertFalse(bottom.intersects(left))
+        let top = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .top, in: safe, avoiding: []))
+        XCTAssertEqual(top.minY, safe.minY + 8)
+        XCTAssertEqual(top.width, safe.width - 16)
+    }
+
+    func testPortraitRightScrollRailClearsTheCameraOnlyWhereItTouchesTheEdge() throws {
+        let canvas = CGRect(x: 0, y: 0, width: 466, height: 678)
+        let safe = CGRect(x: 0, y: 0, width: 382, height: 644)
+        let camera = CGRect(x: 382, y: 0, width: 84, height: 82)
+        let area = EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safe, occlusions: [camera])
+        XCTAssertEqual(area.maxY, safe.maxY, "Keep the home-indicator inset")
+        let rail = try XCTUnwrap(EdgeScrollStripGeometry.frame(on: .right, in: area, avoiding: [camera]))
+        XCTAssertEqual(rail.maxX, canvas.maxX - 8)
+        XCTAssertEqual(rail.minY, camera.maxY + 4)
+        XCTAssertEqual(EdgeScrollStripGeometry.placementArea(canvas: canvas, safeArea: safe, occlusions: []), safe)
+    }
+
+    func testBottomScrollRailUsesTheOpenSpaceAbovePackedPortraitControls() throws {
+        let safe = CGRect(x: 0, y: 0, width: 466, height: 644)
+        let functionTray = CGRect(x: 111, y: 548, width: 244, height: 40)
+        let keypad = CGRect(x: 410, y: 546, width: 44, height: 44)
+        let mainTray = CGRect(x: 35, y: 600, width: 396, height: 44)
+        let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe,
+                                                    avoiding: [functionTray, keypad, mainTray])
+        let bottom = try XCTUnwrap(rails[.bottom])
+        XCTAssertGreaterThanOrEqual(bottom.width, safe.width * 0.6)
+        XCTAssertLessThanOrEqual(bottom.maxY, functionTray.minY - 4)
+        XCTAssertFalse(bottom.intersects(keypad))
+        XCTAssertFalse(bottom.intersects(try XCTUnwrap(rails[.right])))
+    }
+
+    func testPaneTabsCanStartBesideTheLandscapeZoomControl() {
+        let pane = CGRect(x: 0, y: 0, width: 466, height: 326)
+        let safe = CGRect(x: 48, y: 0, width: 418, height: 310)
+        let zoom = CGRect(x: 50, y: 14, width: 40, height: 40)
+        let row = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: safe, avoiding: [zoom])
+        XCTAssertEqual(row.minX, zoom.maxX + WorkspaceOverlayPlacement.gap)
+        XCTAssertEqual(row.minY, safe.minY)
+        XCTAssertFalse(row.intersects(zoom))
+    }
+
+    func testEdgeScrollingPreservesLegacyOffAndManualConfiguration() throws {
+        let legacy = Data(#"{"showRightScrollStrip":false,"showSurfaceGrid":false}"#.utf8)
+        var preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertEqual(preferences.edgeScrolling, .off)
+        XCTAssertFalse(preferences.showSurfaceGrid)
+        XCTAssertTrue(preferences.showTrackpadBorder)
+        XCTAssertTrue(preferences.trackpadTouchTrail)
+        XCTAssertTrue(preferences.scrollMomentumEnabled)
+        XCTAssertFalse(preferences.scrollMotionFeedback)
+        preferences.edgeScrolling = .manual
+        preferences.verticalScrollEdge = .left
+        preferences.horizontalEdgeScrolling = true
+        preferences.horizontalScrollEdge = .top
+        preferences.showTrackpadBorder = false
+        preferences.trackpadTouchTrail = false
+        let data = try JSONEncoder().encode(preferences)
+        preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
+        XCTAssertFalse(preferences.trackpadTouchTrail)
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: false), [.left, .top])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.left, .top])
+        XCTAssertFalse(preferences.showTrackpadBorder)
+        preferences.edgeScrolling = .automatic
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: false), [.right])
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.right, .bottom])
+        preferences.edgeScrolling = .manual
+        preferences.verticalEdgeScrolling = false
+        XCTAssertEqual(preferences.activeScrollEdges(trackpad: true), [.top])
+        preferences.horizontalEdgeScrolling = false
+        XCTAssertTrue(preferences.activeScrollEdges(trackpad: true).isEmpty)
+    }
+
+    func testEdgeScrollSensitivityAndFeedbackSurvivePreferenceRoundTrip() throws {
+        let legacy = Data(#"{"version":25,"scrollMotionFeedback":true}"#.utf8)
+        var preferences = try JSONDecoder().decode(ReceiverControlPreferences.self, from: legacy)
+        XCTAssertTrue(preferences.scrollMotionFeedback)
+        XCTAssertGreaterThan(preferences.edgeScrollSensitivity, 1)
+        preferences.edgeScrollSensitivity = 2
+        let data = try JSONEncoder().encode(preferences)
+        let stored = try JSONDecoder().decode(ReceiverControlPreferences.self, from: data)
+        XCTAssertEqual(stored.edgeScrollSensitivity, 2)
+        XCTAssertTrue(stored.scrollMotionFeedback)
+        let excessive = Data(#"{"edgeScrollSensitivity":500}"#.utf8)
+        let limited = try JSONDecoder().decode(ReceiverControlPreferences.self, from: excessive)
+        XCTAssertEqual(limited.edgeScrollSensitivity, EdgeScrollSensitivity.range.upperBound)
+    }
+
+    func testEdgeScrollRailsFitAroundTheExistingTrayAndPalette() throws {
+        for size in [CGSize(width: 390, height: 780), CGSize(width: 720, height: 310),
+                     CGSize(width: 1024, height: 768)] {
+            let screen = CGRect(origin: .zero, size: size)
+            let safe = screen.insetBy(dx: 20, dy: 24)
+            let layout = ControlTrayGeometry.layout(
+                container: screen, safeInsets: .init(top: 24, leading: 20, bottom: 24, trailing: 20),
+                keyboardVisibleRect: nil, portrait: size.height > size.width,
+                side: .trailing, traySize: CGSize(width: 130, height: 44),
+                paletteSize: CGSize(width: 220, height: 92), avoidNotch: true)
+            let controls = [layout.trayFrame, layout.paletteFrame]
+            let rails = EdgeScrollStripGeometry.frames(edges: [.right, .bottom], in: safe, avoiding: controls)
+            let vertical = try XCTUnwrap(rails[.right])
+            let horizontal = try XCTUnwrap(rails[.bottom])
+            XCTAssertTrue(safe.contains(vertical))
+            XCTAssertTrue(safe.contains(horizontal))
+            XCTAssertFalse(vertical.intersects(horizontal))
+            for frame in controls {
+                XCTAssertFalse(vertical.intersects(frame))
+                XCTAssertFalse(horizontal.intersects(frame))
+            }
+        }
+    }
+
+    func testEdgeScrollFeedbackFitsInsideAllFourExpandedRails() {
+        for edge in [ScrollStripEdge.left, .right, .top, .bottom] {
+            let size = edge.isVertical ? CGSize(width: 32, height: 160) : CGSize(width: 160, height: 32)
+            let hitTarget = CGRect(origin: .zero, size: size)
+            let idle = EdgeScrollStripGeometry.visualFrames(edge: edge, size: size, expanded: false, position: 0)
+            for position in [-30.0, 0, 55, 110, 160, 190] {
+                let active = EdgeScrollStripGeometry.visualFrames(edge: edge, size: size, expanded: true, position: position)
+                XCTAssertTrue(hitTarget.contains(active.rail))
+                XCTAssertTrue(active.rail.contains(idle.rail))
+                XCTAssertTrue(hitTarget.contains(active.contact.offsetBy(dx: active.rail.minX, dy: active.rail.minY)))
+                XCTAssertTrue(CGRect(origin: .zero, size: active.rail.size).contains(active.contact))
+                XCTAssertEqual(edge.isVertical ? active.contact.width : active.contact.height, 11)
+                XCTAssertEqual(edge.isVertical ? active.contact.height : active.contact.width, 72)
+            }
+        }
+    }
+
+    func testLegacyCursorLocatorDefaultDoesNotBecomeAnOptIn() throws {
+        let suite = "ReceiverControlsMigrationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repository = ReceiverControlPreferencesRepository(defaults: defaults)
+        let legacy = Data(#"{"version":23,"showCursorLocator":true,"showSurfaceGrid":false}"#.utf8)
+        defaults.set(legacy, forKey: ReceiverControlPreferencesRepository.defaultsKey)
+
+        let migrated = repository.load()
+        XCTAssertEqual(migrated.version, ReceiverControlPreferences.schemaVersion)
+        XCTAssertFalse(migrated.showCursorLocator)
+        XCTAssertFalse(migrated.showSurfaceGrid)
     }
 
     func testTrayCanBeShownRequiresBothAllowInputAndTrayEnabled() {
@@ -1332,6 +1585,33 @@ final class ReceiverControlsTests: XCTestCase {
             mainTrayFrame: mainFrame, groupSizes: [CGSize(width: 44, height: 200)],
             avoiding: nil, avoidNotch: true, notchSide: .leading)
         XCTAssertEqual(frames[0].minX, leftNotch.leading)
+    }
+
+    func testLandscapeBottomFunctionGroupsStayClearAfterTheNotchMovesOne() {
+        let container = CGRect(x: 0, y: 0, width: 466, height: 326)
+        let sizes = [CGSize(width: 44, height: 88), CGSize(width: 44, height: 88),
+                     CGSize(width: 44, height: 44)]
+        for side in [LandscapeTraySide.leading, .trailing] {
+            let safe = ControlSafeInsets(top: 0, leading: side == .leading ? 48 : 0,
+                                         bottom: 16, trailing: side == .trailing ? 48 : 0)
+            func frames(avoidNotch: Bool) -> [CGRect] {
+                ControlTrayGeometry.functionTrayLayout(
+                    container: container, safeInsets: safe, keyboardVisibleRect: nil,
+                    portrait: false, mainSide: side.opposite, position: .oppositeSide,
+                    mainTrayFrame: .zero, groupSizes: sizes, avoiding: nil,
+                    avoidNotch: avoidNotch, notchSide: side, bottomRow: true)
+            }
+            let raw = frames(avoidNotch: false)
+            let adjusted = frames(avoidNotch: true)
+            let originalNotchAdjustment = raw.dropLast().map {
+                ControlTrayGeometry.avoidingUnsafeRegion($0, in: container, safeInsets: safe,
+                                                         enabled: true, notchSide: side)
+            }
+            XCTAssertEqual(Array(adjusted.dropLast()), originalNotchAdjustment)
+            XCTAssertEqual(adjusted[2].origin.y, raw[2].origin.y)
+            XCTAssertFalse(adjusted[1].intersects(adjusted[2]))
+            XCTAssertTrue(container.contains(adjusted[2]))
+        }
     }
 
     func testTemporaryPaletteUsesConditionalObstacleAvoidance() {
@@ -2438,7 +2718,7 @@ final class ShortcutPaletteQuitTests: XCTestCase {
             saved.version = 22
             repository.defaults.set(try JSONEncoder().encode(saved), forKey: ReceiverControlPreferencesRepository.defaultsKey)
             let loaded = repository.load()
-            XCTAssertEqual(loaded.version, 23)
+            XCTAssertEqual(loaded.version, ReceiverControlPreferences.schemaVersion)
             for slot in ControlProfileSlot.allCases {
                 XCTAssertEqual(loaded.profile(for: slot), .canonical(slot: slot))
                 XCTAssertEqual(loaded.profile(for: slot).actions(for: command).filter { $0.id == "quit" }.count, 1)

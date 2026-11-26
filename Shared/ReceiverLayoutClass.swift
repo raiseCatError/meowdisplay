@@ -3,23 +3,21 @@
 // roomy window, and the table that keeps every control reachable in both
 // layouts. Foundation only, so the hostless Mac test target covers it.
 //
-// Size classes (never the device idiom or orientation) decide the layout: an
-// iPhone Duo window can be regular in both directions when unfolded, and a
-// fold resizes the window mid-session.
+// Size classes adapt the iPad layout to the window. A phone keeps the iPhone
+// control layout when unfolding gives it more space.
 
 import Foundation
 
 enum ReceiverLayoutClass {
     /// The iPad-style presentation (Strip/Overlay/Custom, Control Size, …)
-    /// applies only when the window is regular in BOTH directions, so a phone
-    /// in landscape (regular width, compact height) stays compact.
-    static func isRoomy(horizontalRegular: Bool, verticalRegular: Bool) -> Bool {
-        horizontalRegular && verticalRegular
+    /// applies on iPad when the window is regular in both directions.
+    static func isRoomy(supportsPadControls: Bool, horizontalRegular: Bool, verticalRegular: Bool) -> Bool {
+        supportsPadControls && horizontalRegular && verticalRegular
     }
 
     /// What a window with no saved control preferences starts with when the
-    /// first layout class it ever reports is roomy although the device
-    /// started compact (an iPhone idiom that unfolded onto a roomy window):
+    /// first layout class it ever reports is roomy although the store
+    /// started compact:
     /// the existing iPad initial defaults. `nil` for everything else, so
     /// saved preferences are never replaced, and neither is a later fold.
     static func firstRunPreferences(hasSavedPreferences: Bool, isFirstLayoutClass: Bool,
@@ -33,6 +31,7 @@ enum ReceiverLayoutClass {
 /// store (the live one and Demo Mode's own) feeds its window's size classes
 /// through one of these, so they decide roomy and first-run defaults alike.
 struct ReceiverLayoutClassState: Equatable {
+    private let supportsPadControls: Bool
     private(set) var isRoomy: Bool
     /// Whether a size-class report has arrived yet; only the first may adopt
     /// first-run defaults.
@@ -48,10 +47,14 @@ struct ReceiverLayoutClassState: Equatable {
 
     /// `startsRoomy`: the device's own starting guess, before any window
     /// has reported (an iPad idiom starts roomy).
-    init(startsRoomy: Bool) { isRoomy = startsRoomy }
+    init(startsRoomy: Bool, supportsPadControls: Bool) {
+        self.supportsPadControls = supportsPadControls
+        isRoomy = supportsPadControls && startsRoomy
+    }
 
     mutating func update(horizontalRegular: Bool, verticalRegular: Bool, hasSavedPreferences: Bool) -> Change {
-        let roomy = ReceiverLayoutClass.isRoomy(horizontalRegular: horizontalRegular,
+        let roomy = ReceiverLayoutClass.isRoomy(supportsPadControls: supportsPadControls,
+                                                horizontalRegular: horizontalRegular,
                                                 verticalRegular: verticalRegular)
         let adopted = ReceiverLayoutClass.firstRunPreferences(
             hasSavedPreferences: hasSavedPreferences, isFirstLayoutClass: !hasSeenLayoutClass,

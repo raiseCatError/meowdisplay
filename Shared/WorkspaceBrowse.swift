@@ -14,6 +14,7 @@ struct CatalogDisplayItem: Equatable, Sendable, Identifiable {
     var isVirtual: Bool
     /// The display's arrangement data (frame, mirror/placeholder flags) when the Mac sent it.
     var overview: OverviewDisplay? = nil
+    var displayUUID: String? = nil
 }
 
 /// One launchable Mac app (installed or running), from `appCatalog`.

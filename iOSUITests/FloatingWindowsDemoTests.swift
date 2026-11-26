@@ -58,7 +58,7 @@ final class FloatingWindowsDemoTests: XCTestCase {
 
         // Fling it at the right edge: it tucks, leaving a handle; the handle brings it back.
         let pill2 = app.buttons["floatOptions"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: -40, dy: 0))
-        let width = app.windows.firstMatch.frame.width
+        let width = app.receiverWindow.frame.width
         pill2.press(forDuration: 0.05, thenDragTo: pill2.withOffset(CGVector(dx: width * 0.45, dy: 0)), withVelocity: 3000, thenHoldForDuration: 0)
         let handle = app.descendants(matching: .any).matching(identifier: "floatTuckHandle").firstMatch
         XCTAssertTrue(handle.waitForExistence(timeout: 5), "a tucked float leaves a handle on the edge")

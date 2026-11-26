@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum ControlModifier: String, Codable, CaseIterable, Hashable, Identifiable {
@@ -888,8 +889,49 @@ enum LandscapeTrayCorner: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum EdgeScrolling: String, Codable, CaseIterable {
+    case automatic, off, manual
+
+    var title: String {
+        switch self {
+        case .automatic: String(localized: "Automatic")
+        case .off: String(localized: "Off")
+        case .manual: String(localized: "Manual")
+        }
+    }
+}
+
+enum ScrollStripEdge {
+    case left, right, top, bottom
+
+    var isVertical: Bool { self == .left || self == .right }
+}
+
+enum VerticalScrollEdge: String, Codable {
+    case left, right
+}
+
+enum HorizontalScrollEdge: String, Codable {
+    case top, bottom
+}
+
+enum EdgeScrollSensitivity {
+    static let defaultValue = 1.5
+    static let range = 0.5...3.0
+
+    static func clamped(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    static func output(for delta: CGVector, gain: Double) -> CGVector {
+        let multiplier = CGFloat(clamped(gain))
+        return CGVector(dx: delta.dx * multiplier, dy: delta.dy * multiplier)
+    }
+}
+
 struct ReceiverControlPreferences: Codable, Equatable {
-    static let schemaVersion = 23
+    static let schemaVersion = 26
 
     var version = schemaVersion
     var trayEnabled = true
@@ -989,10 +1031,42 @@ struct ReceiverControlPreferences: Codable, Equatable {
     /// Purely visual decoration for the mapped interaction surface shown
     /// while video production is off. It never participates in hit-testing.
     var showSurfaceGrid = true
+    // An explicit choice. The QA preview previously defaulted its display guide on.
+    var trackpadDisplayLayoutOptIn = false
+    // Keeps Off intact when an older build reads these preferences.
+    private var showRightScrollStrip = true
+    var edgeScrolling = EdgeScrolling.automatic {
+        didSet { showRightScrollStrip = edgeScrolling != .off }
+    }
+    var verticalEdgeScrolling = true
+    var verticalScrollEdge = VerticalScrollEdge.right
+    var horizontalEdgeScrolling = false
+    var horizontalScrollEdge = HorizontalScrollEdge.bottom
+    var edgeScrollSensitivity = EdgeScrollSensitivity.defaultValue
+    var scrollMomentumEnabled = true
+    var scrollMotionFeedback = false
+    var showTrackpadBorder = true
+    /// A short trail follows each finger on the Trackpad. Drawing only; it never changes input.
+    var trackpadTouchTrail = true
+
+    func activeScrollEdges(trackpad: Bool) -> [ScrollStripEdge] {
+        switch edgeScrolling {
+        case .automatic: return trackpad ? [.right, .bottom] : [.right]
+        case .off: return []
+        case .manual:
+            var edges: [ScrollStripEdge] = []
+            if verticalEdgeScrolling { edges.append(verticalScrollEdge == .left ? .left : .right) }
+            if horizontalEdgeScrolling { edges.append(horizontalScrollEdge == .top ? .top : .bottom) }
+            return edges
+        }
+    }
     /// An arrow at the edge of the picture pointing at the Mac pointer while it is somewhere
     /// this receiver isn't showing (another display, or zoomed or panned out of view). It
     /// never stands for the pointer itself and never affects input.
-    var showCursorLocator = true
+    var showCursorLocator = false
+    /// Constrain Trackpad motion while showing a single display. The video-off
+    /// Trackpad always acts on the desktop.
+    var keepPointerOnReceiverDisplay = false
     var pinchTarget = ReceiverGestureTarget.viewport
     /// Defaults to Disabled (schema 16): an accidental twist while pinching
     /// should never tilt the Mac display. Viewport rotation stays one
@@ -1144,8 +1218,23 @@ struct ReceiverControlPreferences: Codable, Equatable {
         // "old settings migrate to ON" requirement).
         avoidNotch = try value(.avoidNotch, fallback.avoidNotch)
         showSurfaceGrid = try value(.showSurfaceGrid, fallback.showSurfaceGrid)
-        // Absent (added 2026-11-15): on, like a new install. No schema bump.
+        trackpadDisplayLayoutOptIn = try value(.trackpadDisplayLayoutOptIn, fallback.trackpadDisplayLayoutOptIn)
+        let legacyStrip = try value(.showRightScrollStrip, fallback.showRightScrollStrip)
+        edgeScrolling = (try? value(.edgeScrolling, legacyStrip ? fallback.edgeScrolling : .off))
+            ?? fallback.edgeScrolling
+        showRightScrollStrip = edgeScrolling != .off
+        verticalEdgeScrolling = try value(.verticalEdgeScrolling, fallback.verticalEdgeScrolling)
+        verticalScrollEdge = (try? value(.verticalScrollEdge, fallback.verticalScrollEdge)) ?? fallback.verticalScrollEdge
+        horizontalEdgeScrolling = try value(.horizontalEdgeScrolling, fallback.horizontalEdgeScrolling)
+        horizontalScrollEdge = (try? value(.horizontalScrollEdge, fallback.horizontalScrollEdge)) ?? fallback.horizontalScrollEdge
+        let sensitivity = (try? value(.edgeScrollSensitivity, fallback.edgeScrollSensitivity)) ?? fallback.edgeScrollSensitivity
+        edgeScrollSensitivity = EdgeScrollSensitivity.clamped(sensitivity)
+        scrollMomentumEnabled = try value(.scrollMomentumEnabled, fallback.scrollMomentumEnabled)
+        scrollMotionFeedback = try value(.scrollMotionFeedback, fallback.scrollMotionFeedback)
+        showTrackpadBorder = try value(.showTrackpadBorder, fallback.showTrackpadBorder)
+        trackpadTouchTrail = (try? value(.trackpadTouchTrail, fallback.trackpadTouchTrail)) ?? fallback.trackpadTouchTrail
         showCursorLocator = (try? value(.showCursorLocator, fallback.showCursorLocator)) ?? fallback.showCursorLocator
+        keepPointerOnReceiverDisplay = try value(.keepPointerOnReceiverDisplay, fallback.keepPointerOnReceiverDisplay)
         pinchTarget = try value(.pinchTarget, fallback.pinchTarget)
         rotateTarget = try value(.rotateTarget, fallback.rotateTarget)
         snapRotation = try value(.snapRotation, fallback.snapRotation)
@@ -1425,6 +1514,13 @@ struct ReceiverControlPreferencesRepository {
             value.profiles = value.profiles.map { $0.addingQuitToUntouchedCommandPalette() }
             value.version = 23
         }
+        if value.version < 24 {
+            // Every older save encoded the previous default. A stored true
+            // cannot establish an opt-in, so offer the setting off once.
+            value.showCursorLocator = false
+            value.version = 24
+        }
+        if value.version < 26 { value.version = 26 }
         // Old Function Tray profiles predate `ShortcutItem.systemImage`.
         // Resolve current canonical metadata by ID without rewriting the
         // user's visibility, order, or group choices; a tray still at an

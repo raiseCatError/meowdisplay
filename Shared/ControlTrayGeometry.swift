@@ -297,22 +297,202 @@ enum VideoOffSurfaceGeometry {
     /// deterministic); `controlGap` separates it from the fold. Without an
     /// intersecting division the rectangle is returned unchanged.
     static func usablePiece(of available: CGRect, removing divisions: [CGRect]) -> CGRect {
+        func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
+        return usablePieces(of: available, removing: divisions).reduce(nil as CGRect?) { best, piece in
+            guard let best else { return piece }
+            return area(piece) >= area(best) ? piece : best
+        } ?? .zero
+    }
+
+    /// Noninteractive surface decoration may occupy both usable sides of a fold.
+    static func usablePieces(of available: CGRect, removing divisions: [CGRect]) -> [CGRect] {
+        guard !available.isNull, !available.isEmpty else { return [] }
         let splitters = divisions
             .map { $0.insetBy(dx: -controlGap, dy: -controlGap).intersection(available) }
             .filter { !$0.isNull && !$0.isEmpty }
-        guard !splitters.isEmpty else { return available }
+        guard !splitters.isEmpty else { return [available] }
         let columns = ControlPlacementArea.segments(
             of: available, removing: splitters.filter { $0.height >= $0.width }, horizontal: true)
         let rows = ControlPlacementArea.segments(
             of: available, removing: splitters.filter { $0.height < $0.width }, horizontal: false)
-        let pieces = columns.flatMap { column in
+        return columns.flatMap { column in
             rows.map { column.intersection($0) }
         }.filter { !$0.isNull && !$0.isEmpty }
-        func area(_ rect: CGRect) -> CGFloat { rect.width * rect.height }
-        return pieces.reduce(nil as CGRect?) { best, piece in
-            guard let best else { return piece }
-            return area(piece) >= area(best) ? piece : best
-        } ?? .zero
+    }
+
+    /// A table fold puts short-lived actions on the stable lower half when they fit there.
+    static func choicePiece(of available: CGRect, removing divisions: [CGRect]) -> CGRect {
+        if let fold = divisions.first(where: { $0.width > $0.height && $0.intersects(available) }),
+           let lower = usablePieces(of: available, removing: divisions)
+            .filter({ $0.minY >= fold.maxY && $0.height >= 180 })
+            .max(by: { $0.width < $1.width }) {
+            return lower
+        }
+        return usablePiece(of: available, removing: divisions)
+    }
+}
+
+enum TrackpadDisplayGuideGeometry {
+    static let dotRadius: CGFloat = 1.1
+    static let stretchedDotRadius: CGFloat = dotRadius * 1.6
+
+    static func dotCenters(in surface: CGRect, excluding outlines: [CGRect]) -> [CGPoint] {
+        let spacing: CGFloat = 28
+        guard !surface.isNull, !surface.isEmpty, surface.width.isFinite, surface.height.isFinite else { return [] }
+        let excluded = outlines.map { $0.insetBy(dx: -stretchedDotRadius, dy: -stretchedDotRadius) }
+        return stride(from: surface.minY + spacing / 2, to: surface.maxY, by: spacing).flatMap { y in
+            stride(from: surface.minX + spacing / 2, to: surface.maxX, by: spacing).compactMap { x in
+                let point = CGPoint(x: x, y: y)
+                return excluded.contains(where: { $0.contains(point) }) ? nil : point
+            }
+        }
+    }
+
+    struct Layout {
+        let outlines: [CGRect]
+        let cursor: CGPoint?
+    }
+
+    static func layout(displays: [CGRect], cursor: CGPoint?, in size: CGSize) -> Layout {
+        let displays = displays.filter {
+            $0.width > 0 && $0.height > 0 &&
+                $0.minX.isFinite && $0.maxX.isFinite && $0.minY.isFinite && $0.maxY.isFinite
+        }
+        guard size.width > 0, size.height > 0, size.width.isFinite, size.height.isFinite,
+              let first = displays.first else { return Layout(outlines: [], cursor: nil) }
+
+        func contains(_ rect: CGRect, _ point: CGPoint) -> Bool {
+            (rect.minX...rect.maxX).contains(point.x) && (rect.minY...rect.maxY).contains(point.y)
+        }
+        let knownCursor = cursor.flatMap { point in
+            displays.contains(where: { contains($0, point) }) ? point : nil
+        }
+        if displays.count == 1 {
+            let marker = knownCursor.map {
+                CGPoint(x: ($0.x - first.minX) / first.width * size.width,
+                        y: ($0.y - first.minY) / first.height * size.height)
+            }
+            return Layout(outlines: [], cursor: marker)
+        }
+
+        let desktop = displays.reduce(first) { $0.union($1) }
+        let margin = min(12, size.width / 4, size.height / 4)
+        let scale = min((size.width - 2 * margin) / desktop.width, (size.height - 2 * margin) / desktop.height)
+        let fitOrigin = CGPoint(x: (size.width - desktop.width * scale) / 2,
+                                y: (size.height - desktop.height * scale) / 2)
+        func map(_ point: CGPoint) -> CGPoint {
+            CGPoint(x: fitOrigin.x + (point.x - desktop.minX) * scale,
+                    y: fitOrigin.y + (point.y - desktop.minY) * scale)
+        }
+        return Layout(outlines: displays.map {
+            CGRect(origin: map($0.origin), size: CGSize(width: $0.width * scale, height: $0.height * scale))
+        }, cursor: knownCursor.map(map))
+    }
+}
+
+enum EdgeScrollStripGeometry {
+    /// A corner occlusion can inflate UIKit's safe inset for a whole side.
+    /// Recover that side for the rails when the system reports its exact
+    /// footprint. The caller still supplies the occlusion as an obstacle.
+    static func placementArea(canvas: CGRect, safeArea: CGRect, occlusions: [CGRect]) -> CGRect {
+        guard !safeArea.isNull, !safeArea.isEmpty else { return safeArea }
+        let tolerance: CGFloat = 1
+        let leftHasLocalOcclusion = occlusions.contains {
+            $0.intersects(canvas) && $0.minX <= canvas.minX + tolerance
+                && abs($0.maxX - safeArea.minX) <= tolerance
+        }
+        let rightHasLocalOcclusion = occlusions.contains {
+            $0.intersects(canvas) && $0.maxX >= canvas.maxX - tolerance
+                && abs($0.minX - safeArea.maxX) <= tolerance
+        }
+        let minX = leftHasLocalOcclusion ? canvas.minX : safeArea.minX
+        let maxX = rightHasLocalOcclusion ? canvas.maxX : safeArea.maxX
+        return CGRect(x: minX, y: safeArea.minY, width: maxX - minX, height: safeArea.height)
+    }
+
+    /// Rails fit around existing controls and system geometry. A perpendicular
+    /// rail gives way at the shared corner.
+    static func frames(edges: [ScrollStripEdge], in safeArea: CGRect,
+                       avoiding obstacles: [CGRect]) -> [ScrollStripEdge: CGRect] {
+        var occupied = obstacles
+        var rails: [ScrollStripEdge: CGRect] = [:]
+        for edge in edges {
+            guard let rail = frame(on: edge, in: safeArea, avoiding: occupied) else { continue }
+            rails[edge] = rail
+            occupied.append(rail)
+        }
+        return rails
+    }
+
+    /// The contact marker is in the rail's own coordinates and stays inset
+    /// from its capsule ends. Expansion keeps the screen-facing edge fixed.
+    static func visualFrames(edge: ScrollStripEdge, size: CGSize, expanded: Bool,
+                             position: CGFloat) -> (rail: CGRect, contact: CGRect) {
+        let length = edge.isVertical ? size.height : size.width
+        let cross = edge.isVertical ? size.width : size.height
+        let thickness = min(expanded ? 13 : 3, max(0, cross - 8))
+        let outerOrigin = min(4, cross / 2)
+        let origin = edge == .left || edge == .top ? outerOrigin : cross - outerOrigin - thickness
+        let inset: CGFloat = 1
+        let contactLength = min(72, max(0, length - 2 * inset))
+        let start = max(inset, min(length - contactLength - inset, position - contactLength / 2))
+        let contactThickness = max(0, thickness - 2 * inset)
+        if edge.isVertical {
+            return (CGRect(x: origin, y: 0, width: thickness, height: length),
+                    CGRect(x: inset, y: start, width: contactThickness, height: contactLength))
+        }
+        return (CGRect(x: 0, y: origin, width: length, height: thickness),
+                CGRect(x: start, y: inset, width: contactLength, height: contactThickness))
+    }
+
+    static func frame(on edge: ScrollStripEdge, in safeArea: CGRect, avoiding obstacles: [CGRect]) -> CGRect? {
+        func transpose(_ rect: CGRect) -> CGRect {
+            CGRect(x: rect.minY, y: rect.minX, width: rect.height, height: rect.width)
+        }
+        func reflect(_ rect: CGRect) -> CGRect {
+            CGRect(x: -rect.maxX, y: rect.minY, width: rect.width, height: rect.height)
+        }
+        func toRightEdge(_ rect: CGRect) -> CGRect {
+            let vertical = edge.isVertical ? rect : transpose(rect)
+            return edge == .left || edge == .top ? reflect(vertical) : vertical
+        }
+        guard !safeArea.isEmpty, !safeArea.isNull,
+              let segment = frame(in: toRightEdge(safeArea),
+                                  avoiding: obstacles.filter { !$0.isEmpty && !$0.isNull }.map(toRightEdge),
+                                  preferredLength: edge.isVertical ? nil : safeArea.width * 0.6)
+        else { return nil }
+        let vertical = edge == .left || edge == .top ? reflect(segment) : segment
+        return edge.isVertical ? vertical : transpose(vertical)
+    }
+
+    /// Find the longest uninterrupted strip in the nearest usable column.
+    /// A horizontal rail can move past the control rows to find better travel.
+    static func frame(in safeArea: CGRect, avoiding obstacles: [CGRect], preferredLength: CGFloat? = nil) -> CGRect? {
+        let edgeGap: CGFloat = 8
+        let targetWidth: CGFloat = 32
+        let minimumHeight: CGFloat = 44
+        guard !safeArea.isNull, safeArea.width >= targetWidth + 2 * edgeGap,
+              safeArea.height >= minimumHeight + 2 * edgeGap else { return nil }
+        let clearances = obstacles
+            .filter { !$0.isNull && !$0.isEmpty }
+            .map { $0.insetBy(dx: -4, dy: -4) }
+        let outerEdge = safeArea.maxX - edgeGap
+        let innerLimit = max(safeArea.midX, safeArea.maxX - 120, safeArea.minX + edgeGap + targetWidth)
+        // A vertical tray may occupy the entire outer column in landscape.
+        // In that case use the nearest free column beside it on the right.
+        let rightEdges = [outerEdge] + clearances.map(\.minX)
+            .filter { $0 >= innerLimit && $0 < outerEdge }.sorted(by: >)
+        var longest: CGRect?
+        for rightEdge in rightEdges {
+            let rail = CGRect(x: rightEdge - targetWidth, y: safeArea.minY + edgeGap,
+                              width: targetWidth, height: safeArea.height - 2 * edgeGap)
+            let crossing = clearances.filter { !$0.intersection(rail).isEmpty }
+            guard let segment = ControlPlacementArea.segments(of: rail, removing: crossing, horizontal: false)
+                .max(by: { $0.height < $1.height }), segment.height >= minimumHeight else { continue }
+            if segment.height >= (preferredLength ?? minimumHeight) { return segment }
+            if segment.height > (longest?.height ?? 0) { longest = segment }
+        }
+        return longest
     }
 }
 
@@ -733,7 +913,7 @@ extension ControlTrayGeometry {
                                 portrait: portrait, notchSide: notchSide)
         }
         let obstacles = reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
-        return frames.map { frame in
+        var placed = frames.map { frame in
             var result = frame
             let piece = home(of: frame)
             result.origin.x = clamp(result.origin.x, min: piece.minX + margin, max: piece.maxX - margin - result.width)
@@ -742,6 +922,27 @@ extension ControlTrayGeometry {
                                            within: fullVisible.insetBy(dx: margin, dy: margin),
                                            alsoAvoiding: [mainTrayFrame] + (collisionFrame.map { [$0] } ?? []))
         }
+        // A notch can push the outer bottom group into the next group after
+        // the row has been laid out. Keep its corrected anchor and move only
+        // the overlapping neighbour inward if the row has room.
+        guard avoidNotch, !portrait, bottomRow, placed.count > 2 else { return placed }
+        let side = position == .sameSide ? mainSide : mainSide.opposite
+        let available = visible.insetBy(dx: margin, dy: margin)
+        let protected = obstacles + unsafeRegions(in: container, safeInsets: safeInsets, notchSide: notchSide)
+            + [mainTrayFrame, placed[0]] + (collisionFrame.map { [$0] } ?? [])
+        for index in 2..<placed.count {
+            let previous = placed[index - 1]
+            let frame = placed[index]
+            guard frame.intersects(previous) else { continue }
+            let dx = side == .leading ? previous.maxX + groupGap - frame.minX
+                : previous.minX - groupGap - frame.maxX
+            let adjusted = frame.offsetBy(dx: dx, dy: 0)
+            if available.contains(adjusted),
+               protected.allSatisfy({ !$0.intersects(adjusted) }) {
+                placed[index] = adjusted
+            }
+        }
+        return placed
     }
 
     /// Nudges `frame` clear of `avoid` along `axis` — up/down in portrait
@@ -815,6 +1016,15 @@ enum WorkspaceOverlayPlacement {
         return r.isNull || r.isEmpty ? picture : r
     }
 
+    /// Use the first usable part of a pane's top row for its tabs.
+    static func paneTitleRow(pane: CGRect, safe: CGRect?, avoiding controls: [CGRect]) -> CGRect {
+        let area = usable(picture: pane, safe: safe)
+        let row = CGRect(x: area.minX, y: area.minY, width: area.width, height: min(area.height, paneTitleHeight))
+        let obstacles = controls.map { $0.insetBy(dx: -gap, dy: -gap) }.filter { $0.intersects(row) }
+        return ControlPlacementArea.segments(of: row, removing: obstacles, horizontal: true)
+            .first { $0.width >= min(160, row.width) } ?? row
+    }
+
     /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below
     /// the notch, the Dynamic Island and the status bar. Where it would cover a pane's title or a
     /// float's title pill it slides beside them along that row, or steps down below them.
@@ -858,7 +1068,8 @@ enum WorkspaceOverlayPlacement {
     /// area, never off the float; the float itself stays where it is. Past the picture's top or
     /// side (gliding into or out of an edge) it keeps the place it has at that edge and moves
     /// with the float, instead of sliding along it.
-    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect) -> CGRect {
+    static func floatPill(content: CGRect, size: CGSize, safe: CGRect?, picture: CGRect,
+                          avoiding rails: [CGRect] = []) -> CGRect {
         // Placed as on the same float just inside the picture, then moved back with it.
         let dx = max(picture.minX - content.minX, 0) + min(picture.maxX - content.maxX, 0)
         let dy = max(picture.minY - content.minY, 0)
@@ -870,7 +1081,14 @@ enum WorkspaceOverlayPlacement {
             if c.x - hw < safe.minX { c.x = min(safe.minX + hw, inside.maxX) }
             if c.x + hw > safe.maxX { c.x = max(safe.maxX - hw, inside.minX) }
         }
-        return CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+        let pill = CGRect(x: c.x - dx - size.width / 2, y: c.y - dy - size.height / 2, width: size.width, height: size.height)
+        return floatPillClearingRails(pill, safe: safe, picture: picture, rails: rails)
+    }
+
+    static func floatPillClearingRails(_ pill: CGRect, safe: CGRect?, picture: CGRect,
+                                       rails: [CGRect]) -> CGRect {
+        ControlTrayGeometry.avoidingReservedRegions(pill, obstacles: rails,
+                                                   within: usable(picture: picture, safe: safe))
     }
 
     /// The centre of a float's grabber (a 28 pt tall touch area under the window): just below it,
@@ -912,5 +1130,32 @@ enum WorkspaceOverlayPlacement {
             y = below
         }
         return CGRect(x: centred, y: top, width: w, height: h)
+    }
+}
+
+/// How an outline drawn on the phone's screen meets the screen's rounded corners: it lies on the
+/// display's own edges, and a corner that sits in a corner of the screen takes the display's
+/// radius, so the line follows the glass all the way round instead of being cut off by it. Every
+/// other corner keeps `inner`. With no rounded screen (`screenRadius` 0) every corner keeps `inner`.
+enum ScreenCornerRounding {
+    struct Radii: Equatable {
+        var topLeading: CGFloat
+        var topTrailing: CGFloat
+        var bottomTrailing: CGFloat
+        var bottomLeading: CGFloat
+    }
+
+    /// `rect` and `screen` in the same (global) coordinates.
+    static func radii(rect: CGRect, screen: CGRect?, screenRadius: CGFloat, inner: CGFloat,
+                      tolerance: CGFloat = 2) -> Radii {
+        guard screenRadius > 0, let screen else {
+            return Radii(topLeading: inner, topTrailing: inner, bottomTrailing: inner, bottomLeading: inner)
+        }
+        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < tolerance }
+        let left = near(rect.minX, screen.minX), right = near(rect.maxX, screen.maxX)
+        let top = near(rect.minY, screen.minY), bottom = near(rect.maxY, screen.maxY)
+        func corner(_ outer: Bool) -> CGFloat { outer ? screenRadius : inner }
+        return Radii(topLeading: corner(left && top), topTrailing: corner(right && top),
+                     bottomTrailing: corner(right && bottom), bottomLeading: corner(left && bottom))
     }
 }

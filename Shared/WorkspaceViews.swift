@@ -11,7 +11,29 @@ import UIKit
 private let workspaceAccent = Color(red: 0.50, green: 0.70, blue: 1.0)
 private let workspaceChip = Color(white: 0.11, opacity: 0.8)
 
-private extension WorkspaceRect {
+extension View {
+    /// Fades out while the controls tray is auto-hidden, and back in with it. The view leaves the
+    /// tree while hidden: one kept at opacity 0 stays in the accessibility tree and answers its
+    /// hit tests even with `.accessibilityHidden`, so VoiceOver and UI tests would still reach it.
+    func fadesWithControls(_ hidden: Bool) -> some View {
+        modifier(FadesWithControls(hidden: hidden))
+    }
+}
+
+private struct FadesWithControls: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        ZStack {
+            if !hidden {
+                content.transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.28), value: hidden)
+    }
+}
+
+extension WorkspaceRect {
     func onScreen(_ picture: CGRect) -> CGRect {
         CGRect(x: picture.minX + x * picture.width, y: picture.minY + y * picture.height,
                width: width * picture.width, height: height * picture.height)
@@ -52,6 +74,28 @@ struct WorkspaceRectsShape: Shape {
     func path(in rect: CGRect) -> Path { Path { $0.addRects(rects) } }
 }
 
+/// Interactive workspace chrome measured in screen coordinates for the receiver rails.
+struct WorkspaceRailObstaclePreference: PreferenceKey {
+    static let defaultValue: [CGRect] = []
+
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+extension View {
+    func workspaceRailObstacle(_ visible: Bool = true) -> some View {
+        background {
+            if visible {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: WorkspaceRailObstaclePreference.self, value: [proxy.frame(in: .global)])
+                }
+                .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
 /// Tile borders, state badges, title pills with the tile menu, drag-to-move
 /// with a drop preview, and divider grips while arranging. `picture` is where
 /// the Mac's picture is drawn, in this view's coordinates.
@@ -73,10 +117,20 @@ struct WorkspaceChromeView: View {
     /// The receiver's own controls (the tray or its gear, the Function Tray, the arrow keypad, the
     /// keyboard and its bar) in this view's coordinates: the drop bar and Arrange's bar sit above them.
     var controls: [CGRect] = []
+    /// Fixed receiver rails that local titles and menus should keep clear of.
+    var railFrames: [CGRect] = []
     /// Opens the receiver's settings (the fullscreen strip's Settings button).
     var onSettings: (() -> Void)?
     /// "View Full Screen" on a desktop pane: back to the full-screen desktop mode.
     var onViewFullScreen: (() -> Void)?
+    var localTrackpad: ((String, CGRect) -> AnyView)?
+    var floatCloseHapticsEnabled = true
+    var onMenuVisibilityChange: ((Bool) -> Void)?
+    var appMenuBarAutoHidden = false
+    /// The controls tray is auto-hidden: the workspace's own controls fade with it, except the
+    /// panes' tabs (owner's QA of 9000083).
+    var controlsHidden = false
+    var onAppMenuBarActivity: ((Bool) -> Void)?
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
@@ -86,6 +140,7 @@ struct WorkspaceChromeView: View {
     @State private var layoutName = ""
     /// The floating label menu: which pane (and tab) it is for.
     @State private var menu: PaneMenuTarget?
+    @State private var appMenuOpen = false
     @State private var menuHeight: CGFloat = 340
     /// A label is held (long press recognized); drags and the menu start from it.
     @State private var heldLabel: PaneMenuTarget?
@@ -143,6 +198,13 @@ struct WorkspaceChromeView: View {
                 .onChange(of: divisions) { _ in model.updateSpace(size, hinge: hinge) }
             chrome
         }
+        #if os(iOS)
+        .onReceive(model.menus.$open.map { !$0.isEmpty }.removeDuplicates()) { open in
+            appMenuOpen = open
+        }
+        .onChange(of: menu != nil || appMenuOpen) { onMenuVisibilityChange?($0) }
+        .onDisappear { onMenuVisibilityChange?(false) }
+        #endif
     }
 
     @ViewBuilder
@@ -166,26 +228,31 @@ struct WorkspaceChromeView: View {
                         tileView(id: id, tile: tile, rect: rect.onScreen(picture), multi: multi, frames: frames)
                     }
                 }
-                if let id = model.active, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
+                if let id = model.active, model.activeTrackpadID == nil, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
                    multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
-                    // While all its tabs are shown and leave too little room, the bar steps aside.
-                    let e = unsafeInsets(of: rect)
-                    let pane = CGRect(x: rect.minX + e.leading, y: rect.minY + e.top,
-                                      width: rect.width - e.leading - e.trailing, height: rect.height - e.top - e.bottom)
-                    if let end = labelStripEnd[id], end > pane.minX, end < pane.maxX {
-                        PaneMenuBar(menus: model.menus, pane: CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height),
-                                    top: pane.minY + 5, bounds: picture)
-                    } else {
-                        PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
-                    }
+                    let pane = paneTitleRow(rect)
+                    let end = labelStripEnd[id] ?? pane.minX
+                    let besideTitle = end > pane.minX && end < pane.maxX
+                        && (onAppMenuBarActivity == nil || pane.maxX - end + 2 >= PaneMenuBar.preferredWidth)
+                    let barPane = besideTitle
+                        ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
+                        : pane
+                    PaneMenuBar(menus: model.menus, pane: barPane,
+                                top: pane.minY + (besideTitle ? 5 : 36), bounds: picture,
+                                automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
+                                showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
                 }
                 let titles = titleZones(frames)
                 #if os(iOS)
                 // Floating panes over the arrangement, back to front, and tucked floats' edge handles.
                 if !model.arranging {
                     WorkspaceFloatLayer(model: model, picture: picture, safeArea: safeArea, inputAllowed: inputAllowed,
-                                        onClose: { confirmClose = $0 }, tipAvoiding: titles, placementChip: placementChip)
+                                        onClose: { confirmClose = $0 }, localTrackpad: localTrackpad,
+                                        closeHapticsEnabled: floatCloseHapticsEnabled,
+                                        closeAvoiding: divisions + controls,
+                                        railFrames: railFrames, controlsHidden: controlsHidden,
+                                        tipAvoiding: titles, placementChip: placementChip)
                 }
                 #endif
                 WorkspaceDropOverlay(model: model, picture: picture, safeArea: safeArea, controls: controls + divisions,
@@ -207,12 +274,9 @@ struct WorkspaceChromeView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // Every item reachable: placed by its measured height inside the safe area (below the
                     // label when it fits, moved up when not), scrolling when taller than the screen.
-                    let room = (safeArea.map { $0.intersection(picture) } ?? picture).insetBy(dx: 8, dy: 8)
-                    let height = min(menuHeight, room.height)
-                    let top = min(max(rect.minY + 40, room.minY), room.maxY - height)
-                    paneMenu(m, tile: tile, maxHeight: room.height)
-                        .position(x: min(max(rect.minX + 132, room.minX + 126), room.maxX - 126),
-                                  y: top + height / 2)
+                    let place = paneMenuPlacement(below: rect)
+                    paneMenu(m, tile: tile, maxHeight: place.maxHeight)
+                        .position(place.centre)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity))
                 }
                 if model.localFullscreen != nil { fullscreenStrip }
@@ -467,17 +531,29 @@ struct WorkspaceChromeView: View {
     private func tileView(id: String, tile: WorkspaceTile, rect: CGRect, multi: Bool, frames: WorkspaceFrames) -> some View {
         let active = model.active == id
         let hovered = model.hovered == id && !active
-        let corners = outerCorners(rect)
+        let outline = paneOutline(rect)
         ZStack(alignment: .topLeading) {
-            PaneOutlineShape(topLeading: corners.0, topTrailing: corners.1, bottomTrailing: corners.2, bottomLeading: corners.3)
+            if tile.source?.isTrackpad == true, let localTrackpad {
+                localTrackpad(id, rect)
+                    .frame(width: rect.width, height: rect.height)
+                    .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
+                    .allowsHitTesting(false)
+            }
+            outline
                 .strokeBorder(active && multi ? workspaceAccent : Color.white.opacity(hovered ? 0.35 : (multi ? 0.12 : 0)),
                               lineWidth: active && multi ? 2 : (hovered ? 1 : 0.5))
                 // A float's window is in the video, under this outline: the outline steps aside
                 // where a float (or its title) is, instead of showing through it.
                 .mask(WorkspaceHoleMask(size: rect.size, holes: floatOccluders(frames).map { $0.offsetBy(dx: -rect.minX, dy: -rect.minY) }))
                 .allowsHitTesting(false)
-                // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
-                // never a tap through to the Mac.
+                .accessibilityHidden(true)
+            // The pane itself for VoiceOver (and UI tests): its activation selects the pane,
+            // never a tap through to the Mac. Its own pane-sized shape, not the outline: a lone
+            // pane's outline draws nothing, and an element that draws nothing has no frame.
+            Color.clear
+                .frame(width: rect.width, height: rect.height)
+                .contentShape(Rectangle())
+                .allowsHitTesting(false)
                 .accessibilityElement()
                 .accessibilityLabel(String(localized: "\(tile.source.map { labelText($0, in: tile, id: id) } ?? String(localized: "Empty")) pane"))
                 .accessibilityIdentifier("workspacePane")
@@ -516,7 +592,7 @@ struct WorkspaceChromeView: View {
     /// edge is under the notch, the Dynamic Island or the status bar.
     private func floatPill(_ content: CGRect) -> CGRect {
         WorkspaceOverlayPlacement.floatPill(content: content, size: WorkspaceFloatLayering.pillBounds(WorkspaceRect(content)).cgRect.size,
-                                            safe: safeArea, picture: picture)
+                                            safe: safeArea, picture: picture, avoiding: railFrames)
     }
 
     /// The panes' label strips and the floats' title pills on screen: the drag's chip and the
@@ -524,9 +600,8 @@ struct WorkspaceChromeView: View {
     private func titleZones(_ frames: WorkspaceFrames) -> [CGRect] {
         let panes = frames.tiles.compactMap { id, r -> CGRect? in
             guard !frames.isFloat(id), let end = labelStripEnd[id] else { return nil }
-            let rect = r.onScreen(picture), e = unsafeInsets(of: rect)
-            let x = rect.minX + e.leading
-            return end > x ? CGRect(x: x, y: rect.minY + e.top, width: end - x, height: WorkspaceOverlayPlacement.paneTitleHeight) : nil
+            let row = paneTitleRow(r.onScreen(picture))
+            return end > row.minX ? CGRect(x: row.minX, y: row.minY, width: end - row.minX, height: row.height) : nil
         }
         // A float being docked is drawn only as its card under the finger: no pill to avoid.
         var docked: String?
@@ -534,22 +609,23 @@ struct WorkspaceChromeView: View {
         return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
     }
 
-    /// Where a pane's label strip starts: its top-left corner inside the safe area.
-    private func titleRow(_ rect: CGRect, width: CGFloat) -> CGRect {
-        let e = unsafeInsets(of: rect)
-        return CGRect(x: rect.minX + e.leading, y: rect.minY + e.top, width: min(rect.width - e.leading, width), height: 44)
+    private func paneTitleRow(_ rect: CGRect) -> CGRect {
+        WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls + railFrames)
     }
 
-    /// A pane corner that sits in a corner of the phone's screen follows the screen's rounding;
-    /// every other corner stays square. (topLeading, topTrailing, bottomTrailing, bottomLeading)
-    private func outerCorners(_ rect: CGRect) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
-        let radius = PaneOutlineShape.screenCornerRadius
-        guard radius > 0, let screen = PaneOutlineShape.screenBounds, model.pictureGlobal.width > 0 else { return (0, 0, 0, 0) }
+    /// Where a pane's label strip starts, clear of the receiver controls.
+    private func titleRow(_ rect: CGRect, width: CGFloat) -> CGRect {
+        let row = paneTitleRow(rect)
+        return CGRect(x: row.minX, y: row.minY, width: min(row.width, width), height: 44)
+    }
+
+    /// A pane's outline: where it meets a corner of the phone's rounded screen it curves with the
+    /// display (`ScreenCornerRounding`); every other corner stays square.
+    private func paneOutline(_ rect: CGRect) -> PaneOutlineShape {
+        guard model.pictureGlobal.width > 0 else { return PaneOutlineShape() }
         let g = rect.offsetBy(dx: model.pictureGlobal.minX - picture.minX, dy: model.pictureGlobal.minY - picture.minY)
-        func near(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) < 2 }
-        let left = near(g.minX, screen.minX), right = near(g.maxX, screen.maxX)
-        let top = near(g.minY, screen.minY), bottom = near(g.maxY, screen.maxY)
-        return (left && top ? radius : 0, right && top ? radius : 0, right && bottom ? radius : 0, left && bottom ? radius : 0)
+        return .following(screen: PaneOutlineShape.screenBounds, screenRadius: PaneOutlineShape.screenCornerRadius,
+                          rect: g, inner: 0)
     }
 
     @ViewBuilder
@@ -640,10 +716,9 @@ struct WorkspaceChromeView: View {
                         }
                     }
                     if let s = model.tileState(id)?.status, s == .offscreen || (s == .paused && model.tileState(id)?.inStageStrip != true),
-                       inputAllowed, !model.missionControlOpen {
-                        // Explicit only: un-minimizes or unhides the window on the Mac and brings it forward.
+                       let action = model.showOnMacTitle(id) {
                         Button { model.showOnMac(id) } label: {
-                            Label("Show on Mac", systemImage: "macwindow").font(.callout.weight(.semibold))
+                            Label(action, systemImage: "macwindow").font(.callout.weight(.semibold))
                                 .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
                                 .background(workspaceChip, in: Capsule())
                         }
@@ -653,7 +728,8 @@ struct WorkspaceChromeView: View {
                     #if os(iOS)
                     // Showing it on the Mac (or reopening a closed window) needs control: ask in place.
                     if !inputAllowed, let s = model.tileState(id)?.status,
-                       s == .closed || (!model.missionControlOpen && (s == .paused || s == .offscreen)) {
+                       s == .closed || (!model.missionControlOpen && (s == .paused || s == .offscreen)
+                           && model.minimizedPaneWindow(id) == nil) {
                         RequestControlInline()
                     }
                     #endif
@@ -670,17 +746,22 @@ struct WorkspaceChromeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if multi || model.arranging || tile.tabs.count > 1 || model.localFullscreen == id {
+                let row = paneTitleRow(rect)
+                let offset = max(0, row.minX - rect.minX - unsafeInsets(of: rect).leading)
                 AppMenuObserver(menus: model.menus) { menus in
                     // The menu bar shares this row (see `chrome`): its tabs fold to the shown one and "+N".
-                    let barHere = active && menus.barShown && menus.tile == id && !model.arranging && model.drag == nil
+                    let barHere = active && (menus.barShown || onAppMenuBarActivity != nil)
+                        && menus.tile == id && !model.arranging && model.drag == nil
                         && (multi || model.localFullscreen == id)
-                    labelStrip(id: id, tile: tile, rect: rect, active: active, sharesRow: barHere)
+                    labelStrip(id: id, tile: tile, rect: row, active: active, sharesRow: barHere)
                 }
+                .workspaceRailObstacle()
                 .background(GeometryReader { g in
                     Color.clear
                         .onAppear { labelStripEnd[id] = g.frame(in: .named("workspace")).maxX }
                         .onChange(of: g.frame(in: .named("workspace"))) { labelStripEnd[id] = $0.maxX }
                 })
+                .padding(.leading, offset)
                 .onDisappear { labelStripEnd[id] = nil }
             }
             VStack(spacing: 6) {
@@ -916,7 +997,7 @@ struct WorkspaceChromeView: View {
 
     private func paneMenuRows(_ m: PaneMenuTarget, tile: WorkspaceTile) -> some View {
         let full = model.localFullscreen == m.tile
-        // The Overview (every display) is neither a desktop nor a window: never turned or filled.
+        // The Overview combines every physical display and stays upright.
         let isOverview = tile.source?.isOverview == true
         let isDesktop = tile.source?.isDisplay == true && !isOverview
         let isWindow = tile.source != nil && !isDesktop && !isOverview
@@ -938,17 +1019,19 @@ struct WorkspaceChromeView: View {
                 // The only way from a desktop pane back to the plain full-screen desktop (Mirror/Extend).
                 menuRow("View Full Screen", "display") { onViewFullScreen() }
             }
-            if !isOverview {
-                menuRow(model.effectiveFit(m.tile) == .fill ? (isDesktop ? "Show Whole Desktop" : "Show Whole Window") : "Fill Pane",
-                        model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
-                    model.toggleFit(m.tile)
-                }
+            let fitLabel: LocalizedStringKey = isOverview ? "Fit Displays" : isDesktop ? "Show Whole Desktop" : "Show Whole Window"
+            menuRow(model.effectiveFit(m.tile) == .fill ? fitLabel : "Fill Pane",
+                    model.effectiveFit(m.tile) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
+                model.toggleFit(m.tile)
             }
             if tile.zoom != nil || tile.rotation != .none || tile.fit == .fill {
                 menuRow("Reset View", "arrow.counterclockwise") { model.resetView(m.tile) }
             }
             if !isOverview { menuRow("Rotate", "rotate.right") { model.rotate(m.tile) } }
             menuRow(isDesktop || isOverview ? "Show a Window Here…" : "Change Window…", "macwindow.on.rectangle") { model.openOverview(replacing: m.tile) }
+            if !isOverview, model.offersOverviewPane, tile.source != nil {
+                menuRow("Add Overview as Tab", "rectangle.on.rectangle") { model.addOverviewTab(to: m.tile) }
+            }
             if isOverview {
                 // Each display it shows, in a pane of its own (the display pane path).
                 ForEach(model.overviewPaneDisplays) { d in
@@ -976,6 +1059,16 @@ struct WorkspaceChromeView: View {
             }
             if isWindow, model.menus.available, inputAllowed {
                 menuRow(model.menus.barShown ? "Hide Menu Bar" : "Show Menu Bar", "menubar.rectangle") { model.menus.barShown.toggle() }
+            }
+            if let window = model.minimizedPaneWindow(m.tile, tab: m.tab),
+               let action = model.minimizedWindowAction(window) {
+                menuRow(LocalizedStringKey(action.title), "macwindow") {
+                    if let tab = m.tab {
+                        model.showMinimizedTab(window, pane: m.tile, index: tab)
+                    } else {
+                        model.showMinimizedWindow(window, pane: m.tile)
+                    }
+                }
             }
             if isWindow {
                 Divider().overlay(Color.white.opacity(0.25)).padding(.vertical, 4)
@@ -1038,7 +1131,9 @@ struct WorkspaceChromeView: View {
         if let id = model.localFullscreen, stripVisible || voiceOver {
             HStack(spacing: 4) {
                 stripButton("Exit Fullscreen", "arrow.down.right.and.arrow.up.left") { model.exitLocalFullscreen() }
-                stripButton(model.effectiveFit(id) == .fill ? "Show Whole Window" : "Fill Pane",
+                stripButton(model.effectiveFit(id) == .fill
+                                ? (model.layout.tiles[id]?.source?.isOverview == true ? "Fit Displays" : "Show Whole Window")
+                                : "Fill Pane",
                             model.effectiveFit(id) == .fill ? "rectangle.arrowtriangle.2.inward" : "rectangle.arrowtriangle.2.outward") {
                     model.toggleFit(id)
                 }
@@ -1090,6 +1185,30 @@ struct WorkspaceChromeView: View {
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.4)) { stripVisible = false }
         }
+    }
+
+    /// Where the pane menu for a pane at `rect` goes: below its label when it fits, moved up when
+    /// not, inside the safe area and above any control under it (the demo Window view's toolbar drew
+    /// over its last rows on the Duo, 9000088). It scrolls when taller than the room.
+    private func paneMenuPlacement(below rect: CGRect) -> (centre: CGPoint, maxHeight: CGFloat) {
+        let screen = (safeArea.map { $0.intersection(picture) } ?? picture).insetBy(dx: 8, dy: 8)
+        let x = min(max(rect.minX + 132, screen.minX + 126), screen.maxX - 126)
+        let room = Self.paneMenuRoom(screen, column: (x - 126)...(x + 126), controls: controls)
+        let height = min(menuHeight, room.height)
+        let top = min(max(rect.minY + 40, room.minY), room.maxY - height)
+        return (CGPoint(x: x, y: top + height / 2), room.height)
+    }
+
+    /// `screen` ending above any control in its lower half that `column` crosses. A control too
+    /// close to the top to leave a usable menu is ignored.
+    static func paneMenuRoom(_ screen: CGRect, column: ClosedRange<CGFloat>, controls: [CGRect]) -> CGRect {
+        var bottom = screen.maxY
+        for control in controls where control.minX < column.upperBound && control.maxX > column.lowerBound
+            && control.midY > screen.midY && control.minY < bottom {
+            bottom = control.minY - 8
+        }
+        guard bottom - screen.minY >= 160 else { return screen }
+        return CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: bottom - screen.minY)
     }
 
     // MARK: Haptics
@@ -1256,6 +1375,8 @@ private extension WorkspaceDropTarget {
 /// The collapsible rail: a thin handle at rest, a strip of windows when open.
 struct WindowRailView: View {
     @ObservedObject var model: WorkspaceModel
+    /// The controls tray is auto-hidden: the folded rail's handle fades with it.
+    var controlsHidden = false
 
     var body: some View {
         if model.available {
@@ -1268,7 +1389,7 @@ struct WindowRailView: View {
             }
             ZStack(alignment: alignment) {
                 Color.clear.allowsHitTesting(false)
-                if model.railExpanded { expanded(vertical: vertical) } else { handle(vertical: vertical) }
+                if model.railExpanded { expanded(vertical: vertical) } else { handle(vertical: vertical).fadesWithControls(controlsHidden) }
             }
         }
     }
@@ -1437,11 +1558,17 @@ struct WindowOverviewView: View {
                     if !windows.isEmpty, !results.apps.isEmpty { sectionHeader("Open Windows") }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                         ForEach(windows) { w in
-                            OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
-                                         current: model.layout.tiles.values.contains { $0.source?.windowID == w.id },
-                                         onPick: { model.choose(w, asNewTile: false) },
-                                         onAdd: model.replacingTile == nil && (1..<max(model.capacity, 1)).contains(model.layout.tiles.count)
-                                             ? { model.choose(w, asNewTile: true) } : nil)
+                            VStack(spacing: 6) {
+                                OverviewCard(window: w, thumbnail: model.thumbnails[w.id], icon: model.icons[w.bundleID],
+                                             current: model.layout.tiles.values.contains { $0.source?.windowID == w.id },
+                                             onPick: { model.choose(w, asNewTile: false) },
+                                             onAdd: model.replacingTile == nil && (1..<max(model.capacity, 1)).contains(model.layout.tiles.count)
+                                                 ? { model.choose(w, asNewTile: true) } : nil)
+                                if let action = model.minimizedWindowAction(w) {
+                                    Button(action.title) { model.showMinimizedWindow(w) }
+                                        .buttonStyle(.bordered)
+                                }
+                            }
                         }
                     }
                     appSection(results, searching: searching)
@@ -1908,7 +2035,7 @@ struct WorkspaceLeaveExtendConfirmation: ViewModifier {
 /// While a window or a pane label is dragged: the highlighted landing area with what will
 /// happen there, and a Cancel zone (drop on it and nothing changes). Window mode shows it over
 /// the panes; Mirror/Extend over the desktop (a window dropped there joins it in Window mode).
-/// Moving a whole pane that is already in the layout also offers Remove from Layout beside Cancel.
+/// Moving a pane or tab already in the layout also offers Remove from Layout where available.
 struct WorkspaceDropOverlay: View {
     @ObservedObject var model: WorkspaceModel
     /// The picture, in this view's coordinates.
@@ -2002,7 +2129,7 @@ struct WorkspaceDropOverlay: View {
             case .tab(let t, _):
                 if case .pane(let p, let tab?) = item, p == t, tab >= 0 { return String(localized: "Move Tab Here") }
                 return String(localized: "Add as Tab")
-            case .split: return String(localized: "New Pane")
+            case .split: return String(localized: "Add as New Pane")
             case .emptySlot: return String(localized: "Show Here")
             }
         }()
@@ -2090,8 +2217,7 @@ struct WorkspaceDropOverlay: View {
         }
     }
 
-    /// Takes the pane out of this device's layout, or a float being docked off this device (the
-    /// float menu's own Remove from This Device). Never closes, minimizes or quits the Mac window.
+    /// Takes a pane or tab out of this layout, or removes a float being docked from this device.
     private func removeZone(over: Bool, float: Bool) -> some View {
         dropZone(over ? String(localized: "Release to Remove")
                       : (float ? String(localized: "Remove from This Device") : String(localized: "Remove from Layout")),
@@ -2105,7 +2231,7 @@ struct WorkspaceDropOverlay: View {
                           frame report: @escaping (CGRect) -> Void) -> some View {
         Label(text, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
-            .lineLimit(1).minimumScaleFactor(0.85)
+            .lineLimit(2).minimumScaleFactor(0.85)
             .foregroundStyle(.white)
             .padding(.horizontal, 16).padding(.vertical, 12)
             .frame(minHeight: 44)
@@ -2161,6 +2287,14 @@ struct PaneOutlineShape: InsettableShape {
         return copy
     }
 
+    /// An outline for `rect` (global coordinates) that meets the screen's rounded corners as
+    /// `ScreenCornerRounding` says: on the display's edges, curving with the glass.
+    static func following(screen: CGRect?, screenRadius: CGFloat, rect: CGRect, inner: CGFloat) -> PaneOutlineShape {
+        let r = ScreenCornerRounding.radii(rect: rect, screen: screen, screenRadius: screenRadius, inner: inner)
+        return PaneOutlineShape(topLeading: r.topLeading, topTrailing: r.topTrailing,
+                                bottomTrailing: r.bottomTrailing, bottomLeading: r.bottomLeading)
+    }
+
     /// The screen in global coordinates (nil off iOS). UIKit scene state: main actor only.
     @MainActor
     static var screenBounds: CGRect? {
@@ -2210,12 +2344,28 @@ struct PaneMenuBar: View {
     let pane: CGRect
     let top: CGFloat
     let bounds: CGRect
+    var automaticallyHidden = false
+    /// The controls tray is auto-hidden: a folded bar's chevron fades with it.
+    var controlsHidden = false
+    var showsCollapsedAppName = false
+    var onActivity: ((Bool) -> Void)?
     @State private var titleFrames: [Int: CGRect] = [:]
+    @GestureState private var scrollingTitles = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    static let preferredWidth: CGFloat = 120
     private static let height: CGFloat = 28
+    private static let toggleSize: CGFloat = 44
+
+    private var expanded: Bool {
+        menus.barShown && (!automaticallyHidden || !menus.open.isEmpty || voiceOver)
+    }
 
     var body: some View {
-        if menus.barShown, menus.tile != nil, pane.width >= 120 {
+        let inlineToggle = onActivity != nil
+        if (menus.barShown || inlineToggle), menus.tile != nil,
+           pane.width >= (inlineToggle ? Self.toggleSize + 24 : Self.preferredWidth) {
             ZStack(alignment: .topLeading) {
                 if !menus.open.isEmpty {
                     // Tap anywhere else to close; nothing reaches the Mac while a menu is open.
@@ -2224,9 +2374,17 @@ struct PaneMenuBar: View {
                         .onTapGesture { menus.close() }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                bar
-                    .frame(width: pane.width - 12, height: Self.height)
-                    .offset(x: pane.minX + 6, y: top)
+                Group {
+                    if inlineToggle {
+                        inlineBar
+                    } else {
+                        titles
+                            .frame(width: pane.width - 12)
+                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .workspaceRailObstacle()
+                    }
+                }
+                .offset(x: pane.minX + 6, y: top)
                 if let level = menus.open.last {
                     let anchor = titleFrames[level.path.first ?? -1]?.minX ?? pane.minX + 6
                     let width: CGFloat = 270
@@ -2241,10 +2399,70 @@ struct PaneMenuBar: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .environment(\.colorScheme, .dark)
+            .onChange(of: scrollingTitles) { onActivity?($0) }
+            .onDisappear { if inlineToggle { menus.close() } }
         }
     }
 
-    private var bar: some View {
+    /// On the pane's right edge (owner's QA of 9000083): a `<` that opens the menus to its left,
+    /// and a `>` that folds them back. The tabs keep the row's left end.
+    private var inlineBar: some View {
+        HStack(alignment: .top, spacing: 0) {
+            if expanded {
+                titles
+                    .frame(width: pane.width - 12 - Self.toggleSize)
+                    .simultaneousGesture(DragGesture(minimumDistance: 6)
+                        .updating($scrollingTitles) { _, scrolling, _ in scrolling = true })
+                    .workspaceRailObstacle()
+                    .transition(.opacity)
+            }
+            disclosure
+                .fadesWithControls(controlsHidden && !expanded)
+                .workspaceRailObstacle()
+        }
+        .background(alignment: .top) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(workspaceChip)
+                .frame(height: Self.height)
+                .allowsHitTesting(false)
+        }
+        .frame(width: pane.width - 12, alignment: .topTrailing)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: expanded)
+    }
+
+    private var disclosure: some View {
+        Button {
+            let show = !expanded
+            onActivity?(true)
+            if !show { menus.close() }
+            if show != menus.barShown { menus.barShown = show }
+            onActivity?(false)
+        } label: {
+            HStack(spacing: 0) {
+                if !expanded, showsCollapsedAppName, !menus.app.isEmpty {
+                    Text(menus.app)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: max(0, min(120, pane.width - Self.toggleSize - 20)), alignment: .trailing)
+                        .padding(.leading, 8)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .transition(.opacity)
+                }
+                Image(systemName: expanded ? "chevron.right" : "chevron.left")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: Self.toggleSize, height: Self.height)
+            }
+            .foregroundStyle(.white)
+            .frame(height: Self.toggleSize, alignment: .top)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(expanded ? Text("Hide App Menu Bar") : Text("Show App Menu Bar"))
+        .accessibilityIdentifier("paneMenuBarToggle")
+    }
+
+    private var titles: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
                 // The app's own menu comes first and is bold, as on a Mac; its name alone while loading or unavailable.
@@ -2275,7 +2493,7 @@ struct PaneMenuBar: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 2)
         }
-        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(height: Self.height)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("\(menus.app) menus"))
     }
@@ -2394,6 +2612,29 @@ struct WorkspacePlacementRing: View {
 
 /// Fill Window on Mac / Restore Previous Size on Mac: waiting for the Mac, then what it did (8 s).
 /// Shown at the bottom of the pane or float the item was chosen on.
+struct WorkspaceWindowShowStatus: View {
+    @ObservedObject var model: WorkspaceModel
+
+    var body: some View {
+        if model.windowShowPending || model.windowShowNotice != nil {
+            HStack(spacing: 12) {
+                if model.windowShowPending {
+                    Text("Waiting for approval on the Mac…")
+                    Button("Cancel") { model.cancelWindowShow() }
+                } else if let notice = model.windowShowNotice {
+                    Text(notice)
+                    Button("Dismiss") { model.dismissWindowShowNotice() }
+                }
+            }
+            .font(.callout)
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding()
+            .accessibilityIdentifier("windowShowStatus")
+        }
+    }
+}
+
 struct WorkspaceWindowFrameStatus: View {
     @ObservedObject var model: WorkspaceModel
     let id: String

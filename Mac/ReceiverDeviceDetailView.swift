@@ -107,6 +107,18 @@ struct ReceiverDeviceDetailView: View {
                 .foregroundStyle(.secondary)
             }
 
+            if isPaired {
+                Section("Display Arrangement") {
+                    Picker("Display Arrangement", selection: Binding(
+                        get: { controller.alwaysAllowsDisplayArrangement(peerID: peerID) },
+                        set: { controller.setAlwaysAllowDisplayArrangement($0, peerID: peerID) })) {
+                        Text("Ask Every Time").tag(false)
+                        Text("Always Allow Display Arrangement for This Paired Device").tag(true)
+                    }
+                    .disabled(controller.anySessionHasEffectiveInput && !controller.alwaysAllowsDisplayArrangement(peerID: peerID))
+                }
+            }
+
             filesSection
             clipboardSection
 

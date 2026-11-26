@@ -331,64 +331,64 @@ struct TileContentTransform: Equatable, Sendable {
 /// Where every Mac display lands in an Overview pane, and back. Displays and the camera centre are
 /// in global Mac points (top-left origin, `CGDisplayBounds`); the pane is in canvas pixels.
 ///
-/// Zoom 1 fits the whole arrangement in the pane. Above 1 the camera centre is a global point at
-/// the pane's centre, kept so the view never leaves the arrangement's bounds; it moves only when
-/// the cursor comes within `edgeMarginShare` of the pane's edge (`following(cursor:)`), as macOS
-/// zoom does with "move when the pointer reaches an edge". Pure: the Mac's compositor, capture
-/// sizing and input share it, and `paneZoom` makes `TileContentTransform` map exactly the same way.
+/// The display arrangement is one source on the same free canvas as a window. The compositor
+/// and input both use its Fit or Fill transform, including the same manual zoom and pan.
 struct OverviewPaneLayout: Equatable, Sendable {
     struct Display: Equatable, Sendable {
         var id: UInt32
         var bounds: WorkspaceRect
     }
 
-    static let minimumZoom = 1.0
-    static let maximumZoom = 8.0
-    /// The view follows the cursor once it is this share of the pane's shorter side from an edge.
     static let edgeMarginShare = 0.12
-    /// A scroll is as long at every zoom (canvas pixels per Mac point), as on a real trackpad.
     static let scrollPixelsPerPoint = 2.0
-    /// How far inside a display's far edges a clamped cursor stays (points).
     static let edgeInset = 1e-3
 
     let displays: [Display]
     let pane: WorkspaceRect
-    let zoom: Double
-    /// The global point at the pane's centre (already clamped).
-    let center: WorkspacePoint
+    let union: WorkspaceRect?
+    private let transform: TileContentTransform
 
-    /// `center` nil: the arrangement's centre.
-    init(displays: [Display], pane: WorkspaceRect, zoom: Double, center: WorkspacePoint? = nil) {
+    init(displays: [Display], pane: WorkspaceRect, zoom: WorkspacePaneZoom, fit: WorkspaceFit) {
         let kept = displays.filter { $0.bounds.width > 0 && $0.bounds.height > 0 }
-        let z = OverviewPaneLayout.clampZoom(zoom)
-        let union = OverviewPaneLayout.bounds(of: kept.map(\.bounds))
-        let fit = OverviewPaneLayout.scale(fitting: union, in: pane)
+        let union = Self.bounds(of: kept.map(\.bounds))
         self.displays = kept
         self.pane = pane
-        self.zoom = z
-        self.center = OverviewPaneLayout.clamp(center ?? WorkspacePoint(x: union?.midX ?? 0, y: union?.midY ?? 0),
-                                               union: union, pane: pane, scale: fit * z)
+        self.union = union
+        self.transform = TileContentTransform(tile: pane,
+                                              source: WorkspaceSize(width: union?.width ?? 0, height: union?.height ?? 0),
+                                              rotation: .none, fit: fit, zoom: zoom)
     }
 
-    static func clampZoom(_ z: Double) -> Double { z.isFinite ? min(max(z, minimumZoom), maximumZoom) : minimumZoom }
+    /// Construct a view from a global Mac point at its centre.
+    init(displays: [Display], pane: WorkspaceRect, zoom: Double, center: WorkspacePoint? = nil, fit: WorkspaceFit = .fit) {
+        let union = Self.bounds(of: displays.map(\.bounds).filter { $0.width > 0 && $0.height > 0 })
+        let z = WorkspacePaneZoom(scale: zoom,
+                                  centerX: center.flatMap { c in union.map { (c.x - $0.x) / $0.width } } ?? 0.5,
+                                  centerY: center.flatMap { c in union.map { (c.y - $0.y) / $0.height } } ?? 0.5)
+        self.init(displays: displays, pane: pane, zoom: z, fit: fit)
+    }
 
-    /// The arrangement's bounds: every display together.
-    var union: WorkspaceRect? { Self.bounds(of: displays.map(\.bounds)) }
-
-    /// Canvas pixels per point that fit every display in the pane.
-    var fitScale: Double { Self.scale(fitting: union, in: pane) }
-    /// Canvas pixels per point now.
-    var scale: Double { fitScale * zoom }
+    var zoom: Double { transform.zoom.scale }
+    var paneZoom: WorkspacePaneZoom { transform.effectiveZoom }
+    var center: WorkspacePoint { globalPoint(fromPane: WorkspacePoint(x: pane.midX, y: pane.midY)) }
+    var fitScale: Double {
+        guard let union else { return 0 }
+        return min(pane.width / union.width, pane.height / union.height)
+    }
+    var scale: Double { transform.scale }
 
     func panePoint(fromGlobal g: WorkspacePoint) -> WorkspacePoint {
-        WorkspacePoint(x: pane.midX + (g.x - center.x) * scale, y: pane.midY + (g.y - center.y) * scale)
+        guard let u = union else { return WorkspacePoint(x: pane.midX, y: pane.midY) }
+        return transform.canvasPoint(fromSource: WorkspacePoint(x: g.x - u.x, y: g.y - u.y))
     }
 
     func globalPoint(fromPane p: WorkspacePoint) -> WorkspacePoint {
-        let s = scale
-        guard s > 0 else { return center }
-        return WorkspacePoint(x: center.x + (p.x - pane.midX) / s, y: center.y + (p.y - pane.midY) / s)
+        guard let u = union else { return WorkspacePoint(x: 0, y: 0) }
+        guard let s = transform.unclampedSourcePoint(fromCanvas: p) else { return WorkspacePoint(x: u.midX, y: u.midY) }
+        return WorkspacePoint(x: u.x + s.x, y: u.y + s.y)
     }
+
+    func containsDisplayPoint(_ g: WorkspacePoint) -> Bool { displays.contains { $0.bounds.contains(g) } }
 
     /// A display's whole rectangle in the pane (it may reach past the pane's edges when zoomed in).
     func rect(for d: Display) -> WorkspaceRect {
@@ -422,35 +422,29 @@ struct OverviewPaneLayout: Equatable, Sendable {
         return best?.point
     }
 
-    /// The camera centred on `g` (as far as the arrangement's bounds allow).
     func centered(on g: WorkspacePoint) -> OverviewPaneLayout {
-        OverviewPaneLayout(displays: displays, pane: pane, zoom: zoom, center: g)
+        OverviewPaneLayout(displays: displays, pane: pane, zoom: zoom, center: g, fit: transform.fit)
     }
 
-    /// The same view at another zoom, centred on the cursor `g` (zoom 1: everything, fitted).
-    func zoomed(to z: Double, cursor g: WorkspacePoint) -> OverviewPaneLayout {
-        OverviewPaneLayout(displays: displays, pane: pane, zoom: z, center: g)
-    }
-
-    /// The edge rule: the centre moves only when the cursor's place in the pane is within the edge
-    /// margin, by just enough to put it back on the margin. At zoom 1 nothing moves.
+    /// Follow a moving cursor near the pane edges. Automatic panning stops at the arrangement
+    /// edges while manual panning can leave empty space around the displays.
     func following(cursor g: WorkspacePoint) -> OverviewPaneLayout {
-        let s = scale
-        guard s > 0, pane.width > 0, pane.height > 0 else { return self }
-        let margin = Self.edgeMarginShare * min(pane.width, pane.height)
+        guard let u = union, scale > 0 else { return self }
         let p = panePoint(fromGlobal: g)
-        var c = center
-        if p.x < pane.x + margin { c.x -= (pane.x + margin - p.x) / s } else if p.x > pane.maxX - margin { c.x += (p.x - (pane.maxX - margin)) / s }
-        if p.y < pane.y + margin { c.y -= (pane.y + margin - p.y) / s } else if p.y > pane.maxY - margin { c.y += (p.y - (pane.maxY - margin)) / s }
-        guard c != center else { return self }
-        return OverviewPaneLayout(displays: displays, pane: pane, zoom: zoom, center: c)
-    }
-
-    /// This camera as a pane zoom over the arrangement's bounds: with the union as the source and
-    /// Fit, `TileContentTransform` maps every point exactly as this layout does.
-    var paneZoom: WorkspacePaneZoom {
-        guard let u = union, u.width > 0, u.height > 0 else { return .identity }
-        return WorkspacePaneZoom(scale: zoom, centerX: (center.x - u.x) / u.width, centerY: (center.y - u.y) / u.height)
+        if scale <= fitScale, pane.contains(p) { return self }
+        let margin = Self.edgeMarginShare * min(pane.width, pane.height)
+        let c = center
+        func follow(_ position: Double, _ lo: Double, _ hi: Double, _ origin: Double, _ extent: Double, _ current: Double) -> Double {
+            let delta = position - min(max(position, lo + margin), hi - margin)
+            guard delta != 0 else { return current }
+            let half = min((hi - lo) / scale / 2, extent / 2)
+            // Keep a manually panned view where it is unless following the cursor brings it back.
+            let lower = min(origin + half, current), upper = max(origin + extent - half, current)
+            return min(max(current + delta / scale, lower), upper)
+        }
+        let next = WorkspacePoint(x: follow(p.x, pane.x, pane.maxX, u.x, u.width, c.x),
+                                  y: follow(p.y, pane.y, pane.maxY, u.y, u.height, c.y))
+        return next == c ? self : centered(on: next)
     }
 
     private static func bounds(of rects: [WorkspaceRect]) -> WorkspaceRect? {
@@ -459,24 +453,6 @@ struct OverviewPaneLayout: Equatable, Sendable {
         for r in rects.dropFirst() { x0 = min(x0, r.x); y0 = min(y0, r.y); x1 = max(x1, r.maxX); y1 = max(y1, r.maxY) }
         return WorkspaceRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
     }
-
-    private static func scale(fitting union: WorkspaceRect?, in pane: WorkspaceRect) -> Double {
-        guard let u = union, u.width > 0, u.height > 0, pane.width > 0, pane.height > 0 else { return 0 }
-        return min(pane.width / u.width, pane.height / u.height)
-    }
-
-    /// Per axis: the arrangement's middle when the view is wider than it, else kept so the view
-    /// stays inside it.
-    private static func clamp(_ c: WorkspacePoint, union: WorkspaceRect?, pane: WorkspaceRect, scale: Double) -> WorkspacePoint {
-        guard let u = union, scale > 0, c.x.isFinite, c.y.isFinite else {
-            return WorkspacePoint(x: union?.midX ?? 0, y: union?.midY ?? 0)
-        }
-        func axis(_ v: Double, _ lo: Double, _ extent: Double, _ view: Double) -> Double {
-            let half = view / scale / 2
-            return extent <= 2 * half ? lo + extent / 2 : min(max(v, lo + half), lo + extent - half)
-        }
-        return WorkspacePoint(x: axis(c.x, u.x, u.width, pane.width), y: axis(c.y, u.y, u.height, pane.height))
-    }
 }
 
 /// The receiver's rules for an Overview pane: when it is offered, the displays its menu lists,
@@ -484,9 +460,19 @@ struct OverviewPaneLayout: Equatable, Sendable {
 enum OverviewPaneInput {
     /// The displays an Overview pane shows, in reading order: each drawn display (a mirror set
     /// once), never one of MeowDisplay's own screens. As the Mac's `overviewDisplays`.
+    private static func drawnDisplays(_ catalog: [CatalogDisplayItem]) -> [OverviewDisplay] {
+        DisplayOverviewModel(catalog: catalog).drawnDisplays.filter { !$0.isMeow && !$0.isOwn }
+    }
+
     static func shownDisplays(_ catalog: [CatalogDisplayItem]) -> [CatalogDisplayItem] {
-        let drawn = DisplayOverviewModel(catalog: catalog).drawnDisplays.filter { !$0.isMeow && !$0.isOwn }
-        return drawn.compactMap { d in catalog.first { $0.id == d.id } }
+        drawnDisplays(catalog).compactMap { d in catalog.first { $0.id == d.id } }
+    }
+
+    static func viewportDisplays(_ catalog: [CatalogDisplayItem]) -> [OverviewPaneLayout.Display] {
+        drawnDisplays(catalog).map { d in
+            OverviewPaneLayout.Display(id: d.id, bounds: WorkspaceRect(x: d.frame.minX, y: d.frame.minY,
+                                                                      width: d.frame.width, height: d.frame.height))
+        }
     }
 
     /// Offered as a pane source only when the Mac shows Overview panes (`overviewPane`) and has
@@ -511,24 +497,23 @@ enum OverviewPaneInput {
         case pointer(PointerInputMode)
         /// The Mac scrolls (at the cursor in an Overview pane).
         case scrollMac
-        /// The pane's zoom on this device's layout (an Overview pane's is the Mac's camera, 1x-8x).
+        /// The pane's viewport zoom.
         case zoomPane
-        /// The pane's picture moves (a zoomed or filled window or display pane only).
+        /// The pane's picture moves.
         case movePane
         /// Nothing.
         case none
     }
 
-    /// `kind`: what the pane under the fingers shows. In an Overview pane one finger is always a
-    /// trackpad, two fingers scroll the Mac and a pinch zooms; nothing moves its view (the Mac's
-    /// camera follows the cursor). Other panes are unchanged.
+    /// In an Overview pane one finger is always a trackpad. A two-finger drag scrolls when
+    /// the Mac can take input and local view navigation doesn't own the gesture.
     static func route(_ gesture: Gesture, kind: WorkspaceSource.Kind, preferred: PointerInputMode,
                       inputReachesMac: Bool, moveViewActive: Bool) -> Route {
         switch (gesture, kind) {
-        case (.oneFinger, .overview): return .pointer(.trackpad)
+        case (.oneFinger, .overview), (.oneFinger, .trackpad): return .pointer(.trackpad)
+        case (.pinch, .trackpad): return .none
         case (.oneFinger, _): return .pointer(preferred)
         case (.pinch, _): return .zoomPane
-        case (.twoFingerDrag, .overview): return inputReachesMac && !moveViewActive ? .scrollMac : .none
         case (.twoFingerDrag, _):
             return WorkspaceTwoFingerPolicy.scrollsMac(isPinch: false, inputReachesMac: inputReachesMac,
                                                        moveViewActive: moveViewActive) ? .scrollMac : .movePane
@@ -540,15 +525,6 @@ enum OverviewPaneInput {
         guard let kind, case .pointer(let mode) = route(.oneFinger, kind: kind, preferred: preferred,
                                                         inputReachesMac: true, moveViewActive: false) else { return preferred }
         return mode
-    }
-
-    /// An Overview pane's zoom after a pinch by `ratio` from `start`: the person's scale, 1x-8x
-    /// (`OverviewPaneLayout`). The centre is the Mac's, so it is sent as the middle. nil: 1x.
-    static func zoom(from start: WorkspacePaneZoom?, ratio: Double) -> WorkspacePaneZoom? {
-        let r = ratio.isFinite && ratio > 0 ? ratio : 1
-        let scale = OverviewPaneLayout.clampZoom((start?.scale ?? 1) * r)
-        guard abs(scale - OverviewPaneLayout.minimumZoom) > 1e-4 else { return nil }
-        return WorkspacePaneZoom(scale: scale, centerX: 0.5, centerY: 0.5)
     }
 }
 
@@ -571,6 +547,14 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     var windowID: UInt32
     var bundleID: String?
     var follow: Follow = .window
+    /// Durable identity for a physical display. Older saved layouts use the listed ID.
+    var displayUUID: String? = nil
+
+    func matches(_ other: WorkspaceSource) -> Bool {
+        guard host == other.host, kind == other.kind else { return false }
+        if let displayUUID, let otherUUID = other.displayUUID { return displayUUID == otherUUID }
+        return windowID == other.windowID
+    }
 
     /// A whole Mac display can fill a pane too (Full Desktop as a tile source). It is kept
     /// as a reserved window id with the high bit set (CGWindowIDs never get there), so
@@ -590,8 +574,17 @@ struct WorkspaceSource: Equatable, Codable, Sendable {
     static func overview(host: String) -> WorkspaceSource { WorkspaceSource(host: host, windowID: overviewKey) }
     var isOverview: Bool { windowID == Self.overviewKey }
 
-    enum Kind: Equatable, Sendable { case window, display, overview }
-    var kind: Kind { isOverview ? .overview : isDisplay ? .display : .window }
+    /// Receiver-only pseudo-source, excluded from the Mac's capture requests.
+    static let trackpadKey = UInt32.max
+    static func trackpad(host: String) -> WorkspaceSource { WorkspaceSource(host: host, windowID: trackpadKey) }
+    var isTrackpad: Bool { windowID == Self.trackpadKey }
+
+    enum Kind: Equatable, Sendable { case window, display, overview, trackpad }
+    var kind: Kind {
+        if isTrackpad { return .trackpad }
+        if isOverview { return .overview }
+        return isDisplay ? .display : .window
+    }
 }
 
 struct WorkspaceTile: Equatable, Codable, Sendable {
@@ -653,7 +646,7 @@ struct WorkspaceTabView: Equatable, Codable, Sendable {
 
 extension WorkspaceSource {
     /// One window on one Mac (generation and follow aside): a tab's identity in its pane.
-    var tabKey: String { "\(host)#\(windowID)" }
+    var tabKey: String { "\(host)#\(displayUUID ?? String(windowID))" }
 }
 
 /// Pinch and pan inside one pane: the source point under the fingers when they came down stays
@@ -1075,7 +1068,7 @@ struct WorkspaceLayout: Equatable, Sendable {
 
     private static func unique(_ list: [WorkspaceSource]) -> [WorkspaceSource] {
         var seen: [WorkspaceSource] = []
-        for s in list where !seen.contains(where: { $0.host == s.host && $0.windowID == s.windowID }) { seen.append(s) }
+        for s in list where !seen.contains(where: { $0.matches(s) }) { seen.append(s) }
         return seen
     }
 
@@ -1084,8 +1077,8 @@ struct WorkspaceLayout: Equatable, Sendable {
         guard var tile = tiles[id] else { return self }
         guard let current = tile.source else { return replacingSource(of: id, with: source) }
         var list = tile.windows
-        if !list.contains(where: { $0.host == current.host && $0.windowID == current.windowID }) { list.append(current) }
-        list.removeAll { $0.host == source.host && $0.windowID == source.windowID }
+        if !list.contains(where: { $0.matches(current) }) { list.append(current) }
+        list.removeAll { $0.matches(source) }
         list.append(source)
         tile.tabs = list.count > 1 ? list : []
         tile.show(source)
@@ -1167,6 +1160,10 @@ struct WorkspaceLayout: Equatable, Sendable {
     /// The pane (or floating pane) showing, or holding as a tab, this window, if any.
     func tile(holding host: String, windowID: UInt32) -> String? {
         allTileIDs.first { id in tiles[id]?.windows.contains { $0.host == host && $0.windowID == windowID } == true }
+    }
+
+    func tile(holding source: WorkspaceSource) -> String? {
+        allTileIDs.first { id in tiles[id]?.windows.contains { $0.matches(source) } == true }
     }
 
     /// A new pane beside the one in slot `index` (a drop on a pane's edge).
@@ -1972,6 +1969,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         /// Its window closed on the Mac and it was kept empty (absent otherwise; older readers
         /// drop the empty pane, as they always have).
         var emptied: Bool?
+        var displayUUID: String? = nil
     }
 
     struct TabRecord: Codable, Equatable, Sendable {
@@ -1983,6 +1981,7 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         var rotation: Int?
         var fit: String?
         var zoom: [Double]?
+        var displayUUID: String? = nil
     }
 
     /// A floating pane (schema 4): its tile (in `tiles`), its frame on the canvas, and the edge
@@ -2023,9 +2022,10 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
                  tabs: $0.tabs.isEmpty ? nil : $0.tabs.map { [views = $0.tabViews] s in
                      let v = views[s.tabKey]
                      return TabRecord(host: s.host, window: s.windowID, bundle: s.bundleID, follow: s.follow.rawValue,
-                                      rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue }, zoom: v?.zoom?.wire)
+                                      rotation: v.map { $0.rotation.rawValue }, fit: v.map { $0.fit.rawValue },
+                                      zoom: v?.zoom?.wire, displayUUID: s.displayUUID)
                  },
-                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil)
+                 zoom: $0.zoom?.wire, emptied: $0.source == nil && $0.emptied ? true : nil, displayUUID: $0.source?.displayUUID)
         }
         maximized = layout.maximized
         floats = layout.floats.isEmpty ? nil : layout.floats.map {
@@ -2051,7 +2051,8 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             var source: WorkspaceSource?
             if let host = t.host, let window = t.window, !host.isEmpty {
                 source = WorkspaceSource(host: host, windowID: window, bundleID: t.bundle,
-                                         follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
+                                         follow: t.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window,
+                                         displayUUID: t.displayUUID)
             }
             // Fit unless Fill was chosen ("auto", the old default, shows the whole window too).
             let fit: WorkspaceFit = t.fit == WorkspaceFit.fill.rawValue ? .fill : .fit
@@ -2060,12 +2061,13 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
             if source == nil, t.emptied == true { tile.emptied = true }
             let tabs = (t.tabs ?? []).prefix(8).filter { !$0.host.isEmpty }.map {
                 WorkspaceSource(host: $0.host, windowID: $0.window, bundleID: $0.bundle,
-                                follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window)
+                                follow: $0.follow.flatMap(WorkspaceSource.Follow.init(rawValue:)) ?? .window,
+                                displayUUID: $0.displayUUID)
             }
             if tabs.count > 1, let s = source, tabs.contains(s) {
                 tile.tabs = Array(tabs)
                 for r in (t.tabs ?? []).prefix(8) where r.rotation != nil || r.fit != nil || r.zoom != nil {
-                    let key = WorkspaceSource(host: r.host, windowID: r.window).tabKey
+                    let key = WorkspaceSource(host: r.host, windowID: r.window, displayUUID: r.displayUUID).tabKey
                     guard key != s.tabKey, tile.tabs.contains(where: { $0.tabKey == key }) else { continue }
                     let v = WorkspaceTabView(rotation: WorkspaceRotation(degrees: r.rotation ?? 0), fit: r.fit == WorkspaceFit.fill.rawValue ? .fill : .fit,
                                              zoom: WorkspacePaneZoom(wire: r.zoom).flatMap { $0.isIdentity ? nil : $0 })

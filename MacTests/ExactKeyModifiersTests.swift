@@ -91,8 +91,8 @@ final class ExactKeyModifiersTests: XCTestCase {
         for windows in [false, true] {
             let features = MacSender.welcomeFeatures(windowStreamingAllowed: windows)
             XCTAssertTrue(features.contains(ExactKeyModifiersWire.welcomeFeature), "windows=\(windows)")
-            // A receiver reads only the first 16 entries, each up to 32 characters.
-            XCTAssertLessThanOrEqual(features.count, 16)
+            XCTAssertLessThanOrEqual(features.count, WindowWorkspaceWire.welcomeFeatureLimit)
+            XCTAssertTrue(features.prefix(16).contains(ExactKeyModifiersWire.welcomeFeature))
             XCTAssertTrue(features.allSatisfy { $0.count <= 32 })
             XCTAssertEqual(Set(features).count, features.count)
         }

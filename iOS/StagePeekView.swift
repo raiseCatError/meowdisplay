@@ -1,6 +1,12 @@
 import SwiftUI
 import UIKit
 
+/// Video Off uses the same gestures and animation, with its own catalog and actions.
+struct TrackpadStagePeekConfiguration {
+    let open: Binding<Bool>
+    let turnVideoOn: () -> Void
+}
+
 /// MeowDisplay blue: the Stage Peek focus ring.
 private let stagePeekAccent = meowAccent
 
@@ -45,6 +51,7 @@ struct StagePeekOverlay: View {
     let onDisplay: (CatalogDisplayItem?) -> Void
     /// UI tests (Demo's `-demoStagePeek`): open as VoiceOver's activate does, without the hold.
     var opensOnAppearForTesting = false
+    var trackpad: TrackpadStagePeekConfiguration? = nil
 
     @State private var machine = StagePeekMachine()
     @State private var query = ""
@@ -72,12 +79,19 @@ struct StagePeekOverlay: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
+    private var peekOpen: Bool { trackpad?.open.wrappedValue ?? model.stagePeekOpen }
+
+    private var trackpadMetadataAllowed: Bool {
+        inputAllowed && model.trackpadPeekSupported && model.trackpadPeekAllowed() && !model.macLocked
+    }
+
     /// The compact stack's windows: the chosen app's, matching the search.
     private var windows: [CatalogWindowItem] {
-        let all = (model.catalog?.windows ?? []).filter { appFilter == nil || $0.bundleID == appFilter }
+        let catalog = trackpad == nil ? model.catalog : (trackpadMetadataAllowed ? model.trackpadPeekCatalog : nil)
+        let all = (catalog?.windows ?? []).filter { appFilter == nil || $0.bundleID == appFilter }
         return query.isEmpty ? all : WorkspaceSearch.search(query, apps: [], windows: all).windows
     }
-    private var displays: [CatalogDisplayItem] { model.catalog?.displays ?? [] }
+    private var displays: [CatalogDisplayItem] { trackpad == nil ? model.catalog?.displays ?? [] : [] }
     /// Finder first, running apps next, then every installed app. Falls back to the running
     /// apps from the window catalog until the Mac's app list arrives.
     private var dockApps: [MacAppItem] {
@@ -91,10 +105,10 @@ struct StagePeekOverlay: View {
     private var filterApp: MacAppItem? { appFilter.flatMap { b in dockApps.first { $0.bundleID == b } } }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Roomier chrome when the window is regular in both directions (a full iPad, an unfolded
-    /// iPhone Duo), whatever the device; a phone in landscape stays compact.
+    /// iPad card sizing in a roomy window. A phone keeps its card layout when unfolded.
     private var roomy: Bool {
-        ReceiverLayoutClass.isRoomy(horizontalRegular: horizontalSizeClass == .regular,
+        ReceiverLayoutClass.isRoomy(supportsPadControls: UIDevice.current.userInterfaceIdiom == .pad,
+                                    horizontalRegular: horizontalSizeClass == .regular,
                                     verticalRegular: verticalSizeClass == .regular)
     }
 
@@ -111,72 +125,47 @@ struct StagePeekOverlay: View {
                     // Barely there (not 0) while dragging, so the finger's gesture keeps its view.
                     .opacity(model.drag != nil ? 0.001 : 1)
                     .transition(.opacity)
-                if machine.expansion < 0.999 {
-                    ZStack(alignment: .topLeading) {
-                        ForEach(cards, id: \.index) { card in
-                            cardView(card)
-                                .opacity(model.drag != nil ? 0 : 1 - machine.expansion)
-                                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(x: edge == .left ? -48 : 48)))
+                if trackpad == nil || trackpadMetadataAllowed {
+                    if machine.expansion < 0.999 {
+                        compactStack(cards)
+                            .transition(trackpad == nil ? .opacity : .identity)
+                    }
+                    if machine.expansion > 0.001 {
+                        if trackpad == nil {
+                            gallery
+                                // Keep a card's drag attached to its gallery view.
+                                .opacity(model.drag != nil ? 0.001 : machine.expansion)
+                                .allowsHitTesting(machine.expanded)
+                        } else {
+                            trackpadGallery
+                                .transition(.identity)
+                                .opacity(machine.expansion)
+                                .allowsHitTesting(machine.expanded)
                         }
                     }
-                    .frame(width: frame.width, height: frame.height, alignment: .topLeading)
-                    // Compact Dock: cards fade and clip at the band's edges, never under the controls.
-                    .mask(alignment: .topLeading) { dockMask }
-                    .animation(.spring(response: 0.3, dampingFraction: 0.85), value: machine.closeRevealed)
-                    if machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
-                        title(for: focus)
-                    }
-                    if machine.expansion < 0.5, model.drag == nil, let id = machine.closeRevealed,
-                       let i = machine.ids.firstIndex(of: id), let card = cards.first(where: { $0.index == i }),
-                       let w = windows.first(where: { $0.id == id }) {
-                        compactCloseButton(w, card: card)
-                    }
                 }
-                if machine.expansion > 0.001 {
-                    gallery
-                        // A card dragged from here (search results too) carries the finger's
-                        // gesture: barely there, never 0 or removed, so the drag keeps its view.
-                        .opacity(model.drag != nil ? 0.001 : machine.expansion)
-                        .allowsHitTesting(machine.expanded)
+                if trackpad != nil, !trackpadMetadataAllowed || model.trackpadPeekCatalog == nil
+                    || (windows.isEmpty && machine.expansion < 0.5) {
+                    trackpadStatus
                 }
                 toolbar(cards: cards)
                     .opacity(model.drag != nil ? 0 : 1)
                     .transition(.opacity)
-                if let notice = model.closeNotice {
-                    closeToast(notice)
+                if trackpad == nil {
+                    if let notice = model.closeNotice {
+                        closeToast(notice)
+                    }
+                    topControls
+                        .opacity(model.drag != nil ? 0.001 : 1)
+                        .transition(.opacity)
+                } else if trackpadMetadataAllowed {
+                    trackpadSearch.transition(.identity)
                 }
-                topControls
-                    .opacity(model.drag != nil ? 0.001 : 1)   // the apps bar carries app drags (as above)
-                    .transition(.opacity)
             }
-            if launchpad {
-                launchpadView.transition(.opacity)
+            if trackpad == nil {
+                desktopOverlays
             }
-            RemoteFinderHost(files: model.files, workspace: model, inputAllowed: inputAllowed,
-                             safe: safe, onFinderWindows: { showFinderWindows() })
-                .zIndex(45)
-            if model.drag != nil, !model.windowMode {
-                // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
-                // (Window mode: the pane view draws them. Drawing them here too showed two
-                // "Drop Here to Cancel" zones, owner report 2026-10-31.)
-                // Its chip below the Dynamic Island, its bar above the Home indicator and the controls.
-                WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size),
-                                     safeArea: safe, controls: avoiding).zIndex(55)
-            }
-            if let d = model.drag, case .window(let w) = d.item {
-                // The card under the finger while the peek steps aside to show the panes.
-                dragPreview(w)
-                    .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
-                    .allowsHitTesting(false)
-                    .zIndex(60)
-            } else if let d = model.drag, case .app(let a) = d.item {
-                MacAppIcon(model: model, bundleID: a.bundleID, name: a.name, size: 56)
-                    .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
-                    .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
-                    .allowsHitTesting(false)
-                    .zIndex(60)
-            }
-            if !machine.ids.isEmpty, !model.overviewOpen, !launchpad,
+            if !machine.ids.isEmpty, (trackpad != nil || !model.overviewOpen), !launchpad,
                let strip = StagePeekLayout.strip(edge: edge, safe: safe, avoiding: avoiding) {
                 stripView(strip, cards: cards)
             }
@@ -184,44 +173,42 @@ struct StagePeekOverlay: View {
         .frame(width: frame.width, height: frame.height, alignment: .topLeading)
         .background(GeometryReader { g in
             Color.clear
-                .onAppear { overlayOrigin = g.frame(in: .global).origin; model.desktopPictureGlobal = g.frame(in: .global) }
-                .onChange(of: g.frame(in: .global)) { overlayOrigin = $0.origin; model.desktopPictureGlobal = $0 }
+                .onAppear { updateOverlayOrigin(g.frame(in: .global)) }
+                .onChange(of: g.frame(in: .global)) { updateOverlayOrigin($0) }
         })
         .coordinateSpace(name: "stagePeek")
-        // Escape (VoiceOver's scrub) leaves All Apps first, then the peek.
         .accessibilityAction(.escape) { if launchpad { closeLaunchpad() } else { finish(machine.dismiss()) } }
         .position(x: frame.midX, y: frame.midY)
-        .ignoresSafeArea(.keyboard)   // the search keyboard never resizes (or closes) the peek
+        .ignoresSafeArea(.keyboard)
         .onAppear {
             machine.naturalScrolling = naturalScrolling; syncItems(); playHint()
             if opensOnAppearForTesting { finish(machine.openDirectly()) }
         }
         .onChange(of: naturalScrolling) { machine.naturalScrolling = $0 }
-        // Every new opening starts unfiltered: all windows, no app selected, no search; the
-        // Compact/Normal and layout preferences are kept. Dismissal clears them too.
-        .onChange(of: model.stagePeekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
-        // An app dropped from here is opening: its progress, then its window, show in the layout.
+        .onChange(of: peekOpen) { _ in query = ""; appFilter = nil; launchpad = false }
         .onChange(of: model.stagePeekCloseRequest) { _ in
+            guard trackpad == nil else { return }
             searchFocused = false
             launchpad = false
             if machine.isVisible { animate { cancelAll() } }
         }
         .onChange(of: windows) { _ in syncItems() }
         .onChange(of: displays) { _ in syncItems() }
-        .onChange(of: model.currentWindowID) { _ in syncItems() }
+        .onChange(of: model.currentWindowID) { _ in if trackpad == nil { syncItems() } }
         .onChange(of: model.available) { available in if !available { cancelAll() } }
-        .onChange(of: model.overviewOpen) { open in if open { cancelAll() } }
-        // Searching needs room: typing opens the gallery instead of closing anything.
+        .onChange(of: model.overviewOpen) { open in if open, trackpad == nil { cancelAll() } }
         .onChange(of: searchFocused) { focused in if focused, machine.isVisible, !machine.expanded { animate { machine.expand() } } }
         .onChange(of: query) { q in if !q.isEmpty, machine.isVisible, !machine.expanded { animate { machine.expand() } } }
-        .onChange(of: machine.isVisible) { visible in if !visible { searchFocused = false; model.thumbnailPriority = [] } }
+        .onChange(of: machine.isVisible) { visible in
+            if !visible {
+                searchFocused = false
+                if trackpad == nil { model.thumbnailPriority = [] }
+            }
+        }
         .onChange(of: launchpad) { open in
             model.launchpadOpen = open
-            // VoiceOver moves into All Apps, and back to the peek.
             UIAccessibility.post(notification: .screenChanged, argument: nil)
         }
-        // Rotation, fold, Split View, Stage Manager resize: a width change. A keyboard only changes the height.
-        // A screen opened from the gallery (overview, arrangement editor) keeps the peek open under it.
         .onChange(of: frame.size.width) { _ in
             let galleryScreenOpen = model.displayOverviewOpen || model.displayArrangementEditorOpen
             if StagePeekResize.closesOnWidthChange(searching: searchFocused, galleryScreenOpen: galleryScreenOpen) {
@@ -231,28 +218,108 @@ struct StagePeekOverlay: View {
         .onChange(of: edge) { _ in cancelAll() }
         .onChange(of: stripPressing) { pressing in if !pressing { detectCancel(strip: true) } }
         .onChange(of: openPressing) { pressing in if !pressing { detectCancel(strip: false) } }
+        .onChange(of: trackpadMetadataAllowed) { allowed in
+            guard trackpad != nil, !allowed else { return }
+            model.clearTrackpadPeek()
+            query = ""
+            searchFocused = false
+        }
+        .task(id: trackpad != nil && peekOpen && trackpadMetadataAllowed) {
+            guard trackpad != nil else { return }
+            guard peekOpen, trackpadMetadataAllowed else { model.clearTrackpadPeek(); return }
+            while !Task.isCancelled {
+                model.refreshTrackpadPeek()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
         .onDisappear { cancelAll() }
+    }
+
+    private func updateOverlayOrigin(_ rect: CGRect) {
+        overlayOrigin = rect.origin
+        if trackpad == nil { model.desktopPictureGlobal = rect }
+    }
+
+    @ViewBuilder private func compactStack(_ cards: [StagePeekCard]) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(cards, id: \.index) { card in
+                cardView(card)
+                    .opacity(model.drag != nil ? 0 : 1 - machine.expansion)
+                    .transition(trackpad != nil ? .identity : reduceMotion ? .opacity : .opacity.combined(with: .offset(x: edge == .left ? -48 : 48)))
+            }
+        }
+        .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+        // Compact Dock: cards fade and clip at the band's edges, never under the controls.
+        .mask(alignment: .topLeading) { dockMask }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: machine.closeRevealed)
+        if trackpad == nil, machine.expansion < 0.5, model.drag == nil, let focus = cards.first(where: \.highlighted) {
+            title(for: focus)
+            if machine.closeRevealed == nil, let window = window(at: focus.index) {
+                StagePeekRestoreButton(model: model, window: window)
+                    .position(x: focus.center.x + max(0, focus.size.width / 2 - 26),
+                              y: focus.center.y + max(0, focus.size.height / 2 - 26))
+                    .zIndex(9)
+            }
+        }
+        if trackpad == nil, machine.expansion < 0.5, model.drag == nil, let id = machine.closeRevealed,
+           let i = machine.ids.firstIndex(of: id), let card = cards.first(where: { $0.index == i }),
+           let w = windows.first(where: { $0.id == id }) {
+            compactCloseButton(w, card: card)
+        }
+    }
+
+    @ViewBuilder private var desktopOverlays: some View {
+        if launchpad {
+            launchpadView.transition(.opacity)
+        }
+        RemoteFinderHost(files: model.files, workspace: model, inputAllowed: inputAllowed,
+                         safe: safe, onFinderWindows: { showFinderWindows() })
+            .zIndex(45)
+        if model.drag != nil, !model.windowMode {
+            // Mirror/Extend: the desktop is one pane; landing areas and Cancel show over it.
+            // (Window mode: the pane view draws them. Drawing them here too showed two
+            // "Drop Here to Cancel" zones, owner report 2026-10-31.)
+            // Its chip below the Dynamic Island, its bar above the Home indicator and the controls.
+            WorkspaceDropOverlay(model: model, picture: CGRect(origin: .zero, size: frame.size),
+                                 safeArea: safe, controls: avoiding).zIndex(55)
+        }
+        if let d = model.drag, case .window(let w) = d.item {
+            // The card under the finger while the peek steps aside to show the panes.
+            dragPreview(w)
+                .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
+                .allowsHitTesting(false)
+                .zIndex(60)
+        } else if let d = model.drag, case .app(let a) = d.item {
+            MacAppIcon(model: model, bundleID: a.bundleID, name: a.name, size: 56)
+                .shadow(color: .black.opacity(0.45), radius: 10, y: 4)
+                .position(x: d.location.x - overlayOrigin.x, y: d.location.y - overlayOrigin.y)
+                .allowsHitTesting(false)
+                .zIndex(60)
+        }
     }
 
     // MARK: Geometry
 
     private func layout() -> [StagePeekCard] {
+        if trackpad != nil, !trackpadMetadataAllowed || windows.isEmpty { return [] }
         let aspects = machine.ids.map { id -> Double in
+            if trackpad != nil { return 1.7 }
             if id == StagePeekMachine.fullDesktopID { return 1.6 }
             guard let w = windows.first(where: { $0.id == id }), w.width > 0, w.height > 0 else { return 1.5 }
             return Double(w.width) / Double(w.height)
         }
         return StagePeekLayout.cards(aspects: aspects, position: machine.position, expansion: machine.expansion,
                                      edge: edge, safe: safe, isPad: roomy, reduceMotion: reduceMotion, region: dockRegion,
-                                     fitsRegion: true)
+                                     fitsRegion: true, metadataOnly: trackpad != nil)
     }
 
     /// The Compact Dock's band: under the search and app carousel, above the buttons.
     private var dockRegion: CGRect? {
         guard dock == .compact else { return nil }
-        let compactWidth = min(max(safe.width * (roomy ? 0.24 : 0.36), 110), roomy ? 300 : 210)
+        let compactWidth = StagePeekLayout.compactCardWidth(in: safe, isPad: roomy, metadataOnly: trackpad != nil)
         let column = edge == .left ? safe.minX + 16 + compactWidth / 2 : safe.maxX - 16 - compactWidth / 2
-        return StagePeekLayout.dockRegion(safe: safe, controlsAbove: safe.minY + Self.topControlsBottom,
+        let top = trackpad == nil ? Self.topControlsBottom : 56
+        return StagePeekLayout.dockRegion(safe: safe, controlsAbove: safe.minY + top,
                                           controlsBelow: toolbarY(column) - Self.toolbarHalfHeight)
     }
 
@@ -376,15 +443,17 @@ struct StagePeekOverlay: View {
 
     private func cardView(_ card: StagePeekCard) -> some View {
         let window = window(at: card.index)
-        let thumbnail = window.flatMap { model.thumbnails[$0.id] }
-        let icon = window.flatMap { model.icons[$0.bundleID] }
+        let thumbnail = trackpad == nil ? window.flatMap { model.thumbnails[$0.id] } : nil
+        let icon = trackpad == nil ? window.flatMap { model.icons[$0.bundleID] } : nil
         let shape = RoundedRectangle(cornerRadius: roomy ? 14 : 11, style: .continuous)
         let displayIndex = machine.ids.indices.contains(card.index) ? StagePeekIDs.displayIndex(machine.ids[card.index]) : nil
         let fullDesktop = displayIndex != nil
         let display = displayIndex.flatMap { displays.indices.contains($0) ? displays[$0] : nil }
         return ZStack {
             shape.fill(Color(white: 0.17))
-            if fullDesktop, let still = display.flatMap({ model.displayThumbnails[$0.id] }) {
+            if trackpad != nil, let window {
+                metadataLabel(app: window.app, windowTitle: window.title, bundle: window.bundleID)
+            } else if fullDesktop, let still = display.flatMap({ model.displayThumbnails[$0.id] }) {
                 Image(decorative: still, scale: 1).resizable().scaledToFill()
                 Label(display?.isMain == false ? display?.name ?? "" : String(localized: "Full Desktop"), systemImage: "display")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.white)
@@ -411,7 +480,7 @@ struct StagePeekOverlay: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(6)
             }
-            if let paused = window?.pausedBadge {
+            if trackpad == nil, let paused = window?.pausedBadge {
                 Text(paused).font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Color.black.opacity(0.55), in: Capsule()).foregroundStyle(.white)
@@ -433,9 +502,17 @@ struct StagePeekOverlay: View {
         .accessibilityElement()
         .accessibilityLabel(fullDesktop ? String(localized: "Full Desktop")
                             : window.map { w in w.title.isEmpty ? w.app : "\(w.app), \(w.title)" } ?? "")
-        .accessibilityValue(window?.pausedSpoken ?? "")
+        .accessibilityValue(trackpad == nil ? window?.pausedSpoken ?? "" : "")
         .accessibilityAddTraits(card.highlighted ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction { finish(machine.select(index: card.index)) }
+        .accessibilityActions {
+            if let display, model.canAddDisplayFromMirror(display) {
+                if model.canSplitDesktop {
+                    Button("Add as New Pane") { addDisplayFromMirror(display, asTab: false) }
+                }
+                Button("Add as Tab") { addDisplayFromMirror(display, asTab: true) }
+            }
+        }
     }
 
     /// The floating search pill and the Dock-like app carousel: independent glass pieces,
@@ -475,6 +552,135 @@ struct StagePeekOverlay: View {
         .zIndex(30)
     }
 
+    private var trackpadSearch: some View {
+        let compactWidth = max(1, min(roomy ? 380 : 320, safe.width - 24))
+        let expandedWidth = max(1, min(roomy ? 620 : 560, safe.width - 32))
+        let expansion = machine.expansion
+        let compactX = edge == .left ? safe.minX + 12 + compactWidth / 2 : safe.maxX - 12 - compactWidth / 2
+        return StagePeekSearchPill(query: $query, focused: $searchFocused)
+            .frame(width: compactWidth + (expandedWidth - compactWidth) * expansion)
+            .position(x: compactX + (safe.midX - compactX) * expansion, y: safe.minY + 33)
+            .environment(\.colorScheme, .dark)
+            .zIndex(30)
+    }
+
+    private var trackpadStatus: some View {
+        Group {
+            if !inputAllowed || (model.trackpadPeekSupported && !model.trackpadPeekAllowed()) {
+                MoreActionsNeedControl(detail: String(localized: "Request control to browse windows and apps."))
+            } else if !model.trackpadPeekSupported {
+                Text("Update MeowDisplay on the Mac to use Stage Peek with video off.")
+            } else if let catalog = model.trackpadPeekCatalog {
+                Text(catalog.unavailable ? "Windows unavailable" : "No windows")
+            } else {
+                ProgressView("Loading windows…")
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(.white)
+        .multilineTextAlignment(.center)
+        .padding()
+        .legibleGlass(RoundedRectangle(cornerRadius: 18))
+        .environment(\.colorScheme, .dark)
+        .frame(maxWidth: min(320, max(1, safe.width - 24)))
+        .position(x: safe.midX, y: safe.midY)
+        .accessibilityIdentifier("trackpadStagePeek")
+        .zIndex(10)
+    }
+
+    private var trackpadGallery: some View {
+        let top = safe.minY + 64
+        let bottom = toolbarY(safe.midX) - Self.toolbarHalfHeight - 6
+        let height = max(1, bottom - top)
+        let columns = [GridItem(.adaptive(minimum: min(max(1, safe.width - 24), 260)), spacing: 10)]
+        let apps = WorkspaceSearch.search(query, apps: model.trackpadPeekApps, windows: []).apps
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Windows").font(.headline).accessibilityAddTraits(.isHeader)
+                if windows.isEmpty {
+                    Text(model.trackpadPeekCatalog?.unavailable == true ? "Windows unavailable" : "No windows")
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(windows) { window in
+                            Button {
+                                activateTrackpadWindow(window)
+                                finish(machine.dismiss())
+                            } label: {
+                                metadataLabel(app: window.app, windowTitle: window.title, bundle: window.bundleID)
+                            }
+                            .buttonStyle(.plain)
+                            .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+                if !apps.isEmpty {
+                    Text("Apps").font(.headline).accessibilityAddTraits(.isHeader)
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(apps) { app in
+                            Button {
+                                model.sendTrackpadPeek(WorkspaceRequests.appLaunch(app.bundleID, reveal: true))
+                                finish(machine.dismiss())
+                            } label: {
+                                metadataLabel(app: app.name, windowTitle: nil, bundle: app.bundleID)
+                            }
+                            .buttonStyle(.plain)
+                            .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .foregroundStyle(.white)
+        .frame(width: max(1, safe.width), height: height)
+        .position(x: safe.midX, y: top + height / 2)
+        .accessibilityIdentifier("trackpadStagePeekGallery")
+    }
+
+    private func metadataLabel(app: String, windowTitle: String?, bundle: String) -> some View {
+        HStack(spacing: 8) {
+            WorkspaceAppIcon(icon: trackpadMetadataAllowed ? model.trackpadPeekIcons[bundle] : nil,
+                             name: app, bundleID: bundle, size: 26)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: app).font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.8)).lineLimit(2)
+                if let windowTitle, !windowTitle.isEmpty, windowTitle != app {
+                    Text(verbatim: windowTitle).font(.subheadline.weight(.medium)).lineLimit(3)
+                }
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func activateTrackpadWindow(_ window: CatalogWindowItem) {
+        var action = WorkspaceRequests.activateWindow(window.id, generation: window.generation)
+        action["ifOffscreen"] = true
+        model.sendTrackpadPeek(action)
+    }
+
+    private func addOverviewTabFromDisplays() {
+        guard let pane = model.overviewTabTarget else { return }
+        model.addOverviewTab(to: pane)
+        haptics.play(.select, enabled: hapticsEnabled)
+        animate { machine.cancelAll() }
+        model.stagePeekOpen = false
+    }
+
+    private func addDisplayFromMirror(_ display: CatalogDisplayItem, asTab: Bool) {
+        guard model.addDisplayFromMirror(display, asTab: asTab) else { return }
+        haptics.play(.select, enabled: hapticsEnabled)
+        searchFocused = false
+        animate { machine.cancelAll() }
+        model.stagePeekOpen = false
+    }
+
     /// Expanded Stage Peek: every window (and display) as a vertical gallery, as many columns as
     /// fit. It sits between the search and app carousel and the buttons, fading at both edges, so
     /// no card ever passes under (or intercepts touches meant for) those controls.
@@ -486,6 +692,7 @@ struct StagePeekOverlay: View {
                          width: safe.width, topInset: 12,
                          onWindow: { w in pick(w) },
                          onDisplay: { d in pickDisplay(d) },
+                         onAddDisplayFromMirror: addDisplayFromMirror,
                          onApp: { a in query = ""; searchFocused = false; tapApp(a, forceFilter: true) },
                          onAddTile: { w in
                              haptics.play(.select, enabled: hapticsEnabled)
@@ -493,6 +700,7 @@ struct StagePeekOverlay: View {
                              model.stagePeekOpen = false
                              model.choose(w, asNewTile: true)
                          },
+                         onAddOverviewTab: addOverviewTabFromDisplays,
                          onDragEnded: { dropped in
                              // Dropped on a pane: done. Dropped nowhere: the peek comes back as it was.
                              if dropped { animate { machine.cancelAll() }; model.stagePeekOpen = false }
@@ -508,7 +716,7 @@ struct StagePeekOverlay: View {
                              model.stagePeekOpen = false
                              model.openFloating(w)
                          },
-                         onFullscreen: { app in openFullscreen(app) })
+                         onFullscreen: { app in openFullscreen(app) }, receiverSize: safe.size)
             .frame(width: safe.width, height: height)
             .mask {
                 let f = min(18 / height, 0.3)
@@ -623,8 +831,7 @@ struct StagePeekOverlay: View {
         model.switchTo(w)
     }
 
-    /// A display card: in Window mode the desktop goes into the pane (Full Desktop is a tile
-    /// source, never a mode switch); in Mirror/Extend it already shows.
+    /// A display card: Window puts it in a pane; Mirror asks the Mac to select that source.
     private func pickDisplay(_ d: CatalogDisplayItem?) {
         haptics.play(.select, enabled: hapticsEnabled)
         searchFocused = false
@@ -736,26 +943,37 @@ struct StagePeekOverlay: View {
         let chosen = machine.highlightedID.flatMap { id in windows.first { $0.id == id } }
         // While the apps bar is grown, Compact puts it back to one row first.
         let compacting = machine.expanded || dockRows > 1
-        let addsTile = machine.expanded && model.canAddTile && chosen != nil
+        let canExpand = trackpad == nil || trackpadMetadataAllowed
+        let addsTile = trackpad == nil && machine.expanded && model.canAddTile && chosen != nil
         // Titles drop to icons (still named for VoiceOver) when they would not fit the window.
         let titles = StagePeekToolbarLayout.showsTitles(
-            titles: [(compacting ? String(localized: "Compact") : String(localized: "Expand")).count]
-                + (addsTile ? [String(localized: "Add as Tile").count] : []),
+            titles: (canExpand ? [(compacting ? String(localized: "Compact") : String(localized: "Expand")).count] : [])
+                + (addsTile ? [String(localized: "Add as Tile").count] : [])
+                + (trackpad != nil ? [String(localized: "Turn Video On").count] : []),
             textScale: toolbarTextScale, available: safe.width)
         return HStack(spacing: StagePeekToolbarLayout.spacing) {
-            Button {
-                if dockRows > 1 {
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { dockRows = 1; dockWide = false }
-                } else {
-                    animate { machine.expanded ? machine.compact() : machine.expand() }
+            if canExpand {
+                Button {
+                    if dockRows > 1 {
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) { dockRows = 1; dockWide = false }
+                    } else {
+                        animate { machine.expanded ? machine.compact() : machine.expand() }
+                    }
+                } label: {
+                    Label(compacting ? String(localized: "Compact") : String(localized: "Expand"),
+                          systemImage: compacting ? "arrow.down.right.and.arrow.up.left"
+                                                  : "arrow.up.left.and.arrow.down.right")
                 }
-            } label: {
-                Label(compacting ? String(localized: "Compact") : String(localized: "Expand"),
-                      systemImage: compacting ? "arrow.down.right.and.arrow.up.left"
-                                              : "arrow.up.left.and.arrow.down.right")
+                .accessibilityIdentifier("stagePeekExpand")
             }
-            .accessibilityIdentifier("stagePeekExpand")
-            if machine.expanded, model.canAddTile, let chosen {
+            if let trackpad {
+                Button {
+                    finish(machine.dismiss())
+                    trackpad.turnVideoOn()
+                } label: { Label("Turn Video On", systemImage: "video.fill") }
+                .accessibilityIdentifier("trackpadStagePeekTurnVideoOn")
+            }
+            if addsTile, let chosen {
                 Button {
                     animate { machine.cancelAll() }
                     haptics.play(.select, enabled: hapticsEnabled)
@@ -825,7 +1043,7 @@ struct StagePeekOverlay: View {
             if !machine.isVisible { finish(machine.openDirectly()) }
             finish(machine.step(direction == .increment ? 1 : -1))
         }
-        .accessibilityIdentifier("stagePeekStrip")
+        .accessibilityIdentifier(trackpad == nil ? "stagePeekStrip" : "trackpadStagePeekStrip")
         .zIndex(20)
     }
 
@@ -843,7 +1061,7 @@ struct StagePeekOverlay: View {
                     if !machine.isVisible { haptics.play(.tick, enabled: hapticsEnabled) }   // the bar answers the finger at once
                     _ = machine.touchBegan(id: "strip", at: v.startLocation, time: t, onStrip: true)
                     if machine.phase == .arming {
-                        model.stagePeekOpen = true   // fresh catalog and thumbnails while the hold completes
+                        setPeekOpen(true)   // refresh the appropriate catalog while the hold completes
                         schedulePoll()
                     }
                 }
@@ -851,7 +1069,7 @@ struct StagePeekOverlay: View {
             }
             .onEnded { v in
                 stripDown = false
-                end("strip", v.location, v.time.timeIntervalSinceReferenceDate, cards: cards)
+                end("strip", v, cards: cards)
             }
     }
 
@@ -871,7 +1089,9 @@ struct StagePeekOverlay: View {
                     let wasOpen = machine.phase == .open
                     _ = machine.touchBegan(id: "open\(openTouch)", at: v.startLocation, time: t, onStrip: false,
                                            closableCard: closableCard(at: v.startLocation, cards: cards))
-                    if wasOpen, machine.expansion < 0.5 { armCardHold(at: v.startLocation, cards: cards) }
+                    if trackpad == nil, wasOpen, machine.expansion < 0.5 {
+                        armCardHold(at: v.startLocation, cards: cards)
+                    }
                 }
                 if hypot(v.location.x - openStart.x, v.location.y - openStart.y) > StagePeekConfig.tapSlop { holdTask?.cancel() }
                 move("open\(openTouch)", v.location, t)
@@ -890,7 +1110,7 @@ struct StagePeekOverlay: View {
                     }
                     return
                 }
-                end("open\(openTouch)", v.location, v.time.timeIntervalSinceReferenceDate, cards: cards)
+                end("open\(openTouch)", v, cards: cards)
             }
     }
 
@@ -898,7 +1118,7 @@ struct StagePeekOverlay: View {
 
     /// The compact card under `p` when it's a Mac window this Mac can close (not a display).
     private func closableCard(at p: CGPoint, cards: [StagePeekCard]) -> Int? {
-        guard model.canCloseWindows, machine.expansion < 0.5,
+        guard trackpad == nil, model.canCloseWindows, machine.expansion < 0.5,
               let i = StagePeekLayout.hit(p, cards: cards, region: hitRegion, fade: hitFade), machine.ids.indices.contains(i),
               StagePeekIDs.displayIndex(machine.ids[i]) == nil else { return nil }
         return i
@@ -937,15 +1157,20 @@ struct StagePeekOverlay: View {
         if wasArming, machine.phase == .closed {
             // A swipe from the edge: nothing opens.
             pollTask?.cancel()
-            model.stagePeekOpen = false
+            setPeekOpen(false)
         }
         perform(effects)
     }
 
-    private func end(_ id: String, _ p: CGPoint, _ t: TimeInterval, cards: [StagePeekCard]) {
+    private func end(_ id: String, _ drag: DragGesture.Value, cards: [StagePeekCard]) {
         pollTask?.cancel()
         var effects: [StagePeekEffect] = []
-        animate { effects = machine.touchEnded(id: id, at: p, time: t, cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion, fade: hitFade) }) }
+        let projection = reduceMotion ? 0 : drag.predictedEndTranslation.height - drag.translation.height
+        animate {
+            effects = machine.touchEnded(id: id, at: drag.location, time: drag.time.timeIntervalSinceReferenceDate,
+                                         projectedVerticalTravel: projection,
+                                         cardAt: { StagePeekLayout.hit($0, cards: cards, region: hitRegion, fade: hitFade) })
+        }
         finish(effects)
     }
 
@@ -988,20 +1213,24 @@ struct StagePeekOverlay: View {
         for effect in effects {
             switch effect {
             case .opened:
-                model.stagePeekOpen = true
+                setPeekOpen(true)
                 UIAccessibility.post(notification: .screenChanged, argument: nil)
             case .haptic(let h):
                 haptics.play(h, enabled: hapticsEnabled)
             case .select(let id):
-                model.stagePeekOpen = false
+                if trackpad != nil, let window = windows.first(where: { $0.id == id }) {
+                    activateTrackpadWindow(window)
+                }
+                setPeekOpen(false)
                 searchFocused = false
+                guard trackpad == nil else { continue }
                 if let index = StagePeekIDs.displayIndex(id) {
                     showDisplay(displays.indices.contains(index) ? displays[index] : nil)
                 } else if let w = windows.first(where: { $0.id == id }) {
                     model.switchTo(w)
                 }
             case .dismissed:
-                model.stagePeekOpen = false
+                setPeekOpen(false)
             case .revealClose(let id):
                 if let id, let w = windows.first(where: { $0.id == id }) {
                     UIAccessibility.post(notification: .announcement,
@@ -1014,10 +1243,25 @@ struct StagePeekOverlay: View {
     /// Performs effects, then drops the catalog refresh once nothing shows.
     private func finish(_ effects: [StagePeekEffect]) {
         perform(effects)
-        if machine.phase == .closed, model.stagePeekOpen { model.stagePeekOpen = false }
+        if machine.phase == .closed, peekOpen { setPeekOpen(false) }
+    }
+
+    private func setPeekOpen(_ open: Bool) {
+        if let trackpad {
+            if !open { model.clearTrackpadPeek() }
+            trackpad.open.wrappedValue = open
+        } else {
+            model.stagePeekOpen = open
+        }
     }
 
     private func syncItems() {
+        if trackpad != nil {
+            let ids = windows.map(\.id)
+            // The machine needs one item to open its strip while consent or the catalog is pending.
+            machine.setItems(ids.isEmpty ? [StagePeekMachine.fullDesktopID] : ids, current: nil)
+            return
+        }
         // Displays first (Full Desktop at the top of the stack), then the Mac's windows. Always at
         // least Full Desktop, so the edge bar works before the first listing (it asks for one).
         let displayIDs = displays.isEmpty ? [StagePeekMachine.fullDesktopID] : displays.indices.map { StagePeekIDs.display($0) }
@@ -1033,7 +1277,7 @@ struct StagePeekOverlay: View {
         stripDown = false
         openDown = false
         machine.cancelAll()
-        if model.stagePeekOpen { model.stagePeekOpen = false }
+        if peekOpen { setPeekOpen(false) }
     }
 
     private func animate(_ change: () -> Void) {

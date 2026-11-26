@@ -1,6 +1,16 @@
 import XCTest
 
 extension XCUIApplication {
+    /// The window the receiver draws in. On a physical device the first window can be an
+    /// empty system window (Picture in Picture installs one), and a coordinate taken from
+    /// it lands at the top-left corner of the screen instead of on the receiver.
+    @MainActor
+    var receiverWindow: XCUIElement {
+        let windows = self.windows.allElementsBoundByIndex
+        return windows.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+            ?? self.windows.firstMatch
+    }
+
     /// Taller than any pane title; the title sits in the pane's top strip.
     static let paneTitleMaxHeight: CGFloat = 60
 

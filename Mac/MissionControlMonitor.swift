@@ -102,7 +102,7 @@ final class MissionControlMonitor: @unchecked Sendable {
     /// Closes Mission Control with Escape, only after checking it is open right now (never a
     /// blind toggle, and never an Escape that would land in another app's dialog).
     @discardableResult
-    static func exit() -> Bool {
+    static func exit(stillAllowed: () -> Bool = { true }) -> Bool {
         // Never while the Mac asks for its password: Escape would cancel that prompt.
         guard !PrivacyShieldWindows.isUnlocking else {
             Log.info("missionControl: exit asked while the Mac asks for its password — nothing sent")
@@ -112,6 +112,7 @@ final class MissionControlMonitor: @unchecked Sendable {
             Log.info("missionControl: exit asked but it isn't open — nothing sent")
             return false
         }
+        guard stillAllowed() else { return false }
         let source = CGEventSource(stateID: .hidSystemState)
         for down in [true, false] {
             CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: down)?.post(tap: .cghidEventTap)

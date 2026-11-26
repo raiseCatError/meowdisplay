@@ -341,6 +341,11 @@ struct DemoReceiverScreen: View {
                 .tint(.white)
                 .environment(\.colorScheme, .dark)
                 .accessibilityIdentifier("demoWindowViewToggle")
+                // Reserved with the banner: the calculator panel opened under it (Duo, 9000088).
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: DemoBannerFramePreference.self,
+                                           value: proxy.frame(in: .named(Self.screenSpace)))
+                })
             }
             if let hint {
                 DemoHintChip(hint: hint)
@@ -753,10 +758,12 @@ struct DemoTrackpadPreview: View {
 
 // MARK: - Chrome
 
+/// The banner and the Show Window View chip under it, as one rect the controls keep clear of.
 private struct DemoBannerFramePreference: PreferenceKey {
     static let defaultValue: CGRect? = nil
     static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
+        guard let next = nextValue() else { return }
+        value = value.map { $0.union(next) } ?? next
     }
 }
 

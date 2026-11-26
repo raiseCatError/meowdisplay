@@ -555,10 +555,16 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// `globalCaptureLimit`), and when a display's capture may start again after it stopped.
     private var overviewCaptures: [String: [UInt32: WindowTileCapture]] = [:]
     private var overviewRetry: [UInt32: (attempts: Int, notBefore: TimeInterval)] = [:]
-    /// Under `inputLock`: the displays the Overview pane shows, its camera (zoom and the global
-    /// point at its centre, `OverviewPaneLayout`) and where this engine last put the real cursor.
+    /// Under `inputLock`: live Overview displays, the camera and the last position of the Mac cursor.
     private var overviewDisplays: [OverviewPaneLayout.Display] = []
-    private var overviewCamera: (zoom: Double, center: WorkspacePoint)?
+    private struct OverviewCamera {
+        let generation: UInt64
+        let viewEpoch: Int
+        let requested: WorkspacePaneZoom
+        var applied: WorkspacePaneZoom
+    }
+    private var overviewCamera: OverviewCamera?
+    private var overviewStatePending = false   // queue
     private var overviewCursor: (point: WorkspacePoint, at: TimeInterval)?
     /// A sheet open on a tile's window ("Save changes?"), captured beside it and drawn over it.
     private var sheetCaptures: [String: WindowTileCapture] = [:]
@@ -854,7 +860,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Messages from the receiver (admitted session only; MacSender gates)
 
-    func handle(type: String, message obj: [String: Any], inputGranted: Bool) {
+    func handle(type: String, message obj: [String: Any], inputGranted: Bool,
+                stillAllowed: @escaping @Sendable () -> Bool = { true }) {
         queue.async { [self] in
             // Paused, Video Off or no admitted receiver: no titles, stills or changes.
             guard running, !stopped else { return }
@@ -880,7 +887,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                     Log.info("workspace: window action \(obj["action"] as? String ?? "?") ignored: this session has no control")
                     return
                 }
-                performWindowAction(obj)
+                performWindowAction(obj, stillAllowed: stillAllowed)
             case WireMessage.menuRequest:
                 // A pane's app menus: a control feature (reading them alone is of no use, and
                 // Open Recent lists file names), so only with this session's input grant.
@@ -1104,7 +1111,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                                                         previous: previous, nextGeneration: &nextGeneration, displays: displayFrames,
                                                         allowFloats: allowFloats)
         assignments = result.assignments
-        updateOverviewCamera()   // the Overview's zoom is the Mac's camera from here on
+        updateOverviewCamera(receivedRequest: true)
         rejected = result.rejected
         watchedByReceiver = Self.parseWatch(obj["watch"])
         let sources = WindowAudioSources.of(assignments)
@@ -1353,8 +1360,8 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     private func overviewLayout(_ a: WorkspaceTileAssignment) -> OverviewPaneLayout? {
         guard a.isOverview, !overviewDisplays.isEmpty else { return nil }
         let pane = a.rect.scaled(to: WorkspaceSize(width: targeting.canvas.width, height: targeting.canvas.height))
-        return OverviewPaneLayout(displays: overviewDisplays, pane: pane, zoom: overviewCamera?.zoom ?? a.zoom.scale,
-                                  center: overviewCamera?.center)
+        let applied = overviewCamera?.generation == a.assignmentGeneration ? overviewCamera?.applied : nil
+        return OverviewPaneLayout(displays: overviewDisplays, pane: pane, zoom: applied ?? a.zoom, fit: a.fit)
     }
 
     /// Under `inputLock`. Where the real cursor is: where this engine last put it while it is still
@@ -1368,15 +1375,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     /// Under `inputLock`. A new camera for the Overview pane: kept here and in the targeting (its zoom).
     private func setOverviewCamera(_ layout: OverviewPaneLayout, tile: String) {
-        overviewCamera = (layout.zoom, layout.center)
-        targeting.setZoom(layout.paneZoom, tile: tile)
+        let zoom = layout.paneZoom
+        overviewCamera?.applied = zoom
+        targeting.setZoom(zoom, tile: tile)
         if let u = layout.union { targeting.windowFrames[WorkspaceSource.overviewKey] = CGRect(x: u.x, y: u.y, width: u.width, height: u.height) }
     }
 
-    /// `queue`. The Overview pane's displays and camera brought up to date (a workspace request,
-    /// a new listing). A new zoom from the receiver centres the view on the cursor; the same zoom
-    /// keeps the centre. `assignments` and the targeting get the camera as the pane's zoom.
-    private func updateOverviewCamera() {
+    /// `queue`. Reconcile the arrangement, preserving the live view across repeated requests.
+    /// A new viewport or assignment takes its saved Fit/Fill, scale and centre from the receiver.
+    private func updateOverviewCamera(receivedRequest: Bool = false) {
         guard let i = assignments.firstIndex(where: \.isOverview) else {
             inputLock.withLock { overviewCamera = nil; overviewCursor = nil; targeting.windowFrames[WorkspaceSource.overviewKey] = nil }
             return
@@ -1385,12 +1392,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         let a = assignments[i]
         let zoom = inputLock.withLock { () -> WorkspacePaneZoom? in
             overviewDisplays = displays
-            let requested = OverviewPaneLayout.clampZoom(a.zoom.scale)
-            let pane = a.rect.scaled(to: WorkspaceSize(width: targeting.canvas.width, height: targeting.canvas.height))
-            var layout = OverviewPaneLayout(displays: displays, pane: pane, zoom: requested, center: overviewCamera?.center)
-            guard layout.union != nil else { targeting.windowFrames[a.windowID] = nil; return nil }
-            if overviewCamera.map({ abs($0.zoom - layout.zoom) > 1e-6 }) ?? true {
-                layout = layout.zoomed(to: requested, cursor: overviewCursorPoint(layout))
+            let changed = overviewCamera?.generation != a.assignmentGeneration ||
+                (receivedRequest && (overviewCamera?.viewEpoch != a.viewEpoch || overviewCamera?.requested != a.zoom))
+            if changed {
+                overviewCamera = OverviewCamera(generation: a.assignmentGeneration, viewEpoch: a.viewEpoch,
+                                                requested: a.zoom, applied: a.zoom)
+            }
+            guard let layout = overviewLayout(a), layout.union != nil else {
+                targeting.windowFrames[a.windowID] = nil
+                return nil
             }
             setOverviewCamera(layout, tile: a.tileID)
             return layout.paneZoom
@@ -1410,6 +1420,15 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         assignments[i].zoom = zoom
         dirty = true
         retuneOverviewCaptures()
+        // Keep the next receiver gesture anchored to the live camera. Coalesce pointer-rate updates.
+        if !overviewStatePending {
+            overviewStatePending = true
+            queue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self else { return }
+                self.overviewStatePending = false
+                if self.running { self.sendState() }
+            }
+        }
     }
 
     /// `queue`. Each display's capture size and rate for the Overview pane now.
@@ -1723,8 +1742,11 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // What the Mac accepted for a floating pane (only ever set for a receiver that sent one).
             if a.isFloat { tile["layer"] = "float"; tile["z"] = a.z }
             if a.isLifted { tile["lift"] = true }
-            // The Overview: `zoom` above is the Mac's camera ([zoom, centre] over the arrangement's bounds).
-            if a.isOverview { tile["overview"] = true }
+            // Overview gestures anchor to the applied camera for the current view revision.
+            if a.isOverview {
+                tile["overview"] = true
+                tile["view"] = a.viewEpoch
+            }
             if let d = a.displayID {
                 tile["display"] = Int(d)
                 tile["app"] = "Desktop"
@@ -1764,7 +1786,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: Window actions (need this session's input grant)
 
-    private func performWindowAction(_ obj: [String: Any]) {
+    private func performWindowAction(_ obj: [String: Any], stillAllowed: @escaping @Sendable () -> Bool) {
         guard let action = obj["action"] as? String else { return }
         switch action {
         case "stageManager":
@@ -1785,7 +1807,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // Exit Mission Control, asked by a person with control (the caller checks the grant).
             // The Mac checks it is open right now and only then sends Escape: never a blind toggle.
             guard obj["exit"] as? Bool == true else { return }
-            DispatchQueue.global(qos: .userInitiated).async { MissionControlMonitor.exit() }
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard stillAllowed() else { return }
+                MissionControlMonitor.exit(stillAllowed: stillAllowed)
+            }
         case "addToStage":
             // Confirmed on the device by a person with control (the caller checks the grant):
             // Stage Manager's own Add to Stage on the strip item holding exactly this window.
@@ -1802,14 +1827,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 }
             }
         case "activate":
-            guard let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
+            guard stillAllowed(), !missionControlOpen, !MissionControlMonitor.shared.isOpen,
+                  !MissionControlMonitor.isOpenNow(), stillAllowed(),
+                  let id = (obj["window"] as? Int).flatMap({ UInt32(exactly: $0) }), let entry = catalog[id],
                   (obj["gen"] as? Int).flatMap({ UInt64(exactly: $0) }) == entry.generation else { return }
-            if entry.availability == .offscreen {
+            if entry.availability == .offscreen, !entry.inStageStrip {
                 // Show on Mac for a minimized or hidden window: bring it back first, then forward.
-                let (pid, frame, title) = (entry.pid, entry.frame, entry.title)
                 DispatchQueue.main.async {
-                    Self.restoreQuietly(pid: pid, frame: frame, title: title)
-                    Self.raise(pid: pid, frame: frame)
+                    Self.restoreOffscreen(entry, stillAllowed: stillAllowed)
                 }
                 refreshSoon()
             } else {
@@ -1991,14 +2016,31 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
 
     // MARK: InputTargetMapper (network queue, under the injector's lock)
 
+    /// Under the input lock. Absolute scrolls use the tile under the pointer. The relative
+    /// Overview cursor can sit off-canvas and still scroll on the focused Mac desktop.
+    private var overviewScrollAssignment: WorkspaceTileAssignment? {
+        if pointerDriven, let a = targeting.assignment(targeting.relativeTile), a.isOverview { return a }
+        if let a = targeting.scrollTile, a.isOverview { return a }
+        return nil
+    }
+
     func mapPointer(phase: InputMapPhase, x: Double?, y: Double?, dx: Double, dy: Double) -> CGPoint? {
         inputLock.lock()
         defer { inputLock.unlock() }
         let p = WorkspacePoint(x: x ?? 0, y: y ?? 0)
         if phase == .hover || phase == .drag { pointerDriven = x == nil }
-        if x == nil, phase == .hover || phase == .drag, let a = targeting.assignment(targeting.relativeTile), a.isOverview {
-            // The Overview pane moves the real cursor across every display (not just the pane's picture).
-            return moveOverviewCursor(a, dx: dx, dy: dy)
+        if phase == .scroll, pointerDriven, let a = overviewScrollAssignment, let layout = overviewLayout(a) {
+            let g = overviewCursorPoint(layout)
+            return CGPoint(x: g.x, y: g.y)
+        }
+        if x == nil, phase != .scroll, let a = targeting.assignment(targeting.relativeTile), a.isOverview {
+            if phase == .hover || phase == .drag {
+                // The Overview pane moves the real cursor across every display.
+                return moveOverviewCursor(a, dx: dx, dy: dy)
+            }
+            guard let layout = overviewLayout(a), targeting.resolveOverviewButton(phase, tile: a.tileID) else { return nil }
+            let g = overviewCursorPoint(layout)
+            return CGPoint(x: g.x, y: g.y)
         }
         let target: WorkspaceInputTargeting.Target?
         switch phase {
@@ -2009,13 +2051,17 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         }
         guard var target else { return nil }
         if target.windowID == WorkspaceSource.overviewKey, let a = targeting.assignment(target.tileID), let layout = overviewLayout(a) {
-            // The Overview: presses, releases and scrolls from the trackpad land at the real cursor;
-            // a touch on the pane lands on the display under it (the nearest one in a gap). Like a
-            // desktop pane, nothing is raised first.
-            let g = x == nil ? overviewCursorPoint(layout)
-                : layout.clampToDisplays(WorkspacePoint(x: target.point.x, y: target.point.y)) ?? WorkspacePoint(x: target.point.x, y: target.point.y)
-            overviewCursor = (g, ProcessInfo.processInfo.systemUptime)
-            return CGPoint(x: g.x, y: g.y)
+            var point = WorkspacePoint(x: target.point.x, y: target.point.y)
+            if phase == .drag || phase == .up {
+                guard let g = layout.clampToDisplays(point) else { return nil }
+                point = g
+            }
+            guard layout.containsDisplayPoint(point) else {
+                if phase == .down { targeting.cancelBinding() }
+                return nil
+            }
+            overviewCursor = (point, ProcessInfo.processInfo.systemUptime)
+            return CGPoint(x: point.x, y: point.y)
         }
         if phase == .up { return target.point }   // a release always goes through
         if WorkspaceSource.isDisplayKey(target.windowID) {
@@ -2038,7 +2084,9 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 target.point = again.point
             }
         }
-        if phase == .down, !target.activates, !isTopmost(target.windowID, at: target.point, cached: false) {
+        if phase == .down, !target.activates,
+           (NSWorkspace.shared.frontmostApplication?.processIdentifier != target.pid
+            || !isTopmost(target.windowID, at: target.point, cached: false)) {
             // The active tile's window was covered on the Mac since (someone
             // clicked another app there): a press in its tile brings it back,
             // as a press on another tile does.
@@ -2052,11 +2100,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             // Bounded wait for the window to come to the front, so the press
             // that activated it is delivered once, to it.
             let deadline = ProcessInfo.processInfo.systemUptime + 0.25
-            while !isTopmost(target.windowID, at: target.point, cached: false), ProcessInfo.processInfo.systemUptime < deadline {
+            while ProcessInfo.processInfo.systemUptime < deadline,
+                  (NSWorkspace.shared.frontmostApplication?.processIdentifier != target.pid
+                   || !isTopmost(target.windowID, at: target.point, cached: false)) {
                 usleep(10_000)
             }
         }
-        guard isTopmost(target.windowID, at: target.point, cached: phase == .hover || phase == .drag) else {
+        guard phase != .down || NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+              isTopmost(target.windowID, at: target.point, cached: phase == .hover || phase == .drag) else {
             // Something covers the window here (another app, a panel): send
             // nothing rather than click into the wrong window.
             if phase == .down { targeting.cancelBinding() }
@@ -2077,7 +2128,7 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     func scrollVector(dx: Double, dy: Double) -> CGVector {
         inputLock.withLock { () -> CGVector in
             // The Overview scrolls as a trackpad does: as far at every zoom.
-            if targeting.scrollTile?.isOverview == true {
+            if overviewScrollAssignment != nil {
                 let s = OverviewPaneLayout.scrollPixelsPerPoint
                 return CGVector(dx: dx / s, dy: dy / s)
             }
@@ -2086,7 +2137,13 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     }
 
     func locate(x: Double, y: Double) -> CGPoint? {
-        inputLock.withLock { targeting.globalPoint(at: WorkspacePoint(x: x, y: y)) }
+        inputLock.withLock {
+            let p = WorkspacePoint(x: x, y: y)
+            guard let g = targeting.globalPoint(at: p) else { return nil }
+            if let a = targeting.tile(at: p), a.isOverview, let layout = overviewLayout(a),
+               !layout.containsDisplayPoint(WorkspacePoint(x: g.x, y: g.y)) { return nil }
+            return g
+        }
     }
 
     func cancelBinding() {
@@ -2153,9 +2210,10 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
     /// leave the cursor out (`showsCursor` false, as every pane's), so the receiver draws it there once.
     func cursorPlacement(forGlobal g: CGPoint, receiverMayMovePointer: Bool) -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? {
         inputLock.withLock { () -> (x: Double, y: Double, kx: Double, ky: Double, rotation: Int)? in
-            if let id = targeting.relativeTile, targeting.assignment(id)?.isOverview == true,
-               let placed = targeting.cursorPlacement(forGlobal: g, in: id) {
-                return placed
+            if let id = targeting.relativeTile, let a = targeting.assignment(id), a.isOverview,
+               let layout = overviewLayout(a) {
+                guard layout.containsDisplayPoint(WorkspacePoint(x: g.x, y: g.y)) else { return nil }
+                return targeting.cursorPlacement(forGlobal: g, in: id)
             }
             return Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
                 ? targeting.pointerPlacement() : targeting.cursorPlacement(forGlobal: g)
@@ -2373,6 +2431,43 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
         AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         NSRunningApplication(processIdentifier: pid)?.activate()
         return window != nil
+    }
+
+    /// Resolve the original window again after the consent round trip, before touching AX.
+    static func restoreOffscreen(_ target: WindowCatalogEntry, stillAllowed: () -> Bool) {
+        guard stillAllowed(), !MissionControlMonitor.isOpenNow(), AXIsProcessTrusted(),
+              let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], target.windowID) as? [[String: Any]])?
+                .first(where: { ($0[kCGWindowNumber as String] as? UInt32) == target.windowID }),
+              (info[kCGWindowOwnerPID as String] as? Int32) == target.pid,
+              (info[kCGWindowIsOnscreen as String] as? Bool) != true,
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: bounds),
+              framesMatch(frame, target.frame) else { return }
+
+        let axApp = AXUIElementCreateApplication(target.pid)
+        AXUIElementSetMessagingTimeout(axApp, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return }
+        let matches = windows.filter { window in
+            guard let candidate = axFrame(window), framesMatch(candidate, frame) else { return false }
+            var title: CFTypeRef?
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title)
+            return target.title.isEmpty || (title as? String) == target.title
+        }
+        guard matches.count == 1, let window = matches.first,
+              let app = NSRunningApplication(processIdentifier: target.pid),
+              app.bundleIdentifier == target.bundleID else { return }
+        var minimized: CFTypeRef?
+        let canUnminimize = AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimized) == .success
+            && minimized as? Bool == true
+        guard (canUnminimize || app.isHidden), stillAllowed() else { return }
+        if canUnminimize,
+           AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success { return }
+        if app.isHidden { app.unhide() }
+        guard stillAllowed() else { return }
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        app.activate()
     }
 
     /// Only an unambiguous match: one AX window with this frame (and title).

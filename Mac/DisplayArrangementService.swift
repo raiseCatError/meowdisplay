@@ -7,7 +7,7 @@ import Foundation
 //   1. control (the session's input grant) when it arrives, one request at a time Mac-wide;
 //   2. the receiver's catalog must still be this Mac's arrangement (`base`), and the result
 //      must be valid against the CURRENT displays (`DisplayArrangementEdit.proposal`);
-//   3. the Mac's owner answers a prompt ON THE MAC (Don't Allow after 60 s);
+//   3. the Mac's owner answers a prompt, or has already approved this pinned device;
 //   4. control is asked again, then the origins are applied for this login session only;
 //   5. only `displayArrangeKeep` within 15 s makes them permanent; Revert, the timer, losing
 //      control and the session ending all put the previous origins back.
@@ -20,6 +20,21 @@ enum DisplayConfigurationScope: Equatable, Sendable {
     case forSession
     /// Saved: macOS uses it from now on.
     case permanently
+}
+
+enum DisplayArrangementAuthorization {
+    private static let key = "displayArrangementAlwaysAllow.v1"
+
+    static func allows(peerID: String, pin: Data, defaults: UserDefaults = .standard) -> Bool {
+        !pin.isEmpty && defaults.dictionary(forKey: key)?[peerID] as? Data == pin
+    }
+
+    /// The caller verifies the paired pin and local approval before setting it.
+    static func setPin(_ pin: Data?, for peerID: String, defaults: UserDefaults = .standard) {
+        var pins = defaults.dictionary(forKey: key) as? [String: Data] ?? [:]
+        pins[peerID] = pin
+        defaults.set(pins, forKey: key)
+    }
 }
 
 /// The OS seam: what the displays are now, and changing their origins.
@@ -188,11 +203,12 @@ final class DisplayArrangementService: @unchecked Sendable {
     /// One `displayArrangeRequest`, `displayArrangeKeep` or `displayArrangeRevert` from an admitted
     /// session. `inputGranted`: the session's control gate as the message arrived;
     /// `controlStillAllowed`: the same, asked again (side-effect free) right before applying.
-    func handle(type: String, message: [String: Any], inputGranted: Bool,
+    func handle(type: String, message: [String: Any], inputGranted: Bool, preapproved: Bool = false,
                 controlStillAllowed: @escaping () -> Bool) {
         switch type {
         case WireMessage.displayArrangeRequest:
-            handleRequest(message, inputGranted: inputGranted, controlStillAllowed: controlStillAllowed)
+            handleRequest(message, inputGranted: inputGranted, preapproved: preapproved,
+                          controlStillAllowed: controlStillAllowed)
         case WireMessage.displayArrangeKeep:
             guard let req = message["req"] as? Int else { return }
             keep(req: req, controlAllowed: inputGranted && controlStillAllowed())
@@ -201,6 +217,18 @@ final class DisplayArrangementService: @unchecked Sendable {
             revertRequested(req: req)
         default:
             break
+        }
+    }
+
+    func authorizationChanged() {
+        switch phase {
+        case .confirming(let pending) where !pending.controlStillAllowed():
+            pending.timer?.cancel()
+            confirmer.dismissConfirmation(token: pending.token)
+            finish(pending.req, .denied, reason: DisplayArrangeReason.control)
+        case .applied(let pending) where !pending.controlStillAllowed():
+            revert(pending, reason: DisplayArrangeReason.control)
+        default: break
         }
     }
 
@@ -226,7 +254,8 @@ final class DisplayArrangementService: @unchecked Sendable {
 
     // MARK: Steps
 
-    private func handleRequest(_ message: [String: Any], inputGranted: Bool, controlStillAllowed: @escaping () -> Bool) {
+    private func handleRequest(_ message: [String: Any], inputGranted: Bool, preapproved: Bool,
+                               controlStillAllowed: @escaping () -> Bool) {
         guard let request = DisplayArrangeRequestMessage.parse(message) else {
             if let req = message["req"] as? Int { send(req, .denied, reason: DisplayArrangeReason.malformed) }
             return
@@ -254,6 +283,11 @@ final class DisplayArrangementService: @unchecked Sendable {
         let token = makeToken()
         var pending = Pending(req: request.req, token: token, changes: changes, previous: previous,
                               expected: expected, controlStillAllowed: controlStillAllowed, timer: nil)
+        if preapproved {
+            phase = .confirming(pending)
+            confirmationAnswered(token: token, decision: .allow)
+            return
+        }
         pending.timer = scheduler.schedule(after: DisplayArrangeWire.confirmSeconds) { [weak self] in
             self?.confirmationTimedOut(token: token)
         }
@@ -330,7 +364,9 @@ final class DisplayArrangementService: @unchecked Sendable {
         guard case .applied(var pending) = phase, pending.req == req else { return }
         pending.timer?.cancel()
         pending.timer = nil
-        guard controlAllowed else { return revert(pending, reason: DisplayArrangeReason.control) }
+        guard controlAllowed, pending.controlStillAllowed() else {
+            return revert(pending, reason: DisplayArrangeReason.control)
+        }
         guard currentLayout() == pending.expected else {
             return revert(pending, reason: DisplayArrangeReason.displaysChanged)
         }

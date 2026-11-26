@@ -394,9 +394,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the Mac owner prompt, and the session-grant decision — this instance
     /// never grants itself, and `grantSessionInput(generation:)` ignores a
     /// decision for any connection but the live admitted one. A release is
-    /// applied immediately by `denySessionInput` at the call site in
-    /// `handleControl` and never reaches here.
-    @MainActor var onAllowInputRequest: ((_ generation: UInt64) -> Void)?
+    /// applied immediately in the wire handler. The request revision lets
+    /// the owner’s decision fail closed if the receiver withdraws it.
+    @MainActor var onAllowInputRequest: ((_ generation: UInt64, _ revision: UInt64) -> Void)?
+    @MainActor var onAllowInputCancelled: (() -> Void)?
     /// Remote Finder: this connection asks to browse the approved folders; answer with
     /// `resolveFilesConsent(_:generation:)` after the owner decides.
     @MainActor var onFilesConsentRequest: ((_ generation: UInt64, _ capabilities: Set<FilesCapability>?) -> Void)?
@@ -429,7 +430,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     /// Receiver video requests are handed to the controller, which persists
     /// the Mac-authoritative setting and broadcasts it to every session.
-    @MainActor var onVideoEnabledRequest: ((Bool) -> Void)?
+    @MainActor var onVideoEnabledRequest: ((Bool, Bool, Bool) -> Void)?
     /// A receiver asked to change the Mirror capture source. Handed to
     /// `SenderController`, which remembers it as THIS device's own source
     /// (issue #20) and rebuilds this session only. `nil` requests Auto.
@@ -769,6 +770,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// differ until its hello proves support for protocol v9. Older peers are
     /// always kept video-on so they never get a frozen, unexplained surface.
     private var desiredVideoEnabled: Bool
+    private var trackpadLayoutLease: (generation: UInt64, expires: TimeInterval, inWindow: Bool)?
+    private var trackpadDisplayNames: [UInt32: String] = [:]
+    private var trackpadLayoutPolling = false
+    private var lastTrackpadLayout: TrackpadLayoutWire.Sample?
     private var videoEnabled = true
     // Mac system audio (M-audio). Per-receiver, not Mac-wide like
     // `videoEnabled`: only this session's receiver can turn its own audio
@@ -968,6 +973,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var workspaceEngine: WindowWorkspaceEngine?
     /// Window/app/display browsing for this receiver in every display mode (Stage Peek over Mirror/Extend).
     private var windowBrowser: WindowBrowserService?
+    private var trackpadPeekBrowser: WindowBrowserService?
+    private var trackpadPeekToken: UUID?
+    private let trackpadPeekAuthority = OSAllocatedUnfairLock<UUID?>(initialState: nil)
+    private var workspaceExtendedDisplay: VirtualDisplay?
+    private var workspaceExtendedDisplayOperationInFlight = false
     /// Remote Finder for this session (created on its first request; `queue` only).
     private var fileBrowser: RemoteFileBrowser?
     /// Display arrangement editing for this session (created on its first request; `queue` only).
@@ -984,6 +994,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // controller's own migration), so the receiver must ask again on the
     // new connection.
     private let sessionInputGrant = SessionInputGrantBox()
+    private let inputRequestRevision = OSAllocatedUnfairLock(initialState: UInt64(0))
     private var nativeAppGestureState = NativeAppGestureSessionState()
     private var loggedNativeGestureLimitation = false
 
@@ -1612,6 +1623,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `WireProtocol.sessionScopedInputConsentWireVersion`); `allowed`
     /// alone remains a correct summary for every older peer.
     private func sendAllowInputState(state: SessionInputWireState? = nil) {
+        if !trackpadPeekAllowed(generation: activeConnectionGeneration) { stopTrackpadPeek() }
+        displayArrangement?.authorizationChanged()
         let allowed = sessionAuthorization.inputAllowed(masterEnabled: InputPolicy.allowsInput())
         let resolvedState = state ?? (allowed ? .allowed : .off)
         sendJSONObject(["type": WireMessage.allowInputState,
@@ -1670,10 +1683,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `resolveInputControlRequest`), never directly from a wire handler.
     /// Inert when that connection is no longer the live admitted one — a
     /// decision made for connection A never grants connection B.
-    func grantSessionInput(generation: UInt64) {
+    func grantSessionInput(generation: UInt64, requestRevision: UInt64? = nil) {
         let selfBox = self.selfBox
         queue.async {
             guard let self = selfBox.currentOnQueue() else { return }
+            if let requestRevision, !self.inputRequestIsCurrent(generation: generation, revision: requestRevision) { return }
             // A decision that raced a Fast User Switch out of this login
             // session grants nothing (`InputControlRequestRoute`).
             guard LoginSessionConsole.shared.isOnConsole else {
@@ -1691,6 +1705,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let sink = self.statusSink
             Task { @MainActor in sink.publishSessionInputGrantChanged(true) }
         }
+    }
+
+    func inputRequestIsCurrent(generation: UInt64, revision: UInt64) -> Bool {
+        sessionAuthorization.isAdmitted(generation: generation)
+            && inputRequestRevision.withLock { $0 == revision }
     }
 
     /// Which lock state this sender reads (tests set their own; the app keeps `.shared` current).
@@ -2252,7 +2271,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                         }
                         sender.queue.async {
                             let sender = owner.sender
-                            sender.applyVideoEnabled(false)
+                            if !sender.stopped { sender.applyVideoEnabled(sender.desiredVideoEnabled) }
                             Task { @MainActor in completion() }
                         }
                     }
@@ -3254,6 +3273,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// flight for the whole app), checks for cancellation every second while macOS's capture
     /// service is slow, and stops after `displayListingBudget` instead of waiting without end.
     private func findSCDisplay(id: CGDirectDisplayID, expectedSize: CGSize? = nil,
+                               budget: Duration = MacSender.displayListingBudget,
                                isCancelled: () -> Bool = { false }) async throws -> SCDisplay {
         var lastDisplayCount = 0
         var answers = 0
@@ -3266,14 +3286,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         while answers < 20 {
             guard !stopped, !isCancelled() else { throw CancellationError() }
             let waited = ContinuousClock.now - began
-            guard waited < Self.displayListingBudget else {
+            guard waited < budget else {
                 Log.info("captureService: display \(id) not listed after \(ShareableContent.milliseconds(waited)) ms "
                     + "(\(answers) answers) — giving up")
                 throw NSError(domain: "MacSender", code: 13, userInfo: [NSLocalizedDescriptionKey:
                     "macOS's screen capture service didn't answer in time. Another app may be sending it many "
                     + "requests (for example AltTab's window previews). Try again in a moment."])
             }
-            if waited >= .seconds(3), !reportedSlow {
+            if budget == Self.displayListingBudget, waited >= .seconds(3), !reportedSlow {
                 reportedSlow = true
                 Log.info("captureService: still waiting for macOS to list display \(id) after "
                     + "\(ShareableContent.milliseconds(waited)) ms")
@@ -3741,6 +3761,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         mirrorDisplayTopologyObserver = nil
         virtualDisplay = nil   // releasing it removes the display
+        workspaceExtendedDisplay = nil
     }
 
     private func stopOnQueue() {
@@ -3751,6 +3772,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         stopWorkspaceEngine()
         windowBrowser?.stop()
         windowBrowser = nil
+        stopTrackpadPeek()
         fileBrowser?.stop()
         fileBrowser = nil
         // Display arrangement: a pending prompt goes, an unkept arrangement is put back.
@@ -3936,6 +3958,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
 
+    private func usesTrackpadPoints(_ message: [String: Any]) -> Bool {
+        (lastHello?.protocolVersion ?? 0) >= WireProtocol.trackpadPointsWireVersion
+            && (message["trackpadPoints"] as? Bool) == true
+    }
+
+    private func allowsDesktopTrackpad(_ message: [String: Any]) -> Bool {
+        guard privacyGate.allowsInput else { return false }
+        if message[WorkspaceTrackpadWire.inputKey] as? Bool == true {
+            guard usesTrackpadPoints(message) || message[WireMessage.scrollAtCursor] as? Bool == true else { return false }
+            return mode == .window && videoEnabled && lastHello?.supportsWindowWorkspace == true
+                && controlStillAllowed(generation: activeConnectionGeneration)
+        }
+        return usesTrackpadPoints(message) && (!videoEnabled || (mode != .window && (message["confined"] as? Bool) != true))
+    }
+
     /// Side-effect-free recheck immediately before a deferred Window or Overview action.
     /// These controls require the original connection's grant, an unlocked desktop and the
     /// Mac's Window streaming permission even if all three were present at request time.
@@ -3974,9 +4011,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                   self.updateCaptureState({ $0.requestPause() }) else { return }
             self.sendDisplayState(.paused)
             self.inputInjector?.cancelActiveInput()
-            self.workspaceEngine?.setSuspended(true)
-            self.windowBrowser?.setActive(false)
-            self.streamingDisplayAwake.set(watching: false)
+            self.syncWorkspaceSuspension()
             self.invalidateCapturePipeline()
             self.captureDisplayID = 0   // paused — no active capture until resumeDisplay()
             let activeStream = self.stream
@@ -5743,6 +5778,82 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         sendJSONObject(TextCaretWire.message(rect: rect, sequence: textCaretSeq))
     }
 
+    // MARK: - Video Off layout
+
+    private func trackpadLayoutAllowed(generation: UInt64, inWindow: Bool) -> Bool {
+        let usableSurface = !videoEnabled || (inWindow && mode == .window && lastHello?.supportsWindowWorkspace == true
+                                              && WindowStreamingPolicy.isAllowed())
+        return !stopped && usableSurface && transportController.isReady
+            && sessionAuthorization.isAdmitted(generation: generation)
+            && receiverMayMovePointer() && privacyGate.allowsContent
+            && LoginSessionConsole.shared.isOnConsole && !PrivacyShieldWindows.isUnlocking
+    }
+
+    private func watchTrackpadLayout(on: Bool, inWindow: Bool) {
+        let generation = activeConnectionGeneration
+        guard on else {
+            trackpadLayoutLease = nil
+            lastTrackpadLayout = nil
+            trackpadDisplayNames = [:]
+            return
+        }
+        guard trackpadLayoutAllowed(generation: generation, inWindow: inWindow) else { return }
+        if trackpadLayoutLease?.generation != generation || trackpadLayoutLease?.inWindow != inWindow { lastTrackpadLayout = nil }
+        trackpadLayoutLease = (generation, ProcessInfo.processInfo.systemUptime + 5, inWindow)
+        let queue = self.queue
+        let selfBox = self.selfBox
+        DispatchQueue.main.async {
+            var names: [UInt32: String] = [:]
+            for screen in NSScreen.screens {
+                if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                    names[id] = screen.localizedName
+                }
+            }
+            let namesByID = names
+            queue.async {
+                guard let sender = selfBox.currentOnQueue(), sender.trackpadLayoutLease?.generation == generation,
+                      sender.trackpadLayoutLease?.inWindow == inWindow,
+                      sender.trackpadLayoutAllowed(generation: generation, inWindow: inWindow) else { return }
+                sender.trackpadDisplayNames = namesByID
+            }
+        }
+        if !trackpadLayoutPolling { pollTrackpadLayout() }
+    }
+
+    private func pollTrackpadLayout() {
+        guard let lease = trackpadLayoutLease, lease.expires > ProcessInfo.processInfo.systemUptime,
+              lease.generation == activeConnectionGeneration,
+              trackpadLayoutAllowed(generation: lease.generation, inWindow: lease.inWindow) else {
+            trackpadLayoutLease = nil
+            trackpadLayoutPolling = false
+            lastTrackpadLayout = nil
+            trackpadDisplayNames = [:]
+            return
+        }
+        trackpadLayoutPolling = true
+        let limit = TrackpadLayoutWire.displayLimit
+        var ids = [CGDirectDisplayID](repeating: 0, count: limit)
+        var count: UInt32 = 0
+        let ok = CGGetActiveDisplayList(UInt32(limit), &ids, &count) == .success
+        let displays: [TrackpadDisplayGeometry] = ok ? ids.prefix(Int(count)).sorted().compactMap { id in
+            // The relative desktop can also reach a retained Extend display.
+            guard id != 0, CGDisplayMirrorsDisplay(id) == 0 else { return nil }
+            let bounds = CGDisplayBounds(id)
+            return bounds.isEmpty ? nil : .init(id: id, bounds: bounds, name: trackpadDisplayNames[id])
+        } : []
+        let cursor = (CGEvent(source: nil)?.location).flatMap { location in
+            displays.contains(where: { $0.bounds.contains(location) }) ? location : nil
+        }
+        let sample = TrackpadLayoutWire.Sample(displays: displays, cursor: cursor, inWindow: lease.inWindow)
+        if sample != lastTrackpadLayout, trackpadLayoutAllowed(generation: lease.generation, inWindow: lease.inWindow) {
+            lastTrackpadLayout = sample
+            sendJSONObject(sample.message)
+        }
+        queue.asyncAfter(deadline: .now() + TrackpadLayoutWire.sampleInterval) { [weak self] in
+            self?.pollTrackpadLayout()
+        }
+    }
+
     // MARK: - Local cursor echo (Mac -> phone)
 
     private func startCursorEcho() {
@@ -6361,8 +6472,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "scroll":
             guard receiverInputIsAllowed() else { return }
+            let desktopTrackpad = allowsDesktopTrackpad(obj)
+            guard obj[WorkspaceTrackpadWire.inputKey] as? Bool != true || desktopTrackpad else { return }
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                inputInjector?.handleScroll(dx: dx, dy: dy)
+                let atCursor = obj[WireMessage.scrollAtCursor] as? Bool == true
+                inputInjector?.handleScroll(dx: dx, dy: dy, desktopTrackpad: desktopTrackpad,
+                                            atCurrentCursor: atCursor)
             }
         case "pointer":
             // M7: absolute/relative cursor movement decoupled from button
@@ -6375,6 +6490,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             default: .other
             }
             guard lockScreenPointerAdmits(type: "pointer", obj), receiverInputIsAllowed(pointerEvent) else { return }
+            let desktopTrackpad = allowsDesktopTrackpad(obj)
+            if obj[WorkspaceTrackpadWire.inputKey] as? Bool == true {
+                guard desktopTrackpad, usesTrackpadPoints(obj), action == "moveRelative" || action == "down" else { return }
+            }
             inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
                 switch action {
                 case "move":
@@ -6383,11 +6502,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 case "moveRelative":
                     if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy)
+                        inputInjector?.handlePointerMoveRelative(dx: dx, dy: dy,
+                                                                 trackpadPoints: usesTrackpadPoints(obj),
+                                                                 desktopTrackpad: desktopTrackpad)
                     }
                 case "down":
                     if let button = PointerButton.parse(obj["button"]) {
-                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1)
+                        var workspacePoint: CGPoint?
+                        if mode == .window, videoEnabled, !usesTrackpadPoints(obj),
+                           let x = obj["x"] as? Double, let y = obj["y"] as? Double,
+                           (0...1).contains(x), (0...1).contains(y) {
+                            workspacePoint = CGPoint(x: x, y: y)
+                        }
+                        inputInjector?.handlePointerDown(button: button, clickCount: obj["clickCount"] as? Int ?? 1,
+                                                         desktopTrackpad: desktopTrackpad, workspacePoint: workspacePoint)
                     }
                 case "up":
                     if let button = PointerButton.parse(obj["button"]) {
@@ -6532,11 +6660,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             textCaretFollower.setKeyboardOpen(open)
         case WireMessage.windowCatalogRequest, WireMessage.windowThumbnailRequest, WireMessage.appCatalogRequest,
              WireMessage.appLaunch, WireMessage.windowClose, DisplayActionsWire.identify, DisplayActionsWire.moveCursor,
-             DisplayActionsWire.overviewCursorWatch:
+             DisplayActionsWire.overviewCursorWatch,
+             WireMessage.windowAction where obj["action"] as? String == "activate" && obj["ifOffscreen"] as? Bool == true:
             // Admitted sessions only (gate above). Browsing works in EVERY display mode, so Stage
-            // Peek, search and Launchpad open over Mirror/Extend without switching the mode.
-            // Launching still needs control (checked by the service).
+            // Peek can restore a listed window without changing the display mode.
+            // Launching and restoring still need control (checked by the service).
             guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                handleTrackpadPeek(type: type, message: obj)
+                return
+            }
             // Same gates as the picture itself: no titles or stills while paused, Video Off or not admitted.
             let phase = captureStateSnapshot().phase
             guard videoEnabled, sessionAuthorization.isAdmitted, privacyGate.allowsContent,
@@ -6571,15 +6704,26 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard sessionAuthorization.isAdmitted else { return }
             let generation = activeConnectionGeneration
             let selfBox = self.selfBox
-            let stillAllowed: () -> Bool = { selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false }
+            let tls = transport.tls
+            let preapproved = type == WireMessage.displayArrangeRequest
+                && TrustStore.shared.pin(peerID: tls.peerID) == tls.pinnedPeerSPKI
+                && DisplayArrangementAuthorization.allows(peerID: tls.peerID, pin: tls.pinnedPeerSPKI)
+            let stillAllowed: () -> Bool = {
+                guard selfBox.resolve()?.controlStillAllowed(generation: generation) == true,
+                      TrustStore.shared.pin(peerID: tls.peerID) == tls.pinnedPeerSPKI else { return false }
+                return !preapproved || DisplayArrangementAuthorization.allows(peerID: tls.peerID, pin: tls.pinnedPeerSPKI)
+            }
             if type == WireMessage.displayArrangeRequest {
                 guard lastHello?.supportsWindowWorkspace == true, WindowStreamingPolicy.isAllowed() else { return }
                 ensureDisplayArrangement().handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
+                                                  preapproved: preapproved,
                                                   controlStillAllowed: stillAllowed)
             } else {
                 displayArrangement?.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed(),
                                            controlStillAllowed: stillAllowed)
             }
+        case WorkspaceExtendedDisplayWire.request:
+            handleWorkspaceExtendedDisplay(obj)
         case WireMessage.filesRequest:
             // Admitted sessions only. Read-only, owner-approved folders; the service checks
             // the Mac's switch, the owner's per-session approval and every path.
@@ -6619,7 +6763,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 Log.info("workspace: \(type) before Window mode started — ignored")
                 return
             }
-            engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed())
+            let generation = activeConnectionGeneration
+            let selfBox = self.selfBox
+            engine.handle(type: type, message: obj, inputGranted: receiverInputIsAllowed()) {
+                selfBox.resolve()?.controlStillAllowed(generation: generation) ?? false
+            }
         case WireMessage.displayModeRequest
             where (obj["mode"] as? String) == WindowWorkspaceWire.mode:
             guard let info = lastHello, info.supportsWindowWorkspace, WindowStreamingPolicy.isAllowed(),
@@ -6688,27 +6836,47 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // The decision is bound to THIS connection's generation.
                     let allowInputSelfBox = self.selfBox
                     let requestGeneration = activeConnectionGeneration
+                    let revision = inputRequestRevision.withLock { $0 }
                     Task { @MainActor in
-                        guard let self = allowInputSelfBox.resolve() else { return }
-                        self.onAllowInputRequest?(requestGeneration)
+                        guard let self = allowInputSelfBox.resolve(),
+                              self.inputRequestIsCurrent(generation: requestGeneration, revision: revision) else { return }
+                        self.onAllowInputRequest?(requestGeneration, revision)
                     }
                 }
             } else {
-                // Releasing this session's own grant is always safe/
-                // immediate — narrowing never needs a decision.
+                // An answer to a withdrawn prompt must never grant control.
+                let revision = inputRequestRevision.withLock { current in
+                    current &+= 1
+                    return current
+                }
+                let generation = activeConnectionGeneration
+                let selfBox = self.selfBox
+                Task { @MainActor in
+                    guard let self = selfBox.resolve(),
+                          self.inputRequestIsCurrent(generation: generation, revision: revision) else { return }
+                    self.onAllowInputCancelled?()
+                }
                 denySessionInput(state: .off)
             }
+        case TrackpadLayoutWire.watch:
+            guard let on = obj["on"] as? Bool else { return }
+            watchTrackpadLayout(on: on, inWindow: obj[WorkspaceTrackpadWire.inputKey] as? Bool == true)
         case WireMessage.videoRequest:
             guard let info = lastHello,
                   info.protocolVersion >= WireProtocol.videoControlWireVersion,
                   let requested = obj["enabled"] as? Bool else { return }
-            if requested == desiredVideoEnabled {
+            let resumeWindow = requested && info.supportsWindowWorkspace && WindowStreamingPolicy.isAllowed()
+                && obj[WorkspaceTrackpadWire.resumeWindowKey] as? Bool == true
+            if requested == desiredVideoEnabled && !resumeWindow {
                 applyVideoEnabled(requested)
             } else {
+                let preserveMode = !requested && obj[WireMessage.preserveCaptureMode] as? Bool == true
                 let videoEnabledSelfBox = self.selfBox
+                let generation = activeConnectionGeneration
                 Task { @MainActor in
-                    guard let self = videoEnabledSelfBox.resolve() else { return }
-                    self.onVideoEnabledRequest?(requested)
+                    guard let self = videoEnabledSelfBox.resolve(),
+                          self.sessionAuthorization.isAdmitted(generation: generation) else { return }
+                    self.onVideoEnabledRequest?(requested, preserveMode, resumeWindow)
                 }
             }
         case WireMessage.streamingProfileRequest:
@@ -7033,6 +7201,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// on the Mac owner — belonged to that connection and is gone.
     private func connectionAuthorityEnded(dropped: Bool) {
         textCaretFollower.stop()
+        stopTrackpadPeek()
+        workspaceExtendedDisplay = nil
         // Display arrangement belongs to the connection that asked: its prompt goes and an
         // arrangement it hasn't kept is put back (a new connection must ask again).
         displayArrangement?.sessionEnded()
@@ -8030,14 +8200,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         if let user = PairedMacUserName.outgoing() { welcome["user"] = user }
         if let welcomed = onWelcomed { Task { @MainActor in welcomed() } }
         welcome.merge(QUICPeerCapability.advertisedFields(quicAvailable: QUICRuntimeAvailability.isAvailable)) { $1 }
-        welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: WindowStreamingPolicy.isAllowed())
+        let windowStreaming = WindowStreamingPolicy.isAllowed()
+        welcome["features"] = Self.welcomeFeatures(windowStreamingAllowed: windowStreaming)
+        if windowStreaming {
+            welcome["workspaceFeatures"] = [
+                TrackpadStagePeekWire.welcomeFeature, TrackpadStagePeekWire.textOnlyFeature,
+                WorkspaceExtendedDisplayWire.feature, WorkspaceTrackpadWire.feature,
+            ]
+        }
         sendJSONObject(welcome)
         // Connected while locked (Wake & Connect, a reconnect): said at once, before anything else.
         if !privacyGate.allowsContent { sendLockState() }
     }
 
     /// `welcome.features`: what this Mac offers beyond its `pv`. A receiver
-    /// reads at most 16 entries, so keep the list short. Window-mode features,
+    /// reads a bounded prefix. Keep existing features in the same prefix for older clients. Window-mode features,
     /// Fill/Restore on Mac (`windowFrame`) among them, only while Window mode is allowed.
     static func welcomeFeatures(windowStreamingAllowed: Bool) -> [String] {
         var features = [TextCaretWire.welcomeFeature, RemoteFilesWire.welcomeFeature, ClipboardWire.welcomeFeature, LockMacWire.welcomeFeature]
@@ -8058,6 +8235,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         features.append(ExactKeyModifiersWire.welcomeFeature)
         features.append(MacLockWire.welcomeFeature)
         features.append(LockScreenWire.welcomeFeature)
+        if windowStreamingAllowed { features.append(WindowWorkspaceWire.restoreOffscreenFeature) }
+        features.append(TrackpadLayoutWire.welcomeFeature)
+        features.append(WireMessage.scrollAtCursor)
+        features.append(WireMessage.preserveCaptureMode)
         return features
     }
 
@@ -8126,6 +8307,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     guard let uuid = candidate.persistentID else { return nil }
                     return [
                         "uuid": uuid, "name": candidate.name, "isMain": candidate.isMain,
+                        "displayID": Int(candidate.displayID),
                         "logicalWidth": Int(candidate.logicalSize.width),
                         "logicalHeight": Int(candidate.logicalSize.height),
                         "pixelWidth": Int(candidate.pixelSize.width),
@@ -8846,6 +9028,11 @@ extension MacSender {
         return service
     }
 
+    func displayArrangementAuthorizationChanged() {
+        let selfBox = self.selfBox
+        queue.async { selfBox.currentOnQueue()?.displayArrangement?.authorizationChanged() }
+    }
+
     /// `queue` only. One browser per session; its messages pass the same admission gate.
     @discardableResult
     private func ensureWindowBrowser() -> WindowBrowserService {
@@ -8859,13 +9046,169 @@ extension MacSender {
             let box = WorkspaceMessageBox(value: message)
             queue.async {
                 guard let sender = selfBox.currentOnQueue(), let browser, sender.windowBrowser === browser,
-                      sender.sessionAuthorization.isAdmitted else { return }
+                      sender.sessionAuthorization.isAdmitted, sender.videoEnabled,
+                      sender.privacyGate.allowsContent else { return }
                 sender.sendJSONObject(box.value)
             }
         }
         windowBrowser = browser
         syncWorkspaceSuspension()
         return browser
+    }
+
+    private func trackpadPeekAllowed(generation: UInt64) -> Bool {
+        !stopped && !videoEnabled && transportController.isReady && privacyGate.allowsContent
+            && controlStillAllowed(generation: generation)
+    }
+
+    private func stopTrackpadPeek() {
+        trackpadPeekAuthority.withLock { $0 = nil }
+        trackpadPeekBrowser?.stop()
+        trackpadPeekBrowser = nil
+        trackpadPeekToken = nil
+    }
+
+    /// Window mode can capture the added display through its existing display-source path.
+    /// The session owns the extra monitor separately from its carrier and ordinary Extend.
+    private func handleWorkspaceExtendedDisplay(_ message: [String: Any]) {
+        guard let request = (message["request"] as? String).flatMap(UUID.init(uuidString:)),
+              let action = message["action"] as? String,
+              action == "create" || action == "remove" else { return }
+        let generation = activeConnectionGeneration
+        guard mode == .window, videoEnabled, let engine = workspaceEngine,
+              receiverInputIsAllowed(), controlStillAllowed(generation: generation),
+              CGPreflightScreenCaptureAccess(), !workspaceExtendedDisplayOperationInFlight,
+              let info = lastHello else {
+            sendJSONObject(["type": WorkspaceExtendedDisplayWire.state, "request": request.uuidString,
+                            "status": "unavailable"])
+            return
+        }
+        let setup = WorkspaceExtendedDisplayWire.Setup(message)
+        guard action == "remove" || setup != nil else { return }
+        let plan = setup?.plan(maximumReceiverEdge: max(info.pixelsWide, info.pixelsHigh))
+        let fps = plan.map { todayEffectiveFPS(width: $0.wide * 2, height: $0.high * 2).fps } ?? 60
+        let serial = displaySerial
+        let productID: UInt32 = 0x5753  // "WS": Window mode's additional monitor
+        let owner = ObjectIdentifier(self)
+        let engineID = ObjectIdentifier(engine)
+        let name = String(localized: "MeowDisplay — Extended Display")
+        let queue = self.queue
+        let selfBox = self.selfBox
+        workspaceExtendedDisplayOperationInFlight = true
+        Task { @MainActor in
+            guard let sender = selfBox.resolve() else { return }
+            var existing: VirtualDisplay?
+            var canCreate = false
+            var result = "unavailable"
+            sender.onQueueSync {
+                guard sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID) else { return }
+                if action == "remove" {
+                    sender.workspaceExtendedDisplay = nil
+                    result = "removed"
+                } else if let current = sender.workspaceExtendedDisplay,
+                          DisplayUsability.evaluate(DisplayHealth.reading(for: current.displayID)) == .usable {
+                    existing = current
+                    canCreate = true
+                } else {
+                    sender.workspaceExtendedDisplay = nil
+                    canCreate = true
+                }
+            }
+            var ready: (id: UInt32, uuid: String)?
+            if canCreate, let plan, sender.controlStillAllowed(generation: generation), CGPreflightScreenCaptureAccess() {
+                let candidate = existing ?? VirtualDisplay(
+                    name: name, pointsWide: plan.wide, pointsHigh: plan.high,
+                    sizeInMillimeters: ExtendPhysicalSize.millimetres(pointsWide: plan.unscaledWide, pointsHigh: plan.unscaledHigh),
+                    serialNum: serial, productID: productID, refreshRate: fps,
+                    reservedPointsPerAxis: plan.reservedPointsPerAxis, owner: owner)
+                if let candidate {
+                    ShareableContent.invalidate()
+                    let id = candidate.displayID
+                    let listed = await Self.workspaceExtendedDisplayIsListed(id, generation: generation, sender: selfBox)
+                    sender.onQueueSync {
+                        guard listed, sender.workspaceExtendedDisplayAllowed(generation: generation, engineID: engineID),
+                              DisplayUsability.evaluate(DisplayHealth.reading(for: id)) == .usable,
+                              let uuid = MirrorDisplayIdentity.uuidString(for: id) else { return }
+                        sender.workspaceExtendedDisplay = candidate
+                        ready = (id, uuid)
+                    }
+                }
+            }
+            let status = ready == nil ? result : "ready"
+            let display = ready
+            queue.async {
+                guard let sender = selfBox.currentOnQueue() else { return }
+                sender.workspaceExtendedDisplayOperationInFlight = false
+                guard sender.sessionAuthorization.isAdmitted(generation: generation) else { return }
+                var reply: [String: Any] = ["type": WorkspaceExtendedDisplayWire.state,
+                                            "request": request.uuidString, "status": status]
+                if let display {
+                    reply["display"] = Int(display.id)
+                    reply["uuid"] = display.uuid
+                }
+                sender.sendJSONObject(reply)
+                sender.windowBrowser?.refresh(sendCatalog: true)
+            }
+        }
+    }
+
+    private func workspaceExtendedDisplayAllowed(generation: UInt64, engineID: ObjectIdentifier) -> Bool {
+        videoEnabled && workspaceEngine.map(ObjectIdentifier.init) == engineID
+            && controlStillAllowed(generation: generation) && CGPreflightScreenCaptureAccess()
+    }
+
+    private static func workspaceExtendedDisplayIsListed(
+        _ id: UInt32, generation: UInt64, sender selfBox: MacSenderSelfBox
+    ) async -> Bool {
+        guard let sender = selfBox.resolve() else { return false }
+        return (try? await sender.findSCDisplay(id: id, budget: .seconds(10)) {
+            selfBox.resolve()?.controlStillAllowed(generation: generation) != true
+        }) != nil
+    }
+
+    /// This browser is never attached to the compositor and never accepts still requests.
+    private func handleTrackpadPeek(type: String, message: [String: Any]) {
+        let generation = activeConnectionGeneration
+        guard trackpadPeekAllowed(generation: generation),
+              let token = TrackpadStagePeekWire.token(in: message) else { return }
+        switch type {
+        case WireMessage.windowCatalogRequest, WireMessage.appCatalogRequest, WireMessage.appLaunch, WireMessage.windowThumbnailRequest:
+            break
+        case WireMessage.windowAction:
+            guard message["action"] as? String == "activate" else { return }
+        default: return
+        }
+        if trackpadPeekToken != token {
+            guard type == WireMessage.windowCatalogRequest else { return }
+            stopTrackpadPeek()
+            let browser = WindowBrowserService(hostID: TrustStore.shared.installID() ?? "mac", allowsStills: false)
+            let queue = self.queue
+            let selfBox = self.selfBox
+            browser.sendMessage = { [weak browser] message in
+                guard let type = message["type"] as? String,
+                      [WireMessage.windowCatalog, WireMessage.appCatalog, WireMessage.appIcon].contains(type) else { return }
+                let box = WorkspaceMessageBox(value: message)
+                queue.async {
+                    guard let sender = selfBox.currentOnQueue(), let browser,
+                          sender.trackpadPeekBrowser === browser,
+                          sender.trackpadPeekAllowed(generation: generation) else { return }
+                    var reply = box.value
+                    reply[TrackpadStagePeekWire.tokenKey] = token.uuidString
+                    sender.sendJSONObject(reply)
+                }
+            }
+            trackpadPeekToken = token
+            trackpadPeekBrowser = browser
+            trackpadPeekAuthority.withLock { $0 = UUID() }
+            browser.setActive(true)
+        }
+        let selfBox = self.selfBox
+        guard let authority = trackpadPeekAuthority.withLock({ $0 }) else { return }
+        trackpadPeekBrowser?.handle(type: type, message: message, inputGranted: true, trackpadPeek: true) {
+            guard let sender = selfBox.resolve() else { return false }
+            return sender.trackpadPeekAuthority.withLock { $0 == authority }
+                && sender.controlStillAllowed(generation: generation)
+        }
     }
 
     /// `queue` only. Window streams run only while video is on and the
@@ -8876,6 +9219,8 @@ extension MacSender {
         let paused = phase == .pausing || phase == .paused || phase == .stopped
         // Locked: every window capture and listing stops (and is started again on unlock).
         let hidden = !privacyGate.allowsContent
+        displayArrangement?.authorizationChanged()
+        if paused || !trackpadPeekAllowed(generation: activeConnectionGeneration) { stopTrackpadPeek() }
         workspaceEngine?.setSuspended(!videoEnabled || paused || !sessionAuthorization.isAdmitted || hidden)
         windowBrowser?.setActive(videoEnabled && !paused && sessionAuthorization.isAdmitted && !hidden)
         // Without Screen Recording there is nothing to keep the display awake for.

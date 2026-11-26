@@ -22,6 +22,7 @@ struct CatalogWindowItem: Equatable, Sendable, Identifiable {
     var active: Bool
     /// In Stage Manager's side strip: macOS pauses its picture there (PROTOCOL.md §6.10).
     var inStageStrip = false
+    var displayUUID: String? = nil
 
     /// A short card badge for a window that can't show a current picture, or nil.
     var pausedBadge: String? {
@@ -165,6 +166,9 @@ struct RemoteTileItem: Equatable, Sendable {
     var isFloat = false
     /// The Mac can put this window back to its size before Fill Window on Mac (`restore`).
     var restorable = false
+    /// Applied camera and request revision for the live Overview pane.
+    var overviewZoom: WorkspacePaneZoom? = nil
+    var overviewViewEpoch: Int? = nil
 }
 
 struct WorkspaceStateMessage: Equatable, Sendable {
@@ -232,8 +236,13 @@ enum WorkspaceEvent: Sendable {
     case thumbnail(windowID: UInt32, generation: UInt64, data: Data?, stale: Bool = false)
     case icon(bundleID: String, data: Data)
     case displayThumbnail(displayID: UInt32, data: Data)
+    case displayDetail(OverviewDisplayDetailRequest, data: Data)
     /// `apps` nil: the receiver's revision is current.
     case appCatalog(revision: Int, apps: [MacAppItem]?)
+    case trackpadCatalog(UUID, WorkspaceCatalogMessage)
+    case trackpadApps(UUID, revision: Int, apps: [MacAppItem]?)
+    case trackpadIcon(UUID, bundleID: String, data: Data)
+    case extendedDisplay(UUID, status: String, display: UInt32?, uuid: String?)
     case launchResult(bundleID: String, ok: Bool, window: Bool? = nil)
     /// Close Window from Stage Peek (PROTOCOL.md 6.10).
     case closeResult(windowID: UInt32, result: WindowCloseResult)
@@ -268,6 +277,11 @@ enum WorkspaceEvent: Sendable {
         func u32(_ o: [String: Any], _ k: String) -> UInt32? { (o[k] as? Int).flatMap { UInt32(exactly: $0) } }
         func u64(_ o: [String: Any], _ k: String) -> UInt64? { (o[k] as? Int).flatMap { UInt64(exactly: $0) } }
         switch type {
+        case WorkspaceExtendedDisplayWire.state:
+            guard let request = str(obj, "request", 36).flatMap(UUID.init(uuidString:)),
+                  let status = str(obj, "status", 32) else { return nil }
+            let uuid = str(obj, "uuid", 36).flatMap(UUID.init(uuidString:))?.uuidString
+            return .extendedDisplay(request, status: status, display: u32(obj, "display"), uuid: uuid)
         case MacLockWire.type:
             return MacLockNotice(message: obj).map { .macLock($0) }
         case WireMessage.windowCatalog:
@@ -290,12 +304,17 @@ enum WorkspaceEvent: Sendable {
                 guard let id = u32(d, "id") else { return nil }
                 return CatalogDisplayItem(id: id, name: str(d, "name", 80) ?? "Display", width: d["w"] as? Int ?? 0,
                                           height: d["h"] as? Int ?? 0, isMain: d["main"] as? Bool ?? false,
-                                          isVirtual: d["virtual"] as? Bool ?? false, overview: OverviewDisplay(wire: d))
+                                          isVirtual: d["virtual"] as? Bool ?? false, overview: OverviewDisplay(wire: d),
+                                          displayUUID: str(d, "uuid", 36).flatMap(UUID.init(uuidString:))?.uuidString)
             }
-            return .catalog(WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
+            let catalog = WorkspaceCatalogMessage(host: str(obj, "host"), windows: Array(windows), apps: Array(apps),
                                                    installed: Array(installed),
                                                    unavailable: obj["error"] != nil && obj["error"] as? String != "starting",
-                                                   starting: obj["error"] as? String == "starting", displays: Array(displays)))
+                                                   starting: obj["error"] as? String == "starting", displays: Array(displays))
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadCatalog($0, catalog) }
+            }
+            return .catalog(catalog)
         case WireMessage.workspaceState:
             let tiles = (obj["tiles"] as? [[String: Any]] ?? []).prefix(WorkspaceLayout.maximumTiles).compactMap { t -> RemoteTileItem? in
                 guard let id = str(t, "id", 32) else { return nil }
@@ -304,7 +323,9 @@ enum WorkspaceEvent: Sendable {
                                       app: str(t, "app", 80) ?? "", bundleID: str(t, "bundle") ?? "", title: str(t, "title", 120) ?? "",
                                       attempt: min(max(t["attempt"] as? Int ?? 0, 0), 99), inStageStrip: t["strip"] as? Bool ?? false,
                                       isFloat: t["layer"] as? String == "float",
-                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false)
+                                      restorable: t[WindowFrameWire.tileRestorable] as? Bool ?? false,
+                                      overviewZoom: u32(t, "window") == WorkspaceSource.overviewKey ? WorkspacePaneZoom(wire: t["zoom"]) : nil,
+                                      overviewViewEpoch: (t["view"] as? Int).flatMap { (0...Int(Int32.max)).contains($0) ? $0 : nil })
             }
             let rejected = (obj["rejected"] as? [String: Any] ?? [:]).prefix(32).reduce(into: [String: String]()) { r, e in
                 if let v = e.value as? String { r[e.key] = v }
@@ -327,19 +348,30 @@ enum WorkspaceEvent: Sendable {
             let data = (obj["jpeg"] as? String).flatMap { $0.count <= maxBase64 ? Data(base64Encoded: $0) : nil }
             return .thumbnail(windowID: id, generation: u64(obj, "gen") ?? 0, data: data, stale: obj["stale"] as? Bool ?? false)
         case WireMessage.displayThumbnail:
-            guard let id = u32(obj, "id"), let jpeg = obj["jpeg"] as? String, jpeg.count <= maxBase64,
-                  let data = Data(base64Encoded: jpeg) else { return nil }
+            guard let id = u32(obj, "id"), let jpeg = obj["jpeg"] as? String else { return nil }
+            if let side = obj["detail"] as? Int {
+                var fields: [String: Any] = ["id": Int(id), "maxSide": side]
+                fields["region"] = obj["detailRegion"]
+                guard let request = OverviewDisplayDetailRequest.parse(fields),
+                      jpeg.count <= OverviewDisplayDetailRequest.maxBase64,
+                      let data = Data(base64Encoded: jpeg) else { return nil }
+                return .displayDetail(request, data: data)
+            }
+            guard jpeg.count <= maxBase64, let data = Data(base64Encoded: jpeg) else { return nil }
             return .displayThumbnail(displayID: id, data: data)
         case WireMessage.appCatalog:
             guard let rev = obj["rev"] as? Int else { return nil }
-            if obj["same"] as? Bool == true { return .appCatalog(revision: rev, apps: nil) }
             let apps = (obj["apps"] as? [[String: Any]] ?? []).prefix(900).compactMap { a -> MacAppItem? in
                 guard let b = str(a, "bundle"), !b.isEmpty else { return nil }
                 return MacAppItem(bundleID: b, name: str(a, "name", 80) ?? b, running: a["running"] as? Bool ?? false,
                                   windowCount: a["windows"] as? Int ?? 0,
                                   lastUsed: (a["used"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) })
             }
-            return .appCatalog(revision: rev, apps: Array(apps))
+            let updatedApps = obj["same"] as? Bool == true ? nil : apps
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadApps($0, revision: rev, apps: updatedApps) }
+            }
+            return .appCatalog(revision: rev, apps: updatedApps)
         case WireMessage.appLaunchResult:
             guard let b = str(obj, "bundle") else { return nil }
             return .launchResult(bundleID: b, ok: obj["ok"] as? Bool ?? false, window: obj["window"] as? Bool)
@@ -374,6 +406,9 @@ enum WorkspaceEvent: Sendable {
         case WireMessage.appIcon:
             guard let bundle = str(obj, "bundle"), let png = obj["png"] as? String, png.count <= maxBase64,
                   let data = Data(base64Encoded: png) else { return nil }
+            if obj[TrackpadStagePeekWire.tokenKey] != nil {
+                return TrackpadStagePeekWire.token(in: obj).map { .trackpadIcon($0, bundleID: bundle, data: data) }
+            }
             return .icon(bundleID: bundle, data: data)
         default:
             return nil
@@ -412,10 +447,12 @@ enum WorkspaceRequests {
         return m
     }
 
-    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String], displays: [UInt32] = []) -> [String: Any] {
+    static func thumbnails(_ ids: [UInt32], maxWidth: Int, icons: [String], displays: [UInt32] = [],
+                           detail: OverviewDisplayDetailRequest? = nil) -> [String: Any] {
         var m: [String: Any] = ["type": WireMessage.windowThumbnailRequest, "ids": ids.prefix(24).map { Int($0) }, "max": maxWidth]
         if !icons.isEmpty { m["icons"] = Array(icons.prefix(48)) }
         if !displays.isEmpty { m["displays"] = displays.prefix(8).map { Int($0) } }
+        if let detail { m["detail"] = detail.wire }
         return m
     }
 
@@ -449,7 +486,7 @@ enum WorkspaceRequests {
         var tiles: [[String: Any]] = []
         let floating = floats ? layout.floatIDs.filter { frames.tiles[$0] != nil } : []
         for id in layout.orderedTileIDs + floating {
-            guard let tile = layout.tiles[id], let source = tile.source, source.host == host,
+            guard let tile = layout.tiles[id], let source = tile.source, source.host == host, !source.isTrackpad,
                   let r = frames.tiles[id], r.width > 0, r.height > 0 else { continue }
             var t: [String: Any] = ["id": id, "host": host, "x": r.x, "y": r.y, "w": r.width, "h": r.height,
                                     "follow": source.follow.rawValue,
@@ -475,7 +512,7 @@ enum WorkspaceRequests {
             tiles.append(t)
         }
         var m: [String: Any] = ["type": WireMessage.workspaceRequest, "tiles": tiles]
-        if let focus { m["focus"] = focus }
+        if let focus, layout.tiles[focus]?.source?.isTrackpad != true { m["focus"] = focus }
         // Every window held here, shown or not (other tabs, tucked floats): the Mac says which closed.
         if !watch.isEmpty { m["watch"] = watch.prefix(128).map { ["window": Int($0.window), "gen": Int($0.generation)] } }
         return m
@@ -578,6 +615,8 @@ struct WorkspaceDrag: Equatable {
     var item: Item
     /// Global (screen) coordinates.
     var location: CGPoint
+    /// The original tab, so a catalog change cannot retarget a held label.
+    var tabSource: WorkspaceSource?
     /// Where a drop goes: into the panes (tab, split, swap) or floating at the finger. Switched
     /// by circling while holding (`WorkspaceCircleGesture`), or the Float zone; Cancel keeps everything.
     var placement: WorkspacePlacement = .pane
@@ -620,6 +659,22 @@ final class WorkspaceModel: ObservableObject {
     @Published private(set) var privacyShieldNotice: Bool?
     private var privacyNoticeClear: DispatchWorkItem?
     @Published private(set) var catalog: WorkspaceCatalogMessage?
+    @Published private(set) var trackpadPeekSupported = false
+    @Published private(set) var trackpadPeekCatalog: WorkspaceCatalogMessage?
+    @Published private(set) var trackpadPeekApps: [MacAppItem] = []
+    @Published private(set) var trackpadPeekIcons: [String: CGImage] = [:]
+    private var trackpadPeekToken: UUID?
+    private var trackpadPeekAppsRevision: Int?
+    var trackpadPeekAllowed: () -> Bool = { false }
+    @Published private(set) var extendedDisplaySupported = false
+    @Published private(set) var extendedDisplayID: UInt32?
+    @Published private(set) var extendedDisplayBusy = false
+    @Published private(set) var extendedDisplayNotice: String?
+    private var extendedDisplayRequest: UUID?
+    private var extendedDisplaySource: WorkspaceSource?
+    private var extendedDisplayPlacement: (display: UInt32, uuid: String, pane: String?)?
+    private var extendedDisplayPane: String?
+    private var extendedDisplayTimeout: Task<Void, Never>?
     /// The Mac's screen is locked (or switched to another user): nothing of it is kept or shown
     /// here until it unlocks (`macLockState`). The layout itself is kept.
     @Published private(set) var macLocked = false
@@ -636,6 +691,7 @@ final class WorkspaceModel: ObservableObject {
     @Published var displayOverviewOpen = false {
         didSet {
             if displayOverviewOpen, !oldValue { startRefreshing() }
+            if !displayOverviewOpen, oldValue { setOverviewDetail(nil) }
             if displayOverviewOpen != oldValue { overviewCursorWatchChanged() }
         }
     }
@@ -656,6 +712,8 @@ final class WorkspaceModel: ObservableObject {
     /// No still possible yet (minimized with nothing cached, or capture failed): show the app icon.
     @Published private(set) var unavailableThumbnails: Set<UInt32> = []
     @Published private(set) var displayThumbnails: [UInt32: CGImage] = [:]
+    private var overviewDetailRequest: OverviewDisplayDetailRequest?
+    @Published private var overviewDetailImage: (request: OverviewDisplayDetailRequest, image: CGImage)?
     @Published private(set) var icons: [String: CGImage] = [:]
     /// Which icons to ask the Mac for, and when to ask again (once per connection, with backoff).
     private var iconPlanner = AppIconRequestPlanner()
@@ -891,7 +949,25 @@ final class WorkspaceModel: ObservableObject {
     /// Unified Clipboard with the connected Mac (off until turned on here and allowed there).
     let clipboard: ClipboardModel
 
-    var active: String? { remote?.active }
+    @Published private var localTrackpadFocus: String?
+    @Published private(set) var floatCloseCancellationGeneration = 0
+    var floatCloseTargetsGlobal: [CGRect] = []
+    /// Whether a float's close dot is waiting for its second tap. Not published: the receiver
+    /// reports every touch down here, and only an armed close has anything to cancel.
+    var floatCloseArmed = false
+
+    func cancelFloatClose() {
+        guard floatCloseArmed, !floatCloseTargetsGlobal.isEmpty else { return }
+        floatCloseArmed = false
+        floatCloseCancellationGeneration &+= 1
+    }
+
+    var active: String? {
+        if let localTrackpadFocus, layout.tiles[localTrackpadFocus]?.source?.isTrackpad == true {
+            return localTrackpadFocus
+        }
+        return remote?.active ?? frames.tiles.keys.sorted().first { layout.tiles[$0]?.source?.isTrackpad == true }
+    }
     /// The connected Mac's name as paired (never a name the network claims).
     var hostName: String {
         host.flatMap { id in TrustStore.receiverRole.pinnedPeers().first { $0.peerID == id }?.displayName } ?? "your Mac"
@@ -906,6 +982,8 @@ final class WorkspaceModel: ObservableObject {
     func apply(_ event: WorkspaceEvent) {
         switch event {
         case .connected(let peer):
+            clearTrackpadPeek()
+            cancelWindowShow(message: String(localized: "The Mac session changed."))
             if peer != host { load(for: peer) }
             // A new connection: every app shown here gets its icon asked for again if it's missing
             // (this device may have restarted while the Mac kept its session).
@@ -931,9 +1009,15 @@ final class WorkspaceModel: ObservableObject {
             canFloat = floatsDrawnHere && f.contains(WindowWorkspaceWire.floatFeature)
             canLiftFloats = canFloat && f.contains(WindowWorkspaceWire.floatLiftFeature)
             canShowOverviewPane = f.contains(WindowWorkspaceWire.overviewPaneFeature)
+            supportsOffscreenRestore = f.contains(WindowWorkspaceWire.restoreOffscreenFeature)
+            validatePendingWindowShow()
             publish()
             canLockMac = f.contains(LockMacWire.welcomeFeature)
             canArrangeDisplays = f.contains(DisplayArrangeWire.welcomeFeature)
+            trackpadPeekSupported = f.contains(TrackpadStagePeekWire.textOnlyFeature)
+            if !trackpadPeekSupported { clearTrackpadPeek() }
+            workspaceTrackpadSupported = f.contains(WorkspaceTrackpadWire.feature)
+            extendedDisplaySupported = f.contains(WorkspaceExtendedDisplayWire.feature)
             clipboard.setAvailable(f.contains(ClipboardWire.welcomeFeature))
         case .files(let reply):
             files.apply(reply)
@@ -962,6 +1046,12 @@ final class WorkspaceModel: ObservableObject {
             // A float picked up before its still arrived is lifted now.
             if floatGesture == tile, liftWanted.contains(tile) { liftFloat(tile) }
         case .mode(let window):
+            if window != windowMode {
+                cancelWindowShow(message: String(localized: "The display mode changed."), withdraw: true)
+                finishExtendedDisplayOperation()
+                extendedDisplayID = nil
+                extendedDisplaySource = nil
+            }
             windowMode = window
             leaveExtendRequest = nil   // the mode changed underneath: the question no longer applies
             if !window { remote = nil }
@@ -973,8 +1063,44 @@ final class WorkspaceModel: ObservableObject {
             if let returnTo { returnAfterEarlyExit(to: returnTo) }
         case .catalog(let c):
             onCatalog(c)
+        case .trackpadCatalog(let token, let catalog):
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            trackpadPeekCatalog = catalog
+        case .trackpadApps(let token, let revision, let apps):
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked else { return }
+            trackpadPeekAppsRevision = revision
+            if let apps { trackpadPeekApps = apps }
+        case .trackpadIcon(let token, let bundle, let data):
+            guard trackpadPeekSupported, token == trackpadPeekToken, trackpadPeekAllowed(), !macLocked,
+                  trackpadPeekIcons.count < AppIconRequestPlanner.keep,
+                  let image = WorkspaceImageDecoder.image(data, maxSide: 96) else { return }
+            trackpadPeekIcons[bundle] = image
+        case .extendedDisplay(let request, let status, let display, let uuid):
+            guard extendedDisplayRequest == request, windowMode else { return }
+            switch status {
+            case "ready":
+                guard let display, let uuid, let host else { finishExtendedDisplayOperation(failed: true); return }
+                extendedDisplayID = display
+                extendedDisplaySource = WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(display), displayUUID: uuid)
+                extendedDisplayPlacement = (display, uuid, extendedDisplayPane)
+                if let catalog { placeExtendedDisplay(from: catalog) }
+                if extendedDisplayBusy { requestCatalog() }
+            case "removed":
+                if let source = extendedDisplaySource, let holder = saved.tile(holding: source) {
+                    saved = Self.detach(source, from: holder, in: saved)
+                    persist()
+                    publish()
+                    scheduleSend()
+                }
+                extendedDisplayID = nil
+                extendedDisplaySource = nil
+                finishExtendedDisplayOperation()
+                requestCatalog()
+            default: finishExtendedDisplayOperation(failed: true)
+            }
         case .state(let s):
             remote = s
+            validatePendingWindowShow()
             if let r = requestedFocus, s.active == r || layout.tiles[r] == nil { requestedFocus = nil }
             // A live pane gets its whole-source still before the first pinch, so zooming out or
             // panning never shows an empty area while the fingers move (bounded: once a second).
@@ -987,6 +1113,9 @@ final class WorkspaceModel: ObservableObject {
             let duplicates = s.rejected.filter { $0.value == "duplicateWindow" }.map(\.key).filter { layout.tiles[$0]?.source != nil }
             if !duplicates.isEmpty {
                 edit { l in duplicates.reduce(l) { $0.replacingSource(of: $1, with: nil) } }
+            }
+            if let pendingWindowShow, s.gone.contains(where: { $0.window == pendingWindowShow.window.id && $0.generation == pendingWindowShow.window.generation }) {
+                cancelWindowShow(message: String(localized: "That window closed."), withdraw: true)
             }
             if !s.gone.isEmpty { windowsClosedOnMac(s.gone) }
         case .thumbnail(let id, _, let data, let stale):
@@ -1020,6 +1149,10 @@ final class WorkspaceModel: ObservableObject {
         case .displayThumbnail(let id, let data):
             guard let image = WorkspaceImageDecoder.image(data, maxSide: 560) else { return }
             displayThumbnails[id] = image
+        case .displayDetail(let request, let data):
+            guard displayOverviewOpen, request == overviewDetailRequest,
+                  let image = WorkspaceImageDecoder.image(data, maxSide: request.maxSide) else { return }
+            overviewDetailImage = (request, image)
         case .appCatalog(let rev, let list):
             inventory.answered(now: clock())
             appRevision = rev
@@ -1049,6 +1182,13 @@ final class WorkspaceModel: ObservableObject {
             // Only while the overview watches: a late message after it closed shows nothing.
             if displayOverviewOpen, overviewCursor != cursor { overviewCursor = cursor }
         case .disconnected:
+            extendedDisplaySupported = false
+            extendedDisplayID = nil
+            extendedDisplaySource = nil
+            finishExtendedDisplayOperation()
+            trackpadPeekSupported = false
+            clearTrackpadPeek()
+            cancelWindowShow(message: String(localized: "The Mac disconnected."))
             overviewCursor = nil
             overviewCursorRenewal?.cancel(); overviewCursorRenewal = nil
             sendTask?.cancel()
@@ -1070,6 +1210,9 @@ final class WorkspaceModel: ObservableObject {
             canFloat = false; floatGesture = nil
             canLiftFloats = false; liftedFloats = []; landingFloats = [:]; liftWanted = []
             canShowOverviewPane = false
+            workspaceTrackpadSupported = false
+            localTrackpadFocus = nil
+            supportsOffscreenRestore = false
             canLockMac = false; lockMacStatus = nil
             canResizeWindowsOnMac = false; windowFramePending = []; windowFrameAsked = [:]
             windowFrameNoticeClear?.cancel(); windowFrameNotice = nil
@@ -1095,6 +1238,7 @@ final class WorkspaceModel: ObservableObject {
     /// locked screen. The layout is kept. Unlocked: the window list is asked for again, and
     /// stills come back as they're asked for.
     private func macLockChanged(locked: Bool) {
+        if locked { cancelWindowShow(message: String(localized: "The Mac locked.")) }
         guard locked != macLocked else { return }
         macLocked = locked
         guard locked else {
@@ -1112,6 +1256,7 @@ final class WorkspaceModel: ObservableObject {
             performAppOpening(step)
         }
         appDrop = nil
+        clearTrackpadPeek()
         stagePeekOpen = false; launchpadOpen = false; displayOverviewOpen = false; displayArrangementEditorOpen = false
         overviewCursor = nil
         if overviewOpen { closeOverview() }
@@ -1146,7 +1291,13 @@ final class WorkspaceModel: ObservableObject {
     private func onCatalog(_ c: WorkspaceCatalogMessage) {
         Log.info("workspace: catalog received decoded=\(c.windows.count) apps=\(c.apps.count) unavailable=\(c.unavailable) starting=\(c.starting)")
         if c.starting { return }
+        let oldDisplays = catalog?.displays ?? []
+        let displaySources = saved.tiles.values.compactMap(\.source).filter { $0.kind == .display }
+        let displayAssignmentsChanged = displaySources.contains { source in
+            Self.listedDisplay(for: source, in: oldDisplays)?.id != Self.listedDisplay(for: source, in: c.displays)?.id
+        }
         catalog = c
+        validatePendingWindowShow()
         if !c.unavailable, let live = WorkspaceSearch.reconciled(apps, windows: c.windows, running: c.apps) { apps = live }
         if !c.unavailable, var s = appFirst, s.listed(running: c.apps) { appFirst = s }
         let byID = Dictionary(c.windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -1155,12 +1306,13 @@ final class WorkspaceModel: ObservableObject {
         var rebased = saved
         for (id, tile) in saved.tiles {
             guard let source = tile.source else { continue }
+            if source.isTrackpad { continue }
             if source.isOverview {
                 if c.displays.isEmpty { missing.insert(id) }
                 continue
             }
             if source.isDisplay {
-                if !c.displays.contains(where: { WorkspaceSource.displayKey($0.id) == source.windowID }) { missing.insert(id) }
+                if display(for: source) == nil { missing.insert(id) }
                 continue
             }
             // A new Mac session: keep a saved tile only for the same window id of the same app.
@@ -1180,6 +1332,8 @@ final class WorkspaceModel: ObservableObject {
         if !launching.isEmpty { launching.subtract(c.windows.map(\.bundleID)) }
         publish()
         if awaitingCatalogToSend { awaitingCatalogToSend = false; scheduleSend(immediately: true) }
+        else if windowMode, displayAssignmentsChanged { scheduleSend(immediately: true) }
+        placeExtendedDisplay(from: c)
         requestTuckedStills()
         requestThumbnails()
         advanceAppOpening()
@@ -1195,11 +1349,25 @@ final class WorkspaceModel: ObservableObject {
                                            now: Date().timeIntervalSinceReferenceDate)
         let displays = (stagePeekOpen || overviewOpen || displayOverviewOpen) ? Self.thumbnailDisplayIDs(c.displays) : []
         guard !ids.isEmpty || !wantedIcons.isEmpty || !displays.isEmpty else { return }
-        // Stage Peek's gallery shows large cards: sharp stills.
-        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320, icons: wantedIcons, displays: displays)) {
+        // Seed the full-display still first, so panning beyond the detailed crop has a preview.
+        let detail = overviewDetailRequest.flatMap { displayThumbnails[$0.id] != nil ? $0 : nil }
+        if !send(WorkspaceRequests.thumbnails(ids, maxWidth: stagePeekOpen || displayOverviewOpen ? 560 : 320,
+                                              icons: wantedIcons, displays: displays, detail: detail)) {
             iconPlanner.unsent(wantedIcons)
         }
         scheduleIconRetry()
+    }
+
+    func setOverviewDetail(_ request: OverviewDisplayDetailRequest?) {
+        guard overviewDetailRequest != request else { return }
+        if overviewDetailRequest?.id != request?.id { overviewDetailImage = nil }
+        overviewDetailRequest = request
+        if request != nil, displayOverviewOpen { requestThumbnails() }
+    }
+
+    func overviewDetail(for id: UInt32) -> (request: OverviewDisplayDetailRequest, image: CGImage)? {
+        guard overviewDetailImage?.request.id == id else { return nil }
+        return overviewDetailImage
     }
 
     /// The displays worth a live thumbnail: MeowDisplay virtual displays (this session's or another's)
@@ -1253,6 +1421,101 @@ final class WorkspaceModel: ObservableObject {
     /// current Macs don't answer the listing's old `installed` flag.
     func requestCatalog() { _ = send(WorkspaceRequests.catalog(installed: false)) }
 
+    func requestExtendedDisplay(size: CGSize, scale: CGFloat, shape: ExtendDisplayShape,
+                                desktopSize: ExtendDesktopSize) {
+        guard windowMode, extendedDisplaySupported, !extendedDisplayBusy,
+              controlState() == .allowed, inputAllowed(),
+              size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+              scale.isFinite, scale > 0 else { return }
+        extendedDisplayPane = active.flatMap { layout.isFloat($0) ? nil : $0 } ?? layout.orderedTileIDs.first
+        startExtendedDisplayOperation([
+            "action": "create", "width": Int(min(8192, size.width * scale)),
+            "height": Int(min(8192, size.height * scale)),
+            "shape": shape.rawValue, "size": desktopSize.rawValue,
+        ])
+    }
+
+    func removeExtendedDisplay() {
+        guard windowMode, extendedDisplayID != nil, !extendedDisplayBusy,
+              controlState() == .allowed, inputAllowed() else { return }
+        startExtendedDisplayOperation(["action": "remove"])
+    }
+
+    private func startExtendedDisplayOperation(_ action: [String: Any]) {
+        let request = UUID()
+        var message = action
+        message["type"] = WorkspaceExtendedDisplayWire.request
+        message["request"] = request.uuidString
+        extendedDisplayNotice = nil
+        guard send(message) else { finishExtendedDisplayOperation(failed: true); return }
+        extendedDisplayRequest = request
+        extendedDisplayBusy = true
+        extendedDisplayTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled, self?.extendedDisplayRequest == request else { return }
+            self?.finishExtendedDisplayOperation(failed: true)
+        }
+    }
+
+    private func placeExtendedDisplay(from catalog: WorkspaceCatalogMessage) {
+        guard let pending = extendedDisplayPlacement,
+              let display = catalog.displays.first(where: {
+                  $0.id == pending.display && $0.displayUUID == pending.uuid && $0.overview?.isOwn == true
+              }),
+              let source = source(for: displayWindow(display)) else { return }
+        if let holder = saved.tile(holding: source) {
+            if let tab = layout.tiles[holder]?.tabs.firstIndex(where: { $0.matches(source) }) {
+                edit { $0.switchingTab(of: holder, to: tab) }
+            }
+            focus(holder, raise: false)
+        } else if let pane = pending.pane.flatMap({ layout.orderedTileIDs.contains($0) ? $0 : nil })
+            ?? layout.orderedTileIDs.first {
+            edit { $0.addingTab(source, to: pane) }
+            focus(pane, raise: false)
+        } else {
+            choose(displayWindow(display), asNewTile: false)
+        }
+        finishExtendedDisplayOperation()
+    }
+
+    private func finishExtendedDisplayOperation(failed: Bool = false) {
+        extendedDisplayTimeout?.cancel()
+        extendedDisplayTimeout = nil
+        extendedDisplayRequest = nil
+        extendedDisplayPlacement = nil
+        extendedDisplayPane = nil
+        if extendedDisplayBusy { extendedDisplayBusy = false }
+        extendedDisplayNotice = failed ? String(localized: "The Mac couldn’t update the extended display.") : nil
+    }
+
+    func refreshTrackpadPeek() {
+        guard trackpadPeekSupported, trackpadPeekAllowed(), !macLocked else { clearTrackpadPeek(); return }
+        if trackpadPeekToken == nil { trackpadPeekToken = UUID() }
+        sendTrackpadPeek(WorkspaceRequests.catalog(installed: false))
+        sendTrackpadPeek(WorkspaceRequests.appCatalog(revision: trackpadPeekAppsRevision))
+        let bundles = (trackpadPeekCatalog?.windows.map(\.bundleID) ?? []) + trackpadPeekApps.map(\.bundleID)
+        var seen = Set<String>()
+        let missing = bundles.filter { !$0.isEmpty && trackpadPeekIcons[$0] == nil && seen.insert($0).inserted }
+        if !missing.isEmpty {
+            sendTrackpadPeek(WorkspaceRequests.thumbnails([], maxWidth: 96, icons: Array(missing.prefix(32))))
+        }
+    }
+
+    func clearTrackpadPeek() {
+        trackpadPeekToken = nil
+        trackpadPeekAppsRevision = nil
+        if trackpadPeekCatalog != nil { trackpadPeekCatalog = nil }
+        if !trackpadPeekApps.isEmpty { trackpadPeekApps = [] }
+        if !trackpadPeekIcons.isEmpty { trackpadPeekIcons = [:] }
+    }
+
+    func sendTrackpadPeek(_ action: [String: Any]) {
+        guard let trackpadPeekToken, trackpadPeekSupported, trackpadPeekAllowed(), !macLocked else { return }
+        var request = action
+        request[TrackpadStagePeekWire.tokenKey] = trackpadPeekToken.uuidString
+        _ = send(request)
+    }
+
     // MARK: Space
 
     func updateSpace(_ newSize: WorkspaceSize, hinge newHinge: WorkspaceHinge?) {
@@ -1297,8 +1560,8 @@ final class WorkspaceModel: ObservableObject {
 
     // MARK: Per-tile zoom
 
-    private var zoomGesture: (tile: String, start: WorkspacePaneZoom?, rect: WorkspaceRect, drawn: WorkspaceRect?,
-                              rotation: WorkspaceRotation, turnFrom: Double?)?
+    private var zoomGesture: (tile: String, source: WorkspaceSource, start: WorkspacePaneZoom?, rect: WorkspaceRect,
+                              overviewSize: WorkspaceSize?, rotation: WorkspaceRotation, turnFrom: Double?)?
 
     /// A twist this large (degrees) starts turning the pane, so a pinch's natural wobble never
     /// turns it; the turn then follows the fingers from there, without a jump.
@@ -1347,24 +1610,34 @@ final class WorkspaceModel: ObservableObject {
             let f = frames
             guard let id = f.hitTest(initial), let rect = f.tiles[id],
                   let tile = layout.tiles[id], let shown = tile.source else { zoomGesture = nil; zoomPreview = nil; return false }
-            // An Overview pane only zooms (on the Mac, about its cursor); nothing moves its view here.
+            let overview = shown.isOverview ? overviewViewport(tile, rect: rect) : nil
+            let px = rect.scaled(to: size)
+            let start = WorkspacePoint(x: initial.x * size.width, y: initial.y * size.height)
             let owned = shown.isOverview
-                ? OverviewPaneInput.route(isPinch ? .pinch : .twoFingerDrag, kind: .overview, preferred: .trackpad,
-                                          inputReachesMac: true, moveViewActive: false) == .zoomPane
+                ? overview.map { isPinch || !inputAllowed() || !$0.containsDisplayPoint($0.globalPoint(fromPane: start)) } ?? false
                 : (isPinch || tile.zoom != nil || effectiveFit(id) == .fill) && windowSize(tile) != nil
-            guard owned else { zoomGesture = nil; zoomPreview = nil; return false }
-            zoomGesture = (id, tile.zoom, rect, drawnSourceRect(tile, in: rect), tile.rotation, nil)
+            guard owned, px.width > 0, px.height > 0 else { zoomGesture = nil; zoomPreview = nil; return false }
+            let overviewSize = overview?.union.map { WorkspaceSize(width: $0.width, height: $0.height) }
+            zoomGesture = (id, shown, overview?.paneZoom ?? tile.zoom, rect, overviewSize, tile.rotation, nil)
             zoomPreview = nil
             if active != id { focus(id, raise: false) }   // zooming is this device's view only
             requestBackdrop(id)
         }
-        guard var g = zoomGesture, let tile = layout.tiles[g.tile] else { return false }
-        if tile.source?.isOverview == true { return overviewPinch(g.tile, from: g.start, ratio: scale, ended: ended) }
-        guard let source = windowSize(tile) else { return false }
+        guard var g = zoomGesture, let tile = layout.tiles[g.tile], tile.source == g.source else {
+            zoomGesture = nil
+            zoomPreview = nil
+            return false
+        }
         let pane = WorkspaceSize(width: g.rect.width * size.width, height: g.rect.height * size.height)
         func inPane(_ p: WorkspacePoint) -> WorkspacePoint {
             WorkspacePoint(x: (p.x - g.rect.x) / max(g.rect.width, 1e-6), y: (p.y - g.rect.y) / max(g.rect.height, 1e-6))
         }
+        if let source = g.overviewSize {
+            let zoom = WorkspaceZoom.pinched(g.start, tile: pane, source: source, rotation: .none,
+                                             fit: effectiveFit(g.tile), ratio: scale, from: inPane(initial), to: inPane(current))
+            return updateOverviewViewport(g.tile, zoom: zoom, ended: ended)
+        }
+        guard let source = windowSize(tile) else { return false }
         if isPinch, g.turnFrom == nil, turn.isFinite, abs(turn) >= Self.turnDeadZone {
             g.turnFrom = turn
             zoomGesture = g
@@ -1397,11 +1670,21 @@ final class WorkspaceModel: ObservableObject {
         return true
     }
 
-    /// An Overview pane's pinch: its zoom is the person's scale (1x-8x), sent as it changes; the Mac
-    /// centres the view on its cursor and moves it from there. No local preview and no still: the
-    /// Mac's live picture shows the new view.
-    private func overviewPinch(_ id: String, from start: WorkspacePaneZoom?, ratio: Double, ended: Bool) -> Bool {
-        let next = saved.zooming(id, to: OverviewPaneInput.zoom(from: start, ratio: ratio))
+    private func overviewViewport(_ tile: WorkspaceTile, rect: WorkspaceRect) -> OverviewPaneLayout? {
+        let displays = OverviewPaneInput.viewportDisplays(catalog?.displays ?? [])
+        guard !displays.isEmpty else { return nil }
+        // Begin from the picture on screen, which may have followed the Mac cursor.
+        // Until the Mac accepts a newer request, prefer the local view.
+        let state = tileState(tile.id)
+        let sent = viewSignatures[tile.id] == viewSignature(tile, rect: rect)
+        let applied = sent && state?.overviewViewEpoch == viewEpochs[tile.id] ? state?.overviewZoom : nil
+        return OverviewPaneLayout(displays: displays, pane: rect.scaled(to: size),
+                                  zoom: applied ?? tile.zoom ?? .identity, fit: effectiveFit(tile.id))
+    }
+
+    /// Overview stays on live frames throughout the gesture, including when zoomed in.
+    private func updateOverviewViewport(_ id: String, zoom: WorkspacePaneZoom?, ended: Bool) -> Bool {
+        let next = saved.zooming(id, to: zoom)
         if next != saved {
             saved = next
             publish(); scheduleThrottledSend()
@@ -1413,16 +1696,6 @@ final class WorkspaceModel: ObservableObject {
             sendNow()
         }
         return true
-    }
-
-    /// Where the pane draws its whole source (picture-normalized; larger than the pane when
-    /// filled or zoomed in, smaller when zoomed out), as the Mac composes it.
-    private func drawnSourceRect(_ tile: WorkspaceTile, in rect: WorkspaceRect) -> WorkspaceRect? {
-        guard let w = windowSize(tile), size.width > 0, size.height > 0 else { return nil }
-        let c = TileContentTransform(tile: WorkspaceRect(x: rect.x * size.width, y: rect.y * size.height,
-                                                         width: rect.width * size.width, height: rect.height * size.height),
-                                     source: w, rotation: tile.rotation, fit: tile.fit, zoom: tile.zoom ?? .identity).contentRect
-        return WorkspaceRect(x: c.x / size.width, y: c.y / size.height, width: c.width / size.width, height: c.height / size.height)
     }
 
     private func windowSize(_ tile: WorkspaceTile) -> WorkspaceSize? {
@@ -1452,13 +1725,17 @@ final class WorkspaceModel: ObservableObject {
         return b
     }
 
+    private func viewSignature(_ tile: WorkspaceTile, rect r: WorkspaceRect?) -> String {
+        let z = tile.zoom ?? .identity
+        let liveDisplay = tile.source.flatMap(display(for:))?.id ?? 0
+        // A released float waits for the frame that draws it again.
+        return "\(tile.source?.tabKey ?? "")|\(liveDisplay)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(tile.id))"
+    }
+
     /// Bumps a pane's view epoch when what the Mac must draw for it changed.
     private func noteViews(_ layout: WorkspaceLayout, frames: WorkspaceFrames) {
         for (id, tile) in layout.tiles {
-            let r = frames.tiles[id]
-            let z = tile.zoom ?? .identity
-            // Lifted or not is part of the view: a float let go of waits for the frame that draws it again.
-            let sig = "\(tile.source?.windowID ?? 0)|\(tile.fit.rawValue)|\(tile.rotation.rawValue)|\(z.scale)|\(z.centerX)|\(z.centerY)|\(r?.x ?? 0)|\(r?.y ?? 0)|\(r?.width ?? 0)|\(r?.height ?? 0)|\(liftedFloats.contains(id))"
+            let sig = viewSignature(tile, rect: frames.tiles[id])
             if viewSignatures[id] != sig {
                 viewSignatures[id] = sig
                 viewEpochs[id] = nextViewEpoch
@@ -1501,11 +1778,11 @@ final class WorkspaceModel: ObservableObject {
 
     /// Mission Control holds this pane's or float's picture: a window (never a display: Full
     /// Desktop keeps showing the Mac's screen, Mission Control and all) that the Mac reports
-    /// paused, waiting or retrying while it is open. Only these show its notice.
+    /// unavailable while it is open. Even an offscreen capture can be held by Mission Control.
     func missionControlPaused(_ id: String) -> Bool {
         guard missionControlOpen, let source = layout.tiles[id]?.source, !source.isDisplay,
               let status = tileState(id)?.status else { return false }
-        return [.paused, .waiting, .retrying].contains(status)
+        return [.paused, .offscreen, .waiting, .retrying].contains(status)
     }
 
     /// A paused tile's notice: in full, or folded by its × to a small status that brings it back.
@@ -1637,8 +1914,159 @@ final class WorkspaceModel: ObservableObject {
         }
     }
 
+    enum MinimizedWindowAction: Equatable {
+        case show, request
+
+        var title: String {
+            switch self {
+            case .show: return String(localized: "Show on Mac")
+            case .request: return String(localized: "Request Control & Show")
+            }
+        }
+    }
+
+    private struct PendingWindowShow {
+        let host: String
+        let window: CatalogWindowItem
+        let pane: String?
+        let deadline: TimeInterval
+        var sawPrompt = false
+    }
+
+    var requestControlForWindowShow: () -> Bool = { false }
+    var withdrawControlForWindowShow: () -> Void = {}
+    private var supportsOffscreenRestore = false
+    private var pendingWindowShow: PendingWindowShow?
+    private var windowShowTimeout: Task<Void, Never>?
+    @Published private(set) var windowShowPending = false
+    @Published private(set) var windowShowNotice: String?
+
+    func minimizedWindowAction(_ window: CatalogWindowItem) -> MinimizedWindowAction? {
+        guard let host, windowShowTargetIsValid(.init(host: host, window: window, pane: nil, deadline: .infinity)) else { return nil }
+        switch controlState() {
+        case .allowed: return .show
+        case .off, .notAllowed: return supportsOffscreenRestore && !windowShowPending ? .request : nil
+        case .requesting, .requestsDisabled: return nil
+        }
+    }
+
+    func minimizedPaneWindow(_ id: String, tab: Int? = nil) -> CatalogWindowItem? {
+        guard let pane = layout.tiles[id] else { return nil }
+        if let tab, !pane.tabs.indices.contains(tab) { return nil }
+        let source = tab.map { pane.tabs[$0] } ?? pane.source
+        guard let source, source.host == host, source.kind == .window,
+              let window = windowItem(source), window.minimized else { return nil }
+        return window
+    }
+
+    func showMinimizedTab(_ window: CatalogWindowItem, pane: String, index: Int) {
+        guard minimizedPaneWindow(pane, tab: index) == window else { return }
+        edit { $0.switchingTab(of: pane, to: index) }
+        focus(pane, raise: false)
+        showMinimizedWindow(window, pane: pane)
+    }
+
+    func showMinimizedWindow(_ window: CatalogWindowItem, pane: String? = nil) {
+        guard let host, let action = minimizedWindowAction(window) else { return }
+        let target = PendingWindowShow(host: host, window: window, pane: pane, deadline: clock() + 60)
+        guard windowShowTargetIsValid(target) else { return }
+        windowShowNotice = nil
+        if action == .show {
+            activateMinimizedWindow(target)
+            return
+        }
+        pendingWindowShow = target
+        windowShowPending = true
+        windowShowTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.cancelWindowShow(message: String(localized: "The request to show the window expired."), withdraw: true)
+        }
+        if !requestControlForWindowShow() {
+            cancelWindowShow(message: String(localized: "Can’t request control right now. Try again shortly."))
+        }
+    }
+
+    private func windowShowTargetIsValid(_ target: PendingWindowShow) -> Bool {
+        guard available, windowMode || supportsOffscreenRestore, inputAllowed(), !macLocked, !missionControlOpen,
+              host == target.host, let catalog, !catalog.unavailable,
+              target.window.minimized, target.window.generation != 0,
+              catalog.windows.contains(where: {
+                  $0.id == target.window.id && $0.generation == target.window.generation
+                      && $0.bundleID == target.window.bundleID && $0.minimized
+              }) else { return false }
+        guard let pane = target.pane else { return true }
+        return layout.tiles[pane]?.source?.windowID == target.window.id
+            && layout.tiles[pane]?.source?.host == target.host
+    }
+
+    private func validatePendingWindowShow() {
+        if let pendingWindowShow, !windowShowTargetIsValid(pendingWindowShow) {
+            cancelWindowShow(message: String(localized: "The window is no longer available to show."), withdraw: true)
+        }
+    }
+
+    func windowShowControlChanged(_ state: SessionInputWireState) {
+        guard var pending = pendingWindowShow else { return }
+        guard clock() < pending.deadline else {
+            cancelWindowShow(message: String(localized: "The request to show the window expired."), withdraw: true)
+            return
+        }
+        switch state {
+        case .requesting:
+            pending.sawPrompt = true
+            pendingWindowShow = pending
+        case .allowed:
+            cancelWindowShow(message: nil)
+            guard supportsOffscreenRestore, pending.sawPrompt, windowShowTargetIsValid(pending) else {
+                windowShowNotice = String(localized: "Choose Show on Mac to restore the window.")
+                return
+            }
+            activateMinimizedWindow(pending)
+        case .notAllowed, .requestsDisabled, .off:
+            cancelWindowShow(message: String(localized: "The window stayed minimized. Control was not approved."))
+        }
+    }
+
+    func cancelWindowShow() {
+        cancelWindowShow(message: String(localized: "Showing the window was cancelled."), withdraw: true)
+    }
+
+    private func cancelWindowShow(message: String?, withdraw: Bool = false) {
+        guard pendingWindowShow != nil else { return }
+        pendingWindowShow = nil
+        windowShowTimeout?.cancel()
+        windowShowTimeout = nil
+        windowShowPending = false
+        windowShowNotice = message
+        if withdraw, inputAllowed() { withdrawControlForWindowShow() }
+    }
+
+    func dismissWindowShowNotice() { windowShowNotice = nil }
+
+    private func activateMinimizedWindow(_ target: PendingWindowShow) {
+        guard canControlMac, windowShowTargetIsValid(target) else { return }
+        var request = WorkspaceRequests.activateWindow(target.window.id, generation: target.window.generation)
+        if supportsOffscreenRestore { request["ifOffscreen"] = true }
+        if !send(request) {
+            windowShowNotice = String(localized: "Couldn’t send the request to show the window.")
+        }
+    }
+
+    func showOnMacTitle(_ id: String) -> String? {
+        guard !missionControlOpen, let window = minimizedPaneWindow(id) else { return nil }
+        return minimizedWindowAction(window)?.title
+    }
+
     func showOnMac(_ id: String) {
-        guard let source = layout.tiles[id]?.source, !source.isDisplay, let gen = generation(source) else { return }
+        guard !missionControlOpen else { return }
+        if let window = minimizedPaneWindow(id) {
+            showMinimizedWindow(window, pane: id)
+            return
+        }
+        guard canControlMac, tileState(id)?.inStageStrip == true,
+              let source = layout.tiles[id]?.source, source.kind == .window,
+              let gen = generation(source) else { return }
         _ = send(WorkspaceRequests.activateWindow(source.windowID, generation: gen))
     }
 
@@ -1682,12 +2110,13 @@ final class WorkspaceModel: ObservableObject {
         if let focusTile { focus(focusTile) }
     }
 
-    private func dropping(_ source: WorkspaceSource, on target: WorkspaceWindowDrop, in start: WorkspaceLayout) -> (WorkspaceLayout, String?) {
+    private func dropping(_ source: WorkspaceSource, on target: WorkspaceWindowDrop, in start: WorkspaceLayout,
+                          paneCapacity: Int? = nil) -> (WorkspaceLayout, String?) {
         var l = start
-        if let holder = l.tile(holding: source.host, windowID: source.windowID) {
+        if let holder = l.tile(holding: source) {
             if case .replace(let t, _) = target, t == holder { return (l, holder) }
             if case .tab(let t, _) = target, t == holder {
-                if let i = l.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == source.windowID }) { l = l.switchingTab(of: holder, to: i) }
+                if let i = l.tiles[holder]?.tabs.firstIndex(where: { $0.matches(source) }) { l = l.switchingTab(of: holder, to: i) }
                 return (l, holder)
             }
             l = Self.detach(source, from: holder, in: l)
@@ -1699,7 +2128,9 @@ final class WorkspaceModel: ObservableObject {
             return (l.addingTab(source, to: t), t)
         case .split(let index, let edge, _):
             let id = "w\(nextTile)"; nextTile += 1
-            if l.paneCount < capacity { return (l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge), id) }
+            if l.paneCount < (paneCapacity ?? capacity), l.tiles.count < WorkspaceLayout.maximumTiles {
+                return (l.insertingSplit(WorkspaceTile(id: id, source: source), at: index, edge: edge), id)
+            }
             let holder = WorkspaceLayout.slotID(l.root, at: index).flatMap { $0 }
             return (holder.map { l.addingTab(source, to: $0) } ?? l, holder)
         case .emptySlot(let index, _):
@@ -1712,7 +2143,7 @@ final class WorkspaceModel: ObservableObject {
     private func source(for w: CatalogWindowItem) -> WorkspaceSource? {
         guard let host else { return nil }
         let display = WorkspaceSource.isDisplayKey(w.id)
-        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: display ? nil : w.bundleID)
+        let source = WorkspaceSource(host: host, windowID: w.id, bundleID: display ? nil : w.bundleID, displayUUID: w.displayUUID)
         if !display { setGeneration(source, w.generation) }
         return source
     }
@@ -1723,13 +2154,49 @@ final class WorkspaceModel: ObservableObject {
     func displayWindow(_ d: CatalogDisplayItem) -> CatalogWindowItem {
         CatalogWindowItem(id: WorkspaceSource.displayKey(d.id), generation: 0, bundleID: "", app: String(localized: "Desktop"),
                           title: d.isMain ? String(localized: "Full Desktop") : d.name,
-                          width: d.width, height: d.height, minimized: false, active: false)
+                          width: d.width, height: d.height, minimized: false, active: false, displayUUID: d.displayUUID)
     }
+
+    /// Leaving Mirror for Window view keeps the current desktop and adds this physical display.
+    func canAddDisplayFromMirror(_ d: CatalogDisplayItem) -> Bool {
+        available && !macLocked && !windowMode && mirroring() && !d.isVirtual && desktopDisplay.map { $0.id != d.id } == true
+            && overviewPaneDisplays.contains { $0.id == d.id && $0.displayUUID == d.displayUUID }
+    }
+
+    @discardableResult
+    func addDisplayFromMirror(_ d: CatalogDisplayItem, asTab: Bool = false) -> Bool {
+        guard canAddDisplayFromMirror(d), let desk = desktopLayout(), let tile = desk.orderedTileIDs.first else { return false }
+        let bounds = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        let edge: WorkspaceEdge = desktopDropSpace.width >= desktopDropSpace.height ? .right : .bottom
+        return place(displayWindow(d), on: !asTab && canSplitDesktop ? .split(index: 0, edge: edge, preview: bounds)
+                     : .tab(tile: tile, preview: bounds))
+    }
+
+    var canSplitDesktop: Bool { desktopDropCapacity > 1 }
 
     /// The display a display source shows (nil when it isn't one, or the display is gone).
     func display(for source: WorkspaceSource) -> CatalogDisplayItem? {
-        guard source.isDisplay else { return nil }
-        return catalog?.displays.first { WorkspaceSource.displayKey($0.id) == source.windowID }
+        Self.listedDisplay(for: source, in: catalog?.displays ?? [])
+    }
+
+    private static func listedDisplay(for source: WorkspaceSource, in displays: [CatalogDisplayItem]) -> CatalogDisplayItem? {
+        guard source.kind == .display else { return nil }
+        if let uuid = source.displayUUID {
+            let matches = displays.filter { $0.displayUUID == uuid }
+            return matches.count == 1 ? matches.first : nil
+        }
+        return displays.first { WorkspaceSource.displayKey($0.id) == source.windowID }
+    }
+
+    private func currentDisplay(for item: CatalogWindowItem) -> CatalogDisplayItem? {
+        guard WorkspaceSource.isDisplayKey(item.id), let host else { return nil }
+        return display(for: WorkspaceSource(host: host, windowID: item.id, displayUUID: item.displayUUID))
+    }
+
+    func containsDisplayView(_ d: CatalogDisplayItem) -> Bool {
+        guard let host else { return false }
+        return layout.tile(holding: WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id),
+                                                    displayUUID: d.displayUUID)) != nil
     }
 
     /// The Mac's main real display: what Mirror shows as "the desktop".
@@ -1741,7 +2208,7 @@ final class WorkspaceModel: ObservableObject {
     /// A card's picture: the window's still, or the display's.
     func still(for w: CatalogWindowItem) -> CGImage? {
         guard WorkspaceSource.isDisplayKey(w.id) else { return thumbnails[w.id] }
-        return catalog?.displays.first { WorkspaceSource.displayKey($0.id) == w.id }.flatMap { displayThumbnails[$0.id] }
+        return currentDisplay(for: w).flatMap { displayThumbnails[$0.id] }
     }
 
     // MARK: The Overview pane (every display at once)
@@ -1763,6 +2230,29 @@ final class WorkspaceModel: ObservableObject {
     var overviewPaneDisplays: [CatalogDisplayItem] { OverviewPaneInput.shownDisplays(catalog?.displays ?? []) }
 
     /// Whether the pane holding the focus shows the Overview (the Mac draws its cursor there).
+    @Published private(set) var workspaceTrackpadSupported = false
+
+    var activeTrackpadID: String? { active.flatMap { layout.tiles[$0]?.source?.isTrackpad == true ? $0 : nil } }
+
+    func addTrackpadTab() {
+        guard windowMode, workspaceTrackpadSupported, let host else { return }
+        let source = WorkspaceSource.trackpad(host: host)
+        if let holder = layout.tile(holding: source), let tile = layout.tiles[holder] {
+            if let index = tile.tabs.firstIndex(where: \.isTrackpad) { switchTab(holder, to: index) }
+            else { focus(holder, raise: false) }
+        } else if let target = [requestedFocus, active, lastFocusedPane].compactMap({ $0 })
+            .first(where: { layout.orderedTileIDs.contains($0) }) ?? layout.orderedTileIDs.first {
+            edit { $0.addingTab(source, to: target) }
+            focus(target, raise: false)
+        } else {
+            let id = "w\(nextTile)"
+            nextTile += 1
+            edit { $0.adding(WorkspaceTile(id: id, source: source), landscape: size.width >= size.height) }
+            focus(id, raise: false)
+        }
+        stagePeekCloseRequest += 1
+    }
+
     var activeIsOverview: Bool { active.flatMap { layout.tiles[$0]?.source?.isOverview } ?? false }
 
     /// What the pane at `p` (normalized to the picture) shows: nil where there's no pane or it's empty.
@@ -1775,7 +2265,7 @@ final class WorkspaceModel: ObservableObject {
     /// or takes the Overview's place when there isn't.
     func showDisplayInPane(_ d: CatalogDisplayItem, from overview: String) {
         let w = displayWindow(d)
-        let shown = host.map { layout.tile(holding: $0, windowID: w.id) != nil } ?? false
+        let shown = containsDisplayView(d)
         if shown || canAddTile {
             choose(w, asNewTile: true)
         } else {
@@ -1791,8 +2281,42 @@ final class WorkspaceModel: ObservableObject {
         choose(overviewWindow, asNewTile: false)
     }
 
+    /// The Displays section adds Overview to the focused nonempty Window pane.
+    var overviewTabTarget: String? {
+        guard windowMode, offersOverviewPane else { return nil }
+        let candidates = [requestedFocus, active, lastFocusedPane].compactMap { $0 } + layout.orderedTileIDs
+        return candidates.first { id in
+            guard let tile = layout.tiles[id], !layout.isFloat(id) else { return false }
+            return tile.windows.contains { !$0.isOverview }
+        }
+    }
+
+    /// Reuse a saved Overview tab. If Overview was its own pane, turn it into a tab in the
+    /// requested pane and keep that pane's other sources and their settings.
+    func addOverviewTab(to id: String) {
+        guard windowMode, offersOverviewPane, let source = source(for: overviewWindow),
+              layout.tiles[id]?.windows.contains(where: { !$0.isOverview }) == true else { return }
+        if let holder = saved.tile(holding: source.host, windowID: source.windowID) {
+            guard let tile = layout.tiles[holder] else { return }
+            if let index = tile.tabs.firstIndex(where: \.isOverview) {
+                edit { $0.switchingTab(of: holder, to: index) }
+                focus(holder, raise: false)
+                return
+            }
+            edit { Self.detach(source, from: holder, in: $0).addingTab(source, to: id) }
+        } else {
+            edit { $0.addingTab(source, to: id) }
+        }
+        focus(id, raise: false)
+    }
+
     /// The catalog entry a pane source shows (a display's pseudo-window for displays).
     func windowItem(_ source: WorkspaceSource) -> CatalogWindowItem? {
+        if source.isTrackpad {
+            let name = String(localized: "Trackpad")
+            return CatalogWindowItem(id: source.windowID, generation: 0, bundleID: "", app: name, title: name,
+                                     width: 0, height: 0, minimized: false, active: false)
+        }
         if source.isOverview { return overviewWindow }
         if source.isDisplay { return display(for: source).map(displayWindow) }
         return catalog?.windows.first { $0.id == source.windowID }
@@ -1805,23 +2329,44 @@ final class WorkspaceModel: ObservableObject {
         return mainDisplay
     }
 
-    /// The listed display a manual Mirror choice names (the two lists share names and point
-    /// sizes, not ids). Nil for Automatic, or when no single display matches.
+    /// The listed display a manual Mirror choice names. Older senders omit the live ID.
     nonisolated static func mirroredDisplay(in displays: [CatalogDisplayItem], choice: MirrorDisplayEntry?) -> CatalogDisplayItem? {
         guard let choice else { return nil }
+        if let id = choice.displayID { return displays.first { $0.id == id } }
         let matches = displays.filter { $0.name == choice.name && $0.width == choice.logicalWidth && $0.height == choice.logicalHeight }
         if matches.count == 1 { return matches[0] }
         let main = matches.filter { $0.isMain == choice.isMain }
         return main.count == 1 ? main[0] : nil
     }
 
+    nonisolated static func mirrorEntry(for display: CatalogDisplayItem, catalog: [CatalogDisplayItem],
+                                       entries: [MirrorDisplayEntry]) -> MirrorDisplayEntry? {
+        guard !display.isVirtual, display.overview?.isOwn != true, display.overview?.isMeow != true else { return nil }
+        let physical = entries.filter { !$0.likelyVirtual }
+        let exact = physical.filter { $0.displayID == display.id }
+        if !exact.isEmpty { return exact.count == 1 ? exact[0] : nil }
+        let legacy = physical.filter {
+            $0.displayID == nil && mirroredDisplay(in: catalog, choice: $0)?.id == display.id
+        }
+        return legacy.count == 1 ? legacy[0] : nil
+    }
+
     /// Mirror/Extend: the picture is one pane showing the desktop, so a window dragged onto it
     /// replaces it, joins it as a tab, or splits it (Window mode then starts with both).
     private func desktopLayout() -> WorkspaceLayout? {
         guard let host, let d = desktopDisplay else { return nil }
-        let tile = WorkspaceTile(id: "w\(nextTile)", source: WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id)))
+        let source = WorkspaceSource(host: host, windowID: WorkspaceSource.displayKey(d.id), displayUUID: d.displayUUID)
+        let tile = WorkspaceTile(id: "w\(nextTile)", source: source)
         return WorkspaceLayout(preset: .single, tiles: [tile])
     }
+
+    private var desktopDropSpace: WorkspaceSize {
+        let picture = desktopPictureGlobal
+        guard picture.width > 0, picture.height > 0 else { return size }
+        return WorkspaceSize(width: picture.width, height: picture.height)
+    }
+
+    private var desktopDropCapacity: Int { WorkspaceGeometry.capacity(for: desktopDropSpace) }
 
     /// A pane's label dragged elsewhere: onto another pane's labels = merge as tabs, onto an
     /// edge = move the pane there, onto a pane's middle = swap. `tab` moves just that tab.
@@ -1859,8 +2404,8 @@ final class WorkspaceModel: ObservableObject {
     /// Takes a window out of a pane (a tab leaves; a single-window pane is removed).
     private static func detach(_ s: WorkspaceSource, from id: String, in l: WorkspaceLayout) -> WorkspaceLayout {
         guard let tile = l.tiles[id] else { return l }
-        if let i = tile.tabs.firstIndex(where: { $0.host == s.host && $0.windowID == s.windowID }) { return l.removingTab(of: id, at: i) }
-        return tile.source?.windowID == s.windowID ? l.removing(id) : l
+        if let i = tile.tabs.firstIndex(where: { $0.matches(s) }) { return l.removingTab(of: id, at: i) }
+        return tile.source?.matches(s) == true ? l.removing(id) : l
     }
 
     /// Where a dragged window or label would land (normalized picture point). Over a floating
@@ -1904,7 +2449,9 @@ final class WorkspaceModel: ObservableObject {
         for id in stacked { if let t = saved.tiles[id] { updated = updated.adding(t, landscape: size.width >= size.height) } }
         saved = stacked.isEmpty ? next : updated
         refreshMissing()
-        persist(); publish(); scheduleSend()
+        persist(); publish()
+        validatePendingWindowShow()
+        scheduleSend()
     }
 
     func undo() {
@@ -1965,8 +2512,9 @@ final class WorkspaceModel: ObservableObject {
         guard let c = catalog else { return }
         missing = Set(saved.tiles.compactMap { id, tile in
             guard let source = tile.source else { return nil }
+            if source.isTrackpad { return nil }
             if source.isOverview { return c.displays.isEmpty ? id : nil }
-            if source.isDisplay { return c.displays.contains { WorkspaceSource.displayKey($0.id) == source.windowID } ? nil : id }
+            if source.isDisplay { return display(for: source) == nil ? id : nil }
             let listed = c.windows.contains { $0.id == source.windowID && (source.bundleID == nil || source.bundleID == $0.bundleID) }
             return listed ? nil : id
         })
@@ -2028,7 +2576,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func choose(_ w: CatalogWindowItem, asNewTile: Bool) {
-        guard let host, let source = source(for: w) else { return }
+        guard let source = source(for: w) else { return }
         if holdForLeavingExtend({ [weak self] in self?.choose(w, asNewTile: asNewTile) }) { return }
         if w.inStageStrip, bringStripWindowsForward, inputAllowed() {
             _ = send(WorkspaceRequests.activateWindow(w.id, generation: w.generation))   // the person chose it, and opted in
@@ -2039,14 +2587,14 @@ final class WorkspaceModel: ObservableObject {
         let landscape = size.width >= size.height
         // One window, one tile: choosing a window that's already showing selects its tile,
         // or swaps the two tiles when replacing another one.
-        if let holder = layout.tile(holding: host, windowID: w.id), layout.tiles[holder]?.source?.windowID != w.id,
-           let i = layout.tiles[holder]?.tabs.firstIndex(where: { $0.windowID == w.id }) {
+        if let holder = layout.tile(holding: source), layout.tiles[holder]?.source?.matches(source) != true,
+           let i = layout.tiles[holder]?.tabs.firstIndex(where: { $0.matches(source) }) {
             // It's a background tab: show that tab.
             edit { $0.switchingTab(of: holder, to: i) }
             focus(holder)
             return
         }
-        if let existing = layout.orderedTileIDs.first(where: { layout.tiles[$0]?.source?.host == host && layout.tiles[$0]?.source?.windowID == w.id }) {
+        if let existing = layout.orderedTileIDs.first(where: { layout.tiles[$0]?.source?.matches(source) == true }) {
             let target = replacing ?? (asNewTile ? nil : active)
             if let target, target != existing, let other = layout.tiles[target]?.source, layout.tiles[existing] != nil {
                 edit { l in l.replacingSource(of: target, with: source).replacingSource(of: existing, with: other) }
@@ -2336,6 +2884,9 @@ final class WorkspaceModel: ObservableObject {
 
     func beginDrag(_ item: WorkspaceDrag.Item, at global: CGPoint, placement: WorkspacePlacement? = nil) {
         var d = WorkspaceDrag(item: item, location: global)
+        if case .pane(let id, let tab?) = item, let tabs = layout.tiles[id]?.tabs, tabs.indices.contains(tab) {
+            d.tabSource = tabs[tab]
+        }
         d.placement = placement ?? initialPlacement(for: item)
         if d.placement == .float, !canPlace(item, .float) { d.placement = .pane }
         drag = d
@@ -2360,6 +2911,7 @@ final class WorkspaceModel: ObservableObject {
 
     func overFloatZone(_ p: CGPoint) -> Bool {
         canDropToFloat && floatZoneGlobal.width > 0 && floatZoneGlobal.insetBy(dx: -8, dy: -8).contains(p)
+            && !overCancelZone(p) && !overRemoveZone(p)
     }
 
     /// Moves the drag; circling while holding (a circle and a bit, about a second) switches its
@@ -2409,14 +2961,34 @@ final class WorkspaceModel: ObservableObject {
         if drag?.placement == .float { return nil }   // Floating placement: no pane targets
         if !windowMode {
             switch drag?.item { case .window?, .app?: break; default: return nil }
+            let addingDisplay: Bool
+            if case .window(let w)? = drag?.item, WorkspaceSource.isDisplayKey(w.id) {
+                guard let display = currentDisplay(for: w),
+                      canAddDisplayFromMirror(display) else { return nil }
+                addingDisplay = true
+            } else {
+                addingDisplay = false
+            }
             guard desktopPictureGlobal.width > 0, desktopPictureGlobal.contains(p) else { return nil }
             // No display listed (an older Mac): the window simply shows in Window mode.
             guard let desk = desktopLayout() else { return .replace(tile: Self.noDesktop, preview: WorkspaceRect(x: 0, y: 0, width: 1, height: 1)) }
             let g = desktopPictureGlobal
-            let s = WorkspaceSize(width: g.width, height: g.height)
+            let s = desktopDropSpace
             let n = WorkspacePoint(x: (p.x - g.minX) / g.width, y: (p.y - g.minY) / g.height)
-            return WorkspaceGeometry.windowDrop(at: n, layout: desk, frames: WorkspaceGeometry.frames(for: desk, in: s, hinge: nil),
-                                                size: s, labelHeight: Double(labelHeight / g.height), canSplit: true)
+            let frames = WorkspaceGeometry.frames(for: desk, in: s, hinge: nil)
+            let target = WorkspaceGeometry.windowDrop(at: n, layout: desk, frames: frames, size: s,
+                                                      labelHeight: Double(labelHeight / g.height),
+                                                      canSplit: !addingDisplay || canSplitDesktop)
+            // A display dropped in the middle keeps the current Mirror desktop as well.
+            if addingDisplay, case .replace(let tile, let preview)? = target {
+                guard canSplitDesktop else { return .tab(tile: tile, preview: preview) }
+                let edge: WorkspaceEdge = g.width >= g.height ? .right : .bottom
+                let half = edge == .right
+                    ? WorkspaceRect(x: 0.5, y: 0, width: 0.5, height: 1)
+                    : WorkspaceRect(x: 0, y: 0.5, width: 1, height: 0.5)
+                return .split(index: 0, edge: edge, preview: half)
+            }
+            return target
         }
         guard pictureGlobal.width > 0, pictureGlobal.contains(p) else { return nil }
         let n = WorkspacePoint(x: (p.x - pictureGlobal.minX) / pictureGlobal.width, y: (p.y - pictureGlobal.minY) / pictureGlobal.height)
@@ -2428,14 +3000,15 @@ final class WorkspaceModel: ObservableObject {
 
     func overCancelZone(_ p: CGPoint) -> Bool { cancelZoneGlobal.width > 0 && cancelZoneGlobal.insetBy(dx: -8, dy: -8).contains(p) }
 
-    /// Remove from Layout is offered only while repositioning a whole pane that is already in the
-    /// layout (its label, not one of its tabs), with another pane left: never for a window or app
-    /// from Stage Peek, a new pane or a tab. A float being docked (circled into a card) is offered
-    /// Remove from This Device. Either removes it here only; the Mac window is untouched.
+    /// Remove a pane with another pane left, or a tab with another tab left in its pane.
+    /// Only existing layout items qualify. A float being docked can also be removed here.
     var canDropToRemove: Bool {
-        guard windowMode else { return false }
-        switch drag?.item {
-        case .pane(let id, nil)?, .float(let id)?: return canRemoveFromLayout(id)
+        guard windowMode, let drag else { return false }
+        switch drag.item {
+        case .pane(let id, nil), .float(let id): return canRemoveFromLayout(id)
+        case .pane(let id, let index?):
+            guard let tabs = layout.tiles[id]?.tabs, tabs.count > 1, tabs.indices.contains(index) else { return false }
+            return drag.tabSource == tabs[index]
         default: return false
         }
     }
@@ -2461,6 +3034,22 @@ final class WorkspaceModel: ObservableObject {
     func endDrag() -> Bool {
         placementSwitchProgress = 0
         guard let d = drag else { return false }
+        if overCancelZone(d.location) { drag = nil; return false }
+        if case .pane(let id, let tab?) = d.item, layout.tiles[id]?.tabs.indices.contains(tab) != true
+            || layout.tiles[id]?.tabs[tab] != d.tabSource {
+            drag = nil
+            return false
+        }
+        if overRemoveZone(d.location) {
+            drag = nil
+            switch d.item {
+            case .pane(let id, let tab?): removeTab(id, at: tab)
+            case .pane(let id, nil): removeTile(id)
+            case .float(let id): removeFloat(id)
+            default: return false
+            }
+            return true
+        }
         if d.placement == .float {
             drag = nil
             return dropFloating(d)
@@ -2470,21 +3059,11 @@ final class WorkspaceModel: ObservableObject {
             return floatItem(d.item, at: nil)
         }
         let target = dropTarget(forGlobal: d.location)
-        let remove = overRemoveZone(d.location)
         drag = nil
-        if remove, case .pane(let id, nil) = d.item {
-            removeTile(id)   // one undo step; never a request to close the window on the Mac
-            return true
-        }
-        if remove, case .float(let id) = d.item {
-            removeFloat(id)   // the float's own Remove from This Device: the Mac window stays open
-            return true
-        }
         guard let target else { return false }
         switch d.item {
         case .window(let w):
-            // Closed (or its id now names another window) while it was dragged: nothing to place.
-            if let c = catalog, !c.windows.contains(where: { $0.id == w.id && $0.generation == w.generation }) { return false }
+            guard isCurrentDragSource(w) else { return false }
             return place(w, on: target)
         case .pane(let id, let tab):
             if let tab, case .tab(let t, _) = target, t == id { return reorderTab(id, from: tab, at: d.location) }
@@ -2500,6 +3079,15 @@ final class WorkspaceModel: ObservableObject {
             dockFloat(id, to: target)
             return true
         }
+    }
+
+    private func isCurrentDragSource(_ w: CatalogWindowItem) -> Bool {
+        guard let catalog else { return false }
+        if WorkspaceSource.isDisplayKey(w.id) {
+            return currentDisplay(for: w) != nil
+        }
+        // A window that closed or whose id now names another window cannot be placed.
+        return catalog.windows.contains { $0.id == w.id && $0.generation == w.generation }
     }
 
     /// A tab dropped back on its own pane's labels: it goes between the labels either side.
@@ -2893,7 +3481,7 @@ final class WorkspaceModel: ObservableObject {
             guard let desk = desktopLayout() else { switchTo(w); return true }
             guard let source = source(for: w) else { return false }
             nextTile += 1   // the desktop pane's id
-            let (next, focusTile) = dropping(source, on: target, in: desk)
+            let (next, focusTile) = dropping(source, on: target, in: desk, paneCapacity: desktopDropCapacity)
             history.record(saved)
             saved = next.compacted()
             localFullscreen = nil
@@ -2988,6 +3576,13 @@ final class WorkspaceModel: ObservableObject {
     /// device): the Mac window then stays where it is, and comes forward only when a key or a
     /// press for it needs it to (never typing into another window meanwhile).
     func focus(_ tile: String, raise: Bool = true) {
+        if tile != active { cancelFloatClose() }
+        if layout.tiles[tile]?.source?.isTrackpad == true {
+            requestedFocus = nil
+            localTrackpadFocus = tile
+            return
+        }
+        localTrackpadFocus = nil
         if layout.tiles[tile] != nil, !layout.isFloat(tile) { lastFocusedPane = tile }
         requestedFocus = tile
         _ = send(WorkspaceRequests.focus(tile, raise: raise))
@@ -3287,9 +3882,6 @@ extension WorkspaceModel {
     /// (a tab of a pane always can, its pane stays).
     func canFloat(pane id: String, tab: Int? = nil) -> Bool {
         guard canFloat, floatsAllowedHere, layout.tiles[id] != nil, !layout.isFloat(id), layout.tiles.count < WorkspaceLayout.maximumTiles || tab == nil else { return false }
-        // The Overview stays a tiled pane: a float is lifted from a still, and it has none.
-        let floated = tab.flatMap { t in layout.tiles[id]?.tabs.indices.contains(t) == true ? layout.tiles[id]?.tabs[t] : nil } ?? layout.tiles[id]?.source
-        if floated?.isOverview == true { return false }
         if let tab { return layout.tiles[id]?.tabs.indices.contains(tab) == true }
         return layout.tiles[id]?.source != nil && (layout.paneCount > 1 || (layout.tiles[id]?.tabs.count ?? 0) > 1)
     }
@@ -3429,7 +4021,7 @@ extension WorkspaceModel {
     /// the finger and once, a moment behind, by the Mac. Needs `floatLift` and a recent still;
     /// without them the Mac keeps drawing it, as before.
     func liftFloat(_ id: String) {
-        guard layout.isFloat(id) else { return }
+        guard layout.isFloat(id), layout.tiles[id]?.source?.isOverview != true else { return }
         liftWanted.insert(id)
         guard canLiftFloats, !liftedFloats.contains(id), hasFreshStill(id) else { return }
         liftedFloats.insert(id)
@@ -3698,11 +4290,12 @@ extension WorkspaceModel {
     /// The focused float went away (tucked, removed): typing goes to the frontmost shown float,
     /// else the pane focused before it. Nothing is sent to the Mac but the focus.
     private func refocus(after id: String) {
-        guard active == id || requestedFocus == id else { return }
+        guard active == id || requestedFocus == id || localTrackpadFocus == id else { return }
         let next = layout.visibleFloatIDs.last { $0 != id }
             ?? lastFocusedPane.flatMap { layout.orderedTileIDs.contains($0) ? $0 : nil }
             ?? layout.orderedTileIDs.first
         if let next { focus(next, raise: false) }
+        else { localTrackpadFocus = nil }
     }
 
     // MARK: Drag placement (Pane | Floating)
@@ -3744,7 +4337,7 @@ extension WorkspaceModel {
     }
 
     private func floatDropFrame(_ d: WorkspaceDrag, at p: CGPoint) -> WorkspaceRect? {
-        guard d.placement == .float, !overCancelZone(p) else { return nil }
+        guard d.placement == .float, !overCancelZone(p), !overRemoveZone(p) else { return nil }
         let picture = windowMode ? pictureGlobal : desktopPictureGlobal
         guard picture.width > 0, picture.height > 0, picture.contains(p) else { return nil }
         let center = WorkspacePoint(x: (p.x - picture.minX) / picture.width, y: (p.y - picture.minY) / picture.height)
@@ -3790,4 +4383,45 @@ extension WorkspaceModel {
 
 private extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+// MARK: The real Mac pointer in Full Desktop panes
+
+extension WorkspaceModel {
+    /// Where the Mac's real pointer is in each shown Full Desktop pane (picture points), while
+    /// the Trackpad drives it (owner's QA of 9000083): the pane's own picture can lag the
+    /// pointer, so the receiver marks it. `cursor` and `displays` are global Mac points from the
+    /// Trackpad's layout samples. A pane gets a mark only where its picture shows that point
+    /// and no float above it covers it.
+    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect) -> [String: CGPoint] {
+        guard windowMode, picture.width > 0, picture.height > 0,
+              let display = displays.first(where: { $0.bounds.contains(cursor) }), display.bounds.width > 0,
+              display.bounds.height > 0 else { return [:] }
+        let frames = self.frames
+        let floats = layout.visibleFloatIDs
+        func onScreen(_ r: WorkspaceRect) -> CGRect {
+            CGRect(x: picture.minX + r.x * picture.width, y: picture.minY + r.y * picture.height,
+                   width: r.width * picture.width, height: r.height * picture.height)
+        }
+        var marks: [String: CGPoint] = [:]
+        for id in layout.orderedTileIDs + floats {
+            guard let tile = layout.tiles[id], let source = tile.source, source.kind == .display,
+                  self.display(for: source)?.id == display.id,
+                  let frame = frames.tiles[id].map(onScreen), frame.width > 0, frame.height > 0,
+                  let transform = floatContentTransform(id, width: Double(frame.width), height: Double(frame.height))
+            else { continue }
+            let u = (cursor.x - display.bounds.minX) / display.bounds.width
+            let v = (cursor.y - display.bounds.minY) / display.bounds.height
+            let local = transform.canvasPoint(fromSource: WorkspacePoint(x: u * transform.source.width,
+                                                                         y: v * transform.source.height))
+            guard let shown = transform.visibleRect,
+                  shown.contains(local) else { continue }
+            let point = CGPoint(x: frame.minX + local.x, y: frame.minY + local.y)
+            // Under a float that sits above this pane: hidden.
+            let above = layout.isFloat(id) ? floats.drop(while: { $0 != id }).dropFirst() : floats[...]
+            if above.contains(where: { frames.tiles[$0].map(onScreen)?.contains(point) == true }) { continue }
+            marks[id] = point
+        }
+        return marks
+    }
 }

@@ -1,7 +1,98 @@
 // Compiled into BOTH the Mac and iOS targets (see project.yml `sources`).
-// Keep this Foundation-only so it stays platform-neutral.
+// Keep the wire definitions independent of AppKit and UIKit.
 
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+
+struct TrackpadDisplayGeometry: Equatable, Identifiable, Sendable {
+    let id: UInt32
+    let bounds: CGRect
+    let name: String?
+
+    init(id: UInt32, bounds: CGRect, name: String? = nil) {
+        self.id = id
+        self.bounds = bounds
+        self.name = name.flatMap { $0.isEmpty ? nil : String($0.prefix(128)) }
+    }
+}
+
+/// Optional, leased geometry and cursor telemetry for Video Off.
+enum TrackpadLayoutWire {
+    static let welcomeFeature = "trackpadLayout"
+    static let watch = "trackpadLayoutWatch"
+    static let state = "trackpadLayoutState"
+    static let displayLimit = 16
+    static let sampleInterval: TimeInterval = 1.0 / 30
+
+    struct Sample: Equatable, Sendable {
+        let displays: [TrackpadDisplayGeometry]
+        let cursor: CGPoint?
+        var inWindow = false
+
+        var message: [String: Any] {
+            var message: [String: Any] = [
+                "type": TrackpadLayoutWire.state,
+                "displays": displays.map {
+                    var display: [String: Any] = [
+                        "id": Int($0.id), "x": Double($0.bounds.minX), "y": Double($0.bounds.minY),
+                        "w": Double($0.bounds.width), "h": Double($0.bounds.height),
+                    ]
+                    if let name = $0.name { display["name"] = name }
+                    return display
+                },
+            ]
+            if inWindow { message[WorkspaceTrackpadWire.inputKey] = true }
+            if let cursor { message["cursor"] = ["x": Double(cursor.x), "y": Double(cursor.y)] }
+            return message
+        }
+
+        static func parse(_ message: [String: Any]) -> Self? {
+            guard let records = message["displays"] as? [[String: Any]],
+                  records.count <= TrackpadLayoutWire.displayLimit else { return nil }
+            var displays: [TrackpadDisplayGeometry] = []
+            var seen: Set<UInt32> = []
+            for record in records {
+                guard let raw = record["id"] as? Int, let id = UInt32(exactly: raw), id != 0,
+                      seen.insert(id).inserted,
+                      let origin = Self.point(record),
+                      let width = record["w"] as? Double, width > 0, width <= 100_000,
+                      let height = record["h"] as? Double, height > 0, height <= 100_000 else { return nil }
+                displays.append(.init(id: id, bounds: CGRect(origin: origin, size: CGSize(width: width, height: height)),
+                                      name: record["name"] as? String))
+            }
+            let cursor = (message["cursor"] as? [String: Any]).flatMap(Self.point)
+                .flatMap { point in displays.contains(where: { $0.bounds.contains(point) }) ? point : nil }
+            return Self(displays: displays, cursor: cursor, inWindow: message[WorkspaceTrackpadWire.inputKey] as? Bool == true)
+        }
+
+        private static func point(_ record: [String: Any]) -> CGPoint? {
+            guard let x = record["x"] as? Double, let y = record["y"] as? Double,
+                  abs(x) <= 1_000_000, abs(y) <= 1_000_000 else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+    }
+}
+
+/// A negotiated input and telemetry context for the receiver's local Window-mode Trackpad.
+enum WorkspaceTrackpadWire {
+    static let feature = "workspaceTrackpad"
+    static let inputKey = "workspaceTrackpad"
+    static let resumeWindowKey = "resumeWindow"
+}
+
+/// A distinct request ID keeps catalog replies out of the saved Window workspace.
+enum TrackpadStagePeekWire {
+    static let welcomeFeature = "trackpadStagePeek"
+    // A receiver needs this capability before asking for Video Off metadata.
+    static let textOnlyFeature = "trackpadPeekText"
+    static let tokenKey = "trackpadStagePeek"
+
+    static func token(in message: [String: Any]) -> UUID? {
+        (message[tokenKey] as? String).flatMap(UUID.init(uuidString:))
+    }
+}
 
 /// The wire-protocol contract between the two apps, decoupled from the app's
 /// marketing version. See COMPATIBILITY.md.
@@ -11,7 +102,9 @@ import Foundation
 /// protocol 1 — that's every install in the field that predates the handshake.
 enum WireProtocol {
     /// The protocol version this build speaks.
-    static let version = 22
+    static let version = 23
+    /// Apple Trackpad motion in Quartz points, with optional desktop-wide routing.
+    static let trackpadPointsWireVersion = 23
 
     /// The pairing protocol's own version, decoupled from `version` (the
     /// media/streaming wire protocol above). Pairing and media evolve on
@@ -232,8 +325,58 @@ enum WindowWorkspaceWire {
     /// `display`) shows every Mac display in its arrangement, live, and moves the real cursor
     /// across them. Without it the receiver never sends one (an older Mac refuses it as `unavailable`).
     static let overviewPaneFeature = "overviewPane"
+    static let restoreOffscreenFeature = "restoreOffscreenWindow"
+    static let welcomeFeatureLimit = 20
     /// `displayModeRequest` / `displayModeState` value for Window mode.
     static let mode = "window"
+}
+
+/// Optional sharper still for one display in the full-screen Overview.
+struct OverviewDisplayDetailRequest: Equatable, Sendable {
+    static let sizes = [960, 1280, 1600]
+    static let maxBase64 = 700_000
+    struct Region: Equatable, Sendable {
+        // Bucket a view's edges so small finger motions don't keep invalidating in-flight stills.
+        static let units = 64
+        let edges: [Int]  // left, top, right, bottom, from the display's own top-left
+
+        init?(_ edges: [Int]) {
+            guard edges.count == 4, edges.allSatisfy({ (0...Self.units).contains($0) }),
+                  edges[0] < edges[2], edges[1] < edges[3] else { return nil }
+            self.edges = edges
+        }
+
+        var unitRect: CGRect {
+            let scale = CGFloat(Self.units)
+            return CGRect(x: CGFloat(edges[0]) / scale, y: CGFloat(edges[1]) / scale,
+                          width: CGFloat(edges[2] - edges[0]) / scale, height: CGFloat(edges[3] - edges[1]) / scale)
+        }
+
+        func rect(in display: CGRect) -> CGRect {
+            let r = unitRect
+            return CGRect(x: display.minX + r.minX * display.width, y: display.minY + r.minY * display.height,
+                          width: r.width * display.width, height: r.height * display.height)
+        }
+    }
+
+    let id: UInt32
+    let maxSide: Int
+    var region: Region? = nil
+
+    var wire: [String: Any] {
+        var message: [String: Any] = ["id": Int(id), "maxSide": maxSide]
+        if let region { message["region"] = region.edges }
+        return message
+    }
+
+    static func parse(_ value: Any?) -> Self? {
+        guard let fields = value as? [String: Any], let rawID = fields["id"] as? Int,
+              let id = UInt32(exactly: rawID), id != 0, let side = fields["maxSide"] as? Int,
+              sizes.contains(side) else { return nil }
+        let region = (fields["region"] as? [Int]).flatMap(Region.init)
+        guard fields["region"] == nil || region != nil else { return nil }
+        return Self(id: id, maxSide: side, region: region)
+    }
 }
 
 /// Remote Finder (PROTOCOL.md 6.12): folders the Mac's owner approved for this device.
@@ -550,6 +693,8 @@ enum WireMessage {
     static let allowInputRequest = "allowInputRequest" // receiver -> Mac: request Allow Input on/off
     static let allowInputState = "allowInputState"   // Mac -> receiver: confirmed Allow Input state
     static let videoRequest = "videoRequest"         // receiver -> Mac: request video production on/off
+    static let preserveCaptureMode = "preserveCaptureMode" // welcome feature and optional videoRequest field
+    static let scrollAtCursor = "scrollAtCursor"     // welcome feature and optional scroll field
     static let videoState = "videoState"             // Mac -> receiver: confirmed state + retained geometry
     static let nativeAppGesture = "nativeAppGesture" // receiver -> Mac: continuous magnify/rotate lifecycle
     static let audioRequest = "audioRequest"         // receiver -> Mac: request system-audio capture on/off
@@ -859,9 +1004,11 @@ struct MirrorDisplayEntry: Equatable {
     let pixelWidth: Int
     let pixelHeight: Int
     let likelyVirtual: Bool
+    /// Live ID shared with the Window catalog. The UUID is still the persisted choice.
+    let displayID: UInt32?
 
     init(uuid: String, name: String, isMain: Bool, logicalWidth: Int, logicalHeight: Int,
-        pixelWidth: Int, pixelHeight: Int, likelyVirtual: Bool) {
+        pixelWidth: Int, pixelHeight: Int, likelyVirtual: Bool, displayID: UInt32? = nil) {
         self.uuid = uuid
         self.name = name
         self.isMain = isMain
@@ -870,6 +1017,7 @@ struct MirrorDisplayEntry: Equatable {
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
         self.likelyVirtual = likelyVirtual
+        self.displayID = displayID
     }
 
     init?(entry: [String: Any]) {
@@ -883,6 +1031,7 @@ struct MirrorDisplayEntry: Equatable {
         pixelWidth = entry["pixelWidth"] as? Int ?? 0
         pixelHeight = entry["pixelHeight"] as? Int ?? 0
         likelyVirtual = entry["likelyVirtual"] as? Bool ?? false
+        displayID = (entry["displayID"] as? Int).flatMap(UInt32.init(exactly:))
     }
 }
 

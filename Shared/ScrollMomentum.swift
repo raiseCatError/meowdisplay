@@ -5,6 +5,44 @@
 import CoreGraphics
 import Foundation
 
+/// Visual lifetime of either edge rail. Touch and momentum extend an owned
+/// interaction, and the hold starts only after the last scroll delta.
+struct EdgeScrollInteraction {
+    private enum Phase {
+        case idle, tracking, coasting
+        case holding(until: TimeInterval)
+    }
+
+    private var phase = Phase.idle
+    var isExpanded: Bool {
+        if case .idle = phase { return false }
+        return true
+    }
+    var holdUntil: TimeInterval? {
+        if case .holding(let deadline) = phase { return deadline }
+        return nil
+    }
+
+    mutating func begin() { phase = .tracking }
+
+    mutating func end(coasting: Bool, now: TimeInterval) {
+        guard case .tracking = phase else { return }
+        phase = coasting ? .coasting : .holding(until: now + 1)
+    }
+
+    mutating func momentumEnded(now: TimeInterval) {
+        guard case .coasting = phase else { return }
+        phase = .holding(until: now + 1)
+    }
+
+    mutating func settle(now: TimeInterval) {
+        guard let holdUntil, now >= holdUntil else { return }
+        reset()
+    }
+
+    mutating func reset() { phase = .idle }
+}
+
 /// Tunable thresholds for remote-scroll momentum/inertia. Grouped so tests
 /// and the real recognizer share one source of truth — see
 /// `iOS/OpenSidecarPhoneApp.swift`'s `VideoView` for how this is driven

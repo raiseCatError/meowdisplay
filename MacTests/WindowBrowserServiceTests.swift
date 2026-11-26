@@ -1,6 +1,21 @@
+import CoreGraphics
 import XCTest
 
 final class WindowBrowserServiceTests: XCTestCase {
+    func testTrackpadWindowRecordOnlyContainsIdentityAndText() {
+        let window = WindowCatalogEntry(
+            windowID: 14, generation: 3, pid: 620, bundleID: "com.example.editor",
+            appName: "Editor", title: "Notes",
+            frame: CGRect(x: 15, y: 100, width: 640, height: 480),
+            availability: .offscreen, isActive: true, inStageStrip: true)
+        XCTAssertEqual(Set(window.trackpadWire.keys), ["id", "gen", "bundle", "app", "title"])
+        XCTAssertEqual(window.trackpadWire["id"] as? Int, 14)
+        XCTAssertEqual(window.trackpadWire["gen"] as? Int, 3)
+        XCTAssertEqual(window.trackpadWire["bundle"] as? String, "com.example.editor")
+        XCTAssertEqual(window.trackpadWire["app"] as? String, "Editor")
+        XCTAssertEqual(window.trackpadWire["title"] as? String, "Notes")
+    }
+
     func testLatestRequestGoesFirstAndOlderPendingIdsAreNotDropped() {
         var s = ThumbnailScheduler()
         let gens: [UInt32: UInt64] = [1: 1, 2: 1, 3: 1, 30: 1]

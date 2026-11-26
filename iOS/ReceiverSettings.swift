@@ -22,17 +22,21 @@ struct SettingsView: View {
     /// Unified Clipboard with the connected Mac.
     var clipboard: ClipboardModel?
     @Environment(\.dismiss) private var dismiss
-    // Deliberately the horizontal class alone, not `ReceiverLayoutClass.isRoomy`:
-    // a sidebar needs width, not height, so a landscape iPhone Max that is
-    // regular-wide still gets the standard NavigationSplitView. Only the
-    // control layout (Strip/Overlay/Custom) uses the roomy rule.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var selection: MobileSettingsCategory?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var query = ""
     /// The setting a search result pointed at; its page scrolls to it and
     /// tints it briefly.
     @State private var highlight: String?
+
+    /// An unfolded iPhone uses the same category list as its cover screen.
+    /// Ordinary wide landscape keeps the standard split-view behavior.
+    private var navigationWidth: UserInterfaceSizeClass? {
+        if !controlStore.supportsPadControls, verticalSizeClass == .regular { return .compact }
+        return horizontalSizeClass
+    }
 
     private static var debugBuild: Bool {
         #if DEBUG
@@ -84,6 +88,7 @@ struct SettingsView: View {
             .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
+        .environment(\.horizontalSizeClass, navigationWidth)
         // Settings owns its system chrome: the receiver surface behind it
         // hides the status bar and home indicator, and a presentation that
         // inherited that would lay its navigation bar out under the top
@@ -94,7 +99,7 @@ struct SettingsView: View {
         .persistentSystemOverlays(.automatic)
         .onAppear {
             if selection == nil {
-                selection = MobileSettingsCategory.initialSelection(regularWidth: horizontalSizeClass == .regular)
+                selection = MobileSettingsCategory.initialSelection(regularWidth: navigationWidth == .regular)
             }
         }
         .task(id: highlight) {
@@ -361,19 +366,32 @@ private struct DisplaySettingsPage: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Toggle("Video", isOn: Binding(
                         get: { receiver.videoEnabled },
-                        set: { receiver.requestVideoEnabled($0) }))
+                        set: { receiver.requestVideoEnabled($0, preserveCaptureMode: true) }))
                         .disabled(!receiver.connected || !receiver.macSupportsVideoControl)
-                    SettingNote("Turning video off keeps the connection, keyboard, controls, and selected input mode active.")
+                    SettingNote("Turning video off makes the receiver a trackpad. Turn Video on to return to your display or window layout.")
                 }
                 .settingsAnchor("video")
-                displayModeRows
+                if receiver.videoEnabled { displayModeRows }
                 Toggle("Show Surface Grid", isOn: preferenceBinding(controlStore, \.showSurfaceGrid))
-                    .settingsAnchor("surfaceGrid")
+                    .settingsAnchor("trackpadDots")
+                Toggle("Trackpad Border", isOn: preferenceBinding(controlStore, \.showTrackpadBorder))
+                Toggle("Touch Trail", isOn: preferenceBinding(controlStore, \.trackpadTouchTrail))
+                    .settingsAnchor("trackpadTouchTrail")
                 VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show Off-screen Cursor Locator", isOn: preferenceBinding(controlStore, \.showCursorLocator))
+                    Toggle("Show Display Layout on Trackpad", isOn: preferenceBinding(controlStore, \.trackpadDisplayLayoutOptIn))
+                    SettingNote("Shows the Mac pointer and display outlines with video off. Surface dots stay outside the outlines.")
+                }
+                .settingsAnchor("trackpadDisplayLayout")
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Show Off-Screen Cursor Indicator", isOn: preferenceBinding(controlStore, \.showCursorLocator))
                     SettingNote("When the Mac pointer is somewhere you can't see, such as another display, an arrow at the edge points to it.")
                 }
                 .settingsAnchor("cursorLocator")
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep Pointer on Receiver Display", isOn: preferenceBinding(controlStore, \.keepPointerOnReceiverDisplay))
+                    SettingNote("Applies to Trackpad while showing a single display. With video off, Trackpad can move across the Mac desktop.")
+                }
+                .settingsAnchor("keepPointerOnReceiverDisplay")
             }
             Section {
                 VStack(alignment: .leading, spacing: 4) {
@@ -821,6 +839,37 @@ private struct InputSettingsPage: View {
                 Toggle("Natural Vertical Scrolling", isOn: preferenceBinding(controlStore, \.invertVerticalScroll))
                     .settingsAnchor("scrollDirection")
                 Toggle("Natural Horizontal Scrolling", isOn: preferenceBinding(controlStore, \.invertHorizontalScroll))
+                Picker("Edge Scrolling", selection: preferenceBinding(controlStore, \.edgeScrolling)) {
+                    ForEach(EdgeScrolling.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .settingsAnchor("rightScrollStrip")
+                if controlStore.preferences.edgeScrolling == .manual {
+                    Toggle("Vertical Scrollbar", isOn: preferenceBinding(controlStore, \.verticalEdgeScrolling))
+                    if controlStore.preferences.verticalEdgeScrolling {
+                        Picker("Vertical Position", selection: preferenceBinding(controlStore, \.verticalScrollEdge)) {
+                            Text("Left").tag(VerticalScrollEdge.left)
+                            Text("Right").tag(VerticalScrollEdge.right)
+                        }
+                    }
+                    Toggle("Horizontal Scrollbar", isOn: preferenceBinding(controlStore, \.horizontalEdgeScrolling))
+                    if controlStore.preferences.horizontalEdgeScrolling {
+                        Picker("Horizontal Position", selection: preferenceBinding(controlStore, \.horizontalScrollEdge)) {
+                            Text("Top").tag(HorizontalScrollEdge.top)
+                            Text("Bottom").tag(HorizontalScrollEdge.bottom)
+                        }
+                    }
+                }
+                Slider(value: preferenceBinding(controlStore, \.edgeScrollSensitivity),
+                       in: EdgeScrollSensitivity.range, step: 0.1) {
+                    Text("Edge Scroll Sensitivity")
+                } minimumValueLabel: {
+                    Text("Slow")
+                } maximumValueLabel: {
+                    Text("Fast")
+                }
+                .settingsAnchor("edgeScrollSensitivity")
+                Toggle("Scroll Momentum", isOn: preferenceBinding(controlStore, \.scrollMomentumEnabled))
+                Toggle("Scroll Motion Feedback", isOn: preferenceBinding(controlStore, \.scrollMotionFeedback))
             } header: {
                 Text("Scrolling")
             } footer: {

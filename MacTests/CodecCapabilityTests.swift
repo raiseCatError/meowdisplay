@@ -644,7 +644,7 @@ final class CodecCapabilityTests: XCTestCase {
         // Superseded by Smart Touch (`smartTouchWireVersion`, pv 20), then
         // session invitations (`sessionInvitationWireVersion`, pv 21), then
         // the optional QUIC transport (`quicTransportWireVersion`, pv 22).
-        XCTAssertEqual(WireProtocol.version, 22)
+        XCTAssertEqual(WireProtocol.version, 23)
         XCTAssertEqual(WireProtocol.quicTransportWireVersion, 22)
         XCTAssertEqual(WireProtocol.minSupportedPeer, 1)
     }

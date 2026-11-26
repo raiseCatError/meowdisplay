@@ -20,16 +20,21 @@ final class ReceiverControlStore: ObservableObject {
     /// can reveal it (see `VideoLayerView`'s `onActivityBegan`/
     /// `onActivityEnded` in `OpenSidecarPhoneApp.swift`). Never persisted: a
     /// relaunch always starts `false`.
-    @Published private(set) var autoHidden = false
+    @Published private(set) var autoHideIdle = false
+    var autoHidden: Bool {
+        autoHideIdle && ControlAutoHidePolicy.mayHide(enabled: preferences.autoHideEnabled,
+            trayCanBeShown: preferences.trayCanBeShown, trayCollapsed: preferences.trayCollapsed,
+            moveViewActive: moveViewActive, sessionActionsOpen: sessionActionsOpen,
+            isPad: isPad, layout: effectivePadLayout)
+    }
+    @Published private(set) var workspaceMenuOpen = false
     private var autoHideTask: Task<Void, Never>?
     private static let autoHideDelay: Duration = .seconds(9)
     private let repository: ReceiverControlPreferencesRepository
     var onInputResetRequested: (() -> Void)?
-    /// The roomy presentation (Strip/Overlay/Custom, Control Size, …)
-    /// applies only when true; otherwise the compact tray. It starts from the
-    /// device and then follows the window (`updateLayoutClass`): a full iPad
-    /// or an unfolded iPhone Duo is roomy, a phone or a narrow iPad window
-    /// (Slide Over, a small Stage Manager window) is compact.
+    /// iPads can switch to the roomy presentation as their window grows.
+    /// iPhones keep the phone tray across window sizes and fold states.
+    let supportsPadControls: Bool
     @Published private(set) var isPad: Bool
     /// Move View: while true the receiver surface moves the local viewport
     /// instead of controlling the Mac. Transient — never persisted, and
@@ -84,25 +89,20 @@ final class ReceiverControlStore: ObservableObject {
     init(repository: ReceiverControlPreferencesRepository = ReceiverControlPreferencesRepository(),
          isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) {
         self.repository = repository
+        supportsPadControls = isPad
         self.isPad = isPad
-        layoutClass = ReceiverLayoutClassState(startsRoomy: isPad)
+        layoutClass = ReceiverLayoutClassState(startsRoomy: isPad, supportsPadControls: isPad)
         preferences = repository.load(initial: .initial(isPad: isPad))
     }
 
-    /// The iPad layout mode actually in effect: Custom needs a layout to
-    /// show, otherwise it presents as Overlay.
+    /// The iPad layout mode actually in effect. Custom needs a layout to show.
     var effectivePadLayout: PadControlLayoutMode {
         let stored = preferences.padControlLayout
         return stored == .custom && preferences.activeCustomLayout == nil ? .overlay : stored
     }
 
-    /// The window's size classes changed (rotation, fold, resize): roomy
-    /// only when it is regular in both directions (`ReceiverLayoutClass`), so
-    /// a phone in landscape stays compact.
-    ///
-    /// The first report on a device that started compact (an iPhone idiom
-    /// that opened unfolded) with nothing saved yet adopts the iPad initial
-    /// defaults once; saved preferences are never replaced.
+    /// The window's size classes changed. The iPad layout needs regular space
+    /// in both directions. Saved preferences are never replaced.
     func updateLayoutClass(horizontalRegular: Bool, verticalRegular: Bool) {
         let change = layoutClass.update(horizontalRegular: horizontalRegular, verticalRegular: verticalRegular,
                                         hasSavedPreferences: repository.hasSavedPreferences)
@@ -142,6 +142,12 @@ final class ReceiverControlStore: ObservableObject {
         if open { beginAutoHideActivity() } else { scheduleAutoHide() }
     }
 
+    func setWorkspaceMenuOpen(_ open: Bool) {
+        guard workspaceMenuOpen != open else { return }
+        workspaceMenuOpen = open
+        if open { beginAutoHideActivity() } else { scheduleAutoHide() }
+    }
+
     func requestViewportReset() {
         viewportResetGeneration &+= 1
     }
@@ -153,38 +159,36 @@ final class ReceiverControlStore: ObservableObject {
     /// the interaction is fully over.
     func beginAutoHideActivity() {
         autoHideTask?.cancel()
-        autoHidden = false
+        if autoHideIdle { autoHideIdle = false }
     }
 
-    /// (Re)starts the 9-second Auto-hide countdown from now, or declines to
-    /// schedule at all when hiding wouldn't be appropriate right now: the
-    /// feature is off, the tray can't show, it's manually collapsed, or
-    /// `interactionIdle` is false because some other interaction (a touch
-    /// still down, a latched chord, an open palette, …) is still ongoing.
-    /// Re-validates the same conditions when the delay elapses so a stale
-    /// task can never hide the tray after a newer interaction already
-    /// cancelled it.
+    /// The tray and focused app menus share the idle timer. The tray's
+    /// visibility rules remain independent of the app menu bar.
     func scheduleAutoHide(interactionIdle: Bool = true) {
         autoHideTask?.cancel()
-        guard autoHideAllowed, interactionIdle else { return }
+        guard canCountDownToAutoHide, interactionIdle else { return }
         autoHideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.autoHideDelay)
-            guard let self, !Task.isCancelled, self.autoHideAllowed else { return }
-            self.autoHidden = true
+            guard let self, !Task.isCancelled, self.canCountDownToAutoHide else { return }
+            self.autoHideIdle = true
         }
     }
 
-    /// Move View keeps its controls up so the mode can always be left;
-    /// Session Actions keeps them up so they are there after Cancel.
-    private var autoHideAllowed: Bool {
-        // An open arrow keypad is in use, like an open palette.
-        !arrowKeypadOpen && ControlAutoHidePolicy.mayHide(enabled: preferences.autoHideEnabled,
-                                      trayCanBeShown: preferences.trayCanBeShown,
-                                      trayCollapsed: preferences.trayCollapsed,
-                                      moveViewActive: moveViewActive,
-                                      sessionActionsOpen: sessionActionsOpen,
-                                      isPad: isPad, layout: effectivePadLayout)
+    private var canCountDownToAutoHide: Bool {
+        preferences.autoHideEnabled && !arrowKeypadOpen && !moveViewActive
+            && !sessionActionsOpen && !workspaceMenuOpen
     }
+
+    #if DEBUG
+    /// The inputs of Auto-hide, for the UI-test fixture's readout.
+    var autoHideDebugState: String {
+        "idle=\(autoHideIdle) hidden=\(autoHidden) countdown=\(autoHideTask != nil) "
+            + "enabled=\(preferences.autoHideEnabled) trayCanBeShown=\(preferences.trayCanBeShown) "
+            + "trayCollapsed=\(preferences.trayCollapsed) moveView=\(moveViewActive) "
+            + "sessionActions=\(sessionActionsOpen) menuOpen=\(workspaceMenuOpen) arrows=\(arrowKeypadOpen) "
+            + "isPad=\(isPad) layout=\(effectivePadLayout)"
+    }
+    #endif
 
     /// Cancels any pending countdown and clears auto-hidden state, then
     /// restarts the countdown from now. The shared "something happened"
@@ -477,6 +481,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     private enum Metrics {
         static var trayItem: CGFloat { 40 }
         static var trayGap: CGFloat { 4 }
+        static var functionTarget: CGFloat { trayItem + trayGap }
         static var collapsed: CGFloat { 46 }
         static var paletteKey: CGFloat { 38 }
         static var paletteGap: CGFloat { 5 }
@@ -697,16 +702,17 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             count: count, length: portrait ? containerSize.width : containerSize.height,
             preferred: Metrics.trayItem, gap: Metrics.trayGap, slack: Metrics.touchSlack)
         let traySize = calculatedTraySize(collapsed: collapsed, portrait: portrait, count: count, item: trayItem)
-        // Auto-hide fades the (always-mounted, see `controls`/`functionGroups`)
-        // tray content out in place rather than removing it — `collapsed`
-        // above is untouched by it, since `store.autoHidden` can only ever
-        // be true while `collapsed` is false (see `ReceiverControlStore.
-        // scheduleAutoHide`'s guard). Reduce Motion drops the positional/
-        // scale nudge and shortens the animation to a near-instant fade.
+        // Auto-hide takes the tray content out of the tree with a fade
+        // (`autoHideTransition`): kept mounted at opacity 0, it stayed in the
+        // accessibility tree and answered hit tests even with
+        // `.accessibilityHidden`, so VoiceOver and UI tests still reached the
+        // invisible controls (Duo, Xcode Cloud). `collapsed` above is untouched
+        // by it, since `store.autoHidden` can only ever be true while
+        // `collapsed` is false (see `ReceiverControlStore.scheduleAutoHide`'s
+        // guard). Reduce Motion drops the positional/scale nudge and shortens
+        // the animation to a near-instant fade.
         let autoHiding = store.autoHidden
         let autoHideRetreat: CGFloat = reduceMotion ? 0 : 3
-        let autoHideOpacity: Double = autoHiding ? 0 : 1
-        let autoHideScale: CGFloat = autoHiding && !reduceMotion ? 0.98 : 1
         let paletteChord = interaction.paletteChord
         let actions = paletteChord.map(profile.actions(for:)) ?? []
         let paletteSize = calculatedPaletteSize(actions: actions, portrait: portrait)
@@ -726,17 +732,18 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // it; nil (the layout above, unchanged) in every other case.
         let foldedTray = foldedTrayRow(baseFrame: baseLayout.trayFrame, traySize: traySize, count: count,
                                        collapsed: collapsed, portrait: portrait)
+        let faceDiameter = foldedTray?.item ?? trayItem
         let layout = foldedTray.map { baseLayout.replacingTrayFrame($0.frame) } ?? baseLayout
         let renderedTraySize = foldedTray?.frame.size ?? traySize
         let trayRegions: [CGRect] = autoHiding ? [CGRect.zero] : (foldedTray?.groups ?? [layout.trayFrame])
         // Retreats toward the edge the tray actually uses this pass, which a
         // fold can move away from the stored preference.
-        let autoHideOffset: CGSize = autoHiding
-            ? (portrait
-                ? CGSize(width: 0, height: autoHideRetreat)
-                : CGSize(width: layout.side == .leading
-                                 ? -autoHideRetreat : autoHideRetreat, height: 0))
-            : .zero
+        let autoHideOffset: CGSize = portrait
+            ? CGSize(width: 0, height: autoHideRetreat)
+            : CGSize(width: layout.side == .leading ? -autoHideRetreat : autoHideRetreat, height: 0)
+        let autoHideTransition: AnyTransition = .opacity
+            .combined(with: .scale(scale: reduceMotion ? 1 : 0.98))
+            .combined(with: .offset(autoHideOffset))
         let rawLayout = ControlTrayGeometry.layout(
             container: CGRect(origin: .zero, size: containerSize),
             safeInsets: safe,
@@ -849,38 +856,36 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
             if collapsed {
                 Image(systemName: ControlTrayItem.settings.displayLabel)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: (18 * faceDiameter / Metrics.trayItem).rounded(), weight: .semibold))
                     .foregroundStyle(.white)
+                    .frame(width: faceDiameter, height: faceDiameter)
+                    .background(chip(selected: false))
                     .frame(width: Metrics.collapsed, height: Metrics.collapsed)
                     .background(frameReader("tray:more"))
-                    .background(chip(selected: false))
                     .accessibilityLabel(ControlTrayItem.settings.title)
                     .accessibilityInputLabels(ControlTrayItem.settings.spokenNames)
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-            } else {
+            } else if !autoHiding {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem,
                             fold: foldedTray)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-                    .opacity(autoHideOpacity)
-                    .scaleEffect(autoHideScale)
-                    .offset(autoHideOffset)
-                    .allowsHitTesting(!autoHiding)
+                    .transition(autoHideTransition)
             }
 
-            ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
-                if index < functionFrames.count {
-                    let frame = functionFrames[index]
-                    functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical)
-                        .frame(width: frame.width, height: frame.height)
-                        .position(x: frame.midX, y: frame.midY)
-                        .opacity(autoHideOpacity)
-                        .scaleEffect(autoHideScale)
-                        .offset(autoHideOffset)
-                        .allowsHitTesting(!autoHiding)
-                        .animation(.snappy(duration: 0.24), value: frame)
+            if !autoHiding {
+                ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
+                    if index < functionFrames.count {
+                        let frame = functionFrames[index]
+                        functionGroupCluster(group, axis: layout.axis == .horizontal ? .horizontal : .vertical,
+                                             faceDiameter: faceDiameter)
+                            .frame(width: frame.width, height: frame.height)
+                            .position(x: frame.midX, y: frame.midY)
+                            .transition(autoHideTransition)
+                            .animation(.snappy(duration: 0.24), value: frame)
+                    }
                 }
             }
 
@@ -898,12 +903,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 .gesture(controlGesture())
 
             if let arrows {
-                arrowKeysButton(frame: arrows.toggle)
-                    .opacity(autoHideOpacity)
-                    .scaleEffect(autoHideScale)
-                    .offset(autoHideOffset)
-                    .allowsHitTesting(!autoHiding)
-                    .animation(.snappy(duration: 0.24), value: arrows.toggle)
+                if !autoHiding {
+                    arrowKeysButton(frame: arrows.toggle, faceDiameter: faceDiameter)
+                        .transition(autoHideTransition)
+                        .animation(.snappy(duration: 0.24), value: arrows.toggle)
+                }
                 arrowKeypadCluster(arrows, frozen: computedArrows)
             }
             // The full tray's gear fades out with Auto-hide (a tap there
@@ -912,6 +916,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
 
             LocalCalculatorLayer(
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
+                buttonFaceDiameter: faceDiameter,
                 panelBounds: safe.safeRect(in: containerSize).insetBy(dx: LocalCalculatorPlacement.margin,
                                                                        dy: LocalCalculatorPlacement.margin),
                 obstacles: [renderedMainTrayFrame] + functionFrames
@@ -1024,9 +1029,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// gets its own independently-positioned frame now (see
     /// `ControlTrayGeometry.functionTrayLayout`), not a shared combined one.
     private func calculatedFunctionGroupSize(_ group: [ShortcutItem], portrait: Bool) -> CGSize {
-        let thickness = Metrics.trayItem + Metrics.touchSlack
-        let length = CGFloat(group.count) * Metrics.trayItem
-            + CGFloat(Swift.max(0, group.count - 1)) * Metrics.trayGap + Metrics.touchSlack
+        let thickness = Metrics.functionTarget
+        let length = CGFloat(group.count) * Metrics.functionTarget
         return portrait
             ? CGSize(width: length, height: thickness)
             : CGSize(width: thickness, height: length)
@@ -1120,23 +1124,25 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// e.g. the default Zoom and Edit clusters visually distinct rather
     /// than one continuous panel — never a single solid tray/card
     /// background.
-    private func functionGroupCluster(_ group: [ShortcutItem], axis: Axis) -> some View {
+    private func functionGroupCluster(_ group: [ShortcutItem], axis: Axis, faceDiameter: CGFloat) -> some View {
+        // Fill the old gap with hit area while keeping the button centres fixed.
         let stack = axis == .horizontal
-            ? AnyLayout(HStackLayout(spacing: Metrics.trayGap))
-            : AnyLayout(VStackLayout(spacing: Metrics.trayGap))
+            ? AnyLayout(HStackLayout(spacing: 0))
+            : AnyLayout(VStackLayout(spacing: 0))
         return stack {
-            ForEach(group) { item in functionButton(item) }
+            ForEach(group) { item in functionButton(item, faceDiameter: faceDiameter) }
         }
     }
 
-    private func functionButton(_ item: ShortcutItem) -> some View {
+    private func functionButton(_ item: ShortcutItem, faceDiameter: CGFloat) -> some View {
         // A button, for its pressed state: it still fires on lift, and only
         // when the finger lifts on it.
         Button { performFunctionAction(item) } label: {
-            ShortcutButtonFaceView(face: item.face, diameter: Metrics.trayItem)
-                .frame(width: Metrics.trayItem, height: Metrics.trayItem)
+            ShortcutButtonFaceView(face: item.face, diameter: faceDiameter)
+                .frame(width: Metrics.functionTarget, height: Metrics.functionTarget)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(TrayChipButtonStyle(reduceMotion: reduceMotion))
+        .buttonStyle(TrayChipButtonStyle(faceDiameter: faceDiameter, reduceMotion: reduceMotion))
         .accessibilityLabel(item.title)
     }
 
@@ -1473,11 +1479,11 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// A tap opens or closes the keypad; a swipe sends one arrow press; the
     /// face previews the arrow a release would send.
     /// `onBar`: the keyboard bar's item, drawn like the bar's other keys.
-    private func arrowKeysButton(frame: CGRect, onBar: Bool = false) -> some View {
+    private func arrowKeysButton(frame: CGRect, onBar: Bool = false, faceDiameter: CGFloat = Metrics.trayItem) -> some View {
         let preview = arrowButtonDrag.flatMap(ArrowButtonGesture.direction(of:))
         let open = store.arrowKeypadOpen
         let pressed = arrowButtonDrag != nil
-        let diameter = onBar ? min(frame.width, frame.height) : Metrics.trayItem
+        let diameter = onBar ? min(frame.width, frame.height) : faceDiameter
         return Image(systemName: preview?.symbol ?? "arrow.up.and.down.and.arrow.left.and.right")
             .font(.system(size: (preview == nil ? 15 : 18) * diameter / Metrics.trayItem, weight: .semibold))
             .foregroundStyle(open ? Color.black : Color.white)
@@ -1852,7 +1858,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                         store.scheduleAutoHide(interactionIdle: interaction.phase == .idle)
                     }))
                 .position(x: frame.midX, y: frame.midY)
-                .accessibilityHidden(true)
+                // No accessibility modifier: a plain clear view adds nothing to the tree, like the
+                // control gesture layer under it. `.accessibilityHidden(true)` made a hidden node over
+                // the gear that accessibility hit tests found first, so the gear read as covered.
         }
     }
 
@@ -2145,7 +2153,10 @@ extension ReceiverControlOverlay {
 
     @ViewBuilder
     var padBody: some View {
-        let mode = store.effectivePadLayout
+        let preferred = store.effectivePadLayout
+        // A divided Duo window needs both sides of the canvas for the display and Trackpad.
+        let hasDivision = reservedRegions.contains { $0.kind == .division }
+        let mode: PadControlLayoutMode = hasDivision && preferred == .strip ? .overlay : preferred
         let container = CGRect(origin: .zero, size: containerSize)
         ZStack(alignment: .topLeading) {
             if mode == .custom, let layout = store.preferences.activeCustomLayout {
@@ -2292,24 +2303,29 @@ extension ReceiverControlOverlay {
             if let gearFrame {
                 padControlChip(.tray(.settings), frame: gearFrame, onRail: false, hint: nil)
             }
-            ForEach(mainControls) { control in
-                Group {
-                    if case .function(let id) = control.kind, let item = functionItem(id) {
-                        padFunctionChip(item, frame: control.frame, onRail: true,
-                                        hint: hints ? item.title.lowercased() : nil)
-                    } else {
-                        padControlChip(control.kind, frame: control.frame, onRail: true,
-                                       hint: hints ? padHint(control.kind) : nil)
+            // Auto-hide takes the rail's chips out of the tree (fading, see the
+            // container's `.animation(value: store.autoHidden)`), not only to
+            // opacity 0: a mounted chip stays in the accessibility tree and
+            // answers its hit tests even with `.accessibilityHidden`, so
+            // VoiceOver and UI tests would still find invisible controls.
+            if !autoHiding {
+                ForEach(mainControls) { control in
+                    Group {
+                        if case .function(let id) = control.kind, let item = functionItem(id) {
+                            padFunctionChip(item, frame: control.frame, onRail: true,
+                                            hint: hints ? item.title.lowercased() : nil)
+                        } else {
+                            padControlChip(control.kind, frame: control.frame, onRail: true,
+                                           hint: hints ? padHint(control.kind) : nil)
+                        }
                     }
+                    .transition(.opacity)
                 }
-                .opacity(autoHiding ? 0 : 1)
-                .allowsHitTesting(!autoHiding)
-            }
-            ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
-                padFunctionChip(control.item, frame: control.frame, onRail: true,
-                                hint: hints ? control.item.title.lowercased() : nil)
-                    .opacity(autoHiding ? 0 : 1)
-                    .allowsHitTesting(!autoHiding)
+                ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
+                    padFunctionChip(control.item, frame: control.frame, onRail: true,
+                                    hint: hints ? control.item.title.lowercased() : nil)
+                        .transition(.opacity)
+                }
             }
             if let paletteChord, let wheel {
                 WheelPaletteView(layout: wheel, actions: actions, selectedID: interaction.selectedActionID,
@@ -3481,6 +3497,7 @@ private extension View {
 /// The iPhone Function Tray's chips: the same translucent circle, lit while
 /// pressed so a tap is visible before it fires on lift.
 private struct TrayChipButtonStyle: ButtonStyle {
+    let faceDiameter: CGFloat
     let reduceMotion: Bool
 
     func makeBody(configuration: Configuration) -> some View {
@@ -3492,8 +3509,8 @@ private struct TrayChipButtonStyle: ButtonStyle {
                     .opacity(0.45)
                     .overlay(Circle().fill(Color.white.opacity(configuration.isPressed ? 0.3 : 0.07)))
                     .overlay(Circle().strokeBorder(.white.opacity(0.28), lineWidth: 0.5))
+                    .frame(width: faceDiameter, height: faceDiameter)
                     .shadow(color: .black.opacity(0.28), radius: 5, y: 1))
-            .contentShape(Circle())
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.92 : 1)
             .animation(.snappy(duration: 0.12), value: configuration.isPressed)
     }

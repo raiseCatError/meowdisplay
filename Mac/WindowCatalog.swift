@@ -98,12 +98,19 @@ struct WindowCatalogEntry: Equatable, Sendable {
     /// `frame` is then the real window's (from Accessibility), not the thumbnail's.
     var inStageStrip = false
 
-    var wire: [String: Any] {
-        var m: [String: Any] = [
+    var trackpadWire: [String: Any] {
+        [
             "id": Int(windowID), "gen": Int(generation), "bundle": bundleID, "app": appName,
-            "title": String(title.prefix(160)), "w": Int(frame.width.rounded()), "h": Int(frame.height.rounded()),
-            "state": availability.rawValue, "active": isActive,
+            "title": String(title.prefix(160)),
         ]
+    }
+
+    var wire: [String: Any] {
+        var m = trackpadWire
+        m["w"] = Int(frame.width.rounded())
+        m["h"] = Int(frame.height.rounded())
+        m["state"] = availability.rawValue
+        m["active"] = isActive
         if inStageStrip { m["strip"] = true }
         return m
     }

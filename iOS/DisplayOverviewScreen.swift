@@ -34,6 +34,7 @@ struct DisplayOverviewScreen: View {
     let onAddAsNewPane: (CatalogDisplayItem) -> Void
 
     @State private var interaction: OverviewInteraction
+    @State private var arrangement: DisplayOverviewModel?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSize
@@ -70,8 +71,13 @@ struct DisplayOverviewScreen: View {
         }
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .modifier(DisplayArrangementEditorPresentation(model: model, overview: $arrangement))
         // Display stills keep refreshing while the overview is open, whatever Stage Peek does underneath.
-        .onAppear { model.displayOverviewOpen = true }
+        .onAppear {
+            model.displayOverviewOpen = true
+            model.setOverviewDetail(interaction.detailRequest)
+        }
+        .onChange(of: interaction.detailRequest) { model.setOverviewDetail($0) }
         .onDisappear { model.displayOverviewOpen = false }
         .onChange(of: model.catalog?.displays) { displays in refreshModel(displays) }
         .onChange(of: environmentDisplayScale) { scale in interaction.setViewDisplayScale(Double(scale)) }
@@ -103,6 +109,14 @@ struct DisplayOverviewScreen: View {
 
     private var toolbarTools: some View {
         HStack(spacing: 8) {
+            if model.canArrangeDisplays, model.inputAllowed(), model.controlState() == .allowed,
+               interaction.model.hasArrangement, interaction.model.drawnDisplays.count >= 2 {
+                Button { arrangement = interaction.model } label: {
+                    Image(systemName: "rectangle.2.swap").padding(8)
+                }
+                .accessibilityLabel("Arrange Displays")
+                .accessibilityIdentifier("displayOverviewArrange")
+            }
             if model.canUseDisplayActions {
                 // Labels on the Mac's own screens, to match these tiles with the desk.
                 Button { model.identifyDisplays() } label: {
@@ -242,8 +256,13 @@ struct DisplayOverviewScreen: View {
         let isSelected = interaction.model.selected == display.id
         let drawn = drawnRect(for: rect)
         let traits: AccessibilityTraits = isSelected ? [.isButton, .isSelected] : [.isButton]
+        let detail = model.overviewDetail(for: display.id).map { still in
+            let region = still.request.region?.rect(in: display.frame) ?? display.frame
+            let view = interaction.camera.viewRect(world: region, viewport: interaction.viewport)
+            return (image: still.image, frame: view.offsetBy(dx: -drawn.minX, dy: -drawn.minY))
+        }
         return ZStack {
-            OverviewDisplayTile(thumbnail: model.displayThumbnails[display.id], fullSize: rect.size,
+            OverviewDisplayTile(thumbnail: model.displayThumbnails[display.id], detail: detail, fullSize: rect.size,
                                 origin: CGPoint(x: rect.minX - drawn.minX, y: rect.minY - drawn.minY),
                                 isMain: display.isMain, isSelected: isSelected)
                 .frame(width: drawn.width, height: drawn.height)
@@ -308,57 +327,70 @@ struct DisplayOverviewScreen: View {
         interaction.model.selected.flatMap { id in model.catalog?.displays.first { $0.id == id } }
     }
 
-    private var tiledSources: Set<UInt32> {
-        Set(model.layout.tiles.values.compactMap { $0.source?.windowID })
-    }
-
     /// Choosing a pane's source from the picker replaces that pane; otherwise the display goes in the
     /// pane the gallery would use.
     private var showTitle: String {
-        model.replacingTile != nil ? String(localized: "Use in This Pane") : String(localized: "Show in Pane")
+        if !model.windowMode, model.mirroring() { return String(localized: "Switch Current Mirror Source") }
+        return model.replacingTile != nil ? String(localized: "Use Display") : String(localized: "Show in Pane")
     }
 
     private func canAddPane(_ item: CatalogDisplayItem) -> Bool {
-        model.canAddTile && model.replacingTile == nil && !tiledSources.contains(WorkspaceSource.displayKey(item.id))
+        if !model.windowMode, model.mirroring() {
+            return model.canSplitDesktop && model.canAddDisplayFromMirror(item)
+        }
+        return model.canAddTile && model.replacingTile == nil && !model.containsDisplayView(item)
     }
 
     /// A display source cannot float on iOS, so there is no float action here.
     private func actionBar(fold: OverviewChromeFold.Split?) -> some View {
-        FoldAwareBar(fold: fold, horizontalPadding: 16) {
-            actionPrimary
-        } trailing: {
-            actionSecondary
-        }
-        .frame(maxWidth: .infinity, minHeight: 60)
-        .padding(.vertical, 8)
-    }
-
-    @ViewBuilder private var actionPrimary: some View {
-        if selectedItem != nil, interaction.selectionCanBeShown {
-            Button(showTitle) { showSelected() }
-                .buttonStyle(.borderedProminent).tint(meowAccent)
-                .accessibilityIdentifier("displayOverviewShowInPane")
-        } else {
-            Text("A MeowDisplay screen can't be shown in a pane.")
-                .font(.footnote).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
-        }
-    }
-
-    private var actionSecondary: some View {
-        HStack(spacing: 12) {
+        Group {
             if let item = selectedItem, interaction.selectionCanBeShown {
-                if canAddPane(item) {
-                    Button("Add as New Pane") { dismiss(); onAddAsNewPane(item) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("displayOverviewAddPane")
+                if let fold {
+                    FoldAwareBar(fold: fold, horizontalPadding: 16) {
+                        actionPrimary
+                    } trailing: {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) { secondaryActions(item) }.fixedSize(horizontal: true, vertical: false)
+                            VStack(spacing: 4) { secondaryActions(item) }
+                        }
+                    }
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            actionPrimary
+                            secondaryActions(item)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        VStack(spacing: 4) {
+                            actionPrimary
+                            secondaryActions(item)
+                        }
+                    }
+                    .padding(.horizontal, 16)
                 }
-                if model.canUseDisplayActions, model.canControlMac {
-                    // Explicit only: selecting a display never moves the Mac cursor.
-                    Button("Move Cursor Here") { model.moveCursor(to: item) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("displayOverviewMoveCursor")
-                }
+            } else {
+                Text("A MeowDisplay screen can’t be shown in a pane.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .accessibilityIdentifier("displayOverviewUnavailable")
             }
+        }
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.vertical, 4)
+    }
+
+    private var actionPrimary: some View {
+        OverviewActionButton(title: showTitle, prominent: true, action: showSelected)
+            .accessibilityHint(model.replacingTile == nil ? Text("Opens the selected display.") : Text("Replaces the display in this pane."))
+            .accessibilityIdentifier("displayOverviewShowInPane")
+    }
+
+    @ViewBuilder private func secondaryActions(_ item: CatalogDisplayItem) -> some View {
+        if canAddPane(item) {
+            OverviewActionButton(title: String(localized: "Add as New Pane")) { dismiss(); onAddAsNewPane(item) }
+                .accessibilityIdentifier("displayOverviewAddPane")
         }
     }
 
@@ -392,12 +424,34 @@ struct DisplayOverviewScreen: View {
 
 // MARK: - Tile views
 
+private struct OverviewActionButton: View {
+    let title: String
+    var prominent = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .frame(minWidth: 44, minHeight: 44)
+                .foregroundStyle(prominent ? Color.white : meowAccent)
+                .background(prominent ? meowAccent : Color.white.opacity(0.14), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// One real display: its still filling the tile (aspect-fill), the main display's menu-bar strip
 /// and a border that is the accent colour while selected. Only the part of the tile that is on
 /// screen is laid out (`origin` places the tile's own top-left inside that part), so deep zoom
 /// never builds a layer as large as the zoomed display.
 private struct OverviewDisplayTile: View {
     let thumbnail: CGImage?
+    let detail: (image: CGImage, frame: CGRect)?
     /// The whole tile's size, view points.
     let fullSize: CGSize
     /// The tile's top-left relative to this view's top-left (zero or negative when cut off).
@@ -417,11 +471,18 @@ private struct OverviewDisplayTile: View {
     }
 
     @ViewBuilder private var picture: some View {
-        if let thumbnail, thumbnail.width > 0, thumbnail.height > 0 {
-            let size = fillSize(for: thumbnail)
-            Image(decorative: thumbnail, scale: 1).resizable().interpolation(.medium)
-                .frame(width: size.width, height: size.height)
-                .position(x: origin.x + fullSize.width / 2, y: origin.y + fullSize.height / 2)
+        ZStack {
+            if let thumbnail, thumbnail.width > 0, thumbnail.height > 0 {
+                let size = fillSize(for: thumbnail)
+                Image(decorative: thumbnail, scale: 1).resizable().interpolation(.medium)
+                    .frame(width: size.width, height: size.height)
+                    .position(x: origin.x + fullSize.width / 2, y: origin.y + fullSize.height / 2)
+            }
+            if let detail {
+                Image(decorative: detail.image, scale: 1).resizable().interpolation(.high)
+                    .frame(width: detail.frame.width, height: detail.frame.height)
+                    .position(x: detail.frame.midX, y: detail.frame.midY)
+            }
         }
     }
 

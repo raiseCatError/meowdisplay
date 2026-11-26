@@ -1092,6 +1092,14 @@ presented frame when it receives `enabled: false`. Re-enabling starts a fresh
 encoder stream with SPS/PPS and an IDR. Receivers MUST NOT send `videoRequest`
 below pv 9; senders keep video enabled for older receivers.
 
+When the Mac advertises `preserveCaptureMode`, a mobile receiver may include
+`preserveCaptureMode: true` with `enabled: false`. The Mac keeps active
+capture assignments and any live Extend display identities while pausing
+video. A subsequent Video On resumes those assignments in the same sessions.
+A receiver can include `resumeWindow: true` with `enabled: true` when it knows
+the Mac supports Window mode. The Mac selects Window for that receiver before
+rebuilding its capture. Other receivers retain their assignments.
+
 **`audioRequest` / `audioState`** (pv 12) control Mac system-audio capture
 independently of video, per receiver — each receiver's own request, not a
 Mac-wide toggle like `videoRequest`. The Mac confirms the actual state with
@@ -1574,7 +1582,15 @@ is answered with the last real one and `stale: true`, or `unavailable: true`
 with `reason` `offscreen` (minimized, hidden) or `failed`. `ids` may hold 48,
 `max` is 64–640, `icons` 48, and optional `displays` (display ids) are
 answered with `displayThumbnail {id, jpeg}` (MeowDisplay's own windows are
-never in a display still). Receivers bound stills at 256 KiB base64.
+never in a display still). Receivers bound ordinary stills at 256 KiB base64.
+A zoomed Overview may add `detail: {id, maxSide, region?}` with one real display
+ID and a requested longest side of 960, 1280, or 1600 pixels. Deep zoom may
+specify `region` as four ordered, integral edges from 0 to 64 of the display's
+width and height. The Mac captures that region first in the same rate-limited
+batch and echoes the requested side as `detail` and the edges as `detailRegion`
+in its `displayThumbnail`. Detailed stills are bounded at 700,000 base64
+characters and the sampled region's native pixel size. Older Macs ignore the
+extra request field and continue sending the ordinary still.
 `appCatalogRequest {rev?}` is answered with `appCatalog {rev, apps}` — every
 launchable app the Mac finds (Spotlight's index of the app folders, a folder
 scan when Spotlight is off), one per bundle id, Finder first, at most 900:
@@ -1641,6 +1657,45 @@ origins (`reverted` with `requested`, `timeout`, `control` or
 most 32 characters; receivers show unknown ones as a generic failure. After
 `kept` or `reverted` the receiver asks for `windowCatalog` again.
 
+Ask Every Time is the default on the Mac. A Mac owner can approve this
+operation in advance for one paired receiver's pinned public key. In that
+case a valid request can go directly to `applied`. The current input grant,
+paired key and display topology are rechecked before Apply and Keep. Withdrawing
+preapproval ends a pending arrangement from that approval.
+
+**Stage Peek with video off.** `welcome.workspaceFeatures` can include
+`trackpadStagePeek` and `trackpadPeekText`. The latter allows a receiver
+to require text-only catalog replies. Older peers keep reading `features`.
+Requests for a window catalog, app catalog, app icon, app launch or window activation
+carry a `trackpadStagePeek` UUID for that opening. A separate metadata-only
+browser accepts them while video is off and the currently admitted connection
+has control. Catalog replies echo the UUID. Text-only window records carry
+window ID, generation, bundle, app name, and title. The receiver may request
+installed app icons with a tagged `windowThumbnailRequest` whose window list
+is empty. The sender only reads its icon list on this path and replies with
+tagged `appIcon` messages. A receiver discards these replies from any other
+opening or after it loses control.
+
+**Trackpad tab in Window mode.** A receiver can add a local Trackpad tab when
+the Mac advertises `workspaceTrackpad` in `welcome.workspaceFeatures`. The
+tab never appears in the Mac’s workspace capture request. Its relative
+pointer and scroll messages use `trackpadPoints: true` and
+`workspaceTrackpad: true` to select desktop-relative input. The Mac rechecks
+the session input grant, active Window mode, and desktop permissions for
+these messages. The same marker permits the existing control-gated
+`trackpadLayoutWatch` to run while Window video stays on.
+
+**Extended display in Window mode.** `welcome.workspaceFeatures` can include
+`workspaceExtendedDisplay`. An admitted receiver with control can ask for
+`workspaceExtendedDisplayRequest {request, action, width?, height?, shape?,
+size?}` in video-enabled Window mode. `request` is a UUID. `create` supplies
+usable receiver dimensions in pixels, an Extend shape and a Desktop Size;
+`remove` releases the session's added display. The Mac replies with
+`workspaceExtendedDisplayState {request, status, display?, uuid?}` where `status`
+is `ready`, `removed` or `unavailable`. The ready display becomes an ordinary
+display-source tab after it appears in the catalog as a display owned by
+that session. The monitor is released when the Window session ends.
+
 **Tiles.** `workspaceRequest {tiles, focus?}` replaces this receiver's
 workspace. Each tile: `id` (1–32 ASCII letters, digits, `-`, `_`), `host`,
 normalized `x y w h` in the canvas (non-overlapping, inside it, at least
@@ -1705,6 +1760,10 @@ display that moved since the listing, is ignored. Neither has a reply; the
 cursor report shows the move. While a session is browsing, the Mac also
 sends a fresh `windowCatalog` when its displays change (attached, removed,
 rearranged or resized), so an overview never keeps an old arrangement.
+Physical display entries can include a stable `uuid` for saved display panes
+and tabs. A receiver resolves that UUID to the current listed display ID before
+sending `workspaceRequest`. The request still uses the current numeric `display`
+ID, and older senders and layouts can continue using the listed ID.
 
 **Overview cursor** (same entry, `displayArrange`; sessions that pass the same
 gates as `windowThumbnailRequest`: `hello.ws`, Window mode allowed, video on,
@@ -1848,12 +1907,13 @@ every Mac display (except MeowDisplay's own virtual displays and mirrors)
 where it sits in the Mac's arrangement, each from its own live display
 capture at the pixels it covers in the pane. At most one per layout (a second
 is `duplicateWindow`); with no listed display it is `unavailable`, as it is
-on a Mac without the feature (no `window`). `rotation` and `fit` are ignored.
-`zoom`'s scale is the person's, 1 to 8 (1 fits every display); its centre is
-the Mac's: a new scale centres the view on the cursor, and above 1 the view
-moves only when the cursor comes within 12% of the pane's shorter side of an
-edge. `workspaceState` echoes `overview: true` and the camera as `zoom`
-(`[scale, cx, cy]`, the centre normalized to the arrangement's bounds). Input
+on a Mac without the feature (no `window`). Overview stays upright and uses
+the pane's `fit` and `zoom` fields. The entire arrangement is the source,
+with a zoom range of 0.7 to 8 and its centre normalized to the arrangement
+bounds. Manual pan can expose empty canvas. Pointer motion may move the
+live view to keep the cursor in view. `workspaceState` echoes `overview: true`,
+the applied camera as `zoom: [scale, cx, cy]`, and the accepted request's
+`view` epoch for newer senders. Input
 while the pane is focused: `pointer` `moveRelative` moves the real cursor by
 `dx`/`dy` canvas pixels divided by the camera's scale, across displays and
 kept on one (a gap lands on the nearest display); `down`/`up` click at the
@@ -2384,6 +2444,10 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 22 (additive) | Text caret (section 6.11): `welcome.features: ["textCaret"]`, `keyboardState`, `textCaret`; gated by capability, no bump |
 | 22 (additive) | Tailscale addresses (section 6.17): `welcome.features: ["remoteEndpoints"]`, `hello.remoteEndpoints`, `remoteEndpoints`; gated by capability, no bump |
 | 22 (additive) | Exact key modifiers: `welcome.features: ["exactKeyModifiers"]`, `keyboard` `exactModifiers` on `press`/`down`/`up`; gated by capability, no bump |
+| 23 | Trackpad `pointer` messages may carry `trackpadPoints: true` and `confined: true/false`. Relative motion then uses Quartz points. The sender honours confinement only with video on and a single display source, and applies its existing authorization to every event. Trackpad presses and scrolls follow the desktop cursor when confinement is off. Older peers retain the video-pixel path. |
+| 23 (additive) | `welcome.features: ["trackpadLayout"]` allows a receiver to send `trackpadLayoutWatch` with `on: true` while video is off, renewing the five-second subscription as needed, or `on: false` to stop. The Mac sends `trackpadLayoutState` on changes at up to 30 Hz with at most 16 active desktop display records excluding mirrored copies (`id`, `x`, `y`, `w`, `h`, optional `name`) and an optional measured `cursor` (`x`, `y`). The records can include an active Extend display that remains reachable by the pointer. Positions are global Quartz points. The Mac checks admission, control and desktop privacy before sending, and uses no video capture for this data. |
+| 23 (additive) | `welcome.features: ["scrollAtCursor"]` allows the receiver to send `scroll` with `scrollAtCursor: true`. Deltas are receiver points. The Mac scrolls at the actual cursor without moving it, including in Window mode. The normal input grant and privacy gates still apply. |
+| 23 (additive) | An absolute hardware pointer press in Window mode may include normalized workspace `x` and `y` with the existing `pointer` `down`. The Mac verifies the target and sends the press once. Relative Trackpad presses still follow the actual cursor. Older peers ignore the additional fields and use the preceding move. |
 
 ---
 

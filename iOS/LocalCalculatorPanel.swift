@@ -59,6 +59,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// nil while the button isn't shown (an open panel then sits in the
     /// top-left of `panelBounds`).
     let buttonFrame: CGRect?
+    var buttonFaceDiameter: CGFloat?
     /// A Strip caption under the button, when Control Hints are on.
     var buttonHint: String?
     /// The safe area (above any keyboard) the panel must stay inside.
@@ -84,8 +85,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let buttonVisible = !autoHiding || model.isOpen
         ZStack(alignment: .topLeading) {
             if let buttonFrame {
-                LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFrame.width, hint: buttonHint,
-                                           chip: chip) {
+                LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFaceDiameter ?? buttonFrame.width,
+                                           hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip) {
                     model.toggle()
                     haptics.play(.selection)
                 }
@@ -124,6 +125,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
 struct LocalCalculatorEntryButton<Chip: View>: View {
     let open: Bool
     let diameter: CGFloat
+    var hitDiameter: CGFloat?
     var hint: String?
     @ViewBuilder let chip: (_ selected: Bool) -> Chip
     let action: () -> Void
@@ -135,6 +137,7 @@ struct LocalCalculatorEntryButton<Chip: View>: View {
                 .foregroundStyle(open ? Color.black : Color.white)
                 .frame(width: diameter, height: diameter)
                 .background(chip(open))
+                .frame(width: hitDiameter ?? diameter, height: hitDiameter ?? diameter)
                 .contentShape(Circle())
                 .onTapGesture(perform: action)
             if let hint {

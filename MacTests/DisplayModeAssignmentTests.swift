@@ -474,6 +474,29 @@ final class DisplayModeAssignmentTests: XCTestCase {
         XCTAssertEqual(coordinator.resolvedAssignment(peerID: "B").mode, .mirror, "Video On never restores Extend")
     }
 
+    func testResumeVideoInWindowChangesOnlyTheRequestingReceiver() {
+        for mode in [CaptureMode.mirror, .extend, .window] {
+            var coordinator = DisplayModeCoordinator(defaults: .init(mode: mode, mirrorDisplayUUID: "STUDIO"),
+                                                     videoEnabled: true, store: store)
+            _ = coordinator.begin(sessionID: "requester", peerID: "resume-\(mode.rawValue)")
+            _ = coordinator.begin(sessionID: "other", peerID: nil)
+            _ = coordinator.disableVideo(hasUsablePhysicalDisplay: true, preserveCaptureMode: true)
+            let other = coordinator.assignment(sessionID: "other")
+
+            let outcome = coordinator.resumeVideoInWindow(sessionID: "requester", hasUsablePhysicalDisplay: true)
+
+            XCTAssertTrue(coordinator.videoEnabled)
+            XCTAssertEqual(coordinator.assignment(sessionID: "requester")?.mode, .window)
+            XCTAssertEqual(coordinator.assignment(sessionID: "other"), other)
+            XCTAssertEqual(coordinator.defaultMode, mode)
+            if mode == .window {
+                if case .rebuild = outcome { XCTFail("Already in Window mode") }
+            } else {
+                if case .rebuild = outcome {} else { XCTFail("Mode change should rebuild only the requester") }
+            }
+        }
+    }
+
     func testHeadlessVideoOffKeepsExtend() {
         var coordinator = DisplayModeCoordinator(defaults: .init(mode: .extend, mirrorDisplayUUID: nil),
                                                  videoEnabled: true, store: store)
@@ -481,6 +504,31 @@ final class DisplayModeAssignmentTests: XCTestCase {
         XCTAssertEqual(coordinator.disableVideo(hasUsablePhysicalDisplay: false), [])
         XCTAssertEqual(coordinator.defaultMode, .extend)
         XCTAssertEqual(coordinator.assignment(sessionID: "a")?.mode, .extend)
+    }
+
+    func testPreservingVideoOffRetainsAssignmentsPreferencesAndModeOnReconnect() {
+        var coordinator = DisplayModeCoordinator(defaults: .init(mode: .extend, mirrorDisplayUUID: "built-in"),
+                                                 videoEnabled: true, store: store)
+        _ = coordinator.begin(sessionID: "extend", peerID: "A")
+        _ = coordinator.begin(sessionID: "window", peerID: "B")
+        _ = coordinator.requestMode(.window, sessionID: "window", hasUsablePhysicalDisplay: true)
+        let originalExtend = coordinator.assignment(sessionID: "extend")
+        let originalWindow = coordinator.assignment(sessionID: "window")
+
+        XCTAssertEqual(coordinator.disableVideo(hasUsablePhysicalDisplay: true, preserveCaptureMode: true), [])
+        XCTAssertFalse(coordinator.videoEnabled)
+        XCTAssertEqual(coordinator.defaultMode, .extend)
+        XCTAssertEqual(coordinator.resolvedAssignment(peerID: "A"), originalExtend)
+        XCTAssertEqual(coordinator.assignment(sessionID: "window"), originalWindow)
+        XCTAssertEqual(coordinator.preference(peerID: "B").mode, .window)
+        coordinator.end(sessionID: "window")
+        XCTAssertEqual(coordinator.begin(sessionID: "reconnected", peerID: "B"), originalWindow)
+        XCTAssertEqual(coordinator.requestMode(.extend, sessionID: "reconnected", hasUsablePhysicalDisplay: true),
+                       .rejected(.videoOff))
+
+        coordinator.enableVideo()
+        XCTAssertEqual(coordinator.assignment(sessionID: "extend"), originalExtend)
+        XCTAssertEqual(coordinator.assignment(sessionID: "reconnected"), originalWindow)
     }
 
     func testSummaryNamesTheModeItsOriginAndTheMirrorSource() {

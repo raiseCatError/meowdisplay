@@ -9,6 +9,54 @@ import XCTest
 /// real device rely on.
 final class ScrollMomentumTests: XCTestCase {
 
+    func testEdgeRailStaysExpandedThroughMomentumAndStartsHoldAfterItEnds() {
+        var rail = EdgeScrollInteraction()
+        rail.begin()
+        XCTAssertTrue(rail.isExpanded)
+        rail.end(coasting: true, now: 1)
+        XCTAssertTrue(rail.isExpanded)
+        XCTAssertNil(rail.holdUntil)
+        rail.momentumEnded(now: 2)
+        XCTAssertEqual(rail.holdUntil, 3)
+        rail.settle(now: 2.99)
+        XCTAssertTrue(rail.isExpanded)
+        rail.settle(now: 3)
+        XCTAssertFalse(rail.isExpanded)
+    }
+
+    func testEdgeRailRetouchCancelsPendingCollapseAndRevocationResets() {
+        var rail = EdgeScrollInteraction()
+        rail.begin()
+        rail.end(coasting: false, now: 1)
+        XCTAssertEqual(rail.holdUntil, 2)
+        rail.begin()
+        rail.settle(now: 3)
+        XCTAssertTrue(rail.isExpanded)
+        XCTAssertNil(rail.holdUntil)
+        rail.reset()
+        XCTAssertFalse(rail.isExpanded)
+    }
+
+    func testEdgeSensitivityIncreasesBothAxesWithoutChangingFlickDuration() throws {
+        let gain = EdgeScrollSensitivity.defaultValue
+        let reversal = CGVector(dx: -16, dy: 28)
+        let drag = EdgeScrollSensitivity.output(for: reversal, gain: gain)
+        XCTAssertEqual(drag.dx, -24)
+        XCTAssertEqual(drag.dy, 42)
+        let release = CGVector(dx: 300, dy: -800)
+        let original = try XCTUnwrap(ScrollMomentumSession(initialVelocity: release, at: 0))
+        let adjusted = try XCTUnwrap(ScrollMomentumSession(initialVelocity: release, at: 0))
+        for frame in 1...100 {
+            let time = Double(frame) / 60
+            let before = original.tick(now: time)
+            let after = adjusted.tick(now: time)
+            let output = EdgeScrollSensitivity.output(for: after.delta, gain: gain)
+            XCTAssertEqual(output.dx, before.delta.dx * CGFloat(gain), accuracy: 0.0001)
+            XCTAssertEqual(output.dy, before.delta.dy * CGFloat(gain), accuracy: 0.0001)
+            XCTAssertEqual(before.alive, after.alive)
+        }
+    }
+
     // MARK: - Release-velocity estimation
 
     func testSlowScrollReleaseProducesNoMomentum() {

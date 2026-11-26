@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // Floating panes: Window mode panes that float above the tiled panes (or above a Full Desktop
@@ -1194,6 +1195,8 @@ enum WorkspaceFloatLayering {
         WorkspaceRect(x: content.x, y: content.y - pillReach, width: content.width, height: content.height + pillReach)
     }
 
+    /// The narrowest title pill: a short title and its options button.
+
     /// The title pill's largest extent for a float of `content` (it is never wider than this).
     static func pillBounds(_ content: WorkspaceRect) -> WorkspaceRect {
         let w = max(min(content.width - 28, 280), 90) + 34
@@ -1211,6 +1214,24 @@ enum WorkspaceFloatLayering {
             guard let i = r.intersection(c) else { return false }
             return i.width > tolerance && i.height > tolerance
         }
+    }
+
+    /// The close dot's 44 pt touch area, centred on the float's rounded top-left corner: on the
+    /// corner's arc, halfway round it. It shows only where its dot (24 pt) is inside the safe area
+    /// and the whole area is clear of `obstacles`: it hides rather than moving anywhere else.
+    static let closeTargetSize = CGSize(width: 44, height: 44)
+
+    static func closeTarget(onCornerOf content: CGRect, cornerRadius: CGFloat, safe: CGRect?,
+                            avoiding obstacles: [CGRect]) -> CGRect? {
+        let inset = cornerRadius * (1 - 0.5.squareRoot())
+        let center = CGPoint(x: content.minX + inset, y: content.minY + inset)
+        let size = closeTargetSize
+        let target = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                            width: size.width, height: size.height)
+        let dot = CGRect(x: center.x - 12, y: center.y - 12, width: 24, height: 24)
+        guard content.width >= size.width + 64, safe?.contains(dot) != false,
+              !obstacles.contains(where: { $0.intersects(target) }) else { return nil }
+        return target
     }
 
     /// The parts of a straight strip (a divider's touch area) that no float covers, each at least
@@ -1237,6 +1258,33 @@ enum WorkspaceFloatLayering {
     /// picture and take touches meant for the windows around them.
     static func showsHandles(selected: Bool, hovered: Bool, manipulating: Bool) -> Bool {
         selected || hovered || manipulating
+    }
+}
+
+/// One receiver-local arm at a time. A tap on another float starts its own confirmation.
+struct WorkspaceFloatQuickClose {
+    static let confirmationSeconds: TimeInterval = 3
+
+    private(set) var armedID: String?
+    private(set) var generation = 0
+    private var deadline: TimeInterval = 0
+
+    /// Returns true only on the second activation of the same float before its deadline.
+    mutating func tap(_ id: String, at time: TimeInterval) -> Bool {
+        if armedID == id, time < deadline {
+            cancel()
+            return true
+        }
+        generation &+= 1
+        armedID = id
+        deadline = time + Self.confirmationSeconds
+        return false
+    }
+
+    /// An old timeout cannot cancel an arm that replaced it.
+    mutating func cancel(generation expected: Int? = nil) {
+        if let expected, expected != generation { return }
+        armedID = nil
     }
 }
 

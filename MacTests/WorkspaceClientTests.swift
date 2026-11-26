@@ -22,6 +22,145 @@ final class WorkspaceClientTests: XCTestCase {
         return m
     }
 
+    func testTrackpadTabKeepsVideoSiblingsAndStaysOffTheCaptureWire() throws {
+        let host = "mac-a"
+        let window = WorkspaceSource(host: host, windowID: 10)
+        let trackpad = WorkspaceSource.trackpad(host: host)
+        let sibling = WorkspaceSource(host: host, windowID: 20)
+        let original = WorkspaceLayout(preset: .sideBySide, tiles: [
+            WorkspaceTile(id: "w1", source: window), WorkspaceTile(id: "w2", source: sibling),
+        ])
+        let selected = original.addingTab(trackpad, to: "w1")
+        XCTAssertEqual(selected.tiles["w1"]?.windows, [window, trackpad])
+        XCTAssertEqual(selected.tiles["w2"]?.source, sibling)
+        XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: trackpad.kind), .trackpad)
+        let saved = try JSONEncoder().encode(WorkspaceLayoutRecord(selected))
+        let restored = try XCTUnwrap(WorkspaceLayoutRecord.decode(saved))
+        XCTAssertEqual(restored, selected)
+        let frames = WorkspaceGeometry.frames(for: restored, in: WorkspaceSize(width: 800, height: 600))
+        let request = WorkspaceRequests.workspace(restored, frames: frames, host: host, focus: "w1", generation: { _ in nil })
+        let tiles = try XCTUnwrap(request["tiles"] as? [[String: Any]])
+        XCTAssertEqual(tiles.compactMap { $0["id"] as? String }, ["w2"])
+    }
+
+    private func restoreCatalog(generation: Int? = 5, minimized: Bool = true) -> WorkspaceEvent {
+        let windows: [[String: Any]] = generation.map {
+            [["id": 10, "gen": $0, "bundle": "dev.zed.Zed", "app": "Zed",
+              "title": "Original", "state": minimized ? "offscreen" : "visible"]]
+        } ?? []
+        return WorkspaceEvent.parse(type: WireMessage.windowCatalog,
+                                    ["host": "mac-a", "windows": windows, "apps": []])!
+    }
+
+    func testShowMinimizedWindowRequestsControlAndRestoresOnceAfterMacApproval() throws {
+        var sent: [[String: Any]] = []
+        var requests = 0
+        var control = SessionInputWireState.off
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { sent.append($0) } }
+        m.controlState = { control }
+        m.requestControlForWindowShow = { requests += 1; return true }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(restoreCatalog())
+        let window = try XCTUnwrap(m.catalog?.windows.first)
+
+        XCTAssertFalse(m.windowMode, "Stage Peek can restore directly from Mirror")
+        XCTAssertEqual(m.minimizedWindowAction(window), .request)
+        m.showMinimizedWindow(window)
+        m.showMinimizedWindow(window)
+        XCTAssertEqual(requests, 1)
+        XCTAssertTrue(sent.isEmpty)
+        control = .requesting
+        m.windowShowControlChanged(control)
+        control = .allowed
+        m.windowShowControlChanged(control)
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?["window"] as? Int, 10)
+        XCTAssertEqual(sent.first?["gen"] as? Int, 5)
+        XCTAssertEqual(sent.first?["ifOffscreen"] as? Bool, true)
+        XCTAssertEqual(m.minimizedWindowAction(window), .show)
+    }
+
+    func testPendingShowRejectsDenialCancellationChangedTargetAndReconnection() throws {
+        let interruptions: [(WorkspaceModel) -> Void] = [
+            { $0.windowShowControlChanged(.notAllowed) },
+            { $0.windowShowControlChanged(.off) },
+            { $0.cancelWindowShow() },
+            { $0.apply(self.restoreCatalog(generation: nil)) },
+            { $0.apply(self.restoreCatalog(generation: 6)) },
+            { $0.apply(self.restoreCatalog(minimized: false)) },
+            { $0.apply(.mode(window: false)) },
+            { $0.apply(.connected(peerID: "mac-a")) },
+            { $0.apply(.disconnected) },
+        ]
+        for interrupt in interruptions {
+            var activations = 0
+            var control = SessionInputWireState.off
+            let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+            m.controlState = { control }
+            m.apply(.connected(peerID: "mac-a"))
+            m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+            m.apply(.mode(window: true))
+            m.apply(restoreCatalog())
+            m.requestControlForWindowShow = { true }
+            XCTAssertFalse(m.windowShowPending)
+            m.showMinimizedWindow(try XCTUnwrap(m.catalog?.windows.first))
+            XCTAssertTrue(m.windowShowPending)
+            control = .requesting
+            m.windowShowControlChanged(control)
+            interrupt(m)
+            control = .allowed
+            m.windowShowControlChanged(control)
+            XCTAssertEqual(activations, 0)
+            XCTAssertFalse(m.windowShowPending)
+        }
+    }
+
+    func testMinimizedRestoreRequiresPromptForDeferredActionAndAllowsExplicitShowWithControl() throws {
+        var activations = 0
+        var control = SessionInputWireState.off
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+        m.controlState = { control }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(.mode(window: true))
+        m.apply(restoreCatalog())
+        let window = try XCTUnwrap(m.catalog?.windows.first)
+        m.requestControlForWindowShow = { true }
+        m.showMinimizedWindow(window)
+        control = .allowed
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(activations, 0)
+        m.showMinimizedWindow(window)
+        XCTAssertEqual(activations, 1)
+    }
+
+    func testExpiredShowWithdrawsTheOutstandingControlRequest() throws {
+        var now: TimeInterval = 1
+        var control = SessionInputWireState.off
+        var withdrawals = 0
+        var activations = 0
+        let m = model { if $0["type"] as? String == WireMessage.windowAction { activations += 1 } }
+        m.clock = { now }
+        m.controlState = { control }
+        m.requestControlForWindowShow = { true }
+        m.withdrawControlForWindowShow = { withdrawals += 1 }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.restoreOffscreenFeature]))
+        m.apply(.mode(window: true))
+        m.apply(restoreCatalog())
+        m.showMinimizedWindow(try XCTUnwrap(m.catalog?.windows.first))
+        control = .requesting
+        m.windowShowControlChanged(control)
+        now += 61
+        control = .allowed
+        m.windowShowControlChanged(control)
+        XCTAssertEqual(withdrawals, 1)
+        XCTAssertEqual(activations, 0)
+        XCTAssertFalse(m.windowShowPending)
+    }
+
     private func catalogWithDisplay(_ windows: [(UInt32, UInt64, String)]) -> WorkspaceEvent {
         WorkspaceEvent.parse(type: WireMessage.windowCatalog, [
             "type": WireMessage.windowCatalog, "host": "mac-a",
@@ -226,7 +365,7 @@ final class WorkspaceClientTests: XCTestCase {
     }
 
     /// Remove from Layout as a drop target: only for repositioning a whole pane already in the
-    /// layout with another left; never for a tab, a Stage Peek window or app; Cancel changes nothing;
+    /// layout with another left; never for a Stage Peek window or app; Cancel changes nothing;
     /// removal is one undo step and never closes or minimizes the Mac window.
     func testDraggingAPaneToRemoveTakesItOutOfTheLayoutOnly() {
         var sent: [[String: Any]] = []
@@ -254,7 +393,7 @@ final class WorkspaceClientTests: XCTestCase {
         m.beginDrag(.app(MacAppItem(bundleID: "dev.zed.Zed", name: "Zed", running: true, windowCount: 1, lastUsed: nil)), at: CGPoint(x: 200, y: 400))
         XCTAssertFalse(m.canDropToRemove)
         m.cancelDrag()
-        // A tab is never offered Remove.
+        // A pane with one window has no real tab label to remove.
         m.beginDrag(.pane(pane, tab: 0), at: CGPoint(x: 200, y: 20))
         XCTAssertFalse(m.canDropToRemove)
         m.cancelDrag()
@@ -291,6 +430,49 @@ final class WorkspaceClientTests: XCTestCase {
         m.moveDrag(to: onRemove)
         _ = m.endDrag()
         XCTAssertEqual(m.layout.tiles.count, 1)
+    }
+
+    func testDraggingAnExistingTabToRemovePreservesItsPaneAndOtherStreams() throws {
+        var sent: [[String: Any]] = []
+        let m = model { sent.append($0) }
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature]))
+        m.apply(.mode(window: true))
+        m.apply(catalog([(10, 5, "a"), (11, 6, "b"), (12, 7, "c")]))
+        m.updateSpace(WorkspaceSize(width: 400, height: 800), hinge: nil)
+        let windows = try XCTUnwrap(m.catalog?.windows)
+        m.choose(windows[0], asNewTile: false)
+        m.choose(windows[2], asNewTile: true)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        let whole = WorkspaceRect(x: 0, y: 0, width: 1, height: 1)
+        m.drop(windows[1], on: .tab(tile: pane, preview: whole))
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.windowID), [10, 11])
+        m.pictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.removeZoneGlobal = CGRect(x: 200, y: 720, width: 160, height: 44)
+        m.floatZoneGlobal = m.removeZoneGlobal
+        let onRemove = CGPoint(x: 280, y: 740)
+
+        m.beginDrag(.pane(pane, tab: 1), at: CGPoint(x: 200, y: 20))
+        XCTAssertTrue(m.canDropToRemove)
+        m.moveDrag(to: onRemove)
+        XCTAssertTrue(m.overRemoveZone(onRemove))
+        XCTAssertFalse(m.overFloatZone(onRemove))
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.windowID, 10)
+        XCTAssertEqual(Set(m.layout.tiles.values.compactMap { $0.source?.windowID }), [10, 12])
+        let types = sent.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains(WireMessage.windowClose))
+        XCTAssertFalse(types.contains(WireMessage.windowAction))
+        m.undo()
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.windowID), [10, 11])
+
+        // The first tab disappears while the second is held. Its old index cannot remove another source.
+        m.beginDrag(.pane(pane, tab: 1), at: CGPoint(x: 200, y: 20))
+        m.removeTab(pane, at: 0)
+        m.moveDrag(to: onRemove)
+        XCTAssertFalse(m.canDropToRemove)
+        XCTAssertFalse(m.endDrag())
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.windowID, 11)
     }
 
     /// An app dragged onto a pane: its one window goes there; several → the person picks; none →
@@ -701,24 +883,124 @@ final class OverviewPaneReceiverTests: XCTestCase {
         [display(1, "Built-in Display", main: true, x: 0), display(2, "Studio Display", x: 1920)]
     }
 
-    private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true,
-                       sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
-        let m = WorkspaceModel(defaults: UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
+    private func model(displays: [CatalogDisplayItem], overviewFeature: Bool = true, inWindowMode: Bool = true,
+                       defaults: UserDefaults? = nil, sent: @escaping ([String: Any]) -> Void = { _ in }) -> WorkspaceModel {
+        let m = WorkspaceModel(defaults: defaults ?? UserDefaults(suiteName: "OverviewPaneReceiverTests-\(UUID().uuidString)")!)
         m.send = { sent($0); return true }
         m.inputAllowed = { true }
         m.apply(.connected(peerID: "mac-a"))
         var features: Set<String> = [WindowWorkspaceWire.welcomeFeature]
         if overviewFeature { features.insert(WindowWorkspaceWire.overviewPaneFeature) }
         m.apply(.features(features))
-        m.apply(.mode(window: true))
+        m.apply(.mode(window: inWindowMode))
         m.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false,
                                                  displays: displays)))
         m.updateSpace(WorkspaceSize(width: 1200, height: 800), hinge: nil)
         return m
     }
 
+    func testDraggingASecondPhysicalDisplayFromMirrorStartsTwoLivePaneAssignments() throws {
+        let m = model(displays: twoDisplays, inWindowMode: false)
+        var switches = 0
+        m.mirroring = { true }
+        m.requestWindowMode = { switches += 1; return true }
+        m.desktopPictureGlobal = CGRect(x: 0, y: 0, width: 400, height: 800)
+        m.beginDrag(.window(m.displayWindow(twoDisplays[0])), at: CGPoint(x: 200, y: 400))
+        XCTAssertNil(m.dropTarget(forGlobal: CGPoint(x: 200, y: 400)), "the already mirrored source cannot add itself")
+        m.cancelDrag()
+        m.beginDrag(.window(m.displayWindow(twoDisplays[1])), at: CGPoint(x: 200, y: 400))
+        guard case .split = m.dropTarget(forGlobal: CGPoint(x: 200, y: 400)) else {
+            return XCTFail("the second display should join the current desktop")
+        }
+        XCTAssertTrue(m.endDrag())
+        XCTAssertEqual(switches, 1)
+        m.apply(.mode(window: true))
+        let assignments = WorkspaceRequests.workspace(m.layout, frames: m.frames, host: "mac-a", focus: nil,
+                                                       generation: { _ in nil }, displayID: { m.display(for: $0)?.id })
+        let tiles = try XCTUnwrap(assignments["tiles"] as? [[String: Any]])
+        XCTAssertEqual(tiles.compactMap { $0["display"] as? Int }, [1, 2])
+        XCTAssertTrue(tiles.allSatisfy { $0["window"] == nil })
+    }
+
+    func testMirrorDisplayTabsPersistAndReconnectByPhysicalIdentity() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "PhysicalDisplayTabs-\(UUID().uuidString)"))
+        var original = twoDisplays
+        original[0].displayUUID = UUID().uuidString
+        original[1].displayUUID = UUID().uuidString
+        let m = model(displays: original, inWindowMode: false, defaults: defaults)
+        m.mirroring = { true }
+        m.requestWindowMode = { true }
+        XCTAssertTrue(m.addDisplayFromMirror(original[1], asTab: true))
+        m.apply(.mode(window: true))
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        XCTAssertEqual(m.layout.tiles[pane]?.tabs.map(\.displayUUID), original.map(\.displayUUID))
+
+        // A different monitor now owns the old live ID. The saved tab must wait for its UUID.
+        let impostor = display(original[1].id, original[1].name, x: 1920)
+        let reloaded = model(displays: [original[0], impostor], defaults: defaults)
+        let external = try XCTUnwrap(reloaded.layout.tiles[pane]?.source)
+        XCTAssertNil(reloaded.display(for: external))
+        XCTAssertTrue(reloaded.missing.contains(pane))
+
+        var replugged = display(85, original[1].name, x: 1920)
+        replugged.displayUUID = original[1].displayUUID
+        reloaded.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [],
+                                                        unavailable: false, displays: [original[0], impostor, replugged])))
+        XCTAssertEqual(reloaded.display(for: external)?.id, 85)
+        XCTAssertFalse(reloaded.missing.contains(pane))
+        reloaded.choose(reloaded.displayWindow(replugged), asNewTile: true)
+        XCTAssertEqual(reloaded.layout.orderedTileIDs, [pane], "the rebound display still has one saved view")
+        reloaded.switchTab(pane, to: 0)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source.flatMap { reloaded.display(for: $0) }?.id, 1)
+    }
+
+    func testOverviewTabKeepsTheCurrentLayoutAndRestoresFromDisk() throws {
+        let defaults = UserDefaults(suiteName: "OverviewTab-\(UUID().uuidString)")!
+        let m = model(displays: twoDisplays, defaults: defaults)
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        let first = try XCTUnwrap(m.layout.tiles[pane]?.source)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let otherPane = try XCTUnwrap(m.layout.orderedTileIDs.first { $0 != pane })
+        let other = m.layout.tiles[otherPane]
+        let root = m.layout.root
+        m.addOverviewTab(to: pane)
+        XCTAssertEqual(m.layout.root, root)
+        XCTAssertEqual(m.layout.tiles[otherPane], other)
+        XCTAssertEqual(m.layout.tiles[pane]?.windows.map(\.kind), [.display, .overview])
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.kind, .overview)
+
+        m.switchTab(pane, to: 0)
+        XCTAssertEqual(m.layout.tiles[pane]?.source, first)
+        m.addOverviewTab(to: otherPane)
+        XCTAssertEqual(m.layout.tiles[pane]?.source?.kind, .overview)
+        XCTAssertEqual(m.layout.tiles[otherPane], other)
+        XCTAssertEqual(m.layout.tiles.values.flatMap(\.windows).filter(\.isOverview).count, 1)
+
+        let reloaded = model(displays: twoDisplays, defaults: defaults)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source?.kind, .overview)
+        reloaded.removeTab(pane, at: 1)
+        XCTAssertEqual(reloaded.layout.tiles[pane]?.source, first)
+        XCTAssertEqual(reloaded.layout.tiles[otherPane], other)
+        XCTAssertEqual(reloaded.layout.root, root)
+    }
+
+    func testDisplaysActionTurnsAStandaloneOverviewIntoATab() throws {
+        let m = model(displays: twoDisplays)
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let target = try XCTUnwrap(m.overviewTabTarget)
+        m.choose(m.overviewWindow, asNewTile: true)
+        XCTAssertEqual(m.layout.tiles.count, 2)
+
+        XCTAssertEqual(m.overviewTabTarget, target)
+        m.addOverviewTab(to: target)
+        XCTAssertEqual(m.layout.tiles.count, 1)
+        XCTAssertEqual(m.layout.tiles[target]?.windows.map(\.kind), [.display, .overview])
+        XCTAssertEqual(m.layout.tiles[target]?.source?.kind, .overview)
+    }
+
     /// The pure table: in an Overview pane one finger is a trackpad whatever the setting, two
-    /// fingers scroll the Mac, a pinch zooms, and nothing moves the view. Other panes are as before.
+    /// fingers scroll over the displays with control, and pan the view when local navigation owns the gesture.
     func testEachGestureRoutesInAnOverviewPaneAndInOtherPanes() {
         func route(_ g: OverviewPaneInput.Gesture, _ kind: WorkspaceSource.Kind, _ preferred: PointerInputMode = .direct,
                    input: Bool = true, moveView: Bool = false) -> OverviewPaneInput.Route {
@@ -727,8 +1009,8 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(route(.oneFinger, .overview, .direct), .pointer(.trackpad), "a trackpad even with Direct Touch chosen")
         XCTAssertEqual(route(.oneFinger, .overview, .trackpad), .pointer(.trackpad))
         XCTAssertEqual(route(.twoFingerDrag, .overview), .scrollMac)
-        XCTAssertEqual(route(.twoFingerDrag, .overview, input: false), .none, "View Only: the view still never moves")
-        XCTAssertEqual(route(.twoFingerDrag, .overview, moveView: true), .none, "Move View moves nothing in the Overview")
+        XCTAssertEqual(route(.twoFingerDrag, .overview, input: false), .movePane)
+        XCTAssertEqual(route(.twoFingerDrag, .overview, moveView: true), .movePane)
         XCTAssertEqual(route(.pinch, .overview), .zoomPane)
         for kind in [WorkspaceSource.Kind.window, .display] {
             XCTAssertEqual(route(.oneFinger, kind, .direct), .pointer(.direct), "\(kind) keeps the person's pointer model")
@@ -741,16 +1023,6 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .overview), .trackpad)
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: .display), .direct)
         XCTAssertEqual(OverviewPaneInput.pointerMode(preferred: .direct, kind: nil), .direct, "outside every pane")
-    }
-
-    /// A pinch's zoom is the person's scale, 1x to 8x, with the centre left to the Mac.
-    func testOverviewZoomIsTheScaleOneToEight() {
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 1), "1x is no zoom")
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: 0.5), "never below 1x")
-        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 2), WorkspacePaneZoom(scale: 2, centerX: 0.5, centerY: 0.5))
-        XCTAssertEqual(OverviewPaneInput.zoom(from: WorkspacePaneZoom(scale: 3, centerX: 0.5, centerY: 0.5), ratio: 2)?.scale, 6)
-        XCTAssertEqual(OverviewPaneInput.zoom(from: nil, ratio: 100)?.scale, 8)
-        XCTAssertNil(OverviewPaneInput.zoom(from: nil, ratio: .nan))
     }
 
     /// Offered only with the Mac's `overviewPane` and two or more displays it would show (never
@@ -797,32 +1069,179 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertNil(tile["display"])
     }
 
-    /// A pinch zooms the Overview pane 1x-8x and is sent; it never asks for a still and a
-    /// two-finger drag never moves it (that scrolls the Mac).
-    func testPinchZoomsTheOverviewWithoutAStillAndNothingPansIt() throws {
+    func testOverviewTabCanFloatAndDockWithoutLosingItsView() throws {
+        let m = model(displays: twoDisplays)
+        m.floatsDrawnHere = true
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.overviewPaneFeature,
+                           WindowWorkspaceWire.floatFeature]))
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        let pane = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        m.addOverviewTab(to: pane)
+        let tab = try XCTUnwrap(m.layout.tiles[pane]?.tabs.firstIndex(where: \.isOverview))
+        XCTAssertTrue(m.canFloat(pane: pane, tab: tab))
+        m.floatPane(pane, tab: tab)
+        let floating = try XCTUnwrap(m.layout.floats.first?.tile)
+        XCTAssertTrue(m.layout.tiles[floating]?.source?.isOverview == true)
+        let rest = try XCTUnwrap(m.layout.orderedTileIDs.first)
+        XCTAssertEqual(m.layout.tiles[rest]?.source?.windowID, WorkspaceSource.displayKey(twoDisplays[0].id))
+        m.liftFloat(floating)
+        XCTAssertFalse(m.drawsFloatHere(floating))
+        m.dockFloat(floating, to: .tab(tile: rest, preview: WorkspaceRect(x: 0, y: 0, width: 1, height: 1)))
+        XCTAssertTrue(m.layout.floats.isEmpty)
+        XCTAssertEqual(m.layout.tiles[floating]?.tabs.filter(\.isOverview).count, 1)
+        XCTAssertEqual(m.layout.tiles[floating]?.tabs.count, 2)
+    }
+
+    func testTrackpadStagePeekDoesNotRequestCatalogFromLegacyMetadataSender() {
         var sent: [[String: Any]] = []
         let m = model(displays: twoDisplays) { sent.append($0) }
-        m.choose(m.overviewWindow, asNewTile: false)
+        m.trackpadPeekAllowed = { true }
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.welcomeFeature]))
+        m.refreshTrackpadPeek()
+        XCTAssertFalse(m.trackpadPeekSupported)
+        XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })
+    }
+
+    func testTrackpadStagePeekRejectsStaleCatalogsAndIconsAfterRevocationAndReconnect() throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        var hasControl = false
+        m.trackpadPeekAllowed = { hasControl }
+        let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, TrackpadStagePeekWire.textOnlyFeature]
+        m.apply(.features(features))
+        m.refreshTrackpadPeek()
+        XCTAssertFalse(sent.contains { $0[TrackpadStagePeekWire.tokenKey] != nil })
+        hasControl = true
+        m.refreshTrackpadPeek()
+        let firstMessage = try XCTUnwrap(sent.last)
+        let token = try XCTUnwrap(TrackpadStagePeekWire.token(in: firstMessage))
+        let catalog = try XCTUnwrap(m.catalog)
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertEqual(m.trackpadPeekCatalog, catalog)
+        let bundle = "com.example.editor"
+        let context = try XCTUnwrap(CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8,
+                                              bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let png = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(png, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let iconMessage = ["bundle": bundle, "png": (png as Data).base64EncodedString(),
+                           TrackpadStagePeekWire.tokenKey: token.uuidString]
+        let icon = try XCTUnwrap(WorkspaceEvent.parse(type: WireMessage.appIcon, iconMessage))
+        m.apply(icon)
+        XCTAssertEqual(m.trackpadPeekIcons[bundle]?.width, 16)
+        hasControl = false
+        m.clearTrackpadPeek()
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertNil(m.trackpadPeekCatalog)
+        m.apply(icon)
+        XCTAssertTrue(m.trackpadPeekIcons.isEmpty)
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-b"))
+        m.apply(.features(features))
+        hasControl = true
+        m.refreshTrackpadPeek()
+        XCTAssertNotEqual(sent.last.flatMap(TrackpadStagePeekWire.token(in:)), token)
+        m.apply(.trackpadCatalog(token, catalog))
+        XCTAssertNil(m.trackpadPeekCatalog)
+        m.apply(icon)
+        XCTAssertTrue(m.trackpadPeekIcons.isEmpty)
+    }
+
+    func testExtendedDisplayWaitsForMatchingOwnedCatalogAndRemovesWithoutCatalog() throws {
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays) { sent.append($0) }
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WorkspaceExtendedDisplayWire.feature]))
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let previous = m.layout.tiles.values.flatMap(\.windows)
+        m.requestExtendedDisplay(size: CGSize(width: 400, height: 760), scale: 2, shape: .automatic, desktopSize: .standard)
+        let message = try XCTUnwrap(sent.last { $0["type"] as? String == WorkspaceExtendedDisplayWire.request })
+        let request = try XCTUnwrap((message["request"] as? String).flatMap(UUID.init(uuidString:)))
+        let plan = try XCTUnwrap(WorkspaceExtendedDisplayWire.Setup(message)).plan(maximumReceiverEdge: 1800)
+        XCTAssertEqual(plan.wide, 400)
+        XCTAssertEqual(plan.high, 760)
+        let uuid = UUID().uuidString
+        m.apply(.extendedDisplay(UUID(), status: "ready", display: 3, uuid: uuid))
+        XCTAssertNil(m.extendedDisplayID)
+        m.apply(.extendedDisplay(request, status: "ready", display: 3, uuid: uuid))
+        XCTAssertTrue(m.extendedDisplayBusy, "waits for the catalog")
+        let virtual = CatalogDisplayItem(id: 3, name: "Extended Display", width: 400, height: 760,
+                                         isMain: false, isVirtual: true,
+                                         overview: OverviewDisplay(id: 3, frame: CGRect(x: 3840, y: 0, width: 400, height: 760),
+                                                                    isVirtual: true, isOwn: true), displayUUID: uuid)
+        let catalog = WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false,
+                                               displays: twoDisplays + [virtual])
+        m.apply(.catalog(catalog))
+        XCTAssertFalse(m.extendedDisplayBusy)
+        XCTAssertEqual(m.layout.orderedTileIDs.count, 2)
+        XCTAssertTrue(previous.allSatisfy { m.layout.tiles.values.flatMap(\.windows).contains($0) })
+        XCTAssertEqual(m.layout.tiles.values.flatMap(\.windows).filter { $0.displayUUID == uuid }.count, 1)
+        m.removeExtendedDisplay()
+        let remove = try XCTUnwrap(sent.last { $0["type"] as? String == WorkspaceExtendedDisplayWire.request })
+        let removal = try XCTUnwrap((remove["request"] as? String).flatMap(UUID.init(uuidString:)))
+        m.apply(.catalog(.init(host: "mac-a", windows: [], apps: [], installed: [], unavailable: false, displays: twoDisplays)))
+        m.apply(.extendedDisplay(removal, status: "removed", display: nil, uuid: nil))
+        let remaining = m.layout.tiles.values.flatMap(\.windows)
+        XCTAssertEqual(remaining.count, previous.count)
+        XCTAssertTrue(previous.allSatisfy { remaining.contains($0) })
+        XCTAssertNil(m.extendedDisplayID)
+    }
+
+    func testOverviewPanAndZoomPersistPerTabAndRestoreFromDisk() throws {
+        let defaults = UserDefaults(suiteName: "OverviewViewport-\(UUID().uuidString)")!
+        var sent: [[String: Any]] = []
+        let m = model(displays: twoDisplays, defaults: defaults) { sent.append($0) }
+        m.choose(m.displayWindow(twoDisplays[0]), asNewTile: false)
         let id = try XCTUnwrap(m.layout.orderedTileIDs.first)
-        let c = WorkspacePoint(x: 0.5, y: 0.5)
-        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1),
-                       "a two-finger drag isn't the pane's")
-        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
-        XCTAssertTrue(m.pinch(began: false, ended: false, isPinch: true, initial: c, current: WorkspacePoint(x: 0.7, y: 0.6),
-                              scale: 2.5, turn: 40))
-        XCTAssertEqual(m.layout.tiles[id]?.zoom, WorkspacePaneZoom(scale: 2.5, centerX: 0.5, centerY: 0.5),
-                       "the scale only: the Mac centres it on the cursor")
-        XCTAssertEqual(m.layout.tiles[id]?.rotation, WorkspaceRotation.none, "never turned")
-        XCTAssertNil(m.zoomPreview, "no local preview: the live picture shows the new view")
-        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 50))
-        XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale, 8)
-        // Zoomed in, a two-finger drag still isn't the pane's (the Mac's camera follows the cursor).
-        XCTAssertFalse(m.pinch(began: true, ended: false, isPinch: false, initial: c, current: WorkspacePoint(x: 0.6, y: 0.5), scale: 1))
-        XCTAssertTrue(m.pinch(began: true, ended: false, isPinch: true, initial: c, current: c, scale: 1))
-        XCTAssertTrue(m.pinch(began: false, ended: true, isPinch: true, initial: c, current: c, scale: 0.01))
-        XCTAssertNil(m.layout.tiles[id]?.zoom, "back to 1x: everything fits")
+        m.addOverviewTab(to: id)
+        m.choose(m.displayWindow(twoDisplays[1]), asNewTile: true)
+        let other = try XCTUnwrap(m.layout.orderedTileIDs.first { $0 != id })
+        let untouched = m.layout.tiles[other]
+        for space in [WorkspaceSize(width: 1200, height: 800), WorkspaceSize(width: 450, height: 800)] {
+            m.updateSpace(space, hinge: nil)
+            m.resetView(id)
+            let frame = try XCTUnwrap(m.frames.tiles[id])
+            let c = WorkspacePoint(x: frame.midX, y: frame.midY)
+            let moved = WorkspacePoint(x: c.x + frame.width * 0.18, y: c.y + frame.height * 0.2)
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: true, initial: c, current: c, scale: 0.4, turn: 40))
+            XCTAssertEqual(m.layout.tiles[id]?.zoom?.scale, 0.7)
+            XCTAssertEqual(m.layout.tiles[id]?.rotation, WorkspaceRotation.none)
+            XCTAssertFalse(m.pinch(began: true, ended: true, isPinch: false, initial: c, current: moved, scale: 1),
+                           "a two-finger drag over a live display still scrolls with control")
+            m.inputAllowed = { false }
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: false, initial: c, current: moved, scale: 1))
+            XCTAssertLessThan(try XCTUnwrap(m.layout.tiles[id]?.zoom?.centerX), 0.5)
+            XCTAssertLessThan(try XCTUnwrap(m.layout.tiles[id]?.zoom?.centerY), 0.5)
+            m.inputAllowed = { true }
+            let blank = WorkspacePoint(x: frame.maxX - frame.width * 0.01, y: frame.y + frame.height * 0.01)
+            let dragFromBlank = WorkspacePoint(x: blank.x - frame.width * 0.06, y: blank.y + frame.height * 0.05)
+            XCTAssertTrue(m.pinch(began: true, ended: true, isPinch: false, initial: blank, current: dragFromBlank, scale: 1),
+                          "the empty canvas pans even while control is granted")
+            XCTAssertEqual(m.layout.tiles[other], untouched)
+        }
+        let viewport = try XCTUnwrap(m.layout.tiles[id]?.zoom)
+        m.switchTab(id, to: 0)
+        XCTAssertNil(m.layout.tiles[id]?.zoom)
+        m.switchTab(id, to: 1)
+        XCTAssertEqual(m.layout.tiles[id]?.zoom, viewport)
+        m.apply(.disconnected)
+        m.apply(.connected(peerID: "mac-a"))
+        m.apply(.features([WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.overviewPaneFeature]))
+        m.apply(.mode(window: true))
+        m.apply(.catalog(WorkspaceCatalogMessage(host: "mac-a", windows: [], apps: [], installed: [],
+                                                 unavailable: false, displays: twoDisplays)))
+        XCTAssertEqual(m.layout.tiles[id]?.zoom, viewport)
+        let reloaded = model(displays: twoDisplays, defaults: defaults)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.zoom, viewport)
+        reloaded.toggleFit(id)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.fit, .fill)
+        reloaded.resetView(id)
+        XCTAssertEqual(reloaded.layout.tiles[id]?.fit, .fit)
+        XCTAssertNil(reloaded.layout.tiles[id]?.zoom)
         m.requestBackdrop(id, refresh: true)
-        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest }, "no still is ever asked for")
+        XCTAssertFalse(sent.contains { $0["type"] as? String == WireMessage.workspaceBackdropRequest })
     }
 
     /// Its menu's "Show <display> in a Pane": the display pane source, in a new pane when there's

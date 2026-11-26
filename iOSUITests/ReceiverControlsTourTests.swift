@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Walks the receiver's touch controls in Demo Mode (the real control
 /// overlay over a sample desktop) and keeps a screenshot of each state:
@@ -13,9 +14,103 @@ final class ReceiverControlsTourTests: XCTestCase {
     }
 
     @MainActor
+    func testVideoOffChoiceAndDisplayGuideInPortraitAndLandscape() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for (count, orientation) in [(0, UIDeviceOrientation.portrait),
+                                     (1, .landscapeLeft), (2, .portrait), (2, .landscapeLeft)] {
+            XCUIDevice.shared.orientation = orientation
+            app = XCUIApplication()
+            app.launchEnvironment["MEOW_UITEST_TRACKPAD_DISPLAYS"] = String(count)
+            app.launch()
+            let card = app.descendants(matching: .any)["videoOffStatus"].firstMatch
+            let turnOn = app.buttons["videoOffTurnOn"]
+            let useTrackpad = app.buttons["videoOffUseTrackpad"]
+            XCTAssertTrue(card.waitForExistence(timeout: 5))
+            XCTAssertTrue(turnOn.isHittable)
+            XCTAssertTrue(useTrackpad.isHittable)
+            let portrait = orientation == .portrait
+            let turnsVideoOn = count == 2 && !portrait
+            let name = "video-off-\(count)-\(portrait ? "portrait" : "landscape")"
+            snapshot("\(name)-with-choice")
+            switch (count, portrait) {
+            case (0, _):
+                app.buttons["Dismiss"].tap()
+            case (1, _):
+                useTrackpad.tap()
+            case (2, true):
+                card.swipeLeft()
+            default:
+                turnOn.tap()
+                XCTAssertTrue(app.staticTexts["uitestTrackpadVideoOn"].waitForExistence(timeout: 3))
+            }
+            XCTAssertTrue(card.waitForNonExistence(timeout: 3))
+            XCTAssertEqual(app.staticTexts["uitestTrackpadVideoOn"].exists, turnsVideoOn)
+            if !turnsVideoOn { snapshot("\(name)-surface") }
+            app.terminate()
+        }
+    }
+
+    @MainActor
     func testControlsTourPortrait() {
         XCUIDevice.shared.orientation = .portrait
         tour(prefix: "portrait")
+    }
+
+    @MainActor
+    func testTrackpadEdgeScrollTour() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for (mode, orientation) in [("automatic", UIDeviceOrientation.portrait), ("video", .landscapeLeft), ("hidden", .portrait)] {
+            XCUIDevice.shared.orientation = orientation
+            app = XCUIApplication()
+            app.launchEnvironment["MEOW_UITEST_TRACKPAD_DISPLAYS"] = "2"
+            app.launchEnvironment["MEOW_UITEST_EDGE_SCROLL"] = mode
+            app.launch()
+            XCTAssertTrue(app.descendants(matching: .any)["uitestTrackpadSurface"].firstMatch.waitForExistence(timeout: 5))
+            let vertical = element("edgeScrollVertical")
+            let horizontal = element("edgeScrollHorizontal")
+            XCTAssertEqual(vertical.exists, mode != "hidden")
+            XCTAssertEqual(horizontal.exists, mode == "automatic")
+            snapshot("edge-scroll-\(mode)-idle")
+            if mode == "automatic" {
+                let start = vertical.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.77))
+                let end = vertical.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+                start.press(forDuration: 0.3, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+                XCTAssertEqual(vertical.value as? String, "Expanded")
+                snapshot("edge-scroll-automatic-expanded")
+                start.press(forDuration: 0.04, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+                end.tap()
+                let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", "Expanded"), object: vertical)
+                XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 6), .completed)
+                snapshot("edge-scroll-automatic-settled")
+            }
+            app.terminate()
+        }
+    }
+
+    @MainActor
+    func testFloatingPaneQuickCloseInDemo() {
+        XCUIDevice.shared.orientation = .portrait
+        enterDemo()
+        let toggle = app.buttons["demoWindowViewToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        app.buttons["demoOpenFloating"].tap()
+        let pane = element("workspaceFloat")
+        XCTAssertTrue(pane.waitForExistence(timeout: 5))
+        let close = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "floatQuickClose-")).firstMatch
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(close.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(close.frame.height, 44)
+        snapshot("float-quick-close-idle")
+        close.tap()
+        XCTAssertEqual(close.label, "Confirm Close Floating Pane")
+        snapshot("float-quick-close-armed")
+
+        let reset = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Close Floating Pane"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [reset], timeout: 6), .completed)
+        close.doubleTap()
+        XCTAssertTrue(pane.waitForNonExistence(timeout: 5))
+        snapshot("float-quick-close-removed")
     }
 
     @MainActor

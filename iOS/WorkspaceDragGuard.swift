@@ -18,7 +18,15 @@ struct WorkspaceDragGuard: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(TouchWatch { touches = $0 }.allowsHitTesting(false).accessibilityHidden(true))
+            .background(
+                TouchWatch(onChange: { touches = $0 }, onTouchBegan: { point in
+                    if !model.floatCloseTargetsGlobal.contains(where: { $0.contains(point) }) {
+                        model.cancelFloatClose()
+                    }
+                })
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            )
             .background(GeometryReader { g in
                 Color.clear
                     .onAppear { width = g.size.width }
@@ -52,27 +60,37 @@ struct WorkspaceDragGuard: ViewModifier {
 /// any gesture: a recognizer that never recognizes, delays nothing and cancels nothing.
 private struct TouchWatch: UIViewRepresentable {
     let onChange: (Int) -> Void
+    /// Outside presses cancel a pending float close without taking the
+    /// receiver surface's touch end away from its pointer engine.
+    let onTouchBegan: (CGPoint) -> Void
 
     func makeUIView(context: Context) -> WatchView {
         let v = WatchView()
-        v.onChange = onChange
+        updateUIView(v, context: context)
         v.isUserInteractionEnabled = false
         return v
     }
 
-    func updateUIView(_ v: WatchView, context: Context) { v.onChange = onChange }
+    func updateUIView(_ v: WatchView, context: Context) {
+        v.onChange = onChange
+        v.onTouchBegan = onTouchBegan
+    }
 
     static func dismantleUIView(_ v: WatchView, coordinator: ()) { v.detach() }
 
     final class WatchView: UIView {
         var onChange: (Int) -> Void = { _ in }
+        var onTouchBegan: (CGPoint) -> Void = { _ in }
         private var recognizer: Counter?
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
             detach()
             guard let window else { return }
-            let r = Counter { [weak self] n in self?.onChange(n) }
+            let r = Counter(
+                report: { [weak self] n in self?.onChange(n) },
+                onTouchBegan: { [weak self] point in self?.onTouchBegan(point) }
+            )
             window.addGestureRecognizer(r)
             recognizer = r
         }
@@ -86,9 +104,11 @@ private struct TouchWatch: UIViewRepresentable {
     final class Counter: UIGestureRecognizer, UIGestureRecognizerDelegate {
         private var down = Set<ObjectIdentifier>()
         private let report: (Int) -> Void
+        private let onTouchBegan: (CGPoint) -> Void
 
-        init(report: @escaping (Int) -> Void) {
+        init(report: @escaping (Int) -> Void, onTouchBegan: @escaping (CGPoint) -> Void) {
             self.report = report
+            self.onTouchBegan = onTouchBegan
             super.init(target: nil, action: nil)
             cancelsTouchesInView = false
             delaysTouchesBegan = false
@@ -97,7 +117,10 @@ private struct TouchWatch: UIViewRepresentable {
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-            touches.forEach { down.insert(ObjectIdentifier($0)) }
+            for touch in touches {
+                down.insert(ObjectIdentifier(touch))
+                onTouchBegan(touch.location(in: view))
+            }
             report(down.count)
         }
         override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { lift(touches) }
