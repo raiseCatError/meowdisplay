@@ -243,6 +243,9 @@ enum CalculatorLanguage {
         "twenty": 20, "thirty": 30, "forty": 40, "fourty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
         "eighty": 80, "ninety": 90, "dozen": 12,
     ]
+    /// Spelled-out numbers stop here; larger ones are an overflow.
+    static let wordNumberLimit = 1_000_000_000_000_000
+
     private static let scales: [String: Int] = ["hundred": 100, "thousand": 1_000, "million": 1_000_000,
                                                 "billion": 1_000_000_000]
 
@@ -259,6 +262,7 @@ enum CalculatorLanguage {
             var consumed = 0
             var sawNumber = false
             var articled = false
+            var tooBig = false
             var cursor = index
             while cursor < words.count {
                 let word = words[cursor]
@@ -273,7 +277,14 @@ enum CalculatorLanguage {
                     current += value
                     sawNumber = true
                 } else if let scale = scales[word], sawNumber || articled {
-                    current = max(current, 1) * scale
+                    // Checked: "hundred hundred hundred …" must not overflow Int.
+                    let (product, overflow) = max(current, 1).multipliedReportingOverflow(by: scale)
+                    guard !overflow, product < Self.wordNumberLimit, total < Self.wordNumberLimit else {
+                        tooBig = true
+                        cursor = words.count
+                        break
+                    }
+                    current = product
                     sawNumber = true
                     if scale >= 1_000 { total += current; current = 0 }
                 } else if word == "and", sawNumber, cursor + 1 < words.count, units[words[cursor + 1]] != nil,
@@ -287,6 +298,12 @@ enum CalculatorLanguage {
                 }
                 cursor += 1
                 consumed = cursor - index
+            }
+            if tooBig {
+                // Out of range: an overflow, like any too-large result.
+                output.append("10^400")
+                index = words.count
+                continue
             }
             if sawNumber, consumed > 0 {
                 output.append(String(total + current))
@@ -314,6 +331,8 @@ enum CalculatorToken: Equatable {
     case number(Decimal)
     case identifier(String)
     case plus, minus, times, divide, power, percent, factorial, modulo
+    /// ² and ³: postfix, so 2²^3 is (2²)^3 and 3²! is (3²)!.
+    case square, cube
     case open, close
     case comma
 }
@@ -356,8 +375,7 @@ enum CalculatorLexer {
                 continue
             }
             if c == "²" || c == "³" {
-                tokens.append(.power)
-                tokens.append(.number(c == "²" ? 2 : 3))
+                tokens.append(c == "²" ? .square : .cube)
                 index += 1
                 continue
             }
@@ -489,9 +507,13 @@ struct CalculatorParser {
                 guard rhs != 0 else { throw CalculatorError.divisionByZero }
                 let quotient = LocalCalculatorFormat.rounded(value / rhs, scale: 0, mode: .down)
                 value = try CalculatorNumber.checked(value - quotient * rhs)
-            case .number, .identifier, .open:
+            case .identifier, .open:
                 // 2(3), 2π, (1)(2), 3 sin 30
                 value = try CalculatorNumber.checked(value * (try power()))
+            case .number:
+                // Two numbers side by side ("2.3.4", "12 4") are a typo,
+                // not a product.
+                throw CalculatorError.syntax
             default:
                 return value
             }
@@ -524,6 +546,9 @@ struct CalculatorParser {
             } else if token == .factorial {
                 index += 1
                 value = try Self.factorial(value)
+            } else if token == .square || token == .cube {
+                index += 1
+                value = try Self.raise(value, token == .square ? 2 : 3)
             } else {
                 break
             }
@@ -665,8 +690,9 @@ struct CalculatorParser {
 
     static func factorial(_ value: Decimal) throws -> Decimal {
         guard value >= 0, CalculatorNumber.isInteger(value) else { throw CalculatorError.domain }
+        // Compared as a Decimal first: a huge operand would wrap as an Int.
+        guard value <= 69 else { throw CalculatorError.overflow }
         let n = NSDecimalNumber(decimal: value).intValue
-        guard n <= 69 else { throw CalculatorError.overflow }
         var result: Decimal = 1
         if n > 1 { for k in 2...n { result *= Decimal(k) } }
         return result
@@ -717,9 +743,9 @@ enum CalculatorSheet {
             if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
                 if let assigns { context.variables[assigns] = value }
                 context.answer = value
-                let lower = source.lowercased()
-                // A sum line isn't added to the total it reports.
-                if !(lower.contains("sum") || lower.contains("total")) {
+                // A line that reads the running total isn't added to it;
+                // "subtotal" and other names that merely contain the word are.
+                if source.lowercased().range(of: #"\b(sum|total)\b"#, options: .regularExpression) == nil {
                     running = (running ?? 0) + value
                 }
                 results.append(CalculatorLineResult(value: value, assigns: assigns))

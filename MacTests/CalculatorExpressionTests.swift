@@ -189,4 +189,31 @@ final class CalculatorExpressionTests: XCTestCase {
         pad.use(42)
         XCTAssertEqual(pad.input, "1 + 42")
     }
+
+    // MARK: Review findings (PR 338)
+
+    func testEdgeCasesFromReview() {
+        XCTAssertEqual(CalculatorExpression.evaluate(String(repeating: "one hundred ", count: 1) + String(repeating: "hundred ", count: 30)),
+                       .failure(.overflow), "spelled-out overflow is an error, not a crash")
+        assertValue("2²^3", "64")
+        assertValue("3²!", "362880")
+        XCTAssertNil(value("2.3.4"), "a malformed number isn't a product")
+        XCTAssertEqual(CalculatorExpression.evaluate("fact(18446744073709551616)"), .failure(.overflow))
+        let results = CalculatorSheet.evaluate(lines: ["subtotal = 5", "subtotal + 2", "total"], angle: .degrees)
+        XCTAssertEqual(results.map(\.value), [5, 7, 12])
+    }
+
+    func testKeypadReusesTheExactSignedAnswer() {
+        XCTAssertEqual(keypad([.digit(3), .operation(.divide), .digit(7), .equals, .operation(.multiply), .digit(7), .equals])
+                        .currentValue.map { LocalCalculatorFormat.rounded($0, significantDigits: 15) }, 3)
+        XCTAssertEqual(keypad([.operation(.subtract), .digit(2), .equals, .square, .equals]).currentValue, 4)
+        XCTAssertEqual(keypad([.digit(2), .operation(.add), .digit(3), .equals, .clear, .operation(.multiply), .digit(2), .equals])
+                        .currentValue, 0, "after AC an operator starts from 0")
+        XCTAssertEqual(keypad([.operation(.subtract), .digit(5), .operation(.multiply), .equals]).currentValue, 25)
+        XCTAssertEqual(keypad([.digit(5), .operation(.subtract), .digit(3), .toggleSign, .equals, .equals]).currentValue, 11)
+        var pad = keypad([.digit(4), .operation(.add), .digit(1), .equals, .operation(.multiply), .digit(2)])
+        XCTAssertEqual(pad.displayInput(locale: Locale(identifier: "en_US")), "5 × 2", "the answer shows as its number")
+        pad.press(.equals)
+        XCTAssertEqual(pad.answeredExpression, "5 × 2")
+    }
 }

@@ -700,12 +700,12 @@ private struct LocalCalculatorKeypadView: View {
         var smallIsAnswer = false
         if model.failed {
             big = String(localized: "Error", comment: "Local calculator display after a division by zero or an overflow.")
-            small = model.input
+            small = model.keypad.displayInput(locale: locale)
         } else if model.showsAnswer {
             big = resultDisplay.text
             small = model.answeredExpression + " ="
         } else {
-            big = model.input.isEmpty ? LocalCalculatorFormat.display(0, locale: locale).text : model.input
+            big = model.input.isEmpty ? LocalCalculatorFormat.display(0, locale: locale).text : model.keypad.displayInput(locale: locale)
             if let preview = model.preview {
                 small = "= " + LocalCalculatorFormat.display(preview, locale: locale).text
                 smallIsAnswer = true
@@ -741,7 +741,7 @@ private struct LocalCalculatorKeypadView: View {
         .accessibilityLabel(Text("Result", comment: "Local calculator display, read with its number."))
         .accessibilityValue(Text(verbatim: model.showsAnswer || model.input.isEmpty || model.failed
                                     ? LocalCalculatorPanel.spoken(resultDisplay)
-                                    : model.input + (model.preview.map { ", = " + LocalCalculatorFormat.display($0, locale: locale).text } ?? "")))
+                                    : model.keypad.displayInput(locale: locale) + (model.preview.map { ", = " + LocalCalculatorFormat.display($0, locale: locale).text } ?? "")))
         .accessibilityAddTraits(.updatesFrequently)
         .accessibilityAction(named: Text("Delete", comment: "Local calculator: deletes the last digit typed.")) {
             press(.delete)

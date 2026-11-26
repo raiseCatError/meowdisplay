@@ -2425,6 +2425,10 @@ final class WorkspaceModel: ObservableObject {
     /// Where a dragged window or label would land (normalized picture point). Over a floating
     /// pane: that float (replace it, or swap with a dragged pane); a float being docked never
     /// lands on a float. Splits count the tree's panes only.
+    /// Each pane's tab row below its top (normalized), where the controls pushed it down; set by the
+    /// view that draws it, so drops land on the row as shown.
+    var tabRowOffsets: [String: Double] = [:]
+
     func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
         let f = frames
         // A float being docked is drawn only as its card: what's under its old frame counts.
@@ -2436,7 +2440,7 @@ final class WorkspaceModel: ObservableObject {
             return f.tiles[hit].map { .replace(tile: hit, preview: $0) }
         }
         let drop = WorkspaceGeometry.windowDrop(at: p, layout: layout, frames: f, size: size, labelHeight: labelHeight,
-                                                canSplit: layout.paneCount < capacity)
+                                                canSplit: layout.paneCount < capacity, tabRowOffsets: tabRowOffsets)
         // Docking never replaces a window: the middle of a pane adds it as a tab there.
         if case .float? = drag?.item, case .replace(let t, let r)? = drop { return .tab(tile: t, preview: r) }
         return drop
@@ -2457,6 +2461,13 @@ final class WorkspaceModel: ObservableObject {
             if saved.float(id).map({ $0.tuck == nil }) == true, let shown = arranged.float(id)?.tuck, next.floats[i].tuck == shown {
                 next.floats[i].tuck = nil
             }
+        }
+        // An edit that leaves the split tree as shown (a tab switch, a pane's view) keeps the saved
+        // ratios: ones fitted to this screen's minimums (`WorkspaceAdaptation.adapt`) aren't saved,
+        // so turning back restores the original arrangement.
+        if stacked.isEmpty, changed.root == arranged.root, saved.root != arranged.root,
+           saved.orderedTileIDs.filter({ !saved.isFloat($0) }) == next.orderedTileIDs.filter({ !next.isFloat($0) }) {
+            next.root = saved.root
         }
         history.record(saved)
         var updated = next
@@ -4441,6 +4452,12 @@ extension WorkspaceModel {
             if above.contains(where: { frames.tiles[$0].map(onScreen)?.contains(point) == true }) { continue }
             marks[id] = point
         }
+        // The Mac draws its full-size cursor in the frontmost pane under it (front float first,
+        // then the panes in order, as `WindowWorkspaceTargeting.cursorPlacement` does): no
+        // second, small arrow there.
+        let echoed = floats.reversed().first { marks[$0] != nil }
+            ?? layout.orderedTileIDs.first { !layout.isFloat($0) && marks[$0] != nil }
+        if let echoed { marks[echoed] = nil }
         return marks
     }
 }

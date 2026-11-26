@@ -127,31 +127,4 @@ final class RouteArbitrationTests: XCTestCase {
             RouteArbitration.decide(ownerTier: lanOwnerTier, targetTier: delayedRemoteRequestTier),
             .ignore, "the delayed Remote request must not replace the LAN session that already won")
     }
-
-    // MARK: - LocalRouteUpgrade
-
-    // The receiver's local Connect request lands after its Remote knock
-    // already started a Remote session: move that session to LAN/AWDL.
-    func testRemoteOwnerMovesToALocalRequest() {
-        XCTAssertTrue(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.remote),
-                                                        localTier: RoutePriority.tier(.lan)))
-        XCTAssertTrue(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.remote),
-                                                        localTier: RoutePriority.tier(.awdl)))
-    }
-
-    // A local or wired owner is never disturbed by a local request.
-    func testLocalOrWiredOwnerIsNotMoved() {
-        XCTAssertFalse(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.lan),
-                                                         localTier: RoutePriority.tier(.awdl)))
-        XCTAssertFalse(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.awdl),
-                                                         localTier: RoutePriority.tier(.lan)))
-        XCTAssertFalse(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.usb),
-                                                         localTier: RoutePriority.tier(.lan)))
-    }
-
-    // A request that is not better than Remote never moves a Remote owner.
-    func testRemoteOwnerIsNotMovedToAnotherRemoteRoute() {
-        XCTAssertFalse(LocalRouteUpgrade.shouldMoveOwner(ownerTier: RoutePriority.tier(.remote),
-                                                         localTier: RoutePriority.tier(.remote)))
-    }
 }

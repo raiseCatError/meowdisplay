@@ -609,6 +609,10 @@ struct WorkspaceChromeView: View {
         return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
     }
 
+    static func normalizedRowOffset(_ points: CGFloat, in picture: CGRect) -> Double {
+        picture.height > 0 ? Double(points / picture.height) : 0
+    }
+
     private func paneTitleRow(_ rect: CGRect) -> CGRect {
         WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls + railFrames)
     }
@@ -765,7 +769,9 @@ struct WorkspaceChromeView: View {
                 })
                 .padding(.leading, offset)
                 .padding(.top, drop)
-                .onDisappear { labelStripEnd[id] = nil }
+                .onAppear { model.tabRowOffsets[id] = Self.normalizedRowOffset(drop, in: model.pictureGlobal) }
+                .onChange(of: drop) { model.tabRowOffsets[id] = Self.normalizedRowOffset($0, in: model.pictureGlobal) }
+                .onDisappear { labelStripEnd[id] = nil; model.tabRowOffsets[id] = nil }
             }
             VStack(spacing: 6) {
                 windowFrameStatus(id)

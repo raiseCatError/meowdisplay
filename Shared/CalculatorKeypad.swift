@@ -43,8 +43,11 @@ struct CalculatorKeypad: Equatable {
     /// starts a new calculation while an operator continues from it.
     private(set) var showsAnswer = false
     private(set) var lastAnswer: Decimal?
-    /// The expression the shown answer came from.
+    /// The expression the shown answer came from, as shown.
     private(set) var answeredExpression = ""
+    /// The same, evaluable later (the answer token replaced by the exact
+    /// previous answer), for repeated =.
+    private(set) var answeredSource = ""
     private(set) var failed = false
     private(set) var history: [HistoryEntry] = []
     var angle: CalculatorAngleUnit = .degrees
@@ -103,6 +106,10 @@ struct CalculatorKeypad: Equatable {
 
     // MARK: Keypad editing
 
+    /// The token that stands for the last answer, exactly (not a rounded
+    /// copy), so 3 ÷ 7 = × 7 = is 3 and a committed −2 squares to 4.
+    static let answerToken = "ans"
+
     private mutating func append(_ text: String) {
         guard input.count + text.count <= Self.maximumInputLength else { return }
         input += text
@@ -116,20 +123,20 @@ struct CalculatorKeypad: Equatable {
         }
     }
 
-    /// An operator after an answer continues from it.
+    /// An operator after an answer continues from it, exactly.
     private mutating func continueFromAnswer() {
         guard showsAnswer else { return }
-        input = lastAnswer.map { LocalCalculatorFormat.copyText($0, locale: LocalCalculatorFormat.posix) } ?? ""
+        input = lastAnswer == nil ? "" : Self.answerToken
         showsAnswer = false
     }
 
     private mutating func appendOperator(_ symbol: String) {
         continueFromAnswer()
         if input.isEmpty {
-            // "− 5" starts a negative number; others start from 0 (or the
-            // last answer, like a calculator's display).
+            // "− 5" starts a negative number; others start from 0. After
+            // AC the last answer is only reachable through Ans.
             if symbol == "−" { input = "−"; return }
-            input = lastAnswer.map { LocalCalculatorFormat.copyText($0, locale: LocalCalculatorFormat.posix) } ?? "0"
+            input = "0"
         }
         // Another operator straight after one replaces it.
         let trimmed = input.trimmingCharacters(in: .whitespaces)
@@ -147,9 +154,20 @@ struct CalculatorKeypad: Equatable {
     }
 
     private mutating func toggleSign() {
-        if showsAnswer, let answer = lastAnswer {
-            lastAnswer = -answer
-            answeredExpression = "−(" + answeredExpression + ")"
+        if showsAnswer {
+            continueFromAnswer()
+            input = "−" + input
+            return
+        }
+        // The answer token and a parenthesised group flip as a whole.
+        if input.hasSuffix("(−\(Self.answerToken))") {
+            input.removeLast(Self.answerToken.count + 3)
+            input += Self.answerToken
+            return
+        }
+        if input.hasSuffix(Self.answerToken) {
+            input.removeLast(Self.answerToken.count)
+            input += "(−\(Self.answerToken))"
             return
         }
         guard let range = Self.lastNumberRange(in: input) else {
@@ -184,10 +202,11 @@ struct CalculatorKeypad: Equatable {
             input.removeLast(name.count + 1)
             return
         }
-        if input.hasSuffix("ans") { input.removeLast(3); return }
+        if input.hasSuffix(Self.answerToken) { input.removeLast(Self.answerToken.count); return }
         if !input.isEmpty { input.removeLast() }
     }
 
+    /// AC: a fresh calculation. The history and Ans stay.
     private mutating func clear() {
         input = ""
         showsAnswer = false
@@ -195,18 +214,19 @@ struct CalculatorKeypad: Equatable {
     }
 
     private mutating func equals() {
-        if showsAnswer, let step = repeatStep(), let answer = lastAnswer {
-            // = again repeats the last step: 2 + 3 = = → 8.
-            let expression = LocalCalculatorFormat.copyText(answer, locale: LocalCalculatorFormat.posix) + step
-            commit(expression)
+        if showsAnswer, lastAnswer != nil, let step = Self.lastStep(in: answeredSource) {
+            // = again repeats the last step: 2 + 3 = = → 8, 5 − −3 = = → 11.
+            commit(Self.answerToken + " " + step.operation + " " + step.operand)
             return
         }
-        guard !input.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        // = straight after an operator reuses the number before it (5 + = → 10).
         var expression = input.trimmingCharacters(in: .whitespaces)
-        for symbol in ["+", "−", "×", "÷"] where expression.hasSuffix(symbol) {
+        guard !expression.isEmpty else { return }
+        // = straight after an operator reuses the term before it, sign and
+        // all (5 + = → 10, −5 × = → 25).
+        for symbol in ["+", "−", "×", "÷"] where expression.hasSuffix(symbol) && expression != "−" {
             let left = String(expression.dropLast()).trimmingCharacters(in: .whitespaces)
-            if let operand = Self.lastNumber(in: left) { expression += " " + operand }
+            let operand = Self.lastStep(in: left)?.operand ?? left
+            if !operand.isEmpty { expression += " " + operand }
             break
         }
         commit(expression)
@@ -215,32 +235,70 @@ struct CalculatorKeypad: Equatable {
     private mutating func commit(_ expression: String) {
         switch CalculatorExpression.evaluate(expression, context: context) {
         case .success(let value):
+            answeredSource = expanded(expression)
+            answeredExpression = displayed(expression, locale: Locale.current)
             lastAnswer = value
-            answeredExpression = expression
             showsAnswer = true
             failed = false
-            history.append(HistoryEntry(expression: expression, value: value))
+            history.append(HistoryEntry(expression: answeredExpression, value: value))
             if history.count > Self.maximumHistory { history.removeFirst(history.count - Self.maximumHistory) }
         case .failure:
             failed = true
         }
     }
 
-    /// The last "op operand" of the expression just answered, when it is a
-    /// simple chain (2 + 3 → " + 3").
-    private func repeatStep() -> String? {
-        let expression = answeredExpression
-        guard let number = Self.lastNumberRange(in: expression) else { return nil }
-        let before = expression[..<number.lowerBound].trimmingCharacters(in: .whitespaces)
-        guard let op = ["+", "−", "×", "÷"].first(where: { before.hasSuffix($0) }), before.count > 1,
-              expression[number.upperBound...].trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-        return " \(op) " + expression[number]
+    /// The last binary operator at the top level of `expression` and the
+    /// term after it, as typed ("2 + 3 × −4" → "×", "−4").
+    static func lastStep(in expression: String) -> (operation: String, operand: String)? {
+        var depth = 0
+        var best: (operation: String, range: Range<String.Index>)?
+        var index = expression.startIndex
+        while index < expression.endIndex {
+            let c = expression[index]
+            if c == "(" { depth += 1 } else if c == ")" { depth -= 1 }
+            if depth == 0 {
+                for op in [" + ", " − ", " × ", " ÷ ", " mod "] where expression[index...].hasPrefix(op) {
+                    let end = expression.index(index, offsetBy: op.count)
+                    best = (op.trimmingCharacters(in: .whitespaces), index..<end)
+                }
+            }
+            index = expression.index(after: index)
+        }
+        guard let best else { return nil }
+        let operand = expression[best.range.upperBound...].trimmingCharacters(in: .whitespaces)
+        return operand.isEmpty ? nil : (best.operation, operand)
+    }
+
+    /// `expression` with the answer token replaced by the exact answer, so
+    /// it means the same after the next answer replaces this one.
+    private func expanded(_ expression: String) -> String {
+        guard let answer = lastAnswer else { return expression }
+        return Self.replacingAnswerToken(in: expression, with: "(" + answer.description + ")")
+    }
+
+    /// `expression` as shown: the answer token as its number.
+    func displayed(_ expression: String, locale: Locale) -> String {
+        guard let answer = lastAnswer, expression.contains(Self.answerToken) else { return expression }
+        let text = LocalCalculatorFormat.display(answer, locale: locale).text
+        return Self.replacingAnswerToken(in: expression, with: answer < 0 ? "(" + text + ")" : text)
+    }
+
+    /// The input as shown.
+    func displayInput(locale: Locale) -> String { displayed(input, locale: locale) }
+
+    static func replacingAnswerToken(in expression: String, with replacement: String) -> String {
+        expression.replacingOccurrences(of: #"\bans\b"#, with: NSRegularExpression.escapedTemplate(for: replacement),
+                                        options: .regularExpression)
     }
 
     /// Puts a history answer (or any value) into the calculation: it
-    /// replaces an empty input or an answer, or follows an operator.
+    /// replaces an empty input or an answer, or follows an operator. A
+    /// negative value goes in parentheses, so squaring it squares it.
     mutating func use(_ value: Decimal) {
-        let text = LocalCalculatorFormat.copyText(value, locale: LocalCalculatorFormat.posix)
+        // Exact when it's short enough to read; otherwise 15 digits.
+        let exact = value.magnitude.description
+        let digits = exact.count <= 20 ? exact : LocalCalculatorFormat.copyText(value.magnitude, locale: LocalCalculatorFormat.posix)
+        let text = value < 0 ? "(−" + digits + ")" : digits
         if showsAnswer || input.isEmpty {
             input = text
             showsAnswer = false

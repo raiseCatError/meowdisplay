@@ -1719,8 +1719,11 @@ enum WorkspaceGeometry {
     /// the pane's label strip adds it as a tab, a band along an edge splits the pane,
     /// the middle replaces the pane's window. `labelHeight` is the label strip's
     /// height normalized to the workspace.
+    /// `tabRowOffsets`: how far (normalized) a pane's tab row sits below its top, when the
+    /// controls pushed it down (`WorkspacePaneReach`); drops there still add a tab.
     static func windowDrop(at point: WorkspacePoint, layout: WorkspaceLayout, frames: WorkspaceFrames, size: WorkspaceSize,
-                           labelHeight: Double, canSplit: Bool) -> WorkspaceWindowDrop? {
+                           labelHeight: Double, canSplit: Bool,
+                           tabRowOffsets: [String: Double] = [:]) -> WorkspaceWindowDrop? {
         guard let index = frames.slots.firstIndex(where: { $0.contains(point) }) else { return nil }
         let slot = frames.slots[index]
         guard let occupant = WorkspaceLayout.slotID(layout.root, at: index) else { return nil }
@@ -1730,8 +1733,10 @@ enum WorkspaceGeometry {
         }
         guard let tile = occupant, layout.tiles[tile]?.source != nil else { return .emptySlot(index: index, preview: slot) }
         let strip = min(labelHeight * 1.6, slot.height * 0.25)
-        if point.y - slot.y <= strip {
-            return .tab(tile: tile, preview: WorkspaceRect(x: slot.x, y: slot.y, width: slot.width, height: strip))
+        let rowTop = slot.y + min(max(0, tabRowOffsets[tile] ?? 0), max(0, slot.height - strip))
+        if point.y - slot.y <= strip || (point.y >= rowTop && point.y - rowTop <= strip) {
+            let top = point.y - slot.y <= strip ? slot.y : rowTop
+            return .tab(tile: tile, preview: WorkspaceRect(x: slot.x, y: top, width: slot.width, height: strip))
         }
         if canSplit, case .split(let i, let edge, let preview)? = dropTarget(at: point, frames: frames, size: size, canSplit: true), i == index {
             return .split(index: i, edge: edge, preview: preview)

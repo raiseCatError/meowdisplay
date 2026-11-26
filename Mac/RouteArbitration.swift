@@ -51,15 +51,3 @@ enum RouteArbitration {
         return targetTier < ownerTier ? .migrate : .ignore
     }
 }
-
-/// A receiver's local Connect request (the Bonjour `cr` token) arriving
-/// while that receiver's session is already owned on Remote — typically
-/// because the Remote knock from the same Connect landed first. Only a
-/// Remote owner is moved, and only onto a strictly better local route; any
-/// other owner keeps the request "already handled" as before.
-enum LocalRouteUpgrade {
-    static func shouldMoveOwner(ownerTier: Int, localTier: Int) -> Bool {
-        ownerTier == RoutePriority.tier(.remote)
-            && RouteArbitration.decide(ownerTier: ownerTier, targetTier: localTier) == .migrate
-    }
-}
