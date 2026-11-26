@@ -15,15 +15,16 @@ the GitHub `ios-duo` job (`AdaptiveLayoutTests`, `DemoModeSmokeTests` and
 ## One-time setup (owner, in Xcode and App Store Connect)
 
 1. Generate the project locally with `./generate-local.sh` and open it in Xcode 27.1.
-2. In Xcode, choose **Integrate ▸ Create Workflow…** (Report navigator ▸ Cloud). Pick the
+2. In Xcode, choose **Integrate ▸ Create Workflow…** (or, in App Store Connect, Xcode Cloud ▸
+   the OpenSidecariOS product ▸ Workflows, which can edit workflows in the browser) (Report navigator ▸ Cloud). Pick the
    **OpenSidecariOS** app (`com.raisecaterror.meowdisplay.ios`). Xcode Cloud uses the app's App
    Store Connect record and asks to create it if it doesn't exist.
 3. Grant Xcode Cloud access to the GitHub repository when Xcode or App Store Connect asks. Only
    the account owner can do this step.
 4. Edit the new workflow:
-   - **Environment:** Xcode 27.1 (the version in `.xcode-version`), latest macOS. Under
-     **Environment Variables**, add `DEVELOPMENT_TEAM` = your team ID. The post-clone script stops
-     without it.
+   - **Environment:** Xcode 27.1 or later (`.xcode-version` names 27.1), latest macOS. No
+     environment variables are needed: the post-clone script signs for the team Xcode Cloud runs
+     as (`CI_TEAM_ID`). A `DEVELOPMENT_TEAM` variable overrides it.
    - **Start Conditions:** manual start, or the branches to cover (for example `dev` and
      `codex/*`). Duo runs are slow, so don't start one on every push to every branch.
    - **Actions:** remove the default Archive action and add a **Test** action. Platform iOS,

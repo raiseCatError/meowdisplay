@@ -1,12 +1,14 @@
 #!/bin/zsh
 # Xcode Cloud: the Xcode project is generated from project.yml and isn't in the repository, so
-# make it right after the clone, the way the GitHub ios-duo job does. The workflow's
-# DEVELOPMENT_TEAM environment variable signs it (Xcode Cloud manages the certificates); there is
-# no fallback team, so a missing variable fails here instead of producing an unsigned project.
+# make it right after the clone, the way the GitHub ios-duo job does. It is signed for the team
+# Xcode Cloud runs as (CI_TEAM_ID; Xcode Cloud manages the certificates), or for a
+# DEVELOPMENT_TEAM the workflow sets. With neither, it fails here instead of producing an
+# unsigned project.
 # docs/ci/xcode-cloud-duo.md has the workflow this serves.
 set -euo pipefail
 
-: "${DEVELOPMENT_TEAM:?Set DEVELOPMENT_TEAM in the Xcode Cloud workflow's environment}"
+DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-${CI_TEAM_ID:-}}"
+: "${DEVELOPMENT_TEAM:?No team: neither DEVELOPMENT_TEAM nor CI_TEAM_ID is set}"
 cd "${CI_PRIMARY_REPOSITORY_PATH:?not running in Xcode Cloud}"
 
 # The developers use XcodeGen 2.46. Homebrew installs its current one; a different version is
