@@ -71,7 +71,9 @@ struct ReceiverScreen: View {
     @StateObject private var controlStore: ReceiverControlStore
     @State private var scrollFeedback = TrackpadScrollFeedback()
     @State private var foregroundScrollRails = EdgeScrollRailLayer()
-    @State private var workspaceMenuOpen = false
+    #if DEBUG
+    @State private var chromeFixturePointerButtons: [String] = []
+    #endif
     @State private var trackpadPeekOpen = false
     @State private var showSettings = false
     @State private var showPairedToast = false
@@ -755,7 +757,7 @@ struct ReceiverScreen: View {
                 avoiding: occupiedControlFrames + divisions + occlusions + (stagePeekHandle.map { [$0] } ?? []))
             let railsVisible = inputReachesMac && !lockScreenShowing && !showSettings
                 && shownKeyboardRect == nil && !workspaceEditing && !workspaceOverlayOpen
-                && !(workspaceVisible && workspaceMenuOpen)
+                && !(workspaceVisible && controlStore.workspaceMenuOpen)
                 && !controlStore.moveViewActive && !controlStore.autoHidden
             let visibleRailFrames = railsVisible
                 ? scrollRailFrames.mapValues { $0.offsetBy(dx: -canvas.minX, dy: -canvas.minY) } : [:]
@@ -876,7 +878,12 @@ struct ReceiverScreen: View {
                                             onViewFullScreen: { _ = model.receiver.requestDisplayMode(lastDesktopMode) },
                                             localTrackpad: { id, rect in windowTrackpad(id, rect: rect) },
                                             floatCloseHapticsEnabled: controlStore.preferences.hapticsEnabled,
-                                            onMenuVisibilityChange: { workspaceMenuOpen = $0 })
+                                            onMenuVisibilityChange: { controlStore.setWorkspaceMenuOpen($0) },
+                                            appMenuBarAutoHidden: controlStore.autoHideIdle,
+                                            onAppMenuBarActivity: { active in
+                                                if active { controlStore.beginAutoHideActivity() }
+                                                else { controlStore.scheduleAutoHide() }
+                                            })
                             .onAppear { model.workspace.edgeReservationsGlobal = edgeReservations }
                             .onChange(of: edgeReservations) { model.workspace.edgeReservationsGlobal = $0 }
                             .onPreferenceChange(WorkspaceRailObstaclePreference.self) { occupiedWorkspaceChrome = $0 }
@@ -1175,11 +1182,6 @@ struct ReceiverScreen: View {
                 .transition(slideTransition(from: .top))
             }
         }
-        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { tap in
-            if !model.workspace.floatCloseTargetsGlobal.contains(where: { $0.contains(tap.location) }) {
-                model.workspace.cancelFloatClose()
-            }
-        })
         .task(id: trackpadGuideContext) {
             guard let inWindow = trackpadGuideContext else { model.receiver.stopTrackpadLayout(); return }
             while !Task.isCancelled {
@@ -1513,6 +1515,14 @@ struct ReceiverScreen: View {
                 workspace?.windowShowControlChanged(state)
                 if state != .allowed { workspace?.clearTrackpadPeek() }
             }
+            #if DEBUG
+            if Self.chromeFixtureEnabled {
+                // The inner geometry can prepare the simulated session before this
+                // callback is installed. Publish its grant again once it can be observed.
+                model.receiver.applyAllowInputStateChangeUpdate(.allowed)
+                return
+            }
+            #endif
             // Control is the Mac's decision for one session: never restored from a previous
             // launch (the stored preference said Allowed while the Mac would drop the input).
             controlStore.applySessionInputState(.off)
@@ -1521,9 +1531,6 @@ struct ReceiverScreen: View {
                 keyboardButtonEnabled: controlStore.preferences.keyboardButtonEnabled)
             model.receiver.announceReceiverPreferences(controlStore.preferences)
             model.receiver.primeAudioPreference(controlStore.preferences.audioPreferred)
-            #if DEBUG
-            if Self.chromeFixtureEnabled { return }
-            #endif
             model.start()
             // Show the first-run hint unless the device has connected before
             // or the user already dismissed it.
@@ -1551,6 +1558,8 @@ struct ReceiverScreen: View {
 extension ReceiverScreen {
     fileprivate static let chromeFixtureEnabled =
         ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_CHROME"] == "1"
+    private static let chromeFixtureTracesPointerButtons = chromeFixtureEnabled
+        && ProcessInfo.processInfo.environment["MEOW_UITEST_POINTER_BUTTONS"] == "1"
     fileprivate static let chromeFixtureRoomy = chromeFixtureEnabled
         && ProcessInfo.processInfo.environment["MEOW_UITEST_RECEIVER_ROOMY"] == "1"
     fileprivate static let chromeFixtureLandscapeSide: LandscapeTraySide? = chromeFixtureEnabled
@@ -1580,7 +1589,18 @@ extension ReceiverScreen {
         let workspace = model.workspace
         let receiver = model.receiver
         let features: Set<String> = [WindowWorkspaceWire.welcomeFeature, WindowWorkspaceWire.floatFeature,
-                                     WorkspaceTrackpadWire.feature, WireMessage.scrollAtCursor]
+                                     WorkspaceTrackpadWire.feature, WireMessage.scrollAtCursor,
+                                     AppMenuWire.welcomeFeature]
+        workspace.menus.send = { [weak menus = workspace.menus] request in
+            guard request["type"] as? String == WireMessage.menuRequest,
+                  let path = request["path"] as? [Int] else { return false }
+            let items = path.isEmpty ? [AppMenuEntry(index: 1, title: "File"), AppMenuEntry(index: 2, title: "Edit")]
+                : [AppMenuEntry(index: 1, title: "New Window")]
+            let reply = AppMenuReply(tile: request["tile"] as? String, path: path, app: "Google Chrome",
+                                    items: items, ok: true, error: nil, req: request["req"] as? Int)
+            Task { @MainActor in menus?.apply(reply) }
+            return true
+        }
         workspace.apply(.connected(peerID: "uitest-chrome-mac"))
         workspace.apply(.features(features))
         workspace.apply(.catalog(WorkspaceCatalogMessage(host: nil, windows: [Self.chromeFixtureWindow], apps: [], installed: [],
@@ -1592,6 +1612,11 @@ extension ReceiverScreen {
         receiver.noteWorkspaceEvent(.mode(window: true))
         receiver.applyMacProtocolVersionUpdate(WireProtocol.version)
         receiver.applyAllowInputStateChangeUpdate(.allowed)
+        if Self.chromeFixtureTracesPointerButtons {
+            receiver.onFixturePointerButton = { button in
+                DispatchQueue.main.async { chromeFixturePointerButtons.append(button) }
+            }
+        }
         setChromeFixtureVideo(true, viewport: viewport)
         var session = ReceiverSessionState()
         _ = session.connectionEstablished()
@@ -1602,6 +1627,10 @@ extension ReceiverScreen {
             $0.arrowKeysEnabled = true
             $0.naturalTouchHintShown = true
             $0.edgeScrolling = .off
+            if Self.chromeFixtureTracesPointerButtons {
+                $0.inputMode = .direct
+                $0.touchStyle = .natural
+            }
             if Self.chromeFixtureRoomy {
                 $0.padControlLayout = .strip
                 $0.padMainEdge = .trailing
@@ -1642,6 +1671,10 @@ extension ReceiverScreen {
                     Button("Set Rail Left") { setChromeFixtureRail(.left) }
                     Button("Set Rail Right") { setChromeFixtureRail(.right) }
                     Button("Toggle Controls") { controlStore.update { $0.trayCollapsed.toggle() } }
+                    Button("Enable Auto-hide") { controlStore.update { $0.autoHideEnabled = true } }
+                    if Self.chromeFixtureTracesPointerButtons {
+                        Button("Revoke Control") { model.receiver.applyAllowInputStateChangeUpdate(.off) }
+                    }
                 }
                 Button("Toggle Video") {
                     let enabled = !model.receiver.videoEnabled
@@ -1655,6 +1688,12 @@ extension ReceiverScreen {
                     .accessibilityLabel("Receiver QA")
             }
             .accessibilityIdentifier("receiverChromeFixtureMenu")
+            if Self.chromeFixtureTracesPointerButtons {
+                Text("Pointer button events")
+                    .accessibilityIdentifier("receiverChromeFixturePointerButtons")
+                    .accessibilityValue(chromeFixturePointerButtons.joined(separator: ";"))
+                    .allowsHitTesting(false)
+            }
             Spacer()
         }
         .padding(.top, 68)

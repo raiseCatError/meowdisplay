@@ -1169,6 +1169,21 @@ final class MacSenderInputRevocationTests: XCTestCase {
 
     // MARK: - No input without a grant
 
+    func testGrantedPointerClicksPreserveButtonOrderAndClickCount() async throws {
+        let sender = try XCTUnwrap(sender)
+        try await admitAndGrant(sender)
+        try await receive(sender, ["type": "pointer", "action": "move", "x": 0.4, "y": 0.4])
+        _ = events.take()
+
+        for count in 1...3 {
+            try await receive(sender, ["type": "pointer", "action": "down", "button": "left", "clickCount": count])
+            try await receive(sender, ["type": "pointer", "action": "up", "button": "left", "clickCount": count])
+            let click = events.take()
+            XCTAssertEqual(click.map(\.type), [.leftMouseDown, .leftMouseUp])
+            XCTAssertEqual(click.map(\.clickCount), [Int64(count), Int64(count)])
+        }
+    }
+
     func testAdmittedSessionWithoutAGrantPostsNothing() async throws {
         let sender = try XCTUnwrap(sender)
         _ = try await admit(sender)
@@ -1282,6 +1297,7 @@ final class RecordingEventSink: SyntheticEventSink, @unchecked Sendable {
         let flags: CGEventFlags
         /// A key-down posted as the key's own repeat.
         let isAutorepeat: Bool
+        let clickCount: Int64?
 
         init(_ event: CGEvent) {
             type = event.type
@@ -1290,9 +1306,15 @@ final class RecordingEventSink: SyntheticEventSink, @unchecked Sendable {
             case .keyDown, .keyUp, .flagsChanged:
                 keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 isAutorepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                clickCount = nil
+            case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp:
+                keyCode = nil
+                isAutorepeat = false
+                clickCount = event.getIntegerValueField(.mouseEventClickState)
             default:
                 keyCode = nil
                 isAutorepeat = false
+                clickCount = nil
             }
         }
 

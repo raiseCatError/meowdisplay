@@ -104,6 +104,8 @@ struct WorkspaceChromeView: View {
     var localTrackpad: ((String, CGRect) -> AnyView)?
     var floatCloseHapticsEnabled = true
     var onMenuVisibilityChange: ((Bool) -> Void)?
+    var appMenuBarAutoHidden = false
+    var onAppMenuBarActivity: ((Bool) -> Void)?
     @State private var confirmClose: String?
     @State private var confirmStageManagerOff = false
     @State private var lastDividerTranslation: CGSize = .zero
@@ -177,11 +179,6 @@ struct WorkspaceChromeView: View {
         }
         .onChange(of: menu != nil || appMenuOpen) { onMenuVisibilityChange?($0) }
         .onDisappear { onMenuVisibilityChange?(false) }
-        .simultaneousGesture(SpatialTapGesture(coordinateSpace: .global).onEnded { event in
-            if !model.floatCloseTargetsGlobal.contains(where: { $0.contains(event.location) }) {
-                model.cancelFloatClose()
-            }
-        })
         #endif
     }
 
@@ -209,14 +206,17 @@ struct WorkspaceChromeView: View {
                 if let id = model.active, model.activeTrackpadID == nil, !frames.isFloat(id), let rect = frames.tiles[id]?.onScreen(picture), !model.arranging, model.drag == nil,
                    multi || model.localFullscreen == id, !coveredByFloat(titleRow(rect, width: rect.width), frames) {
                     // The focused pane's app menus (control only), in its label row right after the labels.
-                    // While all its tabs are shown and leave too little room, the bar steps aside.
                     let pane = paneTitleRow(rect)
-                    if let end = labelStripEnd[id], end > pane.minX, end < pane.maxX {
-                        PaneMenuBar(menus: model.menus, pane: CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height),
-                                    top: pane.minY + 5, bounds: picture)
-                    } else {
-                        PaneMenuBar(menus: model.menus, pane: pane, top: pane.minY + 6 + 26 + 4, bounds: picture)
-                    }
+                    let end = labelStripEnd[id] ?? pane.minX
+                    let besideTitle = end > pane.minX && end < pane.maxX
+                        && (onAppMenuBarActivity == nil || pane.maxX - end + 2 >= PaneMenuBar.preferredWidth)
+                    let barPane = besideTitle
+                        ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
+                        : pane
+                    PaneMenuBar(menus: model.menus, pane: barPane,
+                                top: pane.minY + (besideTitle ? 5 : 36), bounds: picture,
+                                automaticallyHidden: appMenuBarAutoHidden,
+                                showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
                 }
                 let titles = titleZones(frames)
                 #if os(iOS)
@@ -725,7 +725,8 @@ struct WorkspaceChromeView: View {
                 let offset = max(0, row.minX - rect.minX - unsafeInsets(of: rect).leading)
                 AppMenuObserver(menus: model.menus) { menus in
                     // The menu bar shares this row (see `chrome`): its tabs fold to the shown one and "+N".
-                    let barHere = active && menus.barShown && menus.tile == id && !model.arranging && model.drag == nil
+                    let barHere = active && (menus.barShown || onAppMenuBarActivity != nil)
+                        && menus.tile == id && !model.arranging && model.drag == nil
                         && (multi || model.localFullscreen == id)
                     labelStrip(id: id, tile: tile, rect: row, active: active, sharesRow: barHere)
                 }
@@ -2284,12 +2285,26 @@ struct PaneMenuBar: View {
     let pane: CGRect
     let top: CGFloat
     let bounds: CGRect
+    var automaticallyHidden = false
+    var showsCollapsedAppName = false
+    var onActivity: ((Bool) -> Void)?
     @State private var titleFrames: [Int: CGRect] = [:]
+    @GestureState private var scrollingTitles = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    static let preferredWidth: CGFloat = 120
     private static let height: CGFloat = 28
+    private static let toggleSize: CGFloat = 44
+
+    private var expanded: Bool {
+        menus.barShown && (!automaticallyHidden || !menus.open.isEmpty || voiceOver)
+    }
 
     var body: some View {
-        if menus.barShown, menus.tile != nil, pane.width >= 120 {
+        let inlineToggle = onActivity != nil
+        if (menus.barShown || inlineToggle), menus.tile != nil,
+           pane.width >= (inlineToggle ? Self.toggleSize + 24 : Self.preferredWidth) {
             ZStack(alignment: .topLeading) {
                 if !menus.open.isEmpty {
                     // Tap anywhere else to close; nothing reaches the Mac while a menu is open.
@@ -2298,10 +2313,17 @@ struct PaneMenuBar: View {
                         .onTapGesture { menus.close() }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                bar
-                    .frame(width: pane.width - 12, height: Self.height)
-                    .workspaceRailObstacle()
-                    .offset(x: pane.minX + 6, y: top)
+                Group {
+                    if inlineToggle {
+                        inlineBar
+                    } else {
+                        titles
+                            .frame(width: pane.width - 12)
+                            .background(workspaceChip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .workspaceRailObstacle()
+                    }
+                }
+                .offset(x: pane.minX + 6, y: top)
                 if let level = menus.open.last {
                     let anchor = titleFrames[level.path.first ?? -1]?.minX ?? pane.minX + 6
                     let width: CGFloat = 270
@@ -2316,10 +2338,66 @@ struct PaneMenuBar: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .environment(\.colorScheme, .dark)
+            .onChange(of: scrollingTitles) { onActivity?($0) }
+            .onDisappear { if inlineToggle { menus.close() } }
         }
     }
 
-    private var bar: some View {
+    private var inlineBar: some View {
+        HStack(alignment: .top, spacing: 0) {
+            disclosure
+                .workspaceRailObstacle()
+            if expanded {
+                titles
+                    .frame(width: pane.width - 12 - Self.toggleSize)
+                    .simultaneousGesture(DragGesture(minimumDistance: 6)
+                        .updating($scrollingTitles) { _, scrolling, _ in scrolling = true })
+                    .workspaceRailObstacle()
+                    .transition(.opacity)
+            }
+        }
+        .background(alignment: .top) {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(workspaceChip)
+                .frame(height: Self.height)
+                .allowsHitTesting(false)
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: expanded)
+    }
+
+    private var disclosure: some View {
+        Button {
+            let show = !expanded
+            onActivity?(true)
+            if !show { menus.close() }
+            if show != menus.barShown { menus.barShown = show }
+            onActivity?(false)
+        } label: {
+            HStack(spacing: 0) {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: Self.toggleSize, height: Self.height)
+                if !expanded, showsCollapsedAppName, !menus.app.isEmpty {
+                    Text(menus.app)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: max(0, min(120, pane.width - Self.toggleSize - 20)), alignment: .leading)
+                        .padding(.trailing, 8)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .transition(.opacity)
+                }
+            }
+            .foregroundStyle(.white)
+            .frame(height: Self.toggleSize, alignment: .top)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(expanded ? Text("Hide App Menu Bar") : Text("Show App Menu Bar"))
+        .accessibilityIdentifier("paneMenuBarToggle")
+    }
+
+    private var titles: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
                 // The app's own menu comes first and is bold, as on a Mac; its name alone while loading or unavailable.
@@ -2350,7 +2428,7 @@ struct PaneMenuBar: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 2)
         }
-        .background(workspaceChip, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(height: Self.height)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("\(menus.app) menus"))
     }

@@ -573,6 +573,25 @@ extension WindowWorkspaceTargetingTests {
                                     normalized: CGPoint(x: x / 2000, y: y / 1000), time: time))
     }
 
+    func testNaturalFirstTapFocusesInactivePaneAndReleasesExactlyOneLeftClick() {
+        var targeting = naturalTiles()
+        _ = targeting.resolve(.down, at: .init(x: 0.25, y: 0.5))
+        _ = targeting.resolve(.up, at: .init(x: 0.25, y: 0.5))
+        XCTAssertEqual(targeting.activeTile, "a")
+
+        let engine = PointerGestureEngine()
+        engine.setTouchStyle(.natural)
+        XCTAssertTrue(touch(engine, .began, 1500, 500, 0).isEmpty)
+        let click = touch(engine, .ended, 1500, 500, 0.06)
+        XCTAssertEqual(click, [.moveAbsolute(x: 0.75, y: 0.5),
+                               .mouseDown(button: .left, clickCount: 1),
+                               .mouseUp(button: .left, clickCount: 1)])
+        XCTAssertEqual(route(click, &targeting), [.hover(nil), .down("b"), .up("b")])
+        XCTAssertEqual(targeting.activeTile, "b")
+        XCTAssertNil(targeting.boundTile)
+        XCTAssertNil(engine.heldMouseButton)
+    }
+
     func testNaturalScrollStaysInTheTouchedTileEvenWhenInactiveAndTheFingerCrossesTiles() {
         var t = naturalTiles()
         _ = t.resolve(.down, at: .init(x: 0.25, y: 0.5)); _ = t.resolve(.up, at: .init(x: 0.25, y: 0.5))

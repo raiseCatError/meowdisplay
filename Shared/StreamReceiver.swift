@@ -3570,7 +3570,18 @@ final class StreamReceiver: ObservableObject {
 
     /// `keyboard`, `touch` and `pointer` messages. Tagging happens in `sendUIControl`, for every
     /// input family alike (`LockScreenInputTagState`).
+    #if DEBUG && os(iOS)
+    @MainActor var onFixturePointerButton: ((String) -> Void)?
+    #endif
+
     @MainActor private func sendTaggedInput(_ message: [String: Any]) {
+        #if DEBUG && os(iOS)
+        if let onFixturePointerButton, message["type"] as? String == "pointer",
+           let action = message["action"] as? String, let button = message["button"] as? String,
+           let count = message["clickCount"] as? Int {
+            onFixturePointerButton("\(action) \(button) \(count)")
+        }
+        #endif
         sendUIControl(message)
     }
 

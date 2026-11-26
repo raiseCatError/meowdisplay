@@ -28,6 +28,129 @@ final class AdaptiveLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testNaturalTouchClicksWithForegroundRailsAndTrackpadTab() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_POINTER_BUTTONS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let fixture = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(fixture.waitForExistence(timeout: 10))
+        let window = app.windows.firstMatch
+        let surface = window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.48))
+        let buttons = app.staticTexts["receiverChromeFixturePointerButtons"]
+        let leftClick = "down left 1;up left 1"
+
+        surface.tap()
+        XCTAssertTrue(waitUntil { buttons.value as? String == leftClick }, "\(buttons.value ?? "")")
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Set Rail Right"].tap()
+        let rail = app.descendants(matching: .any)["edgeScrollVertical"].firstMatch
+        XCTAssertTrue(rail.waitForExistence(timeout: 5))
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Trackpad Tab"].tap()
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Show Full Desktop"].tap()
+
+        let beforeDoubleTap = buttons.value as? String ?? ""
+        XCTAssertEqual(beforeDoubleTap, leftClick, "Local fixture controls must not click the Mac")
+        surface.doubleTap()
+        let doubleTap = leftClick + ";" + leftClick + ";down left 2;up left 2"
+        XCTAssertTrue(waitUntil { buttons.value as? String == doubleTap }, "\(buttons.value ?? "")")
+
+        surface.press(forDuration: 0.7)
+        let afterHold = doubleTap + ";down right 1;up right 1"
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterHold }, "\(buttons.value ?? "")")
+
+        let dragEnd = window.coordinate(withNormalizedOffset: CGVector(dx: 0.68, dy: 0.54))
+        surface.press(forDuration: 0.32, thenDragTo: dragEnd)
+        let afterDrag = afterHold + ";down left 1;up left 0"
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterDrag }, "\(buttons.value ?? "")")
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Revoke Control"].tap()
+        XCTAssertTrue(waitUntil { !rail.exists })
+        surface.tap()
+        XCTAssertEqual(buttons.value as? String, afterDrag, "Revoked touches must stay local")
+    }
+
+    @MainActor
+    func testAppMenuBarCanCollapseAndFollowsControlInactivity() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchEnvironment["MEOW_UITEST_RECEIVER_CHROME"] = "1"
+        app.launchEnvironment["MEOW_UITEST_POINTER_BUTTONS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let fixture = app.buttons["receiverChromeFixtureMenu"]
+        XCTAssertTrue(fixture.waitForExistence(timeout: 10))
+        fixture.tap()
+        app.buttons["Panes"].tap()
+        app.buttons["Add Google Chrome Pane"].tap()
+
+        let toggle = app.buttons["paneMenuBarToggle"]
+        let file = app.buttons["File"]
+        let settings = app.descendants(matching: .any)["Settings"].firstMatch
+        let chromePane = app.descendants(matching: .any).matching(identifier: "workspacePane").matching(
+            NSPredicate(format: "label CONTAINS %@", "Google Chrome")).firstMatch
+        let chromeSurface = chromePane.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let buttons = app.staticTexts["receiverChromeFixturePointerButtons"]
+        let leftClick = "down left 1;up left 1"
+        XCTAssertTrue(file.waitForExistence(timeout: 5))
+        chromeSurface.tap()
+        XCTAssertTrue(waitUntil { buttons.value as? String == leftClick }, "\(buttons.value ?? "")")
+        keep(app, "app-menu-bar-expanded")
+        XCTAssertEqual(toggle.label, "Hide App Menu Bar")
+        let menuAnchor = toggle.frame.minX
+        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        XCTAssertEqual(file.frame.minY, toggle.frame.minY, accuracy: 10)
+        XCTAssertGreaterThanOrEqual(file.frame.midX, toggle.frame.maxX)
+        XCTAssertLessThan(file.frame.minX - toggle.frame.maxX, 16)
+        toggle.tap()
+        XCTAssertFalse(file.exists)
+        XCTAssertEqual(toggle.label, "Show App Menu Bar")
+        XCTAssertEqual(toggle.frame.minX, menuAnchor, accuracy: 1,
+                       "Collapsing the menu keeps the affordance beside the app")
+        XCTAssertLessThan(toggle.frame.width, chromePane.frame.width / 2,
+                          "The collapsed button uses only its own compact hit area")
+        keep(app, "app-menu-bar-manually-collapsed")
+        chromeSurface.tap()
+        XCTAssertFalse(file.exists, "A manual collapse survives activity on the Mac surface")
+        let afterManualCollapse = leftClick + ";" + leftClick
+        XCTAssertTrue(waitUntil { buttons.value as? String == afterManualCollapse }, "\(buttons.value ?? "")")
+        toggle.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 5))
+
+        fixture.tap()
+        app.buttons["Controls"].tap()
+        app.buttons["Enable Auto-hide"].tap()
+        file.tap()
+        let submenu = app.buttons["New Window"]
+        XCTAssertTrue(submenu.waitForExistence(timeout: 5))
+        let openMenuDisappeared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                                            object: submenu)
+        XCTAssertEqual(XCTWaiter.wait(for: [openMenuDisappeared], timeout: 10), .timedOut)
+        submenu.tap()
+        XCTAssertTrue(waitUntil(15) { !file.exists && !settings.isHittable })
+        XCTAssertTrue(toggle.isHittable)
+        keep(app, "app-menu-bar-auto-hidden")
+        XCTAssertEqual(buttons.value as? String, afterManualCollapse, "Local menus must not click the Mac")
+
+        chromeSurface.tap()
+        XCTAssertTrue(waitUntil { file.isHittable && settings.isHittable })
+        XCTAssertEqual(buttons.value as? String, afterManualCollapse + ";" + leftClick,
+                       "The touch that reveals the menu must reach the Mac")
+        XCTAssertEqual(toggle.label, "Hide App Menu Bar")
+    }
+
+    @MainActor
     func testRoomyPhoneUsesTheIPhoneTrayAcrossTheFullCanvas() throws {
         try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "iPad offers a docked Strip")
         XCUIDevice.shared.orientation = .portrait
@@ -155,8 +278,13 @@ final class AdaptiveLayoutTests: XCTestCase {
 
         let prefix = "receiver-chrome-\(orientation.rawValue)"
         let original = frames()
+        for control in ["Zoom In", "Zoom Out", "Redo", "Return", "Arrow Keys"] {
+            guard let frame = original[control] else { continue }
+            XCTAssertGreaterThanOrEqual(frame.width, 44, "\(control) needs a full touch target")
+            XCTAssertGreaterThanOrEqual(frame.height, 44, "\(control) needs a full touch target")
+        }
         if let redo = original["Redo"], let returnKey = original["Return"] {
-            XCTAssertFalse(redo.intersects(returnKey), "Redo and Return must have separate hit targets")
+            XCTAssertTrue(redo.intersection(returnKey).isEmpty, "Redo and Return must have separate hit targets")
         }
         let canvas = picture.frame
         var moved: [String] = []
