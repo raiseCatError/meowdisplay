@@ -32,8 +32,18 @@ import UIKit.UIGestureRecognizerSubclass
 
     @Published private(set) var samples: [Sample] = []
     @Published private(set) var taps: [Tap] = []
-    /// Where touches count, in global coordinates (the Trackpad's own areas).
+    /// Where touches count, in the watcher's own coordinates (the Trackpad's own areas); empty:
+    /// all of the watcher (`TrackpadTouchTrailWatch`). Tested against the watcher view itself on
+    /// each touch, never a frame stored once: a pane that moved or appeared at zero size first
+    /// (switching panes) keeps its trail.
     var regions: [CGRect] = []
+
+    /// Whether a touch at `local` (the watcher's coordinates, inside `bounds`) is on the Trackpad.
+    nonisolated static func accepts(_ local: CGPoint, bounds: CGRect, regions: [CGRect]) -> Bool {
+        guard bounds.width > 0, bounds.height > 0, bounds.contains(local) else { return false }
+        let areas = regions.filter { $0.width > 0 && $0.height > 0 }
+        return areas.isEmpty || areas.contains { $0.contains(local) }
+    }
 
     private struct Stroke {
         let id: Int
@@ -48,8 +58,8 @@ import UIKit.UIGestureRecognizerSubclass
 
     var isActive: Bool { !samples.isEmpty || !taps.isEmpty }
 
+    /// A touch began at `point` (global) on the Trackpad (the watcher checked `accepts`).
     func began(_ touch: ObjectIdentifier, at point: CGPoint, time: TimeInterval) {
-        guard regions.contains(where: { $0.contains(point) }) else { return }
         nextStroke += 1
         strokes[touch] = Stroke(id: nextStroke, start: point, began: time)
         append(Sample(point: point, time: time, stroke: nextStroke))
@@ -184,7 +194,10 @@ struct TrackpadTouchTrailWatch: UIViewRepresentable {
             super.didMoveToWindow()
             detach()
             guard let window else { return }
-            let r = Watcher { [weak self] in self?.trail }
+            let r = Watcher(trail: { [weak self] in self?.trail }, accepts: { [weak self] touch in
+                guard let self, self.window != nil, let trail = self.trail else { return false }
+                return TrackpadTouchTrail.accepts(touch.location(in: self), bounds: self.bounds, regions: trail.regions)
+            })
             window.addGestureRecognizer(r)
             recognizer = r
         }
@@ -197,10 +210,12 @@ struct TrackpadTouchTrailWatch: UIViewRepresentable {
 
     final class Watcher: UIGestureRecognizer, UIGestureRecognizerDelegate {
         private let trail: () -> TrackpadTouchTrail?
+        private let accepts: (UITouch) -> Bool
         private var down = Set<ObjectIdentifier>()
 
-        init(trail: @escaping () -> TrackpadTouchTrail?) {
+        init(trail: @escaping () -> TrackpadTouchTrail?, accepts: @escaping (UITouch) -> Bool) {
             self.trail = trail
+            self.accepts = accepts
             super.init(target: nil, action: nil)
             cancelsTouchesInView = false
             delaysTouchesBegan = false
@@ -209,7 +224,7 @@ struct TrackpadTouchTrailWatch: UIViewRepresentable {
         }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-            for touch in touches where touch.type == .direct {
+            for touch in touches where touch.type == .direct && accepts(touch) {
                 down.insert(ObjectIdentifier(touch))
                 trail()?.began(ObjectIdentifier(touch), at: touch.location(in: nil), time: Self.now)
             }

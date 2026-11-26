@@ -507,4 +507,49 @@ final class WindowWorkspaceTests: XCTestCase {
         let full = WorkspaceGeometry.windowDrop(at: .init(x: 0.95, y: 0.5), layout: l, frames: f, size: size, labelHeight: 0.05, canSplit: false)
         if case .replace("t", _)? = full {} else { XCTFail("no room for another pane: replace") }
     }
+
+    // MARK: - Panes' tabs stay reachable (owner QA, 2.2 round 2)
+
+    func testAPanesTabsStepBelowAControlAcrossItsTop() throws {
+        let pane = WorkspaceRect(x: 0, y: 0, width: 400, height: 300)
+        let tray = WorkspaceRect(x: 0, y: 0, width: 400, height: 60)
+        let row = try XCTUnwrap(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [tray]))
+        XCTAssertGreaterThanOrEqual(row.y, tray.maxY + WorkspacePaneReach.gap - 1e-9)
+        XCTAssertLessThanOrEqual(row.maxY, pane.maxY)
+        // Beside a small control, on the top row as before.
+        let zoom = WorkspaceRect(x: 10, y: 10, width: 40, height: 40)
+        XCTAssertEqual(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [zoom])?.y, 0)
+        XCTAssertNil(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [WorkspaceRect(x: -10, y: -10, width: 500, height: 400)]),
+                     "covered: no row")
+    }
+
+    func testADividerStopsBeforeAPanesTabsGoUnderTheTray() throws {
+        let size = WorkspaceSize(width: 400, height: 800)
+        let layout = WorkspaceLayout(root: .split(.vertical, [.slot("t0"), .slot("t1")], [0.5, 0.5]),
+                                     tiles: Dictionary(uniqueKeysWithValues: tiles(2).map { ($0.id, $0) }))
+        let divider = try XCTUnwrap(WorkspaceGeometry.frames(for: layout, in: size).dividers.first)
+        let tray = WorkspaceRect(x: 0, y: 600, width: 400, height: 200)
+        let plain = WorkspaceGeometry.resizing(layout, divider: divider, delta: 0.4, in: size)
+        XCTAssertFalse(WorkspacePaneReach.unreachable(plain, in: size, safe: nil, avoiding: [tray]).isEmpty, "the old limit hid t1's tabs")
+        let kept = WorkspacePaneReach.resizing(layout, divider: divider, delta: 0.4, in: size, safe: nil, avoiding: [tray])
+        XCTAssertTrue(WorkspacePaneReach.unreachable(kept, in: size, safe: nil, avoiding: [tray]).isEmpty)
+        let lower = try XCTUnwrap(WorkspaceGeometry.frames(for: kept, in: size).tiles["t1"])
+        XCTAssertGreaterThan(lower.y * size.height, 450, "moved as far as it can")
+        XCTAssertLessThanOrEqual(lower.y * size.height + WorkspacePaneReach.titleHeight, tray.y - WorkspacePaneReach.gap + 1e-6)
+        XCTAssertEqual(WorkspacePaneReach.resizing(layout, divider: divider, delta: 0.4, in: size, safe: nil, avoiding: []), plain,
+                       "no controls: as before")
+    }
+
+    func testPanesKeepTheirMinimumAfterTheScreenTurns() throws {
+        let layout = WorkspaceLayout(root: .split(.horizontal, [.slot("t0"), .slot("t1")], [0.85, 0.15]),
+                                     tiles: Dictionary(uniqueKeysWithValues: tiles(2).map { ($0.id, $0) }))
+        let wide = WorkspaceSize(width: 844, height: 390), narrow = WorkspaceSize(width: 390, height: 844)
+        XCTAssertEqual(WorkspaceAdaptation.adapt(layout, to: wide, active: nil).visible, layout, "fits: unchanged")
+        XCTAssertFalse(WorkspaceGeometry.meetsMinimums(layout, in: narrow))
+        let turned = WorkspaceAdaptation.adapt(layout, to: narrow, active: nil).visible
+        XCTAssertTrue(WorkspaceGeometry.meetsMinimums(turned, in: narrow))
+        XCTAssertEqual(Set(turned.orderedTileIDs), ["t0", "t1"])
+        let t1 = try XCTUnwrap(WorkspaceGeometry.frames(for: turned, in: narrow).tiles["t1"])
+        XCTAssertEqual(t1.width * narrow.width, WorkspaceGeometry.minimumTile.width, accuracy: 0.5, "moved the least")
+    }
 }

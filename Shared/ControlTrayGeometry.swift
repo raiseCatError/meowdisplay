@@ -1020,9 +1020,18 @@ enum WorkspaceOverlayPlacement {
     static func paneTitleRow(pane: CGRect, safe: CGRect?, avoiding controls: [CGRect]) -> CGRect {
         let area = usable(picture: pane, safe: safe)
         let row = CGRect(x: area.minX, y: area.minY, width: area.width, height: min(area.height, paneTitleHeight))
-        let obstacles = controls.map { $0.insetBy(dx: -gap, dy: -gap) }.filter { $0.intersects(row) }
-        return ControlPlacementArea.segments(of: row, removing: obstacles, horizontal: true)
-            .first { $0.width >= min(160, row.width) } ?? row
+        // The top row's first clear run, else one lower in the pane, below the controls in the
+        // way (`WorkspacePaneReach`): the tabs are never left under a tray while room is left.
+        func rect(_ r: CGRect) -> WorkspaceRect { WorkspaceRect(x: Double(r.minX), y: Double(r.minY), width: Double(r.width), height: Double(r.height)) }
+        let safeRect = safe.flatMap { s -> WorkspaceRect? in
+            let i = pane.intersection(s)
+            return i.isNull || i.isEmpty ? nil : rect(s)
+        }
+        if let r = WorkspacePaneReach.titleRow(pane: rect(pane), safe: safeRect,
+                                               avoiding: controls.filter { !$0.isNull && !$0.isEmpty }.map(rect)) {
+            return CGRect(x: r.x, y: r.y, width: r.width, height: r.height)
+        }
+        return row
     }
 
     /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below

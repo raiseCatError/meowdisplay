@@ -374,4 +374,13 @@ final class WindowOffPaneCursorTests: XCTestCase {
         XCTAssertNil(t.offPaneCursor(forGlobal: CGPoint(x: 2000, y: 500)), "two panes, none active: no locator")
         XCTAssertNil(onePane().offPaneCursor(forGlobal: CGPoint(x: CGFloat.nan, y: 0)))
     }
+
+    func testATrackpadPaneInUseReportsTheRealCursor() {
+        let hold = WindowWorkspaceEngine.desktopTrackpadHold
+        XCTAssertTrue(WindowWorkspaceEngine.desktopTrackpadActive(lastInput: 10, now: 10))
+        XCTAssertTrue(WindowWorkspaceEngine.desktopTrackpadActive(lastInput: 10, now: 10 + hold))
+        XCTAssertFalse(WindowWorkspaceEngine.desktopTrackpadActive(lastInput: 10, now: 10 + hold + 0.01), "idle: marks stay put")
+        XCTAssertFalse(WindowWorkspaceEngine.desktopTrackpadActive(lastInput: -.infinity, now: 10), "never used")
+        XCTAssertFalse(WindowWorkspaceEngine.desktopTrackpadActive(lastInput: 20, now: 10))
+    }
 }

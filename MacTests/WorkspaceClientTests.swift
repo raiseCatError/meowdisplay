@@ -1293,4 +1293,17 @@ final class OverviewPaneReceiverTests: XCTestCase {
         XCTAssertEqual(inOverview.width / inOverview.height, 0.75, accuracy: 1e-9, "its shape is kept")
         XCTAssertEqual(PaneCursorSizing.bounded(CGSize(width: 30, height: 40), inOverview: true), CGSize(width: 30, height: 40))
     }
+
+    func testTrackpadFocusFollowsTheTrackpadTab() {
+        let host = "mac-a"
+        let l = WorkspaceLayout(preset: .sideBySide, tiles: [
+            WorkspaceTile(id: "w1", source: WorkspaceSource(host: host, windowID: 10)),
+            WorkspaceTile(id: "w2", source: .trackpad(host: host)),
+        ])
+        XCTAssertEqual(WorkspaceModel.reconciledTrackpadFocus("w2", in: l), "w2")
+        XCTAssertEqual(WorkspaceModel.reconciledTrackpadFocus("w1", in: l), "w2", "its tab moved to another pane")
+        XCTAssertNil(WorkspaceModel.reconciledTrackpadFocus(nil, in: l), "never focused: the Mac's focus")
+        let none = WorkspaceLayout(preset: .sideBySide, tiles: [WorkspaceTile(id: "w1", source: WorkspaceSource(host: host, windowID: 10))])
+        XCTAssertNil(WorkspaceModel.reconciledTrackpadFocus("w2", in: none))
+    }
 }

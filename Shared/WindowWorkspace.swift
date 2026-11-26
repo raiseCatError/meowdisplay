@@ -1775,6 +1775,41 @@ enum WorkspaceGeometry {
     }
 
     /// Smallest extent (points) a subtree needs along `axis`.
+    /// Whether every pane of the tree is at least `minimumTile` here (half a point of slack).
+    static func meetsMinimums(_ layout: WorkspaceLayout, in size: WorkspaceSize, hinge: WorkspaceHinge? = nil) -> Bool {
+        let frames = frames(for: layout, in: size, hinge: hinge)
+        return frames.tiles.allSatisfy { id, r in
+            frames.isFloat(id) || (r.width * size.width >= minimumTile.width - 0.5 && r.height * size.height >= minimumTile.height - 0.5)
+        }
+    }
+
+    /// The tree with each split's ratios moved the least for every pane to keep `minimumTile` in
+    /// this space (a layout made on a wider screen, then turned): shares above their minimum give
+    /// up room in proportion to what they have to spare. A split whose children can't all fit is
+    /// left as it is.
+    static func fittingMinimums(_ layout: WorkspaceLayout, in size: WorkspaceSize) -> WorkspaceLayout {
+        guard size.width > 0, size.height > 0, layout.maximized == nil else { return layout }
+        func fit(_ node: WorkspaceNode, rect: WorkspaceRect) -> WorkspaceNode {
+            guard case .split(let axis, var children, var ratios) = node, ratios.count == children.count else { return node }
+            let extent = axis == .horizontal ? rect.width * size.width : rect.height * size.height
+            let mins = children.map { minimumExtent($0, axis: axis) / max(extent, 1e-9) }
+            if extent > 0, mins.reduce(0, +) <= 1 + 1e-9, zip(ratios, mins).contains(where: { $0 < $1 - 1e-9 }) {
+                let need = zip(ratios, mins).map { max($1 - $0, 0) }.reduce(0, +)
+                let spare = zip(ratios, mins).map { max($0 - $1, 0) }
+                let total = spare.reduce(0, +)
+                if total > 0 {
+                    ratios = ratios.indices.map { i in ratios[i] < mins[i] ? mins[i] : ratios[i] - need * spare[i] / total }
+                }
+            }
+            let bounds = splitBounds(axis: axis, rect: rect, ratios: ratios, hinge: nil)
+            for i in children.indices { children[i] = fit(children[i], rect: bounds[i]) }
+            return .split(axis, children, ratios)
+        }
+        var copy = layout
+        copy.root = fit(layout.root, rect: .unit)
+        return copy
+    }
+
     static func minimumExtent(_ node: WorkspaceNode, axis: WorkspaceAxis) -> Double {
         switch node {
         case .slot: return axis == .horizontal ? minimumTile.width : minimumTile.height
@@ -1782,6 +1817,90 @@ enum WorkspaceGeometry {
             let mins = children.map { minimumExtent($0, axis: axis) }
             return a == axis ? mins.reduce(0, +) : (mins.max() ?? 0)
         }
+    }
+}
+
+// MARK: - Keeping panes' tabs reachable
+
+/// Every pane's tab row stays touchable: clear of the receiver's controls (the control tray, the
+/// Function Tray, the keypad, the keyboard, folds), so it can always be selected, dragged
+/// elsewhere or removed, and the dividers beside it held (owner QA, 2.2 round 2). Points, or any
+/// one space for all arguments.
+enum WorkspacePaneReach {
+    /// A pane's label strip: the labels (26) and its padding.
+    static let titleHeight = 40.0
+    /// The clear run a tab row prefers (the first tabs and their gaps)…
+    static let titleWidth = 160.0
+    /// …and the least it settles for (one 44 pt tab and a gap) before giving up.
+    static let minimumTitleWidth = 60.0
+    /// Kept between a tab row and a control.
+    static let gap = 8.0
+
+    private static func valid(_ r: WorkspaceRect) -> Bool {
+        r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].allSatisfy(\.isFinite)
+    }
+
+    /// The clear runs of `row` along x, with `cuts` removed.
+    static func segments(of row: WorkspaceRect, removing cuts: [WorkspaceRect]) -> [WorkspaceRect] {
+        var pieces = [(row.x, row.maxX)]
+        for c in cuts {
+            pieces = pieces.flatMap { lo, hi -> [(Double, Double)] in
+                guard c.x < hi, c.maxX > lo else { return [(lo, hi)] }
+                return [(lo, min(hi, c.x)), (max(lo, c.maxX), hi)].filter { $0.1 > $0.0 }
+            }
+        }
+        return pieces.sorted { $0.0 < $1.0 }.map { WorkspaceRect(x: $0.0, y: row.y, width: $0.1 - $0.0, height: row.height) }
+    }
+
+    /// Where a pane's tabs go: the first clear run at the top of the pane's safe part, else the
+    /// first one below the controls in its way, still inside the pane (a tray across the top of
+    /// a pane: the tabs sit just under it). nil: no row of the pane has room for a tab.
+    static func titleRow(pane: WorkspaceRect, safe: WorkspaceRect?, avoiding controls: [WorkspaceRect]) -> WorkspaceRect? {
+        guard valid(pane) else { return nil }
+        let area = safe.flatMap { pane.intersection($0) } ?? pane
+        let height = min(area.height, titleHeight)
+        let blocks = controls.filter(valid).map { WorkspaceRect(x: $0.x - gap, y: $0.y - gap, width: $0.width + 2 * gap, height: $0.height + 2 * gap) }
+        for least in [min(titleWidth, area.width), min(minimumTitleWidth, area.width)] {
+            var y = area.y
+            for _ in 0...blocks.count {
+                guard y + height <= area.maxY + 1e-9 else { break }
+                let row = WorkspaceRect(x: area.x, y: y, width: area.width, height: height)
+                let hits = blocks.filter { $0.intersection(row) != nil }
+                if let run = segments(of: row, removing: hits).first(where: { $0.width >= least - 1e-9 }) { return run }
+                guard let next = hits.map(\.maxY).filter({ $0 > y }).min() else { break }
+                y = next
+            }
+        }
+        return nil
+    }
+
+    /// The panes of `layout` (its tree; floats have their own pill) whose tabs have no clear row.
+    static func unreachable(_ layout: WorkspaceLayout, in size: WorkspaceSize, hinge: WorkspaceHinge? = nil,
+                            safe: WorkspaceRect?, avoiding controls: [WorkspaceRect]) -> Set<String> {
+        let frames = WorkspaceGeometry.frames(for: layout, in: size, hinge: hinge)
+        var out = Set<String>()
+        for (id, r) in frames.tiles where !frames.isFloat(id) {
+            if titleRow(pane: r.scaled(to: size), safe: safe, avoiding: controls) == nil { out.insert(id) }
+        }
+        return out
+    }
+
+    /// A divider moved by `delta` (as `WorkspaceGeometry.resizing`), stopping where a further move
+    /// would push a pane's tabs under the controls. `safe` and `controls` in points of `size`.
+    /// A pane already out of reach doesn't hold the divider: no move makes things worse.
+    static func resizing(_ layout: WorkspaceLayout, divider: WorkspaceDivider, delta: Double, in size: WorkspaceSize,
+                         hinge: WorkspaceHinge? = nil, safe: WorkspaceRect?, avoiding controls: [WorkspaceRect]) -> WorkspaceLayout {
+        let full = WorkspaceGeometry.resizing(layout, divider: divider, delta: delta, in: size)
+        guard full != layout, !controls.isEmpty, size.width > 0, size.height > 0 else { return full }
+        let before = unreachable(layout, in: size, hinge: hinge, safe: safe, avoiding: controls)
+        func ok(_ l: WorkspaceLayout) -> Bool { unreachable(l, in: size, hinge: hinge, safe: safe, avoiding: controls).isSubset(of: before) }
+        if ok(full) { return full }
+        var lo = 0.0, hi = 1.0
+        for _ in 0..<16 {
+            let mid = (lo + hi) / 2
+            if ok(WorkspaceGeometry.resizing(layout, divider: divider, delta: delta * mid, in: size)) { lo = mid } else { hi = mid }
+        }
+        return lo > 0 ? WorkspaceGeometry.resizing(layout, divider: divider, delta: delta * lo, in: size) : layout
     }
 }
 
@@ -1805,8 +1924,22 @@ enum WorkspaceAdaptation {
         let capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         let ordered = saved.orderedTileIDs
         guard ordered.count > capacity else {
-            guard !saved.floats.isEmpty else { return Result(visible: saved, stacked: []) }
             var visible = saved
+            // Panes arranged on a larger space (or before a turn) keep at least the minimum here:
+            // their ratios give way, else the natural arrangement for that many panes.
+            if hinge == nil, size.width > 0, size.height > 0, !WorkspaceGeometry.meetsMinimums(saved, in: size) {
+                visible = WorkspaceGeometry.fittingMinimums(saved, in: size)
+                if !WorkspaceGeometry.meetsMinimums(visible, in: size) {
+                    let preset = WorkspacePreset.natural(for: ordered.count, landscape: size.width >= size.height)
+                    var natural = WorkspaceLayout(preset: preset, tiles: ordered.compactMap { saved.tiles[$0] })
+                    for f in saved.floats { natural.tiles[f.tile] = saved.tiles[f.tile] }
+                    natural.floats = saved.floats
+                    natural.maximized = saved.maximized
+                    natural.normalize()
+                    if WorkspaceGeometry.meetsMinimums(natural, in: size) { visible = natural }
+                }
+            }
+            guard !saved.floats.isEmpty else { return Result(visible: visible, stacked: []) }
             visible.floats = WorkspaceFloatGeometry.fitted(saved.floats, in: size, shown: floatsShown)
             return Result(visible: visible, stacked: [])
         }

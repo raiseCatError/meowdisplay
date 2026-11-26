@@ -237,7 +237,7 @@ struct DemoWindowModeView: View {
                 .accessibilityValue(Text("\(workspace.drawn.count) windows drawn"))
                 .accessibilityIdentifier("demoWindowPicture")
             WorkspaceChromeView(model: model, picture: area, inputAllowed: inputAllowed, safeArea: safe,
-                                controls: localToolbarFrame.map { [$0] } ?? [])
+                                controls: (localToolbarFrame.map { [$0] } ?? []) + localReservedControls)
                 .stepsAside(forAllApps: model.launchpadOpen)
             toolbar
                 .background(GeometryReader { g in
@@ -259,6 +259,13 @@ struct DemoWindowModeView: View {
         guard !toolbarFrame.isEmpty else { return nil }
         return CGRect(x: area.midX - toolbarFrame.width / 2, y: toolbarCentreY - toolbarHeight / 2,
                       width: toolbarFrame.width, height: toolbarHeight)
+    }
+
+    /// The receiver's controls (the tray, the Function Tray…) in this view's own space: panes'
+    /// tabs, dividers and floats' title pills keep clear of them, as in a live session.
+    private var localReservedControls: [CGRect] {
+        let origin = reservations.screen.origin
+        return reservations.controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
     }
 
     private func publishReservations() {

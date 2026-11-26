@@ -6494,6 +6494,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if obj[WorkspaceTrackpadWire.inputKey] as? Bool == true {
                 guard desktopTrackpad, usesTrackpadPoints(obj), action == "moveRelative" || action == "down" else { return }
             }
+            // A Trackpad pane moves the real cursor: the panes' marks follow it while it's in use.
+            if desktopTrackpad, action == "moveRelative", mode == .window, obj[WorkspaceTrackpadWire.inputKey] as? Bool == true {
+                workspaceEngine?.noteDesktopTrackpadInput()
+            }
             inputInjector?.perform(for: InputEpisode(tag: LockScreenInputTag(message: obj))) {
                 switch action {
                 case "move":

@@ -962,6 +962,16 @@ final class WorkspaceModel: ObservableObject {
         floatCloseCancellationGeneration &+= 1
     }
 
+    /// The Trackpad focus after `layout` changed: kept while that tile still shows the Trackpad,
+    /// else moved to the tile that shows it now (its tab was floated, docked or moved to another
+    /// pane); nil when no tile shows it. Pure, for tests.
+    nonisolated static func reconciledTrackpadFocus(_ focus: String?, in layout: WorkspaceLayout) -> String? {
+        guard let focus else { return nil }
+        if layout.tiles[focus]?.source?.isTrackpad == true { return focus }
+        let showing = layout.allTileIDs.filter { layout.tiles[$0]?.source?.isTrackpad == true && layout.float($0)?.tuck == nil }
+        return showing.count == 1 ? showing[0] : nil
+    }
+
     var active: String? {
         if let localTrackpadFocus, layout.tiles[localTrackpadFocus]?.source?.isTrackpad == true {
             return localTrackpadFocus
@@ -1549,6 +1559,10 @@ final class WorkspaceModel: ObservableObject {
         arranged = adapted.visible
         layout = localFullscreen.map { adapted.visible.maximizing($0) } ?? adapted.visible
         stacked = adapted.stacked
+        // The Trackpad keeps its focus when its tab moves (floated out, docked, a pane closed up):
+        // the Mac's focus never takes over a Trackpad that is still shown and selected here.
+        let trackpadFocus = Self.reconciledTrackpadFocus(localTrackpadFocus, in: layout)
+        if trackpadFocus != localTrackpadFocus { localTrackpadFocus = trackpadFocus }
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
         canRedo = history.canRedo
@@ -2538,9 +2552,14 @@ final class WorkspaceModel: ObservableObject {
     }
     func move(_ tile: String, to target: WorkspaceDropTarget) { edit { $0.materializing(hinge: hinge).moving(tile, to: target) } }
     /// A divider drag: every step resizes, the whole drag is one undo step. Call `endResize()` when it ends.
-    func resize(_ divider: WorkspaceDivider, delta: Double) {
+    /// `safe` and `controls`: the safe area and the receiver's controls as shares of the picture;
+    /// the divider stops where a pane's tabs would go under the controls (`WorkspacePaneReach`).
+    func resize(_ divider: WorkspaceDivider, delta: Double, safe: WorkspaceRect? = nil, controls: [WorkspaceRect] = []) {
         history.beginGroup()
-        edit { WorkspaceGeometry.resizing($0, divider: divider, delta: delta, in: size) }
+        let size = size
+        func points(_ r: WorkspaceRect) -> WorkspaceRect { r.scaled(to: size) }
+        edit { WorkspacePaneReach.resizing($0, divider: divider, delta: delta, in: size, hinge: hinge,
+                                           safe: safe.map(points), avoiding: controls.map(points)) }
     }
 
     func endResize() { history.endGroup() }

@@ -133,6 +133,8 @@ struct ReceiverScreen: View {
     @State private var keyboardBeforeHome = false
     /// Touch and hold Settings: Back to Home or Disconnect, over the session.
     @State private var sessionActions = ReceiverSessionActionsState()
+    /// The keyboard was open when Rearrange Controls began; Done reopens it.
+    @State private var keyboardBeforeRearrange = false
 
     init() {
         #if DEBUG
@@ -312,6 +314,10 @@ struct ReceiverScreen: View {
             }
         case .lockMac:
             model.workspace.beginLockMac()
+        case .rearrangeControls(let reopenKeyboard):
+            // The overlay already closed the keyboard; Done reopens it.
+            keyboardBeforeRearrange = reopenKeyboard
+            controlStore.setRearrangingControls(true)
         case .disconnect:
             // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
             model.receiver.disconnect()
@@ -386,11 +392,15 @@ struct ReceiverScreen: View {
         model.receiver.requestVideoEnabled(true, resumeWindow: model.workspace.available)
     }
 
+    /// Whether the Mac's cursor (and display layout) is watched, and for which surface: true for a
+    /// Trackpad pane in Window mode (always: the panes' pointer marks follow the real cursor while
+    /// it's used; the display guide itself still needs the opt-in, `windowTrackpad`), false for
+    /// the video-off desktop trackpad (opt-in), nil for neither.
     private var trackpadGuideContext: Bool? {
-        guard route == .receiver, localInputSurfaceOpen, inputReachesMac,
-              controlStore.preferences.trackpadDisplayLayoutOptIn else { return nil }
+        guard route == .receiver, localInputSurfaceOpen, inputReachesMac else { return nil }
+        if model.receiver.videoEnabled, model.workspace.windowMode, model.workspace.activeTrackpadID != nil { return true }
+        guard controlStore.preferences.trackpadDisplayLayoutOptIn else { return nil }
         if !model.receiver.videoEnabled { return false }
-        if model.workspace.windowMode, model.workspace.activeTrackpadID != nil { return true }
         return nil
     }
 
@@ -421,6 +431,7 @@ struct ReceiverScreen: View {
     private var localInputSurfaceOpen: Bool {
         scenePhase == .active
             && sessionActions.surfaceInteractive(model.presentation)
+            && !controlStore.rearrangingControls
             && !model.pictureInPicture.isShowingWindow
     }
 
@@ -1092,7 +1103,8 @@ struct ReceiverScreen: View {
                     workspace: model.workspace,
                     actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
                                                                   presentation: model.presentation,
-                                                                  canLockMac: model.workspace.canLockMac),
+                                                                  canLockMac: model.workspace.canLockMac,
+                                                                  canRearrangeControls: controlStore.canRearrangeControls),
                     onAction: { chooseSessionAction($0) },
                     onCancel: { dismissSessionActions() })
                 .transition(.opacity)
@@ -1100,8 +1112,17 @@ struct ReceiverScreen: View {
         }
         // The session ended or left the screen under the overlay: close it, restore nothing.
         .onChange(of: sessionActionsAvailable) { available in
+            // Rearrange Controls ends with the session; the order is already saved.
+            if !available { controlStore.setRearrangingControls(false) }
             guard !available, sessionActions.isPresented else { return }
             withAnimation(sessionActionsAnimation) { sessionActions.sessionEnded() }
+        }
+        // Done (or the session ending): the keyboard comes back if it was open and still can.
+        .onChange(of: controlStore.rearrangingControls) { on in
+            guard !on else { return }
+            if keyboardBeforeRearrange, keyboardAvailable, inputReachesMac { keyboardActive = true }
+            keyboardBeforeRearrange = false
+            UIAccessibility.post(notification: .screenChanged, argument: nil)
         }
         // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
         .onChange(of: showSettings) { shown in
@@ -4350,7 +4371,9 @@ struct VideoLayerView: UIViewRepresentable {
             hardwareKeyboard.receiver = { [weak self] in self?.receiver }
             hardwareKeyboard.isActive = { [weak self] in
                 guard let self else { return false }
+                // Typing into the local calculator's notes stays on this device.
                 return self.allowsInput && !self.keyboardRequested && self.window != nil
+                    && !LocalCalculatorTextFocus.isEditing
                     && UIApplication.shared.applicationState == .active
             }
         }
@@ -7508,8 +7531,10 @@ private struct TrackpadSurfaceDecoration: View {
             .background {
                 if trailOn { TrackpadTouchTrailWatch(trail: trail).allowsHitTesting(false).accessibilityHidden(true) }
             }
-            .onAppear { trail.regions = areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) } }
-            .onChange(of: areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) }) { trail.regions = $0 }
+            // Local to the watcher (it fills this view): checked on each touch, so a pane that
+            // moved or first laid out at zero size never leaves a stale frame behind.
+            .onAppear { trail.regions = areas }
+            .onChange(of: areas) { trail.regions = $0 }
         }
     }
 
