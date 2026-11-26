@@ -43,3 +43,8 @@ the GitHub `ios-duo` job (`AdaptiveLayoutTests`, `DemoModeSmokeTests` and
 - A class that ran no passing test is a failure. Check the report for each of the three classes.
   Xcode Cloud doesn't run the GitHub job's "ran nothing" check.
 - The Mac isn't involved: tests that need a live Mac skip themselves.
+- `ci_scripts/ci_post_xcodebuild.sh` also writes every test screenshot into the
+  test-without-building log as a small JPEG, so a run can be reviewed from the logs artifact alone.
+  Each one starts with a `MEOWSHOT-BEGIN` line (tab-separated: number, test, attachment name,
+  part count). One or more `MEOWSHOT-DATA` lines follow (number, then a base64 part). Join the
+  parts in order and decode them. `MEOWSHOT-COUNT` ends the list.
