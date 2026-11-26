@@ -1,3 +1,4 @@
+import Combine
 import CoreGraphics
 import XCTest
 
@@ -79,18 +80,31 @@ final class WorkspaceFloatLayeringTests: XCTestCase {
         XCTAssertEqual(three.map(\.maxX), [100, 500, 1000])
     }
 
-    func testQuickCloseStaysAtTheActualCornerWithRoomForTitleAndGrip() {
-        let content = CGRect(x: 60, y: 100, width: 120, height: 80)
-        let title = CGRect(x: 108, y: 85, width: 70, height: 30)
-        let grip = CGRect(x: 32, y: 164, width: 44, height: 44)
-        let target = WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [title, grip])
-        XCTAssertEqual(target, CGRect(x: 60, y: 100, width: 44, height: 44))
+    func testQuickCloseSitsOnTheFloatsRoundedCorner() {
+        // Owner's iPhone QA of 9000083: on the corner's curve, and never moving the title pill.
+        let content = CGRect(x: 60, y: 100, width: 200, height: 150)
+        let target = WorkspaceFloatLayering.closeTarget(onCornerOf: content, cornerRadius: 10, safe: nil, avoiding: [])
+        let inset = 10 * (1 - 0.5.squareRoot())
+        XCTAssertEqual(target?.midX ?? 0, content.minX + inset, accuracy: 0.001)
+        XCTAssertEqual(target?.midY ?? 0, content.minY + inset, accuracy: 0.001)
+        XCTAssertEqual(target?.size, CGSize(width: 44, height: 44))
     }
 
-    func testQuickCloseHidesInsteadOfMovingAwayFromAnOccludedCorner() {
-        let content = CGRect(x: 60, y: 100, width: 120, height: 80)
-        let covered = CGRect(x: 60, y: 100, width: 120, height: 60)
-        XCTAssertNil(WorkspaceFloatLayering.closeTarget(in: content, safe: content, avoiding: [covered]))
+    func testQuickCloseHidesInsteadOfMovingAwayWhenItsSpotIsTaken() {
+        let content = CGRect(x: 60, y: 100, width: 200, height: 150)
+        let frontFloat = CGRect(x: 40, y: 60, width: 60, height: 200)
+        XCTAssertNil(WorkspaceFloatLayering.closeTarget(onCornerOf: content, cornerRadius: 10, safe: nil, avoiding: [frontFloat]))
+        let narrow = CGRect(x: 60, y: 100, width: 90, height: 150)
+        XCTAssertNil(WorkspaceFloatLayering.closeTarget(onCornerOf: narrow, cornerRadius: 10, safe: nil, avoiding: []),
+                     "Too narrow to keep room for its title")
+    }
+
+    func testQuickCloseHidesWhenItsDotWouldLeaveTheSafeArea() {
+        let safe = CGRect(x: 0, y: 59, width: 430, height: 839)
+        let atTheTop = CGRect(x: 60, y: 50, width: 200, height: 150)
+        XCTAssertNil(WorkspaceFloatLayering.closeTarget(onCornerOf: atTheTop, cornerRadius: 10, safe: safe, avoiding: []))
+        let below = CGRect(x: 60, y: 90, width: 200, height: 150)
+        XCTAssertNotNil(WorkspaceFloatLayering.closeTarget(onCornerOf: below, cornerRadius: 10, safe: safe, avoiding: []))
     }
 
     func testQuickCloseRequiresTwoTapsOnTheSameFloat() {
@@ -127,5 +141,35 @@ final class WorkspaceFloatLayeringTests: XCTestCase {
         XCTAssertTrue(WorkspaceFloatLayering.showsHandles(selected: false, hovered: true, manipulating: false))
         XCTAssertTrue(WorkspaceFloatLayering.showsHandles(selected: false, hovered: false, manipulating: true))
         XCTAssertFalse(WorkspaceFloatLayering.showsHandles(selected: false, hovered: false, manipulating: false))
+    }
+
+    // MARK: Cancelling a float close from a receiver touch (Round 9)
+
+    /// The receiver reports every touch down to the workspace. Only an armed close may publish a
+    /// cancellation; publishing on every touch while a float merely exists re-rendered the whole
+    /// receiver per tap and closed any open menu (iPhone 14 Pro Max, 2026-11-26).
+    @MainActor
+    func testATouchWithNoArmedCloseLeavesTheWorkspaceUnchanged() {
+        let model = WorkspaceModel(defaults: UserDefaults(suiteName: "FloatCloseCancel-\(UUID())")!)
+        model.floatCloseTargetsGlobal = [CGRect(x: 10, y: 10, width: 44, height: 44)]
+        var published = 0
+        let watch = model.objectWillChange.sink { published += 1 }
+        model.cancelFloatClose()
+        model.cancelFloatClose()
+        XCTAssertEqual(published, 0)
+        XCTAssertEqual(model.floatCloseCancellationGeneration, 0)
+        watch.cancel()
+    }
+
+    @MainActor
+    func testATouchOutsideAnArmedCloseCancelsItOnce() {
+        let model = WorkspaceModel(defaults: UserDefaults(suiteName: "FloatCloseCancel-\(UUID())")!)
+        model.floatCloseTargetsGlobal = [CGRect(x: 10, y: 10, width: 44, height: 44)]
+        model.floatCloseArmed = true
+        model.cancelFloatClose()
+        XCTAssertEqual(model.floatCloseCancellationGeneration, 1)
+        XCTAssertFalse(model.floatCloseArmed)
+        model.cancelFloatClose()
+        XCTAssertEqual(model.floatCloseCancellationGeneration, 1, "nothing left to cancel")
     }
 }

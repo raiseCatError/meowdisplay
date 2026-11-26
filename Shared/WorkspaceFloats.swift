@@ -1195,6 +1195,8 @@ enum WorkspaceFloatLayering {
         WorkspaceRect(x: content.x, y: content.y - pillReach, width: content.width, height: content.height + pillReach)
     }
 
+    /// The narrowest title pill: a short title and its options button.
+
     /// The title pill's largest extent for a float of `content` (it is never wider than this).
     static func pillBounds(_ content: WorkspaceRect) -> WorkspaceRect {
         let w = max(min(content.width - 28, 280), 90) + 34
@@ -1214,13 +1216,20 @@ enum WorkspaceFloatLayering {
         }
     }
 
-    /// Reserve the pane's actual upper-left corner for the close action.
-    static func closeTarget(in content: CGRect, safe: CGRect?, avoiding obstacles: [CGRect]) -> CGRect? {
-        let side: CGFloat = 44
-        let target = CGRect(x: content.minX, y: content.minY, width: side, height: side)
-        // Leave room for the pane's title and menu on the same edge.
-        guard content.width >= side + 64, content.contains(target),
-              safe?.contains(target) != false,
+    /// The close dot's 44 pt touch area, centred on the float's rounded top-left corner: on the
+    /// corner's arc, halfway round it. It shows only where its dot (24 pt) is inside the safe area
+    /// and the whole area is clear of `obstacles`: it hides rather than moving anywhere else.
+    static let closeTargetSize = CGSize(width: 44, height: 44)
+
+    static func closeTarget(onCornerOf content: CGRect, cornerRadius: CGFloat, safe: CGRect?,
+                            avoiding obstacles: [CGRect]) -> CGRect? {
+        let inset = cornerRadius * (1 - 0.5.squareRoot())
+        let center = CGPoint(x: content.minX + inset, y: content.minY + inset)
+        let size = closeTargetSize
+        let target = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                            width: size.width, height: size.height)
+        let dot = CGRect(x: center.x - 12, y: center.y - 12, width: 24, height: 24)
+        guard content.width >= size.width + 64, safe?.contains(dot) != false,
               !obstacles.contains(where: { $0.intersects(target) }) else { return nil }
         return target
     }

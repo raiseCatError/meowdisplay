@@ -952,9 +952,13 @@ final class WorkspaceModel: ObservableObject {
     @Published private var localTrackpadFocus: String?
     @Published private(set) var floatCloseCancellationGeneration = 0
     var floatCloseTargetsGlobal: [CGRect] = []
+    /// Whether a float's close dot is waiting for its second tap. Not published: the receiver
+    /// reports every touch down here, and only an armed close has anything to cancel.
+    var floatCloseArmed = false
 
     func cancelFloatClose() {
-        guard !floatCloseTargetsGlobal.isEmpty else { return }
+        guard floatCloseArmed, !floatCloseTargetsGlobal.isEmpty else { return }
+        floatCloseArmed = false
         floatCloseCancellationGeneration &+= 1
     }
 

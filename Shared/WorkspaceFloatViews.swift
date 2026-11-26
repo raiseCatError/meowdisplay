@@ -311,7 +311,7 @@ struct WorkspaceFloatLayer: View {
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, f in
                 // Coming back out of its edge: drawn as its edge picture until it's out.
                 if motion.edges[f.id]?.kind != .restoring {
-                    floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i), reservesClose: closeTargets[f.id] != nil)
+                    floatChrome(f.id, rect: f.rect, front: i == shown.count - 1, covers: coverRects(covers, shown.map(\.id), i))
                     if let target = closeTargets[f.id] { closeButton(f.id, at: target) }
                 }
             }
@@ -422,7 +422,7 @@ struct WorkspaceFloatLayer: View {
     /// touchable) where they'd sit over a float in front: they would show through that float and
     /// take its touches.
     @ViewBuilder
-    private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect], reservesClose: Bool) -> some View {
+    private func floatChrome(_ id: String, rect: CGRect, front: Bool, covers: [CGRect]) -> some View {
         let active = model.active == id
         // Being docked: only its card is drawn. Its title pill and grabber stay, empty and taking
         // no new touch: the move that docks it lives on one of them, and SwiftUI cancels a
@@ -480,7 +480,7 @@ struct WorkspaceFloatLayer: View {
         // the finger took it: they never jump from under it. Being docked: only its card is drawn;
         // the pill and grabber stay, empty and taking no new touch (the docking move lives there).
         let held = start[id].map { $0.screen(in: picture) } ?? rect
-        let pill = pillFrame(rect, held: held, reservesClose: reservesClose)
+        let pill = pillFrame(rect, held: held)
         if docked || !covered(pill) {
             titlePill(id, width: pill.width, at: CGPoint(x: pill.midX, y: pill.midY), active: active, outline: outline, docked: docked)
         }
@@ -504,19 +504,13 @@ struct WorkspaceFloatLayer: View {
         }
     }
 
-    private func pillFrame(_ rect: CGRect, held: CGRect, reservesClose: Bool) -> CGRect {
-        let topEdge = reservesClose
-            ? CGRect(x: held.minX + 48, y: held.minY, width: held.width - 48, height: held.height)
-            : held
-        var size = WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size
-        if reservesClose { size.width = min(size.width, topEdge.width) }
-        let pill = WorkspaceOverlayPlacement.floatPill(content: topEdge, size: size, safe: safeArea, picture: picture)
-        let x = reservesClose ? max(topEdge.minX, pill.minX) : pill.minX
-        let current = CGRect(x: x, y: pill.minY, width: pill.width, height: pill.height)
+    /// The title pill on the float's top edge. It is placed the same way whether or not the close
+    /// dot shows: the dot sits on the float's corner and never moves the pill.
+    private func pillFrame(_ rect: CGRect, held: CGRect) -> CGRect {
+        let size = WorkspaceFloatLayering.pillBounds(WorkspaceRect(held)).cgRect.size
+        let pill = WorkspaceOverlayPlacement.floatPill(content: held, size: size, safe: safeArea, picture: picture)
             .offsetBy(dx: rect.midX - held.midX, dy: rect.minY - held.minY)
-        let closeSpace = CGRect(x: rect.minX, y: rect.minY, width: 48, height: 44)
-        return WorkspaceOverlayPlacement.floatPillClearingRails(current, safe: safeArea, picture: picture,
-                                                                 rails: railFrames, closeSpace: reservesClose ? closeSpace : nil)
+        return WorkspaceOverlayPlacement.floatPillClearingRails(pill, safe: safeArea, picture: picture, rails: railFrames)
     }
 
     private func grabberFrame(_ rect: CGRect, held: CGRect) -> CGRect {
@@ -529,12 +523,16 @@ struct WorkspaceFloatLayer: View {
         CGRect(x: leading ? rect.minX - 28 : rect.maxX - 16, y: rect.maxY - 16, width: 44, height: 44)
     }
 
+    /// The selected float's close dot, on its rounded top-left corner. Other floats show none.
+    /// It steps aside (hides) where its spot is taken: a float in front, a control, a rail, the
+    /// float's own title pill or grips.
     private func closeTarget(_ id: String, rect: CGRect, covers: [CGRect]) -> CGRect? {
-        guard model.dockingFloat != id, motion.edges[id] == nil, motion.frames[id] == nil,
+        guard model.active == id, model.dockingFloat != id, motion.edges[id] == nil, motion.frames[id] == nil,
               start[id] == nil, resizeStart[id] == nil else { return nil }
-        let obstacles = covers + closeAvoiding + [grabberFrame(rect, held: rect),
-                                  gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
-        return WorkspaceFloatLayering.closeTarget(in: rect, safe: safeArea ?? picture, avoiding: obstacles)
+        let obstacles = covers + closeAvoiding + railFrames
+            + [pillFrame(rect, held: rect), gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
+        return WorkspaceFloatLayering.closeTarget(onCornerOf: rect, cornerRadius: floatCorner,
+                                                  safe: safeArea ?? picture, avoiding: obstacles)
     }
 
     private func publishCloseTargets(_ targets: [String: CGRect]) {
@@ -552,8 +550,7 @@ struct WorkspaceFloatLayer: View {
                 .background(Color(red: 0.88, green: 0.24, blue: 0.29).opacity(armed ? 1 : 0.76), in: Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(highContrast ? 0.8 : 0.32), lineWidth: 1))
                 .frame(width: 24, height: 24)
-                .padding(1)
-                .frame(width: target.width, height: target.height, alignment: .topLeading)
+                .frame(width: target.width, height: target.height)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
@@ -581,11 +578,13 @@ struct WorkspaceFloatLayer: View {
         } else {
             if closeHapticsEnabled { Self.haptic(.toggle) }
             armedCloseLayout = model.layout
+            model.floatCloseArmed = true
             let generation = quickClose.generation
             closeExpiry = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(WorkspaceFloatQuickClose.confirmationSeconds))
                 guard !Task.isCancelled else { return }
                 quickClose.cancel(generation: generation)
+                model.floatCloseArmed = false
             }
         }
     }
@@ -593,6 +592,7 @@ struct WorkspaceFloatLayer: View {
     private func confirmQuickClose(_ id: String) {
         if closeHapticsEnabled { Self.haptic(.drop) }
         armedCloseLayout = nil
+        model.floatCloseArmed = false
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.14)) { model.removeFloat(id) }
     }
 
@@ -600,6 +600,7 @@ struct WorkspaceFloatLayer: View {
         closeExpiry?.cancel()
         closeExpiry = nil
         armedCloseLayout = nil
+        model.floatCloseArmed = false
         quickClose.cancel()
         accessibleCloseID = nil
     }
