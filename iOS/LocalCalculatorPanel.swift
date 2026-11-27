@@ -29,19 +29,10 @@ enum LocalCalculatorTextFocus {
 /// `ReceiverControlStore`, so the demo has its own.
 @MainActor
 final class LocalCalculatorModel: ObservableObject {
-    enum Mode: Equatable {
+    enum Mode: Hashable {
         case basic
         case scientific
         case notes
-    }
-
-    struct NoteLine: Identifiable, Equatable {
-        let id: UUID
-        var text: String
-        init(id: UUID = UUID(), text: String = "") {
-            self.id = id
-            self.text = text
-        }
     }
 
     typealias Key = CalculatorKeypad.Key
@@ -51,10 +42,17 @@ final class LocalCalculatorModel: ObservableObject {
     @Published var mode: Mode = .basic
     @Published private(set) var keypad = CalculatorKeypad()
     @Published var inverse = false
-    @Published var notes: [NoteLine] = [NoteLine()]
-    @Published var focusedNote: UUID?
-    /// The window's frame once moved or resized, in the layer's space.
-    @Published var windowFrame: CGRect?
+    /// The notes sheet's text, one calculation or question per line.
+    @Published var notesText = ""
+    /// Whether the notes take the keyboard (the rail's button and Close let it go).
+    @Published var notesEditing = false
+    /// Each view's window frame once moved or resized, in the layer's space: the keypads keep
+    /// their proportions, the notes are freeform, so each keeps its own.
+    @Published var windowFrames: [Mode: CGRect] = [:]
+    var windowFrame: CGRect? {
+        get { windowFrames[mode] }
+        set { windowFrames[mode] = newValue }
+    }
     /// Bumped by each Copy Result, for the button's brief confirmation.
     @Published private(set) var copyCount = 0
 
@@ -74,7 +72,7 @@ final class LocalCalculatorModel: ObservableObject {
 
     func close() {
         isOpen = false
-        focusedNote = nil
+        notesEditing = false
     }
 
     func press(_ key: Key) { keypad.press(key) }
@@ -107,32 +105,21 @@ final class LocalCalculatorModel: ObservableObject {
     // MARK: Notes
 
     var noteResults: [CalculatorLineResult] {
-        CalculatorSheet.evaluate(lines: notes.map(\.text), angle: angle)
-    }
-
-    /// Return on a line: a new line after it, focused.
-    func insertNote(after id: UUID) {
-        let line = NoteLine()
-        if let index = notes.firstIndex(where: { $0.id == id }) {
-            notes.insert(line, at: index + 1)
-        } else {
-            notes.append(line)
-        }
-        focusedNote = line.id
-    }
-
-    /// Delete on an empty line: it goes, and the line above takes focus.
-    func removeEmptyNote(_ id: UUID) {
-        guard notes.count > 1, let index = notes.firstIndex(where: { $0.id == id }),
-              notes[index].text.isEmpty else { return }
-        notes.remove(at: index)
-        focusedNote = notes[max(0, index - 1)].id
+        CalculatorSheet.evaluate(lines: notesText.components(separatedBy: "\n"), angle: angle)
     }
 
     func clearNotes() {
-        let line = NoteLine()
-        notes = [line]
-        focusedNote = line.id
+        notesText = ""
+    }
+
+    /// What a notes line's answer copies: the number when there is one, else its text.
+    @discardableResult
+    func copy(_ result: CalculatorLineResult, locale: Locale = .current) -> Bool {
+        if let value = result.value { return copy(value, locale: locale) }
+        guard let text = result.text else { return false }
+        UIPasteboard.general.string = text
+        copyCount &+= 1
+        return true
     }
 }
 
@@ -164,6 +151,20 @@ enum LocalCalculatorWindowGeometry {
         case .scientific: return CGSize(width: basic.width * 1.75, height: basic.height + 64)
         case .notes: return CGSize(width: max(basic.width * 1.3, 320), height: basic.height + 64)
         }
+    }
+
+    /// The keypads resize only proportionally (their round keys would stretch otherwise):
+    /// `frame`'s top-left kept, its width setting the size at `aspect` (width / height),
+    /// within `minimum` and `bounds`.
+    static func proportional(_ frame: CGRect, aspect: CGFloat, minimum: CGSize, bounds: CGRect) -> CGRect {
+        guard aspect > 0, aspect.isFinite, !bounds.isNull, !bounds.isEmpty else {
+            return clamped(frame, minimum: minimum, bounds: bounds)
+        }
+        let smallest = max(minimum.width, minimum.height * aspect)
+        let largest = min(bounds.width, bounds.height * aspect)
+        let width = min(max(frame.width, smallest), largest)
+        return clamped(CGRect(x: frame.minX, y: frame.minY, width: width, height: width / aspect),
+                       minimum: .zero, bounds: bounds)
     }
 
     /// `frame` kept inside `bounds`: no smaller than `minimum` (unless the
@@ -242,7 +243,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
             if let panel {
                 LocalCalculatorPanel(model: model, haptics: haptics,
                                      onMove: { move(by: $0, from: panel, bounds: bounds) },
-                                     onResize: { resize(by: $0, from: panel, bounds: bounds) },
+                                     onResize: { resize(by: $0, from: panel, bounds: bounds, metrics: metrics) },
                                      onGestureEnd: { gestureStart = nil })
                     .frame(width: panel.width, height: panel.height)
                     .position(x: panel.midX, y: panel.midY)
@@ -264,15 +265,30 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .preference(key: LocalCalculatorFramesPreference.self, value: panel.map { [$0] } ?? [])
     }
 
-    private func windowFrame(metrics: LocalCalculatorPanelMetrics, anchor: CGRect, bounds: CGRect) -> CGRect {
-        let minimum = LocalCalculatorWindowGeometry.minimumSize(model.mode)
-        if let frame = model.windowFrame {
-            return LocalCalculatorWindowGeometry.clamped(frame, minimum: minimum, bounds: bounds)
-        }
+    private func aspect(metrics: LocalCalculatorPanelMetrics) -> CGFloat? {
+        guard model.mode != .notes else { return nil }
         let preferred = LocalCalculatorWindowGeometry.preferredSize(model.mode, basic: metrics.size)
+        return preferred.height > 0 ? preferred.width / preferred.height : nil
+    }
+
+    private func settled(_ frame: CGRect, metrics: LocalCalculatorPanelMetrics, bounds: CGRect) -> CGRect {
+        let minimum = LocalCalculatorWindowGeometry.minimumSize(model.mode)
+        if let aspect = aspect(metrics: metrics) {
+            return LocalCalculatorWindowGeometry.proportional(frame, aspect: aspect, minimum: minimum, bounds: bounds)
+        }
+        return LocalCalculatorWindowGeometry.clamped(frame, minimum: minimum, bounds: bounds)
+    }
+
+    private func windowFrame(metrics: LocalCalculatorPanelMetrics, anchor: CGRect, bounds: CGRect) -> CGRect {
+        if let frame = model.windowFrame { return settled(frame, metrics: metrics, bounds: bounds) }
+        let preferred = LocalCalculatorWindowGeometry.preferredSize(model.mode, basic: metrics.size)
+        // Another view was moved: this one opens where that one is.
+        if let other = model.windowFrames.values.first {
+            return settled(CGRect(origin: other.origin, size: preferred), metrics: metrics, bounds: bounds)
+        }
         let size = CGSize(width: min(preferred.width, bounds.width), height: min(preferred.height, bounds.height))
         let placed = LocalCalculatorPlacement.panelFrame(button: anchor, size: size, bounds: bounds, obstacles: obstacles)
-        return LocalCalculatorWindowGeometry.clamped(placed, minimum: minimum, bounds: bounds)
+        return settled(placed, metrics: metrics, bounds: bounds)
     }
 
     private func move(by translation: CGSize, from current: CGRect, bounds: CGRect) {
@@ -282,12 +298,20 @@ struct LocalCalculatorLayer<Chip: View>: View {
         model.windowFrame = LocalCalculatorWindowGeometry.clamped(moved, minimum: .zero, bounds: bounds)
     }
 
-    private func resize(by translation: CGSize, from current: CGRect, bounds: CGRect) {
+    private func resize(by translation: CGSize, from current: CGRect, bounds: CGRect, metrics: LocalCalculatorPanelMetrics) {
         let start = gestureStart ?? current
         if gestureStart == nil { gestureStart = current }
         let minimum = LocalCalculatorWindowGeometry.minimumSize(model.mode)
-        let width = min(max(minimum.width, start.width + translation.width), bounds.maxX - start.minX)
-        let height = min(max(minimum.height, start.height + translation.height), bounds.maxY - start.minY)
+        let room = CGRect(x: start.minX, y: start.minY, width: bounds.maxX - start.minX, height: bounds.maxY - start.minY)
+        if let aspect = aspect(metrics: metrics) {
+            // Proportional: whichever way the corner moves further sets the size.
+            let grow = max(translation.width / max(start.width, 1), translation.height / max(start.height, 1))
+            let frame = CGRect(x: start.minX, y: start.minY, width: start.width * (1 + grow), height: start.height)
+            model.windowFrame = LocalCalculatorWindowGeometry.proportional(frame, aspect: aspect, minimum: minimum, bounds: room)
+            return
+        }
+        let width = min(max(minimum.width, start.width + translation.width), room.width)
+        let height = min(max(minimum.height, start.height + translation.height), room.height)
         model.windowFrame = CGRect(x: start.minX, y: start.minY, width: width, height: height)
     }
 
@@ -864,11 +888,11 @@ private struct LocalCalculatorKeypadView: View {
             haptics.play(.selection)
         } label: {
             keyLabel(id, glyph: glyph)
-                .frame(width: width, height: height)
-                .contentShape(RoundedRectangle(cornerRadius: min(width, height) * 0.32, style: .continuous))
+                .frame(width: min(width, height), height: min(width, height))
+                .contentShape(Circle())
         }
-        .buttonStyle(LocalCalculatorKeyStyle(role: role(id), selected: selected,
-                                             radius: min(width, height) * 0.32))
+        .buttonStyle(LocalCalculatorKeyStyle(role: role(id), selected: selected))
+        .frame(width: width, height: height)
         .accessibilityLabel(accessibilityLabel(id))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -974,9 +998,11 @@ private struct LocalCalculatorKeypadView: View {
 
 // MARK: - Notes view
 
-/// Soulver / Math Notes: one calculation per line, typed or handwritten
-/// (Scribble turns Apple Pencil writing into text), with each line's answer
-/// under it in colour.
+/// Soulver / Math Notes: one text view, one calculation or question per line,
+/// typed or handwritten (Scribble turns Apple Pencil writing into text). Each
+/// line's answer sits beside it in colour and shimmers when it appears; tap
+/// one to copy it. A rail above the keyboard holds the maths symbols and the
+/// button that puts the keyboard away.
 private struct LocalCalculatorNotesView: View {
     @ObservedObject var model: LocalCalculatorModel
     let haptics: ReceiverHaptics
@@ -985,29 +1011,22 @@ private struct LocalCalculatorNotesView: View {
     var body: some View {
         let results = model.noteResults
         VStack(spacing: 6) {
-            ScrollViewReader { reader in
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(model.notes.enumerated()), id: \.element.id) { index, line in
-                            noteRow(line, result: index < results.count ? results[index] : CalculatorLineResult())
-                                .id(line.id)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                }
-                .onChange(of: model.focusedNote) { id in
-                    if let id { withAnimation { reader.scrollTo(id, anchor: .center) } }
-                }
-            }
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.05)))
+            LocalCalculatorNotesEditor(
+                text: $model.notesText,
+                editing: $model.notesEditing,
+                answers: results.map { answer($0) },
+                onCopy: { index in
+                    guard index < results.count, model.copy(results[index], locale: locale) else { return }
+                    haptics.play(.confirmation)
+                })
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.05)))
             HStack(spacing: 8) {
-                Text("Type or write: 20% of 150, 5 plus 3, rent = 1200",
-                     comment: "Local calculator notes: what can be typed.")
+                Text("Try: 20% of 150 · 5 km in miles · 3pm PST in London · 5 hours from now · x = 4, then 2x + 1",
+                     comment: "Local calculator notes: examples of what can be typed.")
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.4))
                     .lineLimit(2)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.75)
                 Spacer(minLength: 0)
                 Button {
                     model.angle = model.angle == .degrees ? .radians : .degrees
@@ -1035,133 +1054,306 @@ private struct LocalCalculatorNotesView: View {
             }
             .padding(.horizontal, 4)
         }
-        .onAppear {
-            if model.focusedNote == nil { model.focusedNote = model.notes.last?.id }
-        }
+        .onAppear { model.notesEditing = true }
+        .onDisappear { model.notesEditing = false }
     }
 
-    private func noteRow(_ line: LocalCalculatorModel.NoteLine, result: CalculatorLineResult) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            LocalCalculatorNoteField(
-                text: Binding(get: { model.notes.first(where: { $0.id == line.id })?.text ?? "" },
-                              set: { text in
-                                  if let index = model.notes.firstIndex(where: { $0.id == line.id }) {
-                                      model.notes[index].text = text
-                                  }
-                              }),
-                focused: model.focusedNote == line.id,
-                onFocus: { model.focusedNote = line.id },
-                onReturn: { model.insertNote(after: line.id) },
-                onDeleteEmpty: { model.removeEmptyNote(line.id) })
-                .frame(height: 30)
-            if let value = result.value {
-                let shown = LocalCalculatorFormat.display(value, locale: locale).text
-                Button {
-                    model.copy(value, locale: locale)
-                    haptics.play(.confirmation)
-                } label: {
-                    Text(verbatim: (result.assigns.map { $0 + " = " } ?? "= ") + shown)
-                        .font(.system(size: 20, weight: .semibold, design: .rounded).monospacedDigit())
-                        .foregroundStyle(LocalCalculatorPalette.answer)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.5)
-                        .modifier(LocalCalculatorShimmer(trigger: shown))
-                }
-                .buttonStyle(.plain)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-                .accessibilityLabel(Text(verbatim: "= " + shown))
-                .accessibilityHint(Text("Copies this answer.", comment: "Local calculator notes: an answer's hint."))
-                .padding(.bottom, 4)
-            }
-        }
-        .animation(.easeOut(duration: 0.2), value: result.value)
+    /// What a line's answer shows: its text answer, or its number.
+    private func answer(_ result: CalculatorLineResult) -> String? {
+        if let text = result.text { return text }
+        return result.value.map { LocalCalculatorFormat.display($0, locale: locale).text }
     }
 }
 
-/// One notes line: a plain text field (so Apple Pencil Scribble, dictation
-/// and a hardware keyboard all work) that reports Return and Delete on an
-/// empty line.
-private struct LocalCalculatorNoteField: UIViewRepresentable {
+/// The notes' text view with its answer column, placeholder and symbol rail.
+private struct LocalCalculatorNotesEditor: UIViewRepresentable {
     @Binding var text: String
-    let focused: Bool
-    let onFocus: () -> Void
-    let onReturn: () -> Void
-    let onDeleteEmpty: () -> Void
+    @Binding var editing: Bool
+    /// One per line; nil where a line has no answer.
+    let answers: [String?]
+    let onCopy: (Int) -> Void
 
-    func makeUIView(context: Context) -> NoteTextField {
-        let field = NoteTextField()
-        field.delegate = context.coordinator
-        field.font = UIFont.monospacedDigitSystemFont(ofSize: 19, weight: .regular)
-        field.textColor = .white
-        field.tintColor = UIColor(LocalCalculatorPalette.answer)
-        field.autocorrectionType = .no
-        field.autocapitalizationType = .none
-        field.spellCheckingType = .no
-        field.smartDashesType = .no
-        field.smartQuotesType = .no
-        field.smartInsertDeleteType = .no
-        field.returnKeyType = .next
-        field.keyboardAppearance = .dark
-        field.attributedPlaceholder = NSAttributedString(
-            string: String(localized: "e.g. 80 × 5 or what is 15% of 80",
-                           comment: "Local calculator notes: an empty line's placeholder."),
-            attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.25)])
-        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return field
+    func makeUIView(context: Context) -> NotesEditorView {
+        let view = NotesEditorView()
+        view.textView.delegate = context.coordinator
+        view.onCopy = onCopy
+        view.onDismissKeyboard = { [weak view] in view?.textView.resignFirstResponder() }
+        return view
     }
 
-    func updateUIView(_ field: NoteTextField, context: Context) {
+    func updateUIView(_ view: NotesEditorView, context: Context) {
         context.coordinator.parent = self
-        if field.text != text { field.text = text }
-        field.onDeleteEmpty = onDeleteEmpty
-        if focused, !field.isFirstResponder {
-            DispatchQueue.main.async { field.becomeFirstResponder() }
+        view.onCopy = onCopy
+        if view.textView.text != text { view.textView.text = text }
+        view.update(answers: answers)
+        if editing, !view.textView.isFirstResponder, view.window != nil {
+            DispatchQueue.main.async { view.textView.becomeFirstResponder() }
+        } else if !editing, view.textView.isFirstResponder {
+            DispatchQueue.main.async { view.textView.resignFirstResponder() }
         }
     }
 
-    static func dismantleUIView(_ field: NoteTextField, coordinator: Coordinator) {
-        if field.isFirstResponder {
-            field.resignFirstResponder()
-        }
+    static func dismantleUIView(_ view: NotesEditorView, coordinator: Coordinator) {
+        if view.textView.isFirstResponder { view.textView.resignFirstResponder() }
+        LocalCalculatorTextFocus.isEditing = false
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
-    final class Coordinator: NSObject, UITextFieldDelegate {
-        var parent: LocalCalculatorNoteField
+    @MainActor
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: LocalCalculatorNotesEditor
 
-        init(parent: LocalCalculatorNoteField) { self.parent = parent }
+        init(parent: LocalCalculatorNotesEditor) { self.parent = parent }
 
-        @objc func changed(_ field: UITextField) {
-            parent.text = field.text ?? ""
+        func textViewDidChange(_ textView: UITextView) {
+            parent.text = textView.text
+            (textView.superview as? NotesEditorView)?.layoutAnswers()
         }
 
-        func textFieldDidBeginEditing(_ textField: UITextField) {
-            MainActor.assumeIsolated { LocalCalculatorTextFocus.isEditing = true }
-            parent.onFocus()
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            LocalCalculatorTextFocus.isEditing = true
+            if !parent.editing { parent.editing = true }
         }
 
-        func textFieldDidEndEditing(_ textField: UITextField) {
-            MainActor.assumeIsolated { LocalCalculatorTextFocus.isEditing = false }
+        func textViewDidEndEditing(_ textView: UITextView) {
+            LocalCalculatorTextFocus.isEditing = false
+            if parent.editing { parent.editing = false }
         }
 
-        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-            parent.onReturn()
-            return false
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            (scrollView.superview as? NotesEditorView)?.layoutAnswers()
+        }
+    }
+}
+
+/// UIKit side of the notes: the text view, the answer labels beside each
+/// line, the placeholder and the keyboard's symbol rail.
+final class NotesEditorView: UIView {
+    let textView = UITextView(usingTextLayoutManager: false)
+    var onCopy: ((Int) -> Void)?
+    var onDismissKeyboard: (() -> Void)?
+
+    private let placeholder = UILabel()
+    private var labels: [UILabel] = []
+    private var answers: [String?] = []
+    private static let answerFont = UIFont.monospacedDigitSystemFont(ofSize: 18, weight: .semibold)
+    private static let inset: CGFloat = 10
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        textView.backgroundColor = .clear
+        textView.font = UIFont.monospacedDigitSystemFont(ofSize: 18, weight: .regular)
+        textView.textColor = .white
+        textView.tintColor = UIColor(LocalCalculatorPalette.answer)
+        textView.keyboardAppearance = .dark
+        textView.autocorrectionType = .no
+        textView.autocapitalizationType = .none
+        textView.spellCheckingType = .no
+        textView.smartDashesType = .no
+        textView.smartQuotesType = .no
+        textView.smartInsertDeleteType = .no
+        textView.alwaysBounceVertical = true
+        textView.keyboardDismissMode = .interactive
+        textView.textContainerInset = UIEdgeInsets(top: Self.inset, left: 6, bottom: Self.inset, right: Self.inset)
+        textView.inputAccessoryView = makeRail()
+        addSubview(textView)
+        placeholder.text = String(localized: "Type or write a sum or a question, one per line",
+                                  comment: "Local calculator notes: placeholder while the notes are empty.")
+        placeholder.font = UIFont.systemFont(ofSize: 16)
+        placeholder.textColor = UIColor.white.withAlphaComponent(0.28)
+        placeholder.numberOfLines = 0
+        placeholder.isUserInteractionEnabled = false
+        addSubview(placeholder)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        textView.frame = bounds
+        let inset = textView.textContainerInset
+        placeholder.frame = CGRect(x: inset.left + 5, y: inset.top, width: max(0, bounds.width - inset.left - 16), height: 44)
+        placeholder.sizeToFit()
+        layoutAnswers()
+    }
+
+    func update(answers: [String?]) {
+        let previous = self.answers
+        self.answers = answers
+        placeholder.isHidden = !textView.text.isEmpty
+        while labels.count < answers.count {
+            let label = UILabel()
+            label.font = Self.answerFont
+            label.textColor = UIColor(LocalCalculatorPalette.answer)
+            label.textAlignment = .right
+            label.isUserInteractionEnabled = true
+            label.tag = labels.count
+            label.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapAnswer(_:))))
+            label.accessibilityTraits = .button
+            label.accessibilityHint = String(localized: "Copies this answer.", comment: "Local calculator notes: an answer's hint.")
+            addSubview(label)
+            labels.append(label)
+        }
+        for (i, label) in labels.enumerated() {
+            let text = i < answers.count ? answers[i] : nil
+            label.text = text
+            label.isHidden = text == nil
+            label.accessibilityLabel = text.map { "= " + $0 }
+            if let text, (i < previous.count ? previous[i] : nil) != text { shimmer(label) }
+        }
+        // The answers' column: as wide as the widest answer, at most 45% of the sheet.
+        let widest = answers.compactMap { $0 }.map { ($0 as NSString).size(withAttributes: [.font: Self.answerFont]).width }.max() ?? 0
+        let column = widest > 0 ? min(widest + 18, bounds.width * 0.45) : Self.inset
+        if abs(textView.textContainerInset.right - column) > 0.5 {
+            textView.textContainerInset.right = column
+        }
+        layoutAnswers()
+    }
+
+    /// Each answer beside the last line fragment of its line.
+    func layoutAnswers() {
+        let manager = textView.layoutManager
+        let container = textView.textContainer
+        manager.ensureLayout(for: container)
+        let text = (textView.text ?? "") as NSString
+        let inset = textView.textContainerInset
+        let column = max(0, inset.right - 8)
+        var location = 0
+        let lines = (textView.text ?? "").components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            let length = (line as NSString).length
+            defer { location += length + 1 }
+            guard i < labels.count, !labels[i].isHidden, length > 0, location + length <= text.length else {
+                if i < labels.count { labels[i].frame = .zero }
+                continue
+            }
+            let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: location, length: length), actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            let fragment = manager.lineFragmentRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+            let y = fragment.minY + inset.top - textView.contentOffset.y
+            labels[i].frame = CGRect(x: bounds.width - column - 8, y: y, width: column, height: max(fragment.height, 24))
+        }
+        for i in lines.count..<max(lines.count, labels.count) { labels[i].frame = .zero }
+    }
+
+    @objc private func tapAnswer(_ recognizer: UITapGestureRecognizer) {
+        guard let label = recognizer.view as? UILabel else { return }
+        onCopy?(label.tag)
+        UIView.animate(withDuration: 0.12, animations: { label.alpha = 0.4 }) { _ in
+            UIView.animate(withDuration: 0.2) { label.alpha = 1 }
         }
     }
 
-    final class NoteTextField: UITextField {
-        var onDeleteEmpty: (() -> Void)?
+    /// A bright band sweeping across a new answer once, as Math Notes does.
+    private func shimmer(_ label: UILabel) {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let mask = CAGradientLayer()
+        mask.frame = CGRect(x: 0, y: 0, width: max(label.bounds.width, 200), height: max(label.bounds.height, 30))
+        mask.startPoint = CGPoint(x: 0, y: 0.5)
+        mask.endPoint = CGPoint(x: 1, y: 0.5)
+        mask.colors = [UIColor(white: 0, alpha: 0.35).cgColor, UIColor.black.cgColor, UIColor(white: 0, alpha: 0.35).cgColor]
+        mask.locations = [-1, -0.5, 0]
+        label.layer.mask = mask
+        let animation = CABasicAnimation(keyPath: "locations")
+        animation.fromValue = [-1, -0.5, 0]
+        animation.toValue = [1, 1.5, 2]
+        animation.duration = 0.9
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak label] in label?.layer.mask = nil }
+        mask.add(animation, forKey: "shimmer")
+        mask.locations = [1, 1.5, 2]
+        CATransaction.commit()
+    }
 
-        override func deleteBackward() {
-            if (text ?? "").isEmpty {
-                onDeleteEmpty?()
-                return
+    // MARK: Symbol rail
+
+    private static let symbols = ["+", "−", "×", "÷", "=", "(", ")", "^", "%", "x", ".", "√"]
+
+    private func makeRail() -> UIView {
+        let rail = UIInputView(frame: CGRect(x: 0, y: 0, width: 320, height: 46), inputViewStyle: .keyboard)
+        rail.allowsSelfSizing = true
+        let scroll = UIScrollView()
+        scroll.showsHorizontalScrollIndicator = false
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.spacing = 6
+        for symbol in Self.symbols {
+            var config = UIButton.Configuration.filled()
+            config.title = symbol
+            config.baseBackgroundColor = UIColor.white.withAlphaComponent(0.16)
+            config.baseForegroundColor = .white
+            config.cornerStyle = .capsule
+            config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14)
+            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                var a = attributes
+                a.font = UIFont.systemFont(ofSize: 19, weight: .medium)
+                return a
             }
-            super.deleteBackward()
+            let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in
+                self?.insert(symbol)
+            })
+            button.accessibilityLabel = Self.spokenSymbol(symbol)
+            stack.addArrangedSubview(button)
+        }
+        var doneConfig = UIButton.Configuration.filled()
+        doneConfig.image = UIImage(systemName: "keyboard.chevron.compact.down")
+        doneConfig.baseBackgroundColor = UIColor(LocalCalculatorPalette.answer)
+        doneConfig.baseForegroundColor = .black
+        doneConfig.cornerStyle = .capsule
+        let done = UIButton(configuration: doneConfig, primaryAction: UIAction { [weak self] _ in
+            self?.onDismissKeyboard?()
+        })
+        done.accessibilityLabel = String(localized: "Hide Keyboard", comment: "Local calculator notes: puts the keyboard away.")
+        scroll.addSubview(stack)
+        rail.addSubview(scroll)
+        rail.addSubview(done)
+        for v in [scroll, stack, done] as [UIView] { v.translatesAutoresizingMaskIntoConstraints = false }
+        NSLayoutConstraint.activate([
+            done.trailingAnchor.constraint(equalTo: rail.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            done.centerYAnchor.constraint(equalTo: rail.centerYAnchor),
+            done.widthAnchor.constraint(equalToConstant: 52),
+            scroll.leadingAnchor.constraint(equalTo: rail.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            scroll.trailingAnchor.constraint(equalTo: done.leadingAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: rail.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
+            rail.heightAnchor.constraint(equalToConstant: 46),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: scroll.frameLayoutGuide.centerYAnchor),
+            stack.heightAnchor.constraint(equalToConstant: 36),
+        ])
+        return rail
+    }
+
+    private func insert(_ symbol: String) {
+        if !textView.isFirstResponder { textView.becomeFirstResponder() }
+        let text: String
+        switch symbol {
+        case "+", "−", "×", "÷", "=": text = " \(symbol) "
+        case "√": text = "√("
+        default: text = symbol
+        }
+        textView.insertText(text)
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    private static func spokenSymbol(_ symbol: String) -> String {
+        switch symbol {
+        case "+": return String(localized: "Plus", comment: "Local calculator key: addition.")
+        case "−": return String(localized: "Minus", comment: "Local calculator key: subtraction.")
+        case "×": return String(localized: "Multiply", comment: "Local calculator key.")
+        case "÷": return String(localized: "Divide", comment: "Local calculator key.")
+        case "=": return String(localized: "Equals", comment: "Local calculator key.")
+        case "(": return String(localized: "Open Parenthesis", comment: "Local calculator key.")
+        case ")": return String(localized: "Close Parenthesis", comment: "Local calculator key.")
+        case "^": return String(localized: "To the Power of", comment: "Local calculator key.")
+        case "%": return String(localized: "Percent", comment: "Local calculator key.")
+        case "√": return String(localized: "Square Root", comment: "Local calculator key.")
+        case ".": return String(localized: "Decimal Point", comment: "Local calculator key.")
+        default: return symbol
         }
     }
 }
@@ -1222,10 +1414,9 @@ private enum LocalCalculatorKeyRole {
 private struct LocalCalculatorKeyStyle: ButtonStyle {
     let role: LocalCalculatorKeyRole
     let selected: Bool
-    let radius: CGFloat
 
     func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let shape = Circle()
         configuration.label
             .foregroundStyle(selected ? role.fill : Color.white)
             .background(shape.fill(selected ? Color.white : role.fill))

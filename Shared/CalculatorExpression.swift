@@ -51,7 +51,8 @@ struct CalculatorContext: Equatable {
 enum CalculatorExpression {
     /// The value of `text`, or why it has none.
     static func evaluate(_ text: String, context: CalculatorContext = CalculatorContext()) -> Result<Decimal, CalculatorError> {
-        let prepared = CalculatorLanguage.normalize(text)
+        let names = Set(context.variables.keys)
+        let prepared = CalculatorLanguage.normalize(text, variables: names)
         guard !prepared.trimmingCharacters(in: .whitespaces).isEmpty else { return .failure(.empty) }
         let first = parse(prepared, context: context)
         guard case .failure(.unknownWord) = first, let stripped = withoutLabels(prepared, context: context) else {
@@ -65,7 +66,7 @@ enum CalculatorExpression {
 
     private static func parse(_ text: String, context: CalculatorContext) -> Result<Decimal, CalculatorError> {
         do {
-            let tokens = try CalculatorLexer.tokens(text)
+            let tokens = try CalculatorLexer.tokens(text, variables: Set(context.variables.keys))
             guard !tokens.isEmpty else { return .failure(.empty) }
             var parser = CalculatorParser(tokens: tokens, context: context)
             let value = try parser.parse()
@@ -101,15 +102,21 @@ enum CalculatorExpression {
         try? evaluate(text, context: context).get()
     }
 
-    /// "name = expression" (a Soulver-style variable), when `text` is one.
+    /// "name = expression", "let name = expression" or "name := expression" (a Soulver-style
+    /// variable), when `text` is one. Any name that isn't a function or constant works, x and
+    /// single letters included; once x is a variable, multiply with × or * ("2 * x", "2x").
     static func assignment(in text: String) -> (name: String, expression: String)? {
-        guard let equals = text.firstIndex(of: "=") else { return nil }
-        let name = text[..<equals].trimmingCharacters(in: .whitespaces).lowercased()
-        let rest = text[text.index(after: equals)...].trimmingCharacters(in: .whitespaces)
-        guard !rest.isEmpty,
+        var body = text.trimmingCharacters(in: .whitespaces)
+        if body.lowercased().hasPrefix("let ") { body = String(body.dropFirst(4)) }
+        guard let equals = body.firstIndex(of: "=") else { return nil }
+        var name = body[..<equals].trimmingCharacters(in: .whitespaces).lowercased()
+        if name.hasSuffix(":") { name = String(name.dropLast()).trimmingCharacters(in: .whitespaces) }
+        let rest = body[body.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+        guard !rest.isEmpty, !rest.hasPrefix("="),
               let first = name.first, first.isLetter,
               name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }),
-              !CalculatorLexer.reservedWords.contains(name) else { return nil }
+              !CalculatorLexer.functions.contains(name), !CalculatorLexer.constants.contains(name),
+              name != "mod" else { return nil }
         return (name, rest)
     }
 }
@@ -148,7 +155,7 @@ enum CalculatorNumber {
 /// Turns plain English into the symbols the parser reads. Word numbers
 /// ("twenty five", "a dozen") become digits; phrases become operators.
 enum CalculatorLanguage {
-    static func normalize(_ text: String) -> String {
+    static func normalize(_ text: String, variables: Set<String> = []) -> String {
         var s = " " + text.lowercased()
             .replacingOccurrences(of: "\u{2212}", with: "-")
             .replacingOccurrences(of: "\u{00D7}", with: "*")
@@ -177,6 +184,8 @@ enum CalculatorLanguage {
         }
         s = replaceNumberWords(s)
         for (pattern, replacement) in phrases {
+            // x is a variable here: it no longer means times.
+            if variables.contains("x"), pattern.contains(#"\s*x\s*"#) { continue }
             s = s.replacingOccurrences(of: pattern, with: replacement, options: [.regularExpression])
         }
         return s.trimmingCharacters(in: .whitespaces)
@@ -344,7 +353,7 @@ enum CalculatorLexer {
     static let constants: Set<String> = ["pi", "π", "e", "ans", "sum", "total", "tau", "τ"]
     static var reservedWords: Set<String> { functions.union(constants).union(["mod", "x"]) }
 
-    static func tokens(_ text: String) throws -> [CalculatorToken] {
+    static func tokens(_ text: String, variables: Set<String> = []) throws -> [CalculatorToken] {
         var tokens: [CalculatorToken] = []
         let characters = Array(text)
         var index = 0
@@ -390,7 +399,8 @@ enum CalculatorLexer {
                 }
                 var word = String(characters[index..<end])
                 // "log2" is a function; "x2" is multiply by 2.
-                if word == "x" || (word.hasPrefix("x") && word.dropFirst().allSatisfy(\.isNumber)) {
+                if !variables.contains("x"),
+                   word == "x" || (word.hasPrefix("x") && word.dropFirst().allSatisfy(\.isNumber)) {
                     tokens.append(.times)
                     index += 1
                     continue
@@ -716,13 +726,19 @@ struct CalculatorLineResult: Equatable {
     var value: Decimal?
     /// The variable this line assigns, if any.
     var assigns: String?
+    /// An answer that isn't just a number ("8:00 PM BST", "3.1 mi"), drawn as is.
+    var text: String?
+
+    var hasAnswer: Bool { value != nil || text != nil }
 }
 
 enum CalculatorSheet {
     /// Every line's answer, in order. Lines see the variables assigned
     /// above them, `ans` is the line above's answer, and `sum`/`total` add
-    /// up the answers since the last blank line.
-    static func evaluate(lines: [String], angle: CalculatorAngleUnit) -> [CalculatorLineResult] {
+    /// up the answers since the last blank line. Everyday questions (time
+    /// zones, dates, units, bases) are answered first (`CalculatorSmartAnswers`).
+    static func evaluate(lines: [String], angle: CalculatorAngleUnit,
+                         smart: CalculatorSmartContext = CalculatorSmartContext()) -> [CalculatorLineResult] {
         var context = CalculatorContext(angle: angle)
         var results: [CalculatorLineResult] = []
         var running: Decimal?
@@ -739,6 +755,12 @@ enum CalculatorSheet {
             if let assignment = CalculatorExpression.assignment(in: trimmed) {
                 assigns = assignment.name
                 source = assignment.expression
+            }
+            if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
+                if let assigns, let value = answer.value { context.variables[assigns] = value }
+                if let value = answer.value { context.answer = value }
+                results.append(CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text))
+                continue
             }
             if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
                 if let assigns { context.variables[assigns] = value }

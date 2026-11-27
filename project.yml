@@ -419,6 +419,7 @@ targets:
       - Shared/LocalCalculatorPlacement.swift
       - Shared/ControlRearrangement.swift
       - Shared/CalculatorExpression.swift
+      - Shared/CalculatorSmartAnswers.swift
       - Shared/CalculatorKeypad.swift
       - Shared/MobileSettingsCategory.swift
       # iOS Demo Mode boundary (Foundation only, no UIKit).
