@@ -769,8 +769,12 @@ struct WorkspaceChromeView: View {
                 })
                 .padding(.leading, offset)
                 .padding(.top, drop)
-                .onAppear { model.tabRowOffsets[id] = Self.normalizedRowOffset(drop, in: model.pictureGlobal) }
-                .onChange(of: drop) { model.tabRowOffsets[id] = Self.normalizedRowOffset($0, in: model.pictureGlobal) }
+                // Drops aim at the row as drawn: below the pane's unsafe
+                // inset and any tray, kept current as the picture resizes.
+                .onAppear { model.tabRowOffsets[id] = Self.normalizedRowOffset(row.minY - rect.minY, in: model.pictureGlobal) }
+                .onChange(of: Self.normalizedRowOffset(row.minY - rect.minY, in: model.pictureGlobal)) {
+                    model.tabRowOffsets[id] = $0
+                }
                 .onDisappear { labelStripEnd[id] = nil; model.tabRowOffsets[id] = nil }
             }
             VStack(spacing: 6) {

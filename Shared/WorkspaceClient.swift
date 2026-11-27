@@ -4423,7 +4423,10 @@ extension WorkspaceModel {
     /// pointer, so the receiver marks it. `cursor` and `displays` are global Mac points from the
     /// Trackpad's layout samples. A pane gets a mark only where its picture shows that point
     /// and no float above it covers it.
-    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect) -> [String: CGPoint] {
+    /// `echo` is where the Mac draws its own full-size cursor (normalized picture), nil while
+    /// it draws none: that pane needs no second mark, and every other pane keeps its own.
+    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect,
+                          echo: CGPoint? = nil) -> [String: CGPoint] {
         guard windowMode, picture.width > 0, picture.height > 0,
               let display = displays.first(where: { $0.bounds.contains(cursor) }), display.bounds.width > 0,
               display.bounds.height > 0 else { return [:] }
@@ -4454,9 +4457,12 @@ extension WorkspaceModel {
         }
         // The Mac draws its full-size cursor in the frontmost pane under it (front float first,
         // then the panes in order, as `WindowWorkspaceTargeting.cursorPlacement` does): no
-        // second, small arrow there.
-        let echoed = floats.reversed().first { marks[$0] != nil }
-            ?? layout.orderedTileIDs.first { !layout.isFloat($0) && marks[$0] != nil }
+        // second, small arrow in the pane that shows it. A float app window can hold the echo,
+        // so it's located by where the cursor is drawn, not by which marks there are.
+        guard let echo else { return marks }
+        let drawn = CGPoint(x: picture.minX + echo.x * picture.width, y: picture.minY + echo.y * picture.height)
+        let echoed = floats.reversed().first { frames.tiles[$0].map(onScreen)?.contains(drawn) == true }
+            ?? layout.orderedTileIDs.first { !layout.isFloat($0) && frames.tiles[$0].map(onScreen)?.contains(drawn) == true }
         if let echoed { marks[echoed] = nil }
         return marks
     }

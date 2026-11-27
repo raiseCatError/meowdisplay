@@ -450,6 +450,7 @@ enum WorkspaceFloatGeometry {
         static let bottomLeading = ResizeHandle(horizontal: -1, vertical: 1)
         static let bottomTrailing = ResizeHandle(horizontal: 1, vertical: 1)
         static let topTrailing = ResizeHandle(horizontal: 1, vertical: -1)
+        static let topLeading = ResizeHandle(horizontal: -1, vertical: -1)
     }
 
     /// A float resized freeform by the edges `handle` names, `translation` points since the drag

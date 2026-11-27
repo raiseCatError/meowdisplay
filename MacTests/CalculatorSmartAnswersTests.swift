@@ -73,4 +73,13 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertNotNil(results[7].value)
         XCTAssertEqual(results.map(\.value).suffix(3), [nil, 80, 68])
     }
+
+    func testRoundTwoReviewFindings() {
+        XCTAssertNil(answer("in 10000000000000000000 days"), "an absurd count is no answer, not a crash")
+        XCTAssertNil(answer("100000000 hours from now"))
+        XCTAssertEqual(answer("3pm pdt in london"), "22:00 GMT", "PDT is UTC−7 even in November")
+        XCTAssertEqual(answer("3pm pt in london"), "23:00 GMT", "PT follows the season")
+        XCTAssertEqual(answer("days since christmas"), "337 days")
+        XCTAssertEqual(answer("days until christmas"), "28 days")
+    }
 }

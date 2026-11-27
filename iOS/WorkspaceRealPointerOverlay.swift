@@ -11,6 +11,8 @@ struct WorkspaceRealPointerOverlay: View {
     let picture: CGRect
     /// The controls tray is auto-hidden now.
     let controlsHidden: Bool
+    /// Where the Mac draws its own cursor (normalized picture), nil while hidden.
+    let echo: () -> CGPoint?
 
     @State private var resting = false
     @State private var restTask: Task<Void, Never>?
@@ -19,7 +21,7 @@ struct WorkspaceRealPointerOverlay: View {
     private static let restDelay: Duration = .milliseconds(1500)
 
     var body: some View {
-        let marks = cursor.location.map { model.realPointerMarks(cursor: $0, displays: displays, picture: picture) } ?? [:]
+        let marks = cursor.location.map { model.realPointerMarks(cursor: $0, displays: displays, picture: picture, echo: echo()) } ?? [:]
         ZStack(alignment: .topLeading) {
             Color.clear
             ForEach(marks.keys.sorted(), id: \.self) { id in

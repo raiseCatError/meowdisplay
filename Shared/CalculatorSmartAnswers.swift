@@ -216,6 +216,12 @@ enum CalculatorSmartAnswers {
 
     // MARK: Time zones
 
+    private static let fixedAbbreviations: [String: Double] = [
+        "pst": -8, "pdt": -7, "mst": -7, "mdt": -6, "cst": -6, "cdt": -5, "est": -5, "edt": -4,
+        "akst": -9, "akdt": -8, "hst": -10, "bst": 1, "cet": 1, "cest": 2, "eet": 2, "eest": 3, "wet": 0, "west": 1,
+        "aest": 10, "aedt": 11, "acst": 9.5, "acdt": 10.5, "awst": 8, "nzst": 12, "nzdt": 13,
+    ]
+
     private static let zoneAliases: [String: String] = [
         "pst": "America/Los_Angeles", "pdt": "America/Los_Angeles", "pt": "America/Los_Angeles", "pacific": "America/Los_Angeles",
         "mst": "America/Denver", "mdt": "America/Denver", "mt": "America/Denver", "mountain": "America/Denver",
@@ -246,6 +252,10 @@ enum CalculatorSmartAnswers {
         let n = name.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"\s+time$"#, with: "", options: .regularExpression)
         guard !n.isEmpty else { return nil }
         if ["here", "local", "my time", "local time", "mine", "me"].contains(n) { return context.timeZone }
+        // An explicit standard or daylight abbreviation is that fixed offset
+        // all year ("PDT" in November is still UTC−7); city names and
+        // generic ones ("PT") follow the seasons.
+        if let hours = fixedAbbreviations[n] { return TimeZone(secondsFromGMT: Int(hours * 3600)) }
         if let id = zoneAliases[n] { return TimeZone(identifier: id) }
         if let m = match(n, #"(?:utc|gmt)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?"#) {
             let hours = Int(m[2]) ?? 0, minutes = Int(m[3]) ?? 0
@@ -333,7 +343,8 @@ enum CalculatorSmartAnswers {
     ]
 
     /// A date or time named in `text`: "now", "today", "tomorrow", "3pm", or one NSDataDetector finds.
-    private static func anchor(_ text: String, context: CalculatorSmartContext) -> (date: Date, hasTime: Bool)? {
+    private static func anchor(_ text: String, context: CalculatorSmartContext,
+                               past: Bool = false) -> (date: Date, hasTime: Bool)? {
         let t = text.trimmingCharacters(in: .whitespaces)
         var calendar = context.calendar
         calendar.timeZone = context.timeZone
@@ -345,12 +356,14 @@ enum CalculatorSmartAnswers {
         default: break
         }
         if let date = clockTime(t, in: context.timeZone, context: context) { return (date, true) }
-        if let date = namedDate(t, context: context) { return (date, false) }
+        if let date = namedDate(t, context: context, past: past) { return (date, false) }
         return nil
     }
 
     /// Holidays and dates NSDataDetector reads ("25 dec", "july 4 2027", "next friday").
-    private static func namedDate(_ text: String, context: CalculatorSmartContext) -> Date? {
+    /// A holiday is its next occurrence, or its last one when `past`
+    /// ("days since christmas").
+    private static func namedDate(_ text: String, context: CalculatorSmartContext, past: Bool = false) -> Date? {
         var calendar = context.calendar
         calendar.timeZone = context.timeZone
         let holidays: [String: (month: Int, day: Int)] = [
@@ -362,8 +375,9 @@ enum CalculatorSmartAnswers {
         if let h = holidays[text] {
             let year = calendar.component(.year, from: context.now)
             let today = calendar.startOfDay(for: context.now)
-            for y in [year, year + 1] {
-                if let d = calendar.date(from: DateComponents(year: y, month: h.month, day: h.day)), d >= today { return d }
+            for y in past ? [year, year - 1] : [year, year + 1] {
+                if let d = calendar.date(from: DateComponents(year: y, month: h.month, day: h.day)),
+                   past ? d <= today : d >= today { return d }
             }
         }
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) else { return nil }
@@ -403,8 +417,17 @@ enum CalculatorSmartAnswers {
         func shifted(_ date: Date, _ n: Double, _ unitName: String) -> Date? {
             guard let component = calendarUnits[unitName] else { return nil }
             let seconds: [Calendar.Component: Double] = [.second: 1, .minute: 60, .hour: 3600]
-            if let s = seconds[component] { return date.addingTimeInterval(n * s) }
-            if n == n.rounded() { return calendar.date(byAdding: component, value: Int(n), to: date) }
+            if let s = seconds[component] {
+                guard n.isFinite, abs(n * s) <= 1e11 else { return nil }
+                return date.addingTimeInterval(n * s)
+            }
+            if n == n.rounded() {
+                // Whole counts only within a few thousand years: beyond that
+                // `Int(n)` traps and Calendar has nothing to say.
+                guard n.isFinite, abs(n) <= 10_000_000, let whole = Int(exactly: n) else { return nil }
+                return calendar.date(byAdding: component, value: whole, to: date)
+            }
+            guard n.isFinite, abs(n) <= 10_000_000 else { return nil }
             if component == .day { return date.addingTimeInterval(n * 86_400) }
             if component == .weekOfYear { return date.addingTimeInterval(n * 604_800) }
             return nil
@@ -443,7 +466,7 @@ enum CalculatorSmartAnswers {
         let unitWords: [String: (divisor: Int, name: String)] = ["days": (1, "day"), "weeks": (7, "week"), "day": (1, "day"), "week": (7, "week")]
         if let m = match(text, #"(?:how many )?(days|weeks) (until|till|til|to|since|from) (.+)"#)
             ?? match(text, #"(?:how long) (until|till|til|since) (.+)"#).map({ ["", "days", $0[1], $0[2]] }),
-           let unit = unitWords[m[1]], let target = anchor(m[3], context: context) {
+           let unit = unitWords[m[1]], let target = anchor(m[3], context: context, past: ["since", "from"].contains(m[2])) {
             var d = days(context.now, target.date)
             if ["since", "from"].contains(m[2]) {
                 d = -d

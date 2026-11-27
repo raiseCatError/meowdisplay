@@ -216,4 +216,37 @@ final class CalculatorExpressionTests: XCTestCase {
         pad.press(.equals)
         XCTAssertEqual(pad.answeredExpression, "5 × 2")
     }
+
+    // MARK: Review findings, round 2 (PR 338)
+
+    func testRoundTwoEdgeCases() {
+        let nested = String(repeating: "(", count: 5000) + "1" + String(repeating: ")", count: 5000)
+        XCTAssertNil(value(nested), "deep nesting is an error, not a crash")
+        XCTAssertNil(value(String(repeating: "-", count: 5000) + "1"))
+        XCTAssertEqual(value("200 + 2π%"), value("200 + 2 × π%"), "an implied × reads like a written one")
+        XCTAssertEqual(value("10^(-100)"), LocalCalculatorFormat.power(-100))
+        XCTAssertEqual(value("2^-3"), Decimal(string: "0.125"))
+        XCTAssertEqual(CalculatorExpression.evaluate("0^-1"), .failure(.divisionByZero))
+    }
+
+    func testDefinedNamesWinOverShorthand() {
+        let results = CalculatorSheet.evaluate(lines: ["x2 = 7", "x2 + 1", "ans1 = 10", "ans1 * 2",
+                                                       "one = 5", "one + 1", "half = 4", "half * 3"], angle: .degrees)
+        XCTAssertEqual(results.map(\.value), [7, 8, 10, 20, 5, 6, 4, 12])
+    }
+
+    func testSmartAnswersCountTowardTotals() {
+        let results = CalculatorSheet.evaluate(lines: ["5 km in m", "2 km in m", "total"], angle: .degrees)
+        XCTAssertEqual(results.last?.value, 7000)
+    }
+
+    func testTypingAfterErrorStartsOver() {
+        var pad = keypad([.digit(1), .operation(.divide), .digit(0), .equals])
+        XCTAssertTrue(pad.failed)
+        pad.press(.digit(2))
+        pad.press(.equals)
+        XCTAssertEqual(pad.currentValue, 2)
+        let edited = keypad([.digit(1), .operation(.divide), .digit(0), .equals, .delete, .digit(4), .equals])
+        XCTAssertEqual(edited.currentValue, Decimal(string: "0.25"), "⌫ still edits the failed calculation")
+    }
 }

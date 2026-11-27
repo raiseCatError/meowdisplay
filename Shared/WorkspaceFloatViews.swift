@@ -720,7 +720,9 @@ struct WorkspaceFloatLayer: View {
             .accessibilityHidden(true)   // the float's own actions move it
     }
 
-    static let resizeEdges: [WorkspaceFloatGeometry.ResizeHandle] = [.left, .right, .top, .bottom]
+    /// The edges, then the upper corners (both adjoining edges at once; the lower corners have
+    /// their grips). Corners come last so they sit above the edge strips they overlap.
+    static let resizeEdges: [WorkspaceFloatGeometry.ResizeHandle] = [.left, .right, .top, .bottom, .topLeading, .topTrailing]
 
     /// An invisible strip along one edge of the float, mostly just outside it (the window's own
     /// edge keeps its touches): drag it to move that edge. Cut around the pill, grabber, grips,
@@ -729,7 +731,10 @@ struct WorkspaceFloatLayer: View {
     private func edgeResizer(_ id: String, rect: CGRect, handle: WorkspaceFloatGeometry.ResizeHandle, avoiding: [CGRect]) -> some View {
         let outside: CGFloat = 12, inside: CGFloat = 4
         let strip: CGRect = {
+            let corner = outside + 10
             switch (handle.horizontal, handle.vertical) {
+            case (-1, -1): return CGRect(x: rect.minX - outside, y: rect.minY - outside, width: corner, height: corner)
+            case (1, -1): return CGRect(x: rect.maxX + outside - corner, y: rect.minY - outside, width: corner, height: corner)
             case (-1, _): return CGRect(x: rect.minX - outside, y: rect.minY, width: outside + inside, height: rect.height)
             case (1, _): return CGRect(x: rect.maxX - inside, y: rect.minY, width: outside + inside, height: rect.height)
             case (_, -1): return CGRect(x: rect.minX, y: rect.minY - outside, width: rect.width, height: outside + inside)

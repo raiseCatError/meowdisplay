@@ -3772,11 +3772,16 @@ final class StreamReceiver: ObservableObject {
         if connected, trackpadLayoutWatching {
             sendUIControl(["type": TrackpadLayoutWire.watch, "on": false])
         }
-        // Window mode: the panes' pointer marks keep the cursor's last place when the Trackpad
-        // goes idle, instead of vanishing.
-        let kept = windowModeActive ? trackpadCursor.location : nil
+        // Window mode: the panes' pointer marks keep the cursor's last place, and the display
+        // geometry that places it, when the Trackpad goes idle, instead of vanishing. A
+        // disconnect or a revoked control clears both (`clearTrackpadLayout`).
+        let keep = connected && windowModeActive && trackpadLayoutControlGranted
+        let kept = keep ? (trackpadCursor.location, trackpadDisplayGeometry) : nil
         clearTrackpadLayout()
-        if let kept { trackpadCursor.location = kept }
+        if let kept, let location = kept.0 {
+            trackpadCursor.location = location
+            trackpadDisplayGeometry = kept.1
+        }
     }
 
     @MainActor private func clearTrackpadLayout() {

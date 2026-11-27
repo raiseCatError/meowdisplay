@@ -72,6 +72,14 @@ struct CalculatorKeypad: Equatable {
     }
 
     mutating func press(_ key: Key) {
+        if failed {
+            // After Error a new number starts a new calculation; ⌫ still
+            // edits the failed one and an operator continues it.
+            switch key {
+            case .digit, .decimalPoint, .open, .function, .constant, .answer: input = ""
+            default: break
+            }
+        }
         if key != .equals { failed = false }
         switch key {
         case .digit(let digit): startOperandIfNeeded(); append(String(digit))

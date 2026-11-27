@@ -908,7 +908,11 @@ struct ReceiverScreen: View {
                         // The Mac's real pointer in Full Desktop panes while the Trackpad drives it.
                         WorkspaceRealPointerOverlay(model: model.workspace, cursor: model.receiver.trackpadCursor,
                                                     displays: model.receiver.trackpadDisplayGeometry,
-                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden)
+                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden,
+                                                    echo: { [receiver = model.receiver] in
+                                                        let state = receiver.cursorState
+                                                        return state.visible ? CGPoint(x: state.x, y: state.y) : nil
+                                                    })
                     }
                     // The rails are receiver chrome above both Trackpad renderers and floats.
                     // Only the strip hit regions take touches.

@@ -167,6 +167,14 @@ enum CalculatorLanguage {
             .replacingOccurrences(of: "\u{2014}", with: "-")
             .replacingOccurrences(of: "’", with: "'")
             .replacingOccurrences(of: "\n", with: " ") + " "
+        // A defined name means itself: "one = 5" then "one + 1" is 6, so
+        // names sit out the word rewriting below behind placeholders.
+        let protected = variables.sorted { $0.count > $1.count }
+        for (index, name) in protected.enumerated() {
+            s = s.replacingOccurrences(of: #"(?<![\p{L}\p{N}_])"# + NSRegularExpression.escapedPattern(for: name)
+                                        + #"(?![\p{L}\p{N}_])"#,
+                                       with: " " + placeholder(index) + " ", options: .regularExpression)
+        }
         // Thousands separators inside numbers ("1,200" → 1200); a comma
         // elsewhere is a pause, like "and".
         s = s.replacingOccurrences(of: #"(\d),(\d{3})(?!\d)"#, with: "$1$2", options: .regularExpression)
@@ -188,7 +196,20 @@ enum CalculatorLanguage {
             if variables.contains("x"), pattern.contains(#"\s*x\s*"#) { continue }
             s = s.replacingOccurrences(of: pattern, with: replacement, options: [.regularExpression])
         }
+        for (index, name) in protected.enumerated() {
+            s = s.replacingOccurrences(of: placeholder(index), with: " \(name) ")
+        }
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Letters no phrase or number word matches, unique per index.
+    private static func placeholder(_ index: Int) -> String {
+        var n = index, letters = ""
+        repeat {
+            letters.append(Character(UnicodeScalar(UInt8(97 + n % 26))))
+            n /= 26
+        } while n > 0
+        return "qzqv" + letters + "qzq"
     }
 
     /// Ordered: longer phrases first. Patterns are matched on the
@@ -398,6 +419,12 @@ enum CalculatorLexer {
                     end += 1
                 }
                 var word = String(characters[index..<end])
+                // A defined name is itself, whatever it looks like ("x2", "ans1").
+                if variables.contains(word) {
+                    tokens.append(.identifier(word))
+                    index = end
+                    continue
+                }
                 // "log2" is a function; "x2" is multiply by 2.
                 if !variables.contains("x"),
                    word == "x" || (word.hasPrefix("x") && word.dropFirst().allSatisfy(\.isNumber)) {
@@ -456,6 +483,13 @@ struct CalculatorParser {
     private let tokens: [CalculatorToken]
     private let context: CalculatorContext
     private var index = 0
+    /// Nesting so far: pasted notes can hold anything, and each group,
+    /// sign and exponent recurses.
+    private var depth = 0
+    static let maximumDepth = 120
+    /// Whether the term just parsed multiplied, divided or took a modulo,
+    /// written or implied (2π%), so a trailing % is that term's own.
+    private var termCombined = false
 
     init(tokens: [CalculatorToken], context: CalculatorContext) {
         self.tokens = tokens
@@ -474,7 +508,14 @@ struct CalculatorParser {
     private var current: CalculatorToken? { index < tokens.count ? tokens[index] : nil }
 
     /// + and −, with "percent of the left side" for a trailing %.
+    private mutating func nest() throws {
+        depth += 1
+        guard depth <= Self.maximumDepth else { throw CalculatorError.syntax }
+    }
+
     private mutating func expression() throws -> Decimal {
+        try nest()
+        defer { depth -= 1 }
         var value = try term()
         while let token = current, token == .plus || token == .minus {
             index += 1
@@ -491,7 +532,7 @@ struct CalculatorParser {
         let start = index
         let value = try term()
         let consumed = Array(tokens[start..<index])
-        if consumed.last == .percent, !consumed.dropLast().contains(where: { $0 == .times || $0 == .divide || $0 == .modulo }) {
+        if consumed.last == .percent, !termCombined {
             // Undo the ÷100 the factor applied; the caller scales instead.
             return (value * 100, true)
         }
@@ -501,7 +542,13 @@ struct CalculatorParser {
     /// × ÷ mod, and implicit multiplication.
     private mutating func term() throws -> Decimal {
         var value = try unary()
+        var combined = false
+        defer { termCombined = combined }
         while let token = current {
+            switch token {
+            case .times, .divide, .modulo, .identifier, .open: combined = true
+            default: break
+            }
             switch token {
             case .times:
                 index += 1
@@ -532,6 +579,8 @@ struct CalculatorParser {
     }
 
     private mutating func unary() throws -> Decimal {
+        try nest()
+        defer { depth -= 1 }
         if current == .minus { index += 1; return -(try unary()) }
         if current == .plus { index += 1; return try unary() }
         return try power()
@@ -600,6 +649,8 @@ struct CalculatorParser {
 
     /// The argument of "sqrt 2^2" is 2^2; of "sin −30", −30.
     private mutating func unaryArgument() throws -> Decimal {
+        try nest()
+        defer { depth -= 1 }
         if current == .minus { index += 1; return -(try unaryArgument()) }
         return try power()
     }
@@ -682,14 +733,25 @@ struct CalculatorParser {
     static func raise(_ base: Decimal, _ exponent: Decimal) throws -> Decimal {
         if CalculatorNumber.isInteger(exponent), exponent.magnitude <= 400 {
             let count = NSDecimalNumber(decimal: exponent.magnitude).intValue
+            if exponent < 0, base == 0 { throw CalculatorError.divisionByZero }
             var result: Decimal = 1
+            var overflowed = false
             for _ in 0..<count {
                 result *= base
-                guard result.magnitude < CalculatorNumber.overflowLimit else { throw CalculatorError.overflow }
+                if result.magnitude >= CalculatorNumber.overflowLimit { overflowed = true; break }
             }
             if exponent < 0 {
-                guard result != 0 else { throw CalculatorError.divisionByZero }
-                result = 1 / result
+                if overflowed {
+                    // 10^−100: the positive power is out of range but its
+                    // reciprocal isn't, so multiply the reciprocal instead.
+                    let reciprocal = 1 / base
+                    result = 1
+                    for _ in 0..<count { result *= reciprocal }
+                } else {
+                    result = 1 / result
+                }
+            } else if overflowed {
+                throw CalculatorError.overflow
             }
             return try CalculatorNumber.checked(result)
         }
@@ -756,13 +818,7 @@ enum CalculatorSheet {
                 assigns = assignment.name
                 source = assignment.expression
             }
-            if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
-                if let assigns, let value = answer.value { context.variables[assigns] = value }
-                if let value = answer.value { context.answer = value }
-                results.append(CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text))
-                continue
-            }
-            if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
+            func record(_ value: Decimal) {
                 if let assigns { context.variables[assigns] = value }
                 context.answer = value
                 // A line that reads the running total isn't added to it;
@@ -770,6 +826,14 @@ enum CalculatorSheet {
                 if source.lowercased().range(of: #"\b(sum|total)\b"#, options: .regularExpression) == nil {
                     running = (running ?? 0) + value
                 }
+            }
+            if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
+                if let value = answer.value { record(value) }
+                results.append(CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text))
+                continue
+            }
+            if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
+                record(value)
                 results.append(CalculatorLineResult(value: value, assigns: assigns))
             } else {
                 results.append(CalculatorLineResult(value: nil, assigns: nil))
