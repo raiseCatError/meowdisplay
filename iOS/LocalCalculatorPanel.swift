@@ -311,8 +311,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                      onStash: { stashAtNearestEdge(panel, bounds: bounds) })
                     .frame(width: shown.width, height: shown.height)
                     // Stashed: only the strip (and a peek while pulled) shows, inside the bounds.
+                    // Dragged past the bounds: only the part inside them (what it reports, below).
                     .clipShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
-                                                            ?? CGRect(origin: .zero, size: shown.size)))
+                                                            ?? visibleWhileDragged(shown, bounds: bounds)))
                     .allowsHitTesting(waiting == nil)
                     .accessibilityHidden(waiting != nil)
                     .position(x: shown.midX, y: shown.midY)
@@ -336,11 +337,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .animation(.easeOut(duration: 0.2), value: keyboard.top)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.86),
                    value: model.stash)
-        // Where it is drawn: while dragged, its live frame (the part on screen), so the arrow
-        // keys and the workspace keep clear of where it is, not where it was.
-        .preference(key: LocalCalculatorFramesPreference.self,
-                    value: model.stash == nil ? (dragFrame.map { $0.intersection(bounds) }.flatMap { $0.isNull ? nil : $0 }
-                                                 ?? panel).map { [$0] } ?? [] : [])
+        // Where it is drawn: while dragged, its live frame (the part inside the bounds, as drawn),
+        // so the arrow keys and the workspace keep clear of where it is, not where it was.
+        .preference(key: LocalCalculatorFramesPreference.self, value: occupied(panel: panel, bounds: bounds))
         .preference(key: LocalCalculatorStashFramesPreference.self, value: stashOccupied(panel: panel, bounds: bounds))
         // Stashed through a rotation (or a keyboard change): it keeps coming back flush with
         // its edge in the bounds it has now, wherever it is brought back from.
@@ -352,6 +351,24 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .onAppear { anchorStashed(in: usableBounds) }
     }
 
+    /// What the open window takes from the screen: while dragged, only its part inside the
+    /// bounds (nothing when none is); else its frame. Stashed, its strip does instead.
+    private func occupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
+        guard model.stash == nil else { return [] }
+        if let dragFrame {
+            return LocalCalculatorStashGeometry.onScreen(dragFrame, bounds: bounds).map { [$0] } ?? []
+        }
+        return panel.map { [$0] } ?? []
+    }
+
+    /// The part of the window (in its own coordinates) that shows while it isn't stashed: all
+    /// of it, but while dragged only what is inside the bounds.
+    private func visibleWhileDragged(_ shown: CGRect, bounds: CGRect) -> CGRect {
+        guard dragFrame != nil else { return CGRect(origin: .zero, size: shown.size) }
+        guard let part = LocalCalculatorStashGeometry.onScreen(shown, bounds: bounds) else { return .zero }
+        return part.offsetBy(dx: -shown.minX, dy: -shown.minY)
+    }
+
     private func clearGestures() {
         moveStart = nil
         resizeStart = nil
@@ -359,15 +376,17 @@ struct LocalCalculatorLayer<Chip: View>: View {
         moveGeneration &+= 1
     }
 
-    /// While stashed, the frame it comes back to: fitted to `bounds` first (a keypad keeps
-    /// its proportions, so it may shrink), then flush with its edge there. Whatever brings
-    /// it back (its strip, the button, VoiceOver) then finds it in place.
+    /// While stashed, where it comes back: flush with its edge in `bounds`, placed by the size
+    /// it is drawn at there (a keypad keeps its proportions, so it may shrink). Only the place
+    /// is kept: the chosen size stays, so rotating back gives it back. Whatever brings it back
+    /// (its strip, the button, VoiceOver) then finds it in place.
     private func anchorStashed(in bounds: CGRect) {
         guard let stash = model.stash, let frame = model.windowFrame else { return }
         let metrics = LocalCalculatorPanelMetrics.fitting(panelBounds.size, preferredKey: preferredKey)
         let fitted = settled(frame, metrics: metrics, bounds: bounds)
-        model.windowFrame = LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
-                                                                  obstacles: obstacles + stashObstacles)
+        model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+            frame.size, at: LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
+                                                                  obstacles: obstacles + stashObstacles))
     }
 
     /// What a stashed window takes from the screen: its strip, where it takes touches.
@@ -481,8 +500,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         if let flicked = LocalCalculatorStashGeometry.release(frame, velocity: velocity, bounds: bounds),
            let stash = LocalCalculatorStashGeometry.usable(flicked, size: frame.size, bounds: bounds,
                                                            obstacles: obstacles + stashObstacles) {
-            model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds,
-                                                                      obstacles: obstacles + stashObstacles)
+            model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+                model.windowFrame?.size, at: LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds,
+                                                                                   obstacles: obstacles + stashObstacles))
             // The keyboard guard clears when the notes actually let go (`textViewDidEndEditing`).
             model.stash(at: stash)
             haptics.play(.selection)
@@ -499,8 +519,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         guard let stash = LocalCalculatorStashGeometry.usable(LocalCalculatorStash(edge: edge, offset: offset),
                                                               size: panel.size, bounds: bounds,
                                                               obstacles: obstacles + stashObstacles) else { return }
-        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
-                                                                  obstacles: obstacles + stashObstacles)
+        model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+            model.windowFrame?.size, at: LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
+                                                                               obstacles: obstacles + stashObstacles))
         model.stash(at: stash)
     }
 
@@ -509,8 +530,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// placed against everything it keeps off now.
     private func restore(_ panel: CGRect, bounds: CGRect) {
         guard let stash = model.stash else { return }
-        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
-                                                                  obstacles: obstacles + stashObstacles)
+        model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+            model.windowFrame?.size, at: LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
+                                                                               obstacles: obstacles + stashObstacles))
         model.stash = nil
     }
 

@@ -579,6 +579,46 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertTrue(touch.map { $0.minY >= tall.minY - 0.5 && $0.maxY <= tall.maxY + 0.5 } ?? false)
     }
 
+    // Codex round 17: dragged past the bounds, it draws and reports only the part inside them.
+    func testADraggedWindowCountsOnlyItsPartInsideTheBounds() {
+        let bounds = CGRect(x: 100, y: 0, width: 600, height: 800)
+        XCTAssertEqual(LocalCalculatorStashGeometry.onScreen(CGRect(x: 550, y: 100, width: 300, height: 400), bounds: bounds),
+                       CGRect(x: 550, y: 100, width: 150, height: 400))
+        XCTAssertEqual(LocalCalculatorStashGeometry.onScreen(CGRect(x: 200, y: 100, width: 300, height: 400), bounds: bounds),
+                       CGRect(x: 200, y: 100, width: 300, height: 400))
+        XCTAssertNil(LocalCalculatorStashGeometry.onScreen(CGRect(x: 760, y: 100, width: 300, height: 400), bounds: bounds),
+                     "none of it inside (bounds changed mid-drag): it takes nothing, not its old frame")
+        let dragged = LocalCalculatorStashGeometry.dragged(CGRect(x: 900, y: 100, width: 300, height: 400), bounds: bounds)
+        XCTAssertEqual(LocalCalculatorStashGeometry.onScreen(dragged, bounds: bounds)?.width,
+                       LocalCalculatorStashGeometry.strip, "a drag always keeps its strip inside")
+    }
+
+    // Codex round 17: stashed tall in portrait, rotated to landscape and back, it returns at its chosen size.
+    func testAStashThroughARotationKeepsTheChosenSize() {
+        let stash = LocalCalculatorStash(edge: .right, offset: 0.4)
+        let portrait = CGRect(x: 0, y: 0, width: 800, height: 1100)
+        let landscape = CGRect(x: 0, y: 0, width: 1100, height: 700)
+        let chosen = CGRect(x: 480, y: 120, width: 300, height: 900)
+        /// Drawn size in `bounds` (the notes are freeform: no larger than the bounds).
+        func fitted(_ frame: CGRect, _ bounds: CGRect) -> CGRect {
+            let w = min(frame.width, bounds.width), h = min(frame.height, bounds.height)
+            return CGRect(x: min(max(frame.minX, bounds.minX), bounds.maxX - w),
+                          y: min(max(frame.minY, bounds.minY), bounds.maxY - h), width: w, height: h)
+        }
+        func anchor(_ stored: CGRect, in bounds: CGRect) -> CGRect {
+            LocalCalculatorStashGeometry.keepingSize(
+                stored.size, at: LocalCalculatorStashGeometry.restored(fitted(stored, bounds), stash: stash, bounds: bounds))
+        }
+        let inLandscape = anchor(chosen, in: landscape)
+        XCTAssertEqual(inLandscape.size, chosen.size, "the chosen size is kept while it waits")
+        XCTAssertEqual(fitted(inLandscape, landscape).maxX, landscape.maxX, "drawn flush with its edge")
+        XCTAssertEqual(fitted(inLandscape, landscape).height, 700, "drawn fitted to landscape")
+        let back = anchor(inLandscape, in: portrait)
+        XCTAssertEqual(fitted(back, portrait), LocalCalculatorStashGeometry.restored(chosen, stash: stash, bounds: portrait),
+                       "back in portrait: the full chosen size, flush with its edge")
+        XCTAssertEqual(LocalCalculatorStashGeometry.keepingSize(nil, at: chosen), chosen, "nothing chosen yet: as placed")
+    }
+
     func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let function = CGRect(x: 120, y: 760, width: 150, height: 44)

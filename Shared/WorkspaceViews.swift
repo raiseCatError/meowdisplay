@@ -234,11 +234,13 @@ struct WorkspaceChromeView: View {
                     let pane = paneTitleRow(rect)
                     let end = labelStripEnd[id] ?? pane.minX
                     let besideTitle = PaneMenuBar.fitsBesideTitle(labelsEnd: end, pane: pane)
+                    // Its own row below the tabs: clear of the controls there too, not only where the tabs are.
                     let barPane = besideTitle
                         ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
-                        : pane
+                        : WorkspaceOverlayPlacement.paneMenuRow(pane: rect, titleRow: pane, safe: safeArea,
+                                                                avoiding: controls + railFrames)
                     PaneMenuBar(menus: model.menus, pane: barPane,
-                                top: pane.minY + (besideTitle ? 5 : 36), bounds: picture,
+                                top: barPane.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
                                 automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
                                 showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
                 }

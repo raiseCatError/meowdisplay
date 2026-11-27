@@ -41,9 +41,15 @@ final class LocalCalculatorTourTests: XCTestCase {
         revealControls(calculatorButton)
         XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added back from Edit Function Tray")
 
+        let buttonFrame = calculatorButton.frame
         calculatorButton.tap()
         let result = element("Result")
-        XCTAssertTrue(result.waitForExistence(timeout: 3), "the panel opens")
+        let opened = result.waitForExistence(timeout: 3)
+        if !opened {
+            // CI keeps no result bundle: the tree (what is where) goes to the log.
+            print("Calculator button at \(buttonFrame) in \(app.frame)\n\(app.debugDescription)")
+        }
+        XCTAssertTrue(opened, "the panel opens")
         for label in ["Decimal Point", "1", "Plus", "Decimal Point", "2", "Equals"] { calculatorKey(label).tap() }
         // The display reads the sum, then its answer ("0.1 + 0.2, = 0.3") since round 3.
         XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "0.3", "exact decimals")

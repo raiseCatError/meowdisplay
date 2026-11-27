@@ -1034,6 +1034,26 @@ enum WorkspaceOverlayPlacement {
         return row
     }
 
+    /// The pane menu bar's own row, used when it doesn't fit beside the tabs: just below the
+    /// title row (`titleRow`), clear of the controls as the tabs are, lower in the pane when
+    /// they cover it. The bar draws `paneMenuBarInset` down its row and its 44 pt menu button
+    /// reaches `paneMenuButtonReach` below the row, so each control counts as that much taller.
+    static func paneMenuRow(pane: CGRect, titleRow: CGRect, safe: CGRect?, avoiding controls: [CGRect]) -> CGRect {
+        let top = titleRow.minY + paneMenuRowOffset
+        let below = CGRect(x: pane.minX, y: top, width: pane.width, height: max(0, pane.maxY - top))
+        let reach = paneMenuButtonReach
+        let grown = controls.filter { !$0.isNull && !$0.isEmpty }
+            .map { CGRect(x: $0.minX, y: $0.minY - reach, width: $0.width, height: $0.height + reach) }
+        return paneTitleRow(pane: below, safe: safe, avoiding: grown)
+    }
+
+    /// The menu bar's row starts this far below the title row's top (its bar at 36, as before).
+    static let paneMenuRowOffset: CGFloat = 31
+    /// The menu bar is drawn this far down its row.
+    static let paneMenuBarInset: CGFloat = 5
+    /// How far the menu bar's 44 pt button reaches below its 40 pt row.
+    static let paneMenuButtonReach: CGFloat = paneMenuBarInset + 44 - paneTitleHeight
+
     /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below
     /// the notch, the Dynamic Island and the status bar. Where it would cover a pane's title or a
     /// float's title pill it slides beside them along that row, or steps down below them.

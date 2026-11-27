@@ -347,4 +347,19 @@ enum LocalCalculatorStashGeometry {
     static func pullRestores(inward: CGFloat, projected: CGFloat, travel: CGFloat) -> Bool {
         abs(travel) < 6 || inward >= restorePull || projected >= restorePull * 2.5
     }
+
+    /// The part of a dragged window inside `bounds`, or nil when none of it is: only that part
+    /// is drawn, takes touches and is reported, as its strip is once it waits at an edge.
+    static func onScreen(_ frame: CGRect, bounds: CGRect) -> CGRect? {
+        let part = frame.intersection(bounds)
+        return part.isNull || part.isEmpty ? nil : part
+    }
+
+    /// `placed`'s position with the size the person chose (`chosen`, nil for none yet). The
+    /// window is fitted to the bounds as it is drawn, so stashing, a rotation while it waits,
+    /// and bringing it back never shrink the size it returns to where there is room again.
+    static func keepingSize(_ chosen: CGSize?, at placed: CGRect) -> CGRect {
+        guard let chosen else { return placed }
+        return CGRect(origin: placed.origin, size: chosen)
+    }
 }

@@ -563,4 +563,29 @@ final class PaneMenuBarPlacementTests: XCTestCase {
         XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 100, pane: pane, barWidth: 120), "no tabs measured yet")
         XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 260, pane: pane, barWidth: 120), "tabs fill the row")
     }
+
+    // Codex round 17: the bar's own row is clear of a control just below the tabs, menu button included.
+    func testTheBarsOwnRowKeepsClearOfAControlBelowTheTabs() {
+        let pane = CGRect(x: 0, y: 0, width: 400, height: 600)
+        let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [])
+        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: []),
+                       CGRect(x: 0, y: 31, width: 400, height: 40), "nothing in the way: where it always was (bar at 36)")
+
+        let control = CGRect(x: 280, y: 50, width: 120, height: 60)
+        let titleWithControl = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
+        XCTAssertEqual(titleWithControl, title, "the control is below the tabs, not beside them")
+        let row = WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: titleWithControl, safe: nil, avoiding: [control])
+        let top = row.minY + WorkspaceOverlayPlacement.paneMenuBarInset
+        let bar = CGRect(x: row.minX + 6, y: top, width: row.width - 12, height: 28)
+        let button = CGRect(x: bar.maxX - 44, y: top, width: 44, height: 44)
+        XCTAssertFalse(bar.intersects(control))
+        XCTAssertFalse(button.intersects(control), "the menu button's whole 44 pt target stays clear")
+        XCTAssertGreaterThanOrEqual(row.width, PaneMenuBar_preferredWidth)
+
+        let old = CGRect(x: title.maxX - 6 - 44, y: title.minY + 36, width: 44, height: 44)
+        XCTAssertTrue(old.intersects(control), "the row reused from the tabs put the button under the control")
+    }
+
+    /// `PaneMenuBar` (a view) isn't in this target; its preferred width.
+    private let PaneMenuBar_preferredWidth: CGFloat = 120
 }
