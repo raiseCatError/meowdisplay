@@ -2308,7 +2308,7 @@ extension ReceiverControlOverlay {
             ? floatingPass(mainEdge, [1], [.end]).mainCells.prefix(1).map { $0.insetBy(dx: -4, dy: -4) } : []
         let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups,
                                                                calculator: showsCalculator, floating: floatingCells,
-                                                               keepClear: gearCell) { railPass($0, $1, nil) }
+                                                               keepClear: gearCell, bounds: container) { railPass($0, $1, nil) }
         let mainGroups = placement.main
         let mainKinds = mainGroups.flatMap { $0 }
         let calculatorOnMain = placement.placement == .settingsGroup

@@ -958,7 +958,7 @@ extension PadRailComposition {
     /// place keeps everything, the Function rail when it keeps the picture's size and lanes
     /// (its groups may shift), else the Settings group.
     static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool,
-                                    floating: [CGRect] = [], keepClear: [CGRect] = [],
+                                    floating: [CGRect] = [], keepClear: [CGRect] = [], bounds: CGRect? = nil,
                                     layout: (_ main: [[CustomControlKind]], _ calculatorLeadsFunction: Bool) -> PadEdgeLayout)
         -> (main: [[CustomControlKind]], placement: CalculatorPlacement) {
         let without = main.map { $0.filter { $0 != .calculator } }.filter { !$0.isEmpty }
@@ -992,8 +992,25 @@ extension PadRailComposition {
             if let cell = floating.first(where: { clear($0, of: reference.functionCells) }) {
                 return (without, .floating(cell))
             }
-            // Else the Function rail, which lays every chip out without overlap, even when
-            // crowded (a small window, large controls, a long rail) it takes a lane.
+            // Else the Function rail, which lays every chip out without overlap, taking a lane
+            // if it must, as long as every chip stays on screen and the picture keeps at least
+            // half its size. A screen that full (a small window, large controls, a long rail)
+            // has no free spot: the floating spot overlapping the least, clear of the gear.
+            let onScreen = bounds.map { area in leading.functionCells.allSatisfy { area.contains($0) } } ?? true
+            let pictureKept = leading.canvas.width * leading.canvas.height
+                >= reference.canvas.width * reference.canvas.height / 2
+            let gearClear = !leading.functionCells.contains { cell in keepClear.contains { $0.intersects(cell) } }
+            if onScreen, pictureKept, gearClear { return (without, .leadsFunction) }
+            func overlap(_ cell: CGRect) -> CGFloat {
+                reference.functionCells.reduce(0) { total, chip in
+                    let shared = chip.intersection(cell)
+                    return total + (shared.isNull ? 0 : shared.width * shared.height)
+                }
+            }
+            if let cell = floating.filter({ cell in !keepClear.contains { $0.intersects(cell) } })
+                .min(by: { overlap($0) < overlap($1) }) {
+                return (without, .floating(cell))
+            }
             return (without, .leadsFunction)
         }
         // Something has to give: keep the picture's size and lanes if the Function rail

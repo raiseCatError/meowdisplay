@@ -629,12 +629,6 @@ final class PadControlLayoutTests: XCTestCase {
         let insets = ControlSafeInsets(top: 24, leading: 0, bottom: 20, trailing: 0)
         let metrics = PadControlMetrics(scale: 1.4)
         let groups = [2, 2] + Array(repeating: 1, count: 24)
-        func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
-            PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: false,
-                                   mainEdge: .leading, functionEdge: .leading, mainGroupCounts: main.map(\.count),
-                                   mainGroupAlignments: PadRailComposition.alignments(for: main),
-                                   functionGroupCounts: (first ? [1] : []) + groups, metrics: metrics)
-        }
         func pass(_ edge: ControlEdge, _ counts: [Int], _ alignments: [PadGroupAlignment]) -> PadEdgeLayout {
             PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: false, mainEdge: edge,
                                    functionEdge: .leading, mainGroupCounts: counts, mainGroupAlignments: alignments,
@@ -645,12 +639,28 @@ final class PadControlLayoutTests: XCTestCase {
                         pass(.trailing, [1], [.end]).mainCells.first,
                         pass(.trailing, [1], [.start]).mainCells.first].compactMap { $0 }
         let gear = pass(.leading, [1], [.end]).mainCells.prefix(1).map { $0.insetBy(dx: -4, dy: -4) }
-        let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, floating: floating,
-                                                            keepClear: gear, layout: layout)
-        let chosen = layout([], placed.placement == .leadsFunction)
-        let launcher = placed.placement.floatingCell ?? chosen.functionCells[0]
-        let chips = placed.placement == .leadsFunction ? Array(chosen.functionCells.dropFirst()) : chosen.functionCells
-        XCTAssertFalse(chips.contains { $0.intersects(launcher) }, "\(placed.placement)")
+        for strip in [false, true] {
+            func railed(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+                PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: strip,
+                                       mainEdge: .leading, functionEdge: .leading, mainGroupCounts: main.map(\.count),
+                                       mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                       functionGroupCounts: (first ? [1] : []) + groups, metrics: metrics)
+            }
+            let reference = railed([], false)
+            let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, floating: floating,
+                                                                keepClear: gear, bounds: container, layout: railed)
+            let chosen = railed([], placed.placement == .leadsFunction)
+            let label = "strip \(strip): \(placed.placement)"
+            // Codex round 13: every chip stays on screen and the picture keeps most of its size.
+            XCTAssertTrue(chosen.functionCells.allSatisfy { container.contains($0) }, label)
+            XCTAssertGreaterThanOrEqual(chosen.canvas.width * chosen.canvas.height,
+                                        reference.canvas.width * reference.canvas.height / 2, label)
+            let launcher = placed.placement.floatingCell ?? chosen.functionCells[0]
+            XCTAssertFalse(gear.contains { $0.intersects(launcher) }, label)
+            if placed.placement == .leadsFunction {
+                XCTAssertFalse(chosen.functionCells.dropFirst().contains { $0.intersects(launcher) }, label)
+            }
+        }
     }
 
     func testTheCalculatorBesideTheGearLeavesTheGearWhereItWas() {

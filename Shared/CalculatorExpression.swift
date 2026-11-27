@@ -956,8 +956,7 @@ enum CalculatorSheet {
         var context = state.context
         var running = state.running
         defer { state = State(context: context, running: running) }
-        let trimmed = CalculatorSheet.normalizingNumbers(line.trimmingCharacters(in: .whitespaces), locale: smart.locale,
-                                                         variables: Set(state.context.variables.keys))
+        let trimmed = CalculatorSheet.normalizingNumbers(line.trimmingCharacters(in: .whitespaces), locale: smart.locale)
         if trimmed.isEmpty {
             running = nil
             return CalculatorLineResult(value: nil)
@@ -997,7 +996,7 @@ enum CalculatorSheet {
     /// or after an operator (",5", as the rail's key types it).
     /// A dot stays a decimal point where dots don't group. Commas elsewhere ("five, plus
     /// three") are left alone.
-    static func normalizingNumbers(_ text: String, locale: Locale, variables: Set<String> = []) -> String {
+    static func normalizingNumbers(_ text: String, locale: Locale) -> String {
         guard locale.decimalSeparator == "," else { return text }
         var result = text
         let grouping = locale.groupingSeparator ?? ""
@@ -1016,10 +1015,11 @@ enum CalculatorSheet {
         // lexer), then any spaces.
         result = result.replacingOccurrences(of: #"([-+−–—×÷∕∗⋅·*/^(\[{=%√∛]\s*),(?=\d)"#, with: "$1.",
                                              options: .regularExpression)
-        // "x", "mod" and "modulo" after a number or a bracket ("2 x ,5", "(2+3) x ,4",
-        // "7 modulo ,4") read as operators too; "x" not once it names a value.
-        let words = variables.contains("x") ? "modulo|mod" : "modulo|mod|x"
-        return result.replacingOccurrences(of: #"(?i)([\d)\]}]\s*(?:"# + words + #")\s*),(?=\d)"#, with: "$1.",
+        // After the words "x", "mod" and "modulo" ("2 x ,5", "(2+3) x ,4", "balance modulo
+        // ,4"), not inside another word ("box ,5"). Whether "x" multiplies or names a value
+        // ("2 x ,5" is then 2·x·0.5), the comma before a digit is a decimal mark either way,
+        // so arithmetic and smart answers (which don't see the sheet's names) agree.
+        return result.replacingOccurrences(of: #"(?i)((?<![\p{L}_])(?:modulo|mod|x)\s*),(?=\d)"#, with: "$1.",
                                            options: .regularExpression)
     }
 

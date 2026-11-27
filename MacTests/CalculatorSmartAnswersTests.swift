@@ -180,6 +180,13 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         let before = CalculatorSheet.evaluate(lines: first, angle: .degrees, smart: context, reusing: nil)
         XCTAssertEqual(CalculatorSheet.evaluate(lines: second, angle: .degrees, smart: context, reusing: before).results,
                        CalculatorSheet.evaluate(lines: second, angle: .degrees, smart: context))
+        // Codex round 13: also when a saved state lies past it and a later line changes too.
+        let filler = (0..<30).map { "\($0) + 1" }
+        let long = first + filler, edited = second + filler.dropLast() + ["99 + 1"]
+        let saved = CalculatorSheet.evaluate(lines: long, angle: .degrees, smart: context, reusing: nil)
+        XCTAssertTrue(saved.checkpoints.keys.contains { $0 > 1 }, "a saved state past the changed line")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context, reusing: saved).results,
+                       CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context))
     }
 
     func testAnotherAngleRedoesTheSheet() {
@@ -241,8 +248,16 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["2 mod ,5"], angle: .degrees, smart: french).map(\.value), [0])
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["7 modulo ,4"], angle: .degrees, smart: french).map(\.value), [0.2])
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["(2+3) x ,4"], angle: .degrees, smart: french).map(\.value), [2])
-        XCTAssertEqual(CalculatorSheet.normalizingNumbers("2 x ,5", locale: french.locale, variables: ["x"]), "2 x ,5",
-                       "x names a value: not an operator")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["balance = 7", "balance modulo ,4"], angle: .degrees,
+                                                smart: french).map(\.value), [7, 0.2])
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("box ,5", locale: french.locale), "box ,5", "inside a word")
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("commodity ,5", locale: french.locale), "commodity ,5")
+        // Codex round 13: naming x doesn't change what a unit conversion's amount means.
+        let km = CalculatorSheet.evaluate(lines: ["2 x ,5 km in m"], angle: .degrees, smart: french).map(\.value)
+        XCTAssertEqual(km, [1000])
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["x = 3", "2 x ,5 km in m"], angle: .degrees,
+                                                smart: french).map(\.value).last, km.first)
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["2 × ,5 km in m"], angle: .degrees, smart: french).map(\.value), [1000])
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["five plus,3"], angle: .degrees, smart: french).map(\.value), [8])
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("1,5", locale: context.locale), "1,5", "en_GB is left alone")
     }
