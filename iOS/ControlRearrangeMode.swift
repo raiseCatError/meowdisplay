@@ -47,15 +47,25 @@ struct ControlRearrangeRun: Identifiable {
     var id: Kind { kind }
 }
 
+/// An open palette in edit mode: its keys where the live palette draws
+/// them, and the palette's own frame (its backdrop, and where an empty
+/// palette's hint sits).
+struct ControlRearrangePalette {
+    let items: [ControlRearrangeItem]
+    let slots: [CGRect]
+    let frame: CGRect
+}
+
 /// Edit mode over the controls: a faint scrim that takes every touch, the
-/// wiggling runs, the open palette (if any) and Done.
+/// wiggling runs inside dashed outlines of where buttons can go, the open
+/// palette (if any) in its usual place, and Done.
 struct ControlRearrangeLayer: View {
     let containerSize: CGSize
     let safeInsets: ControlSafeInsets
     let isPad: Bool
     let runs: [ControlRearrangeRun]
-    /// The keys of a palette, for rearranging after a tap on its modifier.
-    let paletteItems: (ModifierChord) -> [ControlRearrangeItem]
+    /// A palette laid out as the live tray opens it, after taps on modifiers.
+    let palette: (ModifierChord) -> ControlRearrangePalette
     let onMove: (ControlRearrangeRun.Kind, Int, Int) -> Void
     let onHaptic: (ControlHapticEvent) -> Void
     let onDone: () -> Void
@@ -63,12 +73,9 @@ struct ControlRearrangeLayer: View {
     @State private var openPalette: ModifierChord?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var paletteKey: CGFloat { isPad ? 44 : 38 }
-    private var paletteGap: CGFloat { isPad ? 10 : 8 }
-
     var body: some View {
         let container = CGRect(origin: .zero, size: containerSize)
-        let paletteRun = openPalette.map(paletteRun(for:))
+        let open = openPalette.map { (chord: $0, layout: palette($0)) }
         ZStack(alignment: .topLeading) {
             // Takes every touch outside the buttons: none reach the Mac or
             // the controls underneath. Lifting on it closes an open palette.
@@ -79,27 +86,27 @@ struct ControlRearrangeLayer: View {
                 .accessibilityHidden(true)
 
             ForEach(runs) { run in
+                ControlRearrangeBounds(slots: run.slots)
+            }
+
+            ForEach(runs) { run in
                 ControlRearrangeRunView(run: run, isPad: isPad, coordinateSpace: Self.space,
+                                        selected: openPalette?.modifiers ?? [],
                                         onMove: onMove, onHaptic: onHaptic,
                                         onTap: { item in tapped(item) })
             }
 
-            if let paletteRun, let card = paletteCard(paletteRun) {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
-                    .frame(width: card.width, height: card.height)
-                    .position(x: card.midX, y: card.midY)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0))
-                    .accessibilityHidden(true)
-                paletteHeader(paletteRun, card: card)
-                ControlRearrangeRunView(run: paletteRun, isPad: isPad, coordinateSpace: Self.space,
+            if let open {
+                paletteBackdrop(open.layout, chord: open.chord)
+                ControlRearrangeRunView(run: ControlRearrangeRun(kind: .palette(open.chord), items: open.layout.items,
+                                                                 slots: open.layout.slots),
+                                        isPad: isPad, coordinateSpace: Self.space, selected: [],
                                         onMove: onMove, onHaptic: onHaptic, onTap: { _ in })
+                    .id(open.chord)
                     .transition(.opacity)
             }
 
+            hint(container: container)
             doneButton(container: container)
         }
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
@@ -117,12 +124,10 @@ struct ControlRearrangeLayer: View {
     static let space = "controlRearrange"
 
     private func tapped(_ item: ControlRearrangeItem) {
-        guard let chord = item.palette else { return }
+        guard let chord = item.palette, let modifier = chord.modifiers.first, chord.modifiers.count == 1 else { return }
         onHaptic(.expandCollapse)
-        openPalette = openPalette == chord ? nil : chord
-        if openPalette != nil {
-            UIAccessibility.post(notification: .screenChanged, argument: nil)
-        }
+        openPalette = ControlRearrangePolicy.palette(after: openPalette, tapping: modifier)
+        UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
 
     private func closePalette() {
@@ -131,51 +136,51 @@ struct ControlRearrangeLayer: View {
         UIAccessibility.post(notification: .screenChanged, argument: nil)
     }
 
-    /// The palette's keys as a grid in the middle of the safe area.
-    private func paletteRun(for chord: ModifierChord) -> ControlRearrangeRun {
-        let items = paletteItems(chord)
-        let safe = safeInsets.safeRect(in: containerSize).insetBy(dx: 32, dy: 0)
-        let slots = ControlRearrangement.gridSlots(
-            count: items.count, key: paletteKey, gap: paletteGap, maximumColumns: isPad ? 8 : 5,
-            center: CGPoint(x: safe.midX, y: safe.midY + 12), bounds: safe)
-        return ControlRearrangeRun(kind: .palette(chord), items: items, slots: slots)
-    }
-
-    private func paletteCard(_ run: ControlRearrangeRun) -> CGRect? {
-        guard let first = run.slots.first else { return nil }
-        let keys = run.slots.dropFirst().reduce(first) { $0.union($1) }
-        // Room for the heading above the keys, and for the heading's width.
-        let width = max(keys.width + 32, 180)
-        return CGRect(x: keys.midX - width / 2, y: keys.minY - 52, width: width, height: keys.height + 68)
-    }
-
-    private func paletteHeader(_ run: ControlRearrangeRun, card: CGRect) -> some View {
-        let chord: ModifierChord? = {
-            if case .palette(let chord) = run.kind { return chord }
-            return nil
-        }()
-        return HStack(spacing: 8) {
-            Text(chord?.symbols ?? "")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .accessibilityLabel(Text("\(chord?.displayName ?? "") Shortcuts",
-                                         comment: "Rearrange Controls: heading of an open shortcut palette."))
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 0)
-            Button { closePalette() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(.white.opacity(0.15)))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white)
-            .accessibilityLabel(Text("Close Shortcuts", comment: "Rearrange Controls: closes the open shortcut palette."))
-            .accessibilityIdentifier("controlRearrangeClosePalette")
+    /// The palette's tray where it normally opens, outlined like the
+    /// others; an empty one says so in place.
+    @ViewBuilder
+    private func paletteBackdrop(_ layout: ControlRearrangePalette, chord: ModifierChord) -> some View {
+        if layout.items.isEmpty {
+            Text("No \(chord.symbols) shortcuts yet. Add them in Settings.",
+                 comment: "Rearrange Controls: an open palette with no shortcuts.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(Capsule().fill(.ultraThinMaterial).opacity(0.6))
+                .overlay(Capsule().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                    .foregroundStyle(.white.opacity(0.5)))
+                .fixedSize()
+                .position(x: layout.frame.midX, y: layout.frame.midY)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("controlRearrangeEmptyPalette")
+        } else {
+            let frame = layout.slots.dropFirst().reduce(layout.slots[0]) { $0.union($1) }.insetBy(dx: -6, dy: -6)
+            RoundedRectangle(cornerRadius: min(frame.width, frame.height) / 2, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(0.5)
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0))
+                .accessibilityHidden(true)
+            ControlRearrangeBounds(slots: layout.slots)
         }
-        .padding(.horizontal, 10)
-        .frame(width: card.width)
-        .position(x: card.midX, y: card.minY + 22)
+    }
+
+    private func hint(container: CGRect) -> some View {
+        Text(openPalette == nil
+             ? String(localized: "Drag to rearrange. Tap a modifier for its shortcuts.",
+                      comment: "Rearrange Controls: hint under Done.")
+             : String(localized: "\(openPalette?.symbols ?? "") shortcuts. Tap another modifier to add it.",
+                      comment: "Rearrange Controls: hint under Done while a palette is open."))
+            .font(.footnote)
+            .foregroundStyle(.white.opacity(0.85))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: min(container.width - 48, 420))
+            .fixedSize(horizontal: false, vertical: true)
+            .position(x: container.midX, y: safeInsets.top + (isPad ? 34 : 30) + 34)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     private func doneButton(container: CGRect) -> some View {
@@ -196,35 +201,70 @@ struct ControlRearrangeLayer: View {
     }
 }
 
+/// Dashed outlines of where a run's buttons can go: one capsule per
+/// cluster of neighbouring slots.
+private struct ControlRearrangeBounds: View {
+    let slots: [CGRect]
+
+    var body: some View {
+        ForEach(Array(ControlRearrangement.clusters(slots).enumerated()), id: \.offset) { _, cluster in
+            let frame = cluster.insetBy(dx: -5, dy: -5)
+            RoundedRectangle(cornerRadius: min(frame.width, frame.height) / 2, style: .continuous)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                .foregroundStyle(.white.opacity(0.55))
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
 /// One run: its buttons sit in `run.slots`, wiggle, and are dragged among
 /// them. Others slide aside with a spring as the dragged one passes, and it
-/// settles into the nearest slot on release.
+/// settles into the nearest slot on release. The drag lives in gesture
+/// state, so a cancelled touch (a system gesture, an alert) puts the button
+/// back instead of leaving it lifted.
 private struct ControlRearrangeRunView: View {
     let run: ControlRearrangeRun
     let isPad: Bool
     let coordinateSpace: String
+    /// Modifiers in the open palette's chord, drawn selected.
+    let selected: Set<ControlModifier>
     let onMove: (ControlRearrangeRun.Kind, Int, Int) -> Void
     let onHaptic: (ControlHapticEvent) -> Void
     let onTap: (ControlRearrangeItem) -> Void
 
     private struct Drag: Equatable {
         let id: String
-        let start: Int
-        var target: Int
         var translation: CGSize
     }
 
-    @State private var drag: Drag?
+    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.32, dampingFraction: 0.78)))
+    private var drag: Drag?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var ids: [String] { run.items.map(\.id) }
     private var count: Int { min(run.items.count, run.slots.count) }
+    private var slots: [CGRect] { Array(run.slots.prefix(count)) }
+
+    private var dragStart: Int? {
+        drag.flatMap { drag in ids.prefix(count).firstIndex(of: drag.id) }
+    }
+
+    /// The slot the dragged button is over.
+    private var dragTarget: Int? {
+        guard let drag, let start = dragStart else { return nil }
+        let home = slots[start]
+        let point = CGPoint(x: home.midX + drag.translation.width, y: home.midY + drag.translation.height)
+        return ControlRearrangement.nearestSlot(to: point, in: slots) ?? start
+    }
 
     /// The order on screen: the dragged button already counted in the slot
     /// it hovers over.
     private var liveOrder: [String] {
-        guard let drag else { return Array(ids.prefix(count)) }
-        return ControlRearrangement.moving(Array(ids.prefix(count)), from: drag.start, to: drag.target)
+        guard let start = dragStart, let target = dragTarget else { return Array(ids.prefix(count)) }
+        return ControlRearrangement.moving(Array(ids.prefix(count)), from: start, to: target)
     }
 
     private var settle: Animation {
@@ -233,20 +273,23 @@ private struct ControlRearrangeRunView: View {
 
     var body: some View {
         let order = liveOrder
-        let horizontal = ControlRearrangement.runsHorizontally(Array(run.slots.prefix(count)))
+        let start = dragStart
+        let horizontal = ControlRearrangement.runsHorizontally(slots)
         ZStack(alignment: .topLeading) {
             ForEach(run.items.prefix(count)) { item in
                 let index = order.firstIndex(of: item.id) ?? 0
-                let dragging = drag?.id == item.id
-                let slot = dragging ? run.slots[drag!.start] : run.slots[index]
+                let dragging = start != nil && drag?.id == item.id
+                let slot = dragging ? slots[start!] : slots[index]
                 let offset = dragging ? drag!.translation : .zero
-                ControlRearrangeChip(item: item, diameter: slot.width, isPad: isPad, lifted: dragging)
+                let chosen = item.palette.map { !$0.modifiers.isDisjoint(with: selected) } ?? false
+                ControlRearrangeChip(item: item, diameter: slot.width, isPad: isPad, lifted: dragging || chosen)
                     .modifier(ControlJiggle(id: item.id, active: !dragging))
                     .scaleEffect(dragging && !reduceMotion ? 1.1 : 1)
                     .shadow(color: .black.opacity(dragging ? 0.4 : 0), radius: dragging ? 10 : 0, y: dragging ? 4 : 0)
                     .frame(width: slot.width + 8, height: slot.height + 8)
                     .contentShape(Rectangle())
                     .position(x: slot.midX + offset.width, y: slot.midY + offset.height)
+                    .animation(dragging ? nil : settle, value: order)
                     .zIndex(dragging ? 1 : 0)
                     .onTapGesture { onTap(item) }
                     .gesture(dragGesture(for: item))
@@ -273,41 +316,27 @@ private struct ControlRearrangeRunView: View {
                     .accessibilityIdentifier("rearrange.\(item.id)")
             }
         }
-        // The store changed the run under a drag (a profile switch, say):
-        // drop the drag rather than move the wrong button.
-        .onChange(of: ids) { _ in drag = nil }
+        .onChange(of: drag?.id) { id in
+            if id != nil { onHaptic(.latch) }
+        }
+        .onChange(of: dragTarget) { target in
+            if target != nil, target != dragStart { onHaptic(.selection) }
+        }
     }
 
     private func dragGesture(for item: ControlRearrangeItem) -> some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .named(coordinateSpace))
-            .onChanged { value in
-                if drag == nil {
-                    guard let start = ids.firstIndex(of: item.id), start < count else { return }
-                    onHaptic(.latch)
-                    withAnimation(.snappy(duration: 0.18)) {
-                        drag = Drag(id: item.id, start: start, target: start, translation: .zero)
-                    }
-                }
-                guard var current = drag, current.id == item.id else { return }
-                current.translation = value.translation
-                let home = run.slots[current.start]
-                let point = CGPoint(x: home.midX + value.translation.width, y: home.midY + value.translation.height)
-                let target = ControlRearrangement.nearestSlot(to: point, in: Array(run.slots.prefix(count)))
-                    ?? current.start
-                if target != current.target {
-                    current.target = target
-                    onHaptic(.selection)
-                    withAnimation(settle) { drag = current }
-                } else {
-                    drag = current
-                }
+            .updating($drag) { value, state, _ in
+                guard state == nil || state?.id == item.id else { return }
+                state = Drag(id: item.id, translation: value.translation)
             }
-            .onEnded { _ in
-                guard let finished = drag, finished.id == item.id else { return }
-                withAnimation(settle) {
-                    if finished.target != finished.start { onMove(run.kind, finished.start, finished.target) }
-                    drag = nil
-                }
+            .onEnded { value in
+                guard let from = ids.prefix(count).firstIndex(of: item.id) else { return }
+                let home = slots[from]
+                let point = CGPoint(x: home.midX + value.translation.width, y: home.midY + value.translation.height)
+                let to = ControlRearrangement.nearestSlot(to: point, in: slots) ?? from
+                guard to != from else { return }
+                withAnimation(settle) { onMove(run.kind, from, to) }
             }
     }
 

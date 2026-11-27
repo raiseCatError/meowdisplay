@@ -37,12 +37,70 @@ final class ControlRearrangementTests: XCTestCase {
         XCTAssertTrue(state.surfaceInteractive(.session), "the screen decides input while editing, not the overlay")
     }
 
-    func testOnlyAModifierWithShortcutsOpensAPalette() {
+    func testEveryModifierOpensAPalette() {
         let profile = ControlProfile.canonical()
         XCTAssertEqual(ControlRearrangePolicy.paletteChord(for: .command, in: profile), ModifierChord([.command]))
-        XCTAssertNil(ControlRearrangePolicy.paletteChord(for: .option, in: profile), "Option alone has no palette")
+        XCTAssertEqual(ControlRearrangePolicy.paletteChord(for: .option, in: profile), ModifierChord([.option]),
+                       "an empty palette still opens, with its hint")
         XCTAssertNil(ControlRearrangePolicy.paletteChord(for: .escape, in: profile))
         XCTAssertNil(ControlRearrangePolicy.paletteChord(for: .settings, in: profile))
+    }
+
+    func testTapsBuildAChordLikeTheLiveTray() {
+        let command = ControlRearrangePolicy.palette(after: nil, tapping: .command)
+        XCTAssertEqual(command, ModifierChord([.command]))
+        let commandOption = ControlRearrangePolicy.palette(after: command, tapping: .option)
+        XCTAssertEqual(commandOption, ModifierChord([.command, .option]))
+        XCTAssertEqual(ControlRearrangePolicy.palette(after: commandOption, tapping: .command), ModifierChord([.option]))
+        XCTAssertNil(ControlRearrangePolicy.palette(after: command, tapping: .command))
+    }
+
+    func testBoundsOutlineEachClusterOfSlots() {
+        let row = ControlRearrangement.stackSlots(center: CGPoint(x: 100, y: 50), horizontal: true,
+                                                  count: 3, item: 40, spacing: 8)
+        let apart = ControlRearrangement.stackSlots(center: CGPoint(x: 400, y: 50), horizontal: true,
+                                                    count: 2, item: 40, spacing: 8)
+        let clusters = ControlRearrangement.clusters(row + apart)
+        XCTAssertEqual(clusters.count, 2)
+        XCTAssertEqual(clusters.first, row.dropFirst().reduce(row[0]) { $0.union($1) })
+    }
+
+    // MARK: Portrait and landscape
+
+    func testLandscapeKeepsItsOwnMainTrayOrder() {
+        var profile = ControlProfile.canonical()
+        let portrait = profile.visibleTrayItems
+        profile.moveShownTrayItem(shown: portrait, from: 0, to: 2, landscape: true)
+        XCTAssertEqual(profile.visibleTrayItems, portrait, "portrait is untouched")
+        XCTAssertEqual(profile.visibleTrayItems(landscape: false), portrait)
+        XCTAssertEqual(profile.visibleTrayItems(landscape: true), ControlRearrangement.moving(portrait, from: 0, to: 2))
+        profile.moveShownTrayItem(shown: portrait, from: 1, to: 0)
+        XCTAssertEqual(profile.visibleTrayItems, ControlRearrangement.moving(portrait, from: 1, to: 0))
+        XCTAssertEqual(profile.visibleTrayItems(landscape: true), ControlRearrangement.moving(portrait, from: 0, to: 2),
+                       "landscape is untouched by a portrait move")
+        let decoded = try? JSONDecoder().decode(ControlProfile.self, from: JSONEncoder().encode(profile))
+        XCTAssertEqual(decoded, profile)
+    }
+
+    func testLandscapeKeepsItsOwnFunctionTrayOrder() {
+        var tray = FunctionTrayProfile.canonical()
+        let shown = tray.visibleItems.map(\.id)
+        let groups = tray.visibleGroups.map { $0.map(\.id) }
+        tray.moveShownItem(shown: shown, from: 0, to: shown.count - 1, landscape: true)
+        XCTAssertEqual(tray.visibleGroups.map { $0.map(\.id) }, groups, "portrait is untouched")
+        XCTAssertEqual(tray.visibleGroups(landscape: true).flatMap { $0 }.map(\.id),
+                       ControlRearrangement.moving(shown, from: 0, to: shown.count - 1))
+        XCTAssertEqual(tray.visibleGroups(landscape: true).map(\.count), groups.map(\.count), "clusters keep their sizes")
+        let refreshed = tray.resolvingCanonicalMetadata()
+        XCTAssertEqual(refreshed.landscapeOrder, tray.landscapeOrder, "a metadata refresh keeps the landscape order")
+    }
+
+    func testAProfileSavedBeforeLandscapeOrdersDecodes() throws {
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ControlProfile.canonical())) as! [String: Any]
+        json.removeValue(forKey: "landscapeTrayOrder")
+        let decoded = try JSONDecoder().decode(ControlProfile.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(decoded.landscapeTrayOrder)
+        XCTAssertEqual(decoded.visibleTrayItems(landscape: true), decoded.visibleTrayItems)
     }
 
     // MARK: Reordering

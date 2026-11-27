@@ -514,6 +514,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     }
 
     private var profile: ControlProfile { store.activeProfile }
+    /// Portrait and landscape keep their own tray orders (Rearrange Controls).
+    private var landscapeOrder: Bool { containerSize.width > containerSize.height }
     /// `visibleGroups` (see its doc) — the Function Tray's ordered item
     /// list clustered for rendering; `functionItems` is the flattened form
     /// used wherever only "is there anything to show at all" matters.
@@ -524,7 +526,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // to animate. Never touches the user's own "Show Function Tray"
         // preference.
         guard store.preferences.functionTrayCanBeShown else { return [] }
-        return store.activeFunctionTrayProfile.visibleGroups
+        return store.activeFunctionTrayProfile.visibleGroups(landscape: landscapeOrder)
     }
     private var functionItems: [ShortcutItem] { functionGroups.flatMap { $0 } }
     private var controls: [ControlTrayItem] {
@@ -544,7 +546,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         // `functionGroups`'s doc above; the full tray (settings gear
         // included, since it is one of `visibleTrayItems` whenever the tray
         // isn't manually collapsed) stays mounted and fades out in place.
-        return profile.visibleTrayItems.filter(capabilityAllows)
+        return profile.visibleTrayItems(landscape: landscapeOrder).filter(capabilityAllows)
     }
 
     /// Modifiers need a Mac that understands receiver controls; Keyboard
@@ -957,7 +959,25 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             if store.rearrangingControls {
                 phoneRearrangeLayer(trayFrame: layout.trayFrame, horizontal: layout.axis == .horizontal,
                                     trayItem: trayItem, fold: foldedTray, collapsed: collapsed,
-                                    functionFrames: functionFrames, faceDiameter: faceDiameter)
+                                    functionFrames: functionFrames, faceDiameter: faceDiameter) { chord in
+                    // Where this palette opens in the live tray: the same
+                    // layout pass with its size, and its Grid's cells.
+                    let actions = profile.actions(for: chord)
+                    let size = calculatedPaletteSize(actions: actions, portrait: portrait)
+                    let frame = ControlTrayGeometry.layout(
+                        container: CGRect(origin: .zero, size: containerSize), safeInsets: safe,
+                        keyboardVisibleRect: keyboardVisibleRect, portrait: portrait,
+                        side: store.preferences.preferredLandscapeSide, traySize: traySize, paletteSize: size,
+                        avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
+                        reservedRegions: reservedRegions).paletteFrame
+                    let grid = ControlTrayGeometry.shortcutPaletteGrid(count: actions.count, portrait: portrait)
+                    let slots = ControlRearrangement.paletteSlots(
+                        count: actions.count, rows: grid.rows, columns: grid.columns, rowMajor: portrait,
+                        key: CGSize(width: Metrics.paletteKey, height: Metrics.paletteKey), gap: Metrics.paletteGap,
+                        in: frame)
+                    return ControlRearrangePalette(items: actions.map(ControlRearrangeItem.shortcut),
+                                                   slots: slots, frame: frame)
+                }
             }
 
             #if DEBUG
@@ -2171,7 +2191,8 @@ extension ReceiverControlOverlay {
     /// `functionGroupCluster` draw each button this pass.
     fileprivate func phoneRearrangeLayer(trayFrame: CGRect, horizontal: Bool, trayItem: CGFloat,
                                          fold: ControlFoldGeometry.TrayRow?, collapsed: Bool,
-                                         functionFrames: [CGRect], faceDiameter: CGFloat) -> some View {
+                                         functionFrames: [CGRect], faceDiameter: CGFloat,
+                                         palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
         let main = collapsed ? [] : controls
         let mainSlots = fold?.cells ?? ControlRearrangement.stackSlots(
             center: CGPoint(x: trayFrame.midX, y: trayFrame.midY), horizontal: horizontal,
@@ -2183,22 +2204,26 @@ extension ReceiverControlOverlay {
                 .map { $0.insetBy(dx: inset, dy: inset) }
         }
         let functionShown = Array(functionGroups.prefix(functionFrames.count).joined())
-        return rearrangeLayer(main: Array(zip(main, mainSlots)), function: Array(zip(functionShown, functionSlots)))
+        return rearrangeLayer(main: Array(zip(main, mainSlots)), function: Array(zip(functionShown, functionSlots)),
+                              palette: palette)
     }
 
     /// Edit mode over the iPad Strip/Overlay rails: the modifiers (the only
     /// Main rail buttons whose order the profile sets, see
     /// `PadRailComposition`) and the Function buttons.
     fileprivate func padRearrangeLayer(mainControls: [PadPlacedControl],
-                                       functionControls: [(item: ShortcutItem, frame: CGRect)]) -> some View {
+                                       functionControls: [(item: ShortcutItem, frame: CGRect)],
+                                       palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
         let modifiers: [(ControlTrayItem, CGRect)] = mainControls.compactMap { control in
             guard case .tray(let item) = control.kind, item.modifier != nil else { return nil }
             return (item, control.frame)
         }
-        return rearrangeLayer(main: modifiers, function: functionControls.map { ($0.item, $0.frame) })
+        return rearrangeLayer(main: modifiers, function: functionControls.map { ($0.item, $0.frame) }, palette: palette)
     }
 
-    private func rearrangeLayer(main: [(ControlTrayItem, CGRect)], function: [(ShortcutItem, CGRect)]) -> some View {
+    private func rearrangeLayer(main: [(ControlTrayItem, CGRect)], function: [(ShortcutItem, CGRect)],
+                                palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
+        let landscape = landscapeOrder
         let mainItems = main.map(\.0)
         let functionIDs = function.map(\.0.id)
         let runs = [
@@ -2209,13 +2234,13 @@ extension ReceiverControlOverlay {
         ].filter { !$0.items.isEmpty }
         return ControlRearrangeLayer(
             containerSize: containerSize, safeInsets: safeInsets, isPad: store.isPad, runs: runs,
-            paletteItems: { chord in store.activeProfile.actions(for: chord).map(ControlRearrangeItem.shortcut) },
+            palette: palette,
             onMove: { kind, from, to in
                 switch kind {
                 case .main:
-                    store.updateActiveProfile { $0.moveShownTrayItem(shown: mainItems, from: from, to: to) }
+                    store.updateActiveProfile { $0.moveShownTrayItem(shown: mainItems, from: from, to: to, landscape: landscape) }
                 case .function:
-                    store.updateActiveFunctionTrayProfile { $0.moveShownItem(shown: functionIDs, from: from, to: to) }
+                    store.updateActiveFunctionTrayProfile { $0.moveShownItem(shown: functionIDs, from: from, to: to, landscape: landscape) }
                 case .palette(let chord):
                     store.updateActiveProfile { $0.moveAction(for: chord, from: from, to: to) }
                 }
@@ -2474,7 +2499,25 @@ extension ReceiverControlOverlay {
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: true) }
             if store.rearrangingControls {
-                padRearrangeLayer(mainControls: mainControls, functionControls: functionControls)
+                padRearrangeLayer(mainControls: mainControls, functionControls: functionControls) { chord in
+                    // Where this palette opens on the rail, its keys drawn
+                    // round for rearranging.
+                    let actions = profile.actions(for: chord)
+                    let key = CGSize(width: metrics.item * 0.92, height: metrics.item * 0.92)
+                    let grid = PadEdgeGeometry.paletteGrid(count: actions.count, key: key, gap: metrics.gap,
+                                                           edge: mainEdge, available: paletteBounds.size)
+                    let size = actions.isEmpty ? CGSize(width: 220, height: 36) : grid.size
+                    let frame = (paletteAnchor ?? gearFrame).map {
+                        PadEdgeGeometry.paletteFrame(size: size, anchor: $0, edge: mainEdge, bounds: paletteBounds,
+                                                     gap: metrics.gap * 2)
+                    } ?? CGRect(x: paletteBounds.midX - size.width / 2, y: paletteBounds.midY - size.height / 2,
+                                width: size.width, height: size.height)
+                    let slots = ControlRearrangement.paletteSlots(
+                        count: actions.count, rows: grid.rows, columns: grid.columns,
+                        rowMajor: !mainEdge.stacksVertically, key: key, gap: metrics.gap, in: frame)
+                    return ControlRearrangePalette(items: actions.map(ControlRearrangeItem.shortcut),
+                                                   slots: slots, frame: frame)
+                }
             }
         }
         .onAppear {
@@ -2534,7 +2577,7 @@ extension ReceiverControlOverlay {
     /// The Strip/Overlay Main rail — see `PadRailComposition`: system
     /// actions, then modifiers and keys, then Move View and Settings.
     private var padMainGroups: [[CustomControlKind]] {
-        let modifiers = profile.visibleTrayItems.compactMap(\.modifier)
+        let modifiers = profile.visibleTrayItems(landscape: landscapeOrder).compactMap(\.modifier)
             .filter { _ in capabilityAllows(.command) }
         return PadRailComposition.mainGroups(
             visibility: store.preferences.padStandardControls,

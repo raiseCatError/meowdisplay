@@ -354,6 +354,10 @@ struct ControlProfile: Codable, Equatable, Identifiable {
     var slot: ControlProfileSlot
     var trayItems: [TrayItemConfiguration]
     var palettes: [ChordPalette]
+    /// The Main Tray's order in landscape once it was rearranged there
+    /// (Rearrange Controls); nil keeps `trayItems`' order. Visibility
+    /// always comes from `trayItems`.
+    var landscapeTrayOrder: [ControlTrayItem]? = nil
     var id: String { slot.rawValue }
 
     var visibleTrayItems: [ControlTrayItem] {
@@ -630,6 +634,12 @@ func appGestureCommandDisplayText(for shortcut: KeyboardShortcut) -> String {
 /// without the architecture assuming there are ever exactly two of them or
 /// what they contain. Ordinary `Int`s rather than a named enum for the same
 /// reason: adding a new one is just a new integer, not a schema change.
+/// One Function Tray button's place in an orientation's own order.
+struct FunctionTrayOrderEntry: Codable, Equatable {
+    var id: String
+    var group: Int
+}
+
 struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
     var item: ShortcutItem
     var isVisible: Bool
@@ -661,6 +671,10 @@ struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
 struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     var slot: ControlProfileSlot
     var items: [FunctionTrayItemConfiguration]
+    /// The Function Tray's order and clusters in landscape once it was
+    /// rearranged there (Rearrange Controls); nil keeps `items`' own.
+    /// Visibility, names and faces always come from `items`.
+    var landscapeOrder: [FunctionTrayOrderEntry]? = nil
     var id: String { slot.rawValue }
 
     var visibleItems: [ShortcutItem] {
@@ -701,7 +715,11 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     /// customized — saving any other receiver setting writes the trays too —
     /// so it takes today's default instead, new visible actions included.
     func resolvingCanonicalMetadata() -> FunctionTrayProfile {
-        if isEarlierReleaseDefault { return Self.canonical(slot: slot) }
+        if isEarlierReleaseDefault {
+            var fresh = Self.canonical(slot: slot)
+            fresh.landscapeOrder = landscapeOrder
+            return fresh
+        }
         let canonical = Self.canonical(slot: slot).items
         let canonicalByID = Dictionary(uniqueKeysWithValues: canonical.map { ($0.id, $0.item) })
         let savedIDs = Set(items.map(\.id))
@@ -716,7 +734,7 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
         let added = canonical.filter { !savedIDs.contains($0.id) }.map {
             FunctionTrayItemConfiguration(item: $0.item, isVisible: false, group: $0.group)
         }
-        return FunctionTrayProfile(slot: slot, items: resolved + added)
+        return FunctionTrayProfile(slot: slot, items: resolved + added, landscapeOrder: landscapeOrder)
     }
 
     /// Every slot's starting tray in an earlier release, by the user-owned

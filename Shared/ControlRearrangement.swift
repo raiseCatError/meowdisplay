@@ -21,11 +21,18 @@ enum ControlRearrangePolicy {
     }
 
     /// The palette a tap on `item` opens for rearranging: its own modifier's
-    /// palette, when that has shortcuts. Other tray items have none.
+    /// palette, empty or not. Other tray items have none.
     static func paletteChord(for item: ControlTrayItem, in profile: ControlProfile) -> ModifierChord? {
-        guard let modifier = item.modifier else { return nil }
-        let chord = ModifierChord([modifier])
-        return profile.actions(for: chord).isEmpty ? nil : chord
+        item.modifier.map { ModifierChord([$0]) }
+    }
+
+    /// The palette open after tapping `modifier` while `open` is: taps
+    /// build a chord as the live tray latches one (⌘ then ⌥ opens ⌘⌥), and
+    /// tapping a modifier already in it takes it out again.
+    static func palette(after open: ModifierChord?, tapping modifier: ControlModifier) -> ModifierChord? {
+        guard var modifiers = open?.modifiers else { return ModifierChord([modifier]) }
+        if modifiers.contains(modifier) { modifiers.remove(modifier) } else { modifiers.insert(modifier) }
+        return modifiers.isEmpty ? nil : ModifierChord(modifiers)
     }
 }
 
@@ -65,6 +72,42 @@ enum ControlRearrangement {
             if best == nil || distance < best!.distance { best = (index, distance) }
         }
         return best?.index
+    }
+
+    /// The outlines of `slots` as drawn groups: slots closer than about
+    /// half a button to a neighbour share one rectangle (a tray, a
+    /// Function cluster, one half of a folded row).
+    static func clusters(_ slots: [CGRect]) -> [CGRect] {
+        var clusters: [CGRect] = []
+        for slot in slots {
+            let reach = min(slot.width, slot.height) * 0.6
+            let grown = slot.insetBy(dx: -reach, dy: -reach)
+            var merged = slot
+            clusters.removeAll { cluster in
+                guard cluster.intersects(grown) else { return false }
+                merged = merged.union(cluster)
+                return true
+            }
+            clusters.append(merged)
+        }
+        return clusters
+    }
+
+    /// A palette's keys as the live palette's grid draws them, centred in
+    /// `frame`: along rows in portrait, down columns in landscape
+    /// (`ShortcutPaletteGrid`).
+    static func paletteSlots(count: Int, rows: Int, columns: Int, rowMajor: Bool,
+                             key: CGSize, gap: CGFloat, in frame: CGRect) -> [CGRect] {
+        guard count > 0, rows > 0, columns > 0 else { return [] }
+        let width = CGFloat(columns) * key.width + CGFloat(columns - 1) * gap
+        let height = CGFloat(rows) * key.height + CGFloat(rows - 1) * gap
+        let origin = CGPoint(x: frame.midX - width / 2, y: frame.midY - height / 2)
+        return (0..<count).map { index in
+            let row = rowMajor ? index / columns : index % rows
+            let column = rowMajor ? index % columns : index / rows
+            return CGRect(x: origin.x + CGFloat(column) * (key.width + gap),
+                          y: origin.y + CGFloat(row) * (key.height + gap), width: key.width, height: key.height)
+        }
     }
 
     /// Where an assistive "Move Left/Up" (`delta` -1) or "Move Right/Down"
@@ -119,9 +162,33 @@ enum ControlRearrangement {
 }
 
 extension ControlProfile {
+    /// `trayItems` in the order of the given orientation: landscape keeps
+    /// its own once it was rearranged there. Items the landscape order
+    /// predates follow it in their portrait order.
+    func trayItems(landscape: Bool) -> [TrayItemConfiguration] {
+        guard landscape, let order = landscapeTrayOrder else { return trayItems }
+        let rank = Dictionary(order.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        return trayItems.enumerated().sorted { a, b in
+            let ra = rank[a.element.item] ?? order.count + a.offset
+            let rb = rank[b.element.item] ?? order.count + b.offset
+            return ra < rb
+        }.map(\.element)
+    }
+
+    func visibleTrayItems(landscape: Bool) -> [ControlTrayItem] {
+        trayItems(landscape: landscape).filter(\.isVisible).map(\.item)
+    }
+
     /// Moves a Main Tray item among `shown` (the tray as drawn, in order).
-    mutating func moveShownTrayItem(shown: [ControlTrayItem], from: Int, to: Int) {
-        trayItems = ControlRearrangement.reorderingShown(trayItems, id: \.item, shown: shown, from: from, to: to)
+    /// Portrait and landscape keep separate orders.
+    mutating func moveShownTrayItem(shown: [ControlTrayItem], from: Int, to: Int, landscape: Bool = false) {
+        if landscape {
+            let ordered = trayItems(landscape: true)
+            let moved = ControlRearrangement.reorderingShown(ordered, id: \.item, shown: shown, from: from, to: to)
+            if moved != ordered { landscapeTrayOrder = moved.map(\.item) }
+        } else {
+            trayItems = ControlRearrangement.reorderingShown(trayItems, id: \.item, shown: shown, from: from, to: to)
+        }
     }
 
     /// Moves one key of `chord`'s palette.
@@ -137,14 +204,40 @@ extension FunctionTrayProfile {
     /// id, in tray order). The clusters keep their sizes: each slot keeps
     /// the group it had, and the button landing there joins it, so the tray
     /// keeps its shape while buttons pass from one cluster to the next.
-    mutating func moveShownItem(shown: [String], from: Int, to: Int) {
-        let positions = shown.compactMap { id in items.firstIndex { $0.id == id } }.sorted()
+    mutating func moveShownItem(shown: [String], from: Int, to: Int, landscape: Bool = false) {
+        var ordered = items(landscape: landscape)
+        let positions = shown.compactMap { id in ordered.firstIndex { $0.id == id } }.sorted()
         guard positions.count == shown.count else { return }
-        let slotGroups = positions.map { items[$0].group }
-        let moved = ControlRearrangement.reorderingShown(items, id: \.id, shown: shown, from: from, to: to)
-        guard moved != items else { return }
-        items = moved
-        for (slot, position) in positions.enumerated() { items[position].group = slotGroups[slot] }
+        let slotGroups = positions.map { ordered[$0].group }
+        let moved = ControlRearrangement.reorderingShown(ordered, id: \.id, shown: shown, from: from, to: to)
+        guard moved != ordered else { return }
+        ordered = moved
+        for (slot, position) in positions.enumerated() { ordered[position].group = slotGroups[slot] }
+        if landscape {
+            landscapeOrder = ordered.map { FunctionTrayOrderEntry(id: $0.id, group: $0.group) }
+        } else {
+            items = ordered
+        }
+    }
+
+    /// `items` in the order and clusters of the given orientation:
+    /// landscape keeps its own once it was rearranged there. Buttons the
+    /// landscape order predates follow it as they are in portrait.
+    func items(landscape: Bool) -> [FunctionTrayItemConfiguration] {
+        guard landscape, let order = landscapeOrder else { return items }
+        var byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var result: [FunctionTrayItemConfiguration] = []
+        for entry in order {
+            guard var item = byID.removeValue(forKey: entry.id) else { continue }
+            item.group = entry.group
+            result.append(item)
+        }
+        return result + items.filter { byID[$0.id] != nil }
+    }
+
+    /// `visibleGroups` in the given orientation's order.
+    func visibleGroups(landscape: Bool) -> [[ShortcutItem]] {
+        FunctionTrayProfile(slot: slot, items: items(landscape: landscape)).visibleGroups
     }
 }
 
