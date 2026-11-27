@@ -274,6 +274,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let buttonVisible = !autoHiding || model.isOpen
         ZStack(alignment: .topLeading) {
             if let buttonFrame {
+                let entrySize = Self.entrySize(button: buttonFrame, face: buttonFaceDiameter, hint: buttonHint != nil)
                 LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFaceDiameter ?? buttonFrame.width,
                                            hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip) {
                     if model.isOpen, model.stash != nil, let panel {
@@ -283,8 +284,10 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     }
                     haptics.play(.selection)
                 }
-                .position(x: buttonFrame.midX,
-                          y: buttonFrame.minY + (buttonFrame.height + (buttonHint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
+                // At its own size, moved into place: placed by `.position` its frame (the one
+                // VoiceOver outlines and UI tests tap the middle of) became the whole layer.
+                .frame(width: entrySize.width, height: entrySize.height, alignment: .top)
+                .offset(x: buttonFrame.midX - entrySize.width / 2, y: buttonFrame.minY)
                 .opacity(buttonVisible ? 1 : 0)
                 .allowsHitTesting(buttonVisible)
             }
@@ -442,7 +445,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     haptics.play(.selection)
                 }
             })
-        .position(x: area.midX, y: area.midY)
+        // Moved into place at its own size, like the entry button: its frame stays the strip's.
+        .offset(x: area.minX, y: area.minY)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
         .accessibilityValue(stash.edge == .left
@@ -554,6 +558,14 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let width = min(max(minimum.width, start.width + translation.width), room.width)
         let height = min(max(minimum.height, start.height + translation.height), room.height)
         model.windowFrame = CGRect(x: start.minX, y: start.minY, width: width, height: height)
+    }
+
+    /// The entry button with its caption: as wide as the button (or its caption), as tall as
+    /// both.
+    static func entrySize(button: CGRect, face: CGFloat?, hint: Bool) -> CGSize {
+        guard hint else { return button.size }
+        return CGSize(width: max(button.width, (face ?? button.width) + PadControlMetrics.hintWidthAllowance),
+                      height: button.height + PadControlMetrics.hintHeight + 2)
     }
 
     /// The button's center relative to the panel, so it grows out of it.

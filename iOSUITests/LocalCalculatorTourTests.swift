@@ -42,6 +42,10 @@ final class LocalCalculatorTourTests: XCTestCase {
         XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added back from Edit Function Tray")
 
         let buttonFrame = calculatorButton.frame
+        // Its own frame, which VoiceOver outlines and a tap goes to the middle of; at 1fd358c2
+        // it was the whole screen and the tap landed on the desktop.
+        XCTAssertLessThan(buttonFrame.width, 120, "the button's own frame, not the screen's")
+        XCTAssertLessThan(buttonFrame.height, 120, "the button's own frame, not the screen's")
         calculatorButton.tap()
         let result = element("Result")
         let opened = result.waitForExistence(timeout: 3)
