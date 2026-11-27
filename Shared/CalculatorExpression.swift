@@ -945,7 +945,8 @@ enum CalculatorSheet {
     /// Numbers written the locale's way, as the engine reads them (a dot for the decimal
     /// mark, no grouping). Only where the decimal mark is a comma: "1.250,5" (de_DE groups
     /// with dots) and "1 250,5" (fr_FR groups with spaces) become 1250.5, and a comma
-    /// before a digit is the decimal mark, also leading (",5", as the rail's key types it).
+    /// before a digit is the decimal mark between digits or leading a number at the start
+    /// or after an operator (",5", as the rail's key types it).
     /// A dot stays a decimal point where dots don't group. Commas elsewhere ("five, plus
     /// three") are left alone.
     static func normalizingNumbers(_ text: String, locale: Locale) -> String {
@@ -959,7 +960,11 @@ enum CalculatorSheet {
             result = result.replacingOccurrences(of: #"(?<=\d)[ \x{00A0}\x{202F}](?=\d{3}(?!\d))"#, with: "",
                                                  options: .regularExpression)
         }
-        return result.replacingOccurrences(of: #",(?=\d)"#, with: ".", options: .regularExpression)
+        // A comma between digits, or leading a number at the start or after an operator
+        // (",5 + ,2"); not one after a word ("five plus,3" stays prose punctuation).
+        result = result.replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
+        result = result.replacingOccurrences(of: #"^(\s*),(?=\d)"#, with: "$1.", options: .regularExpression)
+        return result.replacingOccurrences(of: #"([-+−×÷*/^(=%]\s{0,3}),(?=\d)"#, with: "$1.", options: .regularExpression)
     }
 
     /// A line that is just a number ("2026", "42") reads as a note, not a

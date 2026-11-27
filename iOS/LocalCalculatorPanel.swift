@@ -155,6 +155,16 @@ struct LocalCalculatorFramesPreference: PreferenceKey {
     }
 }
 
+/// A stashed panel's strip (where it takes touches), reported apart from the
+/// panel: the workspace keeps clear of it, but the arrow keys don't move for
+/// it; the strip keeps off them instead (`LocalCalculatorLayer.stashObstacles`).
+struct LocalCalculatorStashFramesPreference: PreferenceKey {
+    static let defaultValue: [CGRect] = []
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value += nextValue()
+    }
+}
+
 // MARK: - Window geometry
 
 enum LocalCalculatorWindowGeometry {
@@ -222,6 +232,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
     let panelBounds: CGRect
     /// Other controls and reserved regions the window keeps off when it can.
     var obstacles: [CGRect] = []
+    /// Everything a stashed window's strip keeps off: `obstacles` and the controls placed
+    /// after the calculator (an open palette, the arrow keys, a floating gear).
+    var stashObstacles: [CGRect] = []
     /// Auto-hide fades the button with the other controls, but never while
     /// its panel is open, and never the panel.
     var autoHiding = false
@@ -232,8 +245,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var keyboard = LocalCalculatorKeyboardObserver()
     @State private var layerOrigin: CGPoint = .zero
-    /// The window's frame when a move or resize began.
-    @State private var gestureStart: CGRect?
+    /// The window's frame when a move began, and when a resize began (each its own).
+    @State private var moveStart: CGRect?
+    @State private var resizeStart: CGRect?
     /// Where the window is while its title bar is dragged: it may hang past
     /// the left or right edge then (`LocalCalculatorStashGeometry.dragged`).
     @State private var dragFrame: CGRect?
@@ -270,14 +284,15 @@ struct LocalCalculatorLayer<Chip: View>: View {
             }
             if let panel {
                 let waiting = model.stash.map {
-                    LocalCalculatorStashGeometry.waiting(size: panel.size, stash: $0, bounds: bounds, obstacles: obstacles)
+                    LocalCalculatorStashGeometry.waiting(size: panel.size, stash: $0, bounds: bounds,
+                                                         obstacles: obstacles + stashObstacles)
                 }
                 let shown = waiting.map { peeked($0.window) } ?? dragFrame ?? panel
                 LocalCalculatorPanel(model: model, haptics: haptics,
                                      onMove: { move(by: $0, from: panel, bounds: bounds) },
                                      onMoveEnd: { endMove(velocity: $0, from: panel, bounds: bounds) },
                                      onResize: { resize(by: $0, from: panel, bounds: bounds, metrics: metrics) },
-                                     onResizeEnd: { gestureStart = nil },
+                                     onResizeEnd: { resizeStart = nil },
                                      // A drag the system cancelled (no end): let go where it is.
                                      // Checked a turn later, so a normal end (with its velocity) goes first.
                                      onMoveCancel: {
@@ -313,20 +328,30 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .animation(.easeOut(duration: 0.2), value: keyboard.top)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.86),
                    value: model.stash)
-        .preference(key: LocalCalculatorFramesPreference.self, value: occupied(panel: panel, bounds: bounds))
+        .preference(key: LocalCalculatorFramesPreference.self, value: model.stash == nil ? panel.map { [$0] } ?? [] : [])
+        .preference(key: LocalCalculatorStashFramesPreference.self, value: stashOccupied(panel: panel, bounds: bounds))
         // Stashed through a rotation (or a keyboard change): it keeps coming back flush with
         // its edge in the bounds it has now, wherever it is brought back from.
-        .onChange(of: usableBounds) { bounds in
-            guard let stash = model.stash, let frame = model.windowFrame else { return }
-            model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds, obstacles: obstacles)
-        }
+        .onChange(of: usableBounds) { anchorStashed(in: $0) }
+        .onAppear { anchorStashed(in: usableBounds) }
     }
 
-    /// What the window takes from the screen: all of it, or just its strip while stashed.
-    private func occupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
-        guard let panel else { return [] }
-        guard let stash = model.stash else { return [panel] }
-        let waiting = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: stash, bounds: bounds, obstacles: obstacles)
+    /// While stashed, the frame it comes back to: fitted to `bounds` first (a keypad keeps
+    /// its proportions, so it may shrink), then flush with its edge there. Whatever brings
+    /// it back (its strip, the button, VoiceOver) then finds it in place.
+    private func anchorStashed(in bounds: CGRect) {
+        guard let stash = model.stash, let frame = model.windowFrame else { return }
+        let metrics = LocalCalculatorPanelMetrics.fitting(panelBounds.size, preferredKey: preferredKey)
+        let fitted = settled(frame, metrics: metrics, bounds: bounds)
+        model.windowFrame = LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
+                                                                  obstacles: obstacles + stashObstacles)
+    }
+
+    /// What a stashed window takes from the screen: its strip, where it takes touches.
+    private func stashOccupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
+        guard let panel, let stash = model.stash else { return [] }
+        let waiting = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: stash, bounds: bounds,
+                                                           obstacles: obstacles + stashObstacles)
         return [waiting.touch ?? waiting.strip]
     }
 
@@ -411,8 +436,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
     }
 
     private func move(by translation: CGSize, from current: CGRect, bounds: CGRect) {
-        let start = gestureStart ?? current
-        if gestureStart == nil { gestureStart = current }
+        let start = moveStart ?? current
+        if moveStart == nil { moveStart = current }
         let moved = start.offsetBy(dx: translation.width, dy: translation.height)
         dragFrame = LocalCalculatorStashGeometry.dragged(moved, bounds: bounds)
     }
@@ -422,7 +447,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// moved back inside.
     private func endMove(velocity: CGVector, from current: CGRect, bounds: CGRect) {
         defer {
-            gestureStart = nil
+            moveStart = nil
             dragFrame = nil
         }
         guard let frame = dragFrame else { return }
@@ -447,8 +472,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
     }
 
     private func resize(by translation: CGSize, from current: CGRect, bounds: CGRect, metrics: LocalCalculatorPanelMetrics) {
-        let start = gestureStart ?? current
-        if gestureStart == nil { gestureStart = current }
+        let start = resizeStart ?? current
+        if resizeStart == nil { resizeStart = current }
         let minimum = LocalCalculatorWindowGeometry.minimumSize(model.mode)
         let room = CGRect(x: start.minX, y: start.minY, width: bounds.maxX - start.minX, height: bounds.maxY - start.minY)
         if let aspect = aspect(metrics: metrics) {
@@ -658,7 +683,6 @@ struct LocalCalculatorPanel: View {
         // After an end these do nothing; after a cancel they let go cleanly.
         .onChange(of: moving) { if !$0 { onMoveCancel() } }
         .onChange(of: resizing) { if !$0 { onResizeEnd() } }
-        .onDisappear { LocalCalculatorTextFocus.isEditing = false }
     }
 
     private var panelBackground: some View {
@@ -782,8 +806,10 @@ struct LocalCalculatorPanel: View {
     }
 
     private func close() {
+        // The keyboard guard (`LocalCalculatorTextFocus`) clears when the notes editor actually
+        // lets go (it resigns as `notesEditing` turns off, or as it leaves), not before: while the
+        // panel animates out the editor may still hold the keyboard.
         model.close()
-        LocalCalculatorTextFocus.isEditing = false
         haptics.play(.selection)
     }
 
@@ -1351,7 +1377,9 @@ private struct LocalCalculatorNotesEditor: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: NotesEditorView, coordinator: Coordinator) {
-        if view.textView.isFirstResponder { view.textView.resignFirstResponder() }
+        // Only the editor that holds the keyboard gives up the guard, once it has let go.
+        guard view.textView.isFirstResponder else { return }
+        view.textView.resignFirstResponder()
         LocalCalculatorTextFocus.isEditing = false
     }
 

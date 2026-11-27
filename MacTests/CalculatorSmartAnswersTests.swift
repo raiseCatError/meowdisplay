@@ -162,6 +162,10 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["1.250,5 + ,5"], angle: .degrees, smart: german).map(\.value),
                        [1251])
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("five, plus three", locale: french.locale), "five, plus three")
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("five plus,3", locale: french.locale), "five plus,3",
+                       "a comma after a word is punctuation")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["five plus,3"], angle: .degrees, smart: french).map(\.value), [8])
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("2 × ,5", locale: french.locale), "2 × .5")
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("1,5", locale: context.locale), "1,5", "en_GB is left alone")
     }
 

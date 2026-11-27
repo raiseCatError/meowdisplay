@@ -921,24 +921,55 @@ enum PadRailComposition {
 }
 
 extension PadRailComposition {
-    /// Where the calculator's button goes, given `main` (from `mainGroups(calculator: true)`)
-    /// and a layout pass for a Main rail and whether the button leads the Function rail: in
-    /// the Settings group when the rails and the picture keep the lanes and canvas they have
-    /// without it; else first on the Function rail when that keeps them; else in the Settings
-    /// group anyway (no place leaves everything as it was).
-    static func calculatorPlacement(main: [[CustomControlKind]],
+    enum CalculatorPlacement: Equatable {
+        /// No calculator button.
+        case none
+        /// In the Main rail's Settings group (`main` holds it).
+        case settingsGroup
+        /// The Function rail's first group of its own.
+        case leadsFunction
+        /// Floating beside the collapsed gear at the Main edge, in no rail (no strip is
+        /// reserved for it).
+        case besideGear
+    }
+
+    /// Where the calculator's button goes, given `main` (from `mainGroups(calculator: true)`,
+    /// or empty when the Main rail is collapsed) and a layout pass for a Main rail and
+    /// whether the button leads the Function rail. The first place that leaves every other
+    /// control where it is and the picture its size: the Settings group, then the Function
+    /// rail; with no Main rail, beside the gear. If no place does, the Function rail when
+    /// it keeps the picture's size and lanes (its groups may shift), else the Settings group.
+    static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool,
                                     layout: (_ main: [[CustomControlKind]], _ calculatorLeadsFunction: Bool) -> PadEdgeLayout)
-        -> (main: [[CustomControlKind]], calculatorLeadsFunction: Bool) {
-        guard main.joined().contains(.calculator) else { return (main, false) }
+        -> (main: [[CustomControlKind]], placement: CalculatorPlacement) {
         let without = main.map { $0.filter { $0 != .calculator } }.filter { !$0.isEmpty }
+        guard calculator else { return (without, .none) }
         let reference = layout(without, false)
-        func same(_ other: PadEdgeLayout) -> Bool {
-            other.laneCounts == reference.laneCounts && other.canvas == reference.canvas
-                && other.mainSegments.count == reference.mainSegments.count
+        func keepsEverything(_ other: PadEdgeLayout, mainCells: [CGRect], functionCells: [CGRect]) -> Bool {
+            other.canvas == reference.canvas && other.laneCounts == reference.laneCounts
+                && mainCells == reference.mainCells && functionCells == reference.functionCells
         }
-        if same(layout(main, false)) { return (main, false) }
-        if same(layout(without, true)) { return (without, true) }
-        return (main, false)
+        let joined = main.joined()
+        if let index = Array(joined).firstIndex(of: .calculator) {
+            let inSettings = layout(main, false)
+            var cells = inSettings.mainCells
+            if cells.indices.contains(index) { cells.remove(at: index) }
+            if keepsEverything(inSettings, mainCells: cells, functionCells: inSettings.functionCells) {
+                return (main, .settingsGroup)
+            }
+        }
+        let leading = layout(without, true)
+        if keepsEverything(leading, mainCells: leading.mainCells, functionCells: Array(leading.functionCells.dropFirst())) {
+            return (without, .leadsFunction)
+        }
+        if without.isEmpty { return (without, .besideGear) }
+        // Something has to give: keep the picture's size and lanes if the Function rail
+        // can (its own groups may shift along it), else the Settings group.
+        if leading.canvas == reference.canvas && leading.laneCounts == reference.laneCounts
+            || !joined.contains(.calculator) {
+            return (without, .leadsFunction)
+        }
+        return (main, .settingsGroup)
     }
 }
 

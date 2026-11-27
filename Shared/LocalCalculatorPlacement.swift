@@ -268,31 +268,37 @@ enum LocalCalculatorStashGeometry {
     /// edge), the strip that shows, and where the strip takes touches. The
     /// strip is at most `maximumStripLength` long, at the stash's place along
     /// the edge or the nearest place there whose touch area keeps off
-    /// `obstacles` (trays, palettes, folds). `touch` is nil when no place is
-    /// clear: then only the calculator button brings it back.
+    /// `obstacles` (trays, palettes, arrow keys, folds), shortened down to
+    /// 44 pt to fit a gap. `touch` is nil when no place is clear: then only
+    /// the calculator button brings it back.
     static func waiting(size: CGSize, stash: LocalCalculatorStash, bounds: CGRect,
                         obstacles: [CGRect] = []) -> (window: CGRect, strip: CGRect, touch: CGRect?) {
-        let length = min(size.height, bounds.height, maximumStripLength)
         let wanted = bounds.minY + CGFloat(stash.offset.isFinite ? min(max(stash.offset, 0), 1) : 0.5) * bounds.height
-        let low = bounds.minY + length / 2, high = max(low, bounds.maxY - length / 2)
-        func stripRect(at center: CGFloat) -> CGRect {
+        let longest = min(size.height, bounds.height, maximumStripLength)
+        func stripRect(center: CGFloat, length: CGFloat) -> CGRect {
             CGRect(x: stash.edge == .left ? bounds.minX : bounds.maxX - Self.strip, y: center - length / 2,
                    width: Self.strip, height: length)
         }
-        let blockers = obstacles.filter { !$0.isNull && !$0.isEmpty }
-        func clear(_ center: CGFloat) -> Bool {
-            let area = touchArea(stripRect(at: center), edge: stash.edge)
-            return !blockers.contains { $0.intersects(area) }
+        var placed: (center: CGFloat, length: CGFloat)?
+        for length in [longest, min(longest, touchDepth)] where placed == nil {
+            // Centres whose touch area (at least 44 pt tall) stays inside the bounds and off
+            // every obstacle across the strip's band.
+            let reach = max(length, touchDepth) / 2
+            let band = touchArea(stripRect(center: bounds.midY, length: length), edge: stash.edge)
+            var free = [(bounds.minY + reach, bounds.maxY - reach)]
+            for obstacle in obstacles where !obstacle.isNull && !obstacle.isEmpty
+                && obstacle.maxX > band.minX && obstacle.minX < band.maxX {
+                let blocked = (obstacle.minY - reach, obstacle.maxY + reach)
+                free = free.flatMap { run -> [(CGFloat, CGFloat)] in
+                    guard blocked.0 < run.1, blocked.1 > run.0 else { return [run] }
+                    return [(run.0, blocked.0), (blocked.1, run.1)].filter { $0.0 <= $0.1 }
+                }
+            }
+            let nearest = free.map { min(max(wanted, $0.0), $0.1) }.min { abs($0 - wanted) < abs($1 - wanted) }
+            if let nearest { placed = (nearest, length) }
         }
-        let start = min(max(wanted, low), high)
-        var center: CGFloat?
-        var step: CGFloat = 0
-        while center == nil, start - step >= low - 0.5 || start + step <= high + 0.5 {
-            if start - step >= low - 0.5, clear(start - step) { center = start - step }
-            else if start + step <= high + 0.5, clear(start + step) { center = start + step }
-            step += 8
-        }
-        let shown = stripRect(at: center ?? start)
+        let fallback = min(max(wanted, bounds.minY + longest / 2), max(bounds.minY + longest / 2, bounds.maxY - longest / 2))
+        let shown = stripRect(center: placed?.center ?? fallback, length: placed?.length ?? longest)
         // The window around its strip, inside the bounds where it can be.
         let height = min(size.height, bounds.height)
         var y = shown.midY - height / 2
@@ -300,7 +306,7 @@ enum LocalCalculatorStashGeometry {
         y = min(max(y, shown.maxY - height), shown.minY)
         let x = stash.edge == .left ? bounds.minX - size.width + Self.strip : bounds.maxX - Self.strip
         return (CGRect(x: x, y: y, width: size.width, height: height), shown,
-                center == nil ? nil : touchArea(shown, edge: stash.edge))
+                placed == nil ? nil : touchArea(shown, edge: stash.edge))
     }
 
     /// Where a strip takes touches: `touchDepth` in from its edge, at least

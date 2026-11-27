@@ -465,6 +465,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     /// The local calculator's open panel (`LocalCalculatorLayer`), reported
     /// as occupied like the other controls.
     @State private var calculatorPanelFrames: [CGRect] = []
+    /// A stashed calculator's strip: kept clear by the workspace, not by the arrow keys.
+    @State private var calculatorStashFrames: [CGRect] = []
     /// Down while a finger is on the controls. Resets on a cancelled touch
     /// too, where `onEnded` never runs (see `cancelControlGesture`).
     @GestureState private var controlTouchDown = false
@@ -692,9 +694,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             closeArrowKeys()
             apply(interaction.resetAll())
         }
+        // Nothing left to rearrange: the sheet goes, and input waits until it has gone (`onDismiss`).
         .onChange(of: store.canRearrangeControls) { can in
-            if !can { store.setRearrangingControls(false) }
+            if !can { rearrangeSheetPresented = false }
         }
+        // Taken away with the sheet up (a new layout, the session ending): the sheet goes with it.
+        .onDisappear { if rearrangeSheetPresented { store.setRearrangingControls(false) } }
         .onChange(of: store.preferences.trayCollapsed) { _ in store.resetAutoHide() }
         .onChange(of: store.preferences.trayCanBeShown) { _ in store.resetAutoHide() }
         .onChange(of: store.preferences.padControlLayout) { _ in
@@ -725,6 +730,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         .onDisappear { store.projectChord([]) }
         .onPreferenceChange(WheelHitPreference.self) { wheelHit = $0 }
         .onPreferenceChange(LocalCalculatorFramesPreference.self) { calculatorPanelFrames = $0 }
+        .onPreferenceChange(LocalCalculatorStashFramesPreference.self) { calculatorStashFrames = $0 }
     }
 
     @ViewBuilder
@@ -865,7 +871,12 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 occupied: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
                 avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
                 reservedRegions: reservedRegions,
-                tray: collapsed ? nil : renderedMainTrayFrame, trayHorizontal: layout.axis == .horizontal,
+                // Collapsed (or no tray shown): beside the lone gear, never the top lane.
+                tray: collapsed
+                    ? CGRect(x: layout.trayFrame.midX - Metrics.collapsed / 2, y: layout.trayFrame.midY - Metrics.collapsed / 2,
+                             width: Metrics.collapsed, height: Metrics.collapsed)
+                    : renderedMainTrayFrame,
+                trayHorizontal: layout.axis == .horizontal,
                 beside: functionFrames, arrowSide: arrowKeysShown ? store.preferences.arrowKeysSide : nil) : nil
         // Arrow keys (#179): placed after everything else, around it,
         // the calculator's button and open panel included. The calculator
@@ -889,7 +900,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
         let occupiedFrames = [renderedMainTrayFrame]
             + functionFrames
             + (renderedPaletteFrame.map { [$0] } ?? [])
-            + (calculatorButton.map { [$0] } ?? []) + calculatorPanelFrames
+            + (calculatorButton.map { [$0] } ?? []) + calculatorPanelFrames + calculatorStashFrames
             + (arrows?.occupied ?? [])
 
         ZStack(alignment: .topLeading) {
@@ -967,6 +978,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                                                                        dy: LocalCalculatorPlacement.margin),
                 obstacles: [renderedMainTrayFrame] + functionFrames
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                stashObstacles: (renderedPaletteFrame.map { [$0] } ?? []) + (arrows?.occupied ?? [])
+                    + (calculatorButton.map { [$0] } ?? []),
                 autoHiding: autoHiding, haptics: haptics) { chip(selected: $0) }
 
             #if DEBUG
@@ -2277,13 +2290,12 @@ extension ReceiverControlOverlay {
         // would take another lane, it leads the Function rail instead. With no
         // Main rail (the tray can't show) it is the Function edge's first
         // group of its own, so it still shows in View Only.
-        let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups) {
-            railPass($0, $1, nil)
-        }
+        let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups,
+                                                               calculator: showsCalculator) { railPass($0, $1, nil) }
         let mainGroups = placement.main
         let mainKinds = mainGroups.flatMap { $0 }
-        let calculatorOnMain = mainKinds.contains(.calculator)
-        let calculatorOnFunction = showsCalculator && !calculatorOnMain
+        let calculatorOnMain = placement.placement == .settingsGroup
+        let calculatorOnFunction = placement.placement == .leadsFunction
         let pass: (CGFloat?) -> PadEdgeLayout = { railPass(mainGroups, calculatorOnFunction, $0) }
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
@@ -2301,10 +2313,21 @@ extension ReceiverControlOverlay {
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
         }
+        // Beside the collapsed gear: the gear's own floating pass with one more end group
+        // before it (the gear keeps its place at the end), reserving no strip.
+        let besideGear: CGRect? = placement.placement == .besideGear ? PadEdgeGeometry.layout(
+            container: container, safeInsets: safeInsets, reservesStrips: false,
+            mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end],
+            functionGroupCounts: [],
+            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop,
+            divisions: divisions).mainCells.first.map {
+                PadEdgeGeometry.circleFrame(inCell: $0, metrics: PadControlMetrics(scale: padMetricsScale))
+            } : nil
         let calculatorButton: CGRect? = calculatorOnMain
             ? mainControls.first { $0.kind == .calculator }?.frame
             : calculatorOnFunction
-                ? layout.functionCells.first.map { PadEdgeGeometry.circleFrame(inCell: $0, metrics: metrics) } : nil
+                ? layout.functionCells.first.map { PadEdgeGeometry.circleFrame(inCell: $0, metrics: metrics) }
+                : besideGear
         let functionControls: [(item: ShortcutItem, frame: CGRect)] =
             zip(groups.flatMap { $0 }, layout.functionCells.dropFirst(calculatorOnFunction ? 1 : 0)).map { item, cell in
                 (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics))
@@ -2362,7 +2385,7 @@ extension ReceiverControlOverlay {
             .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
         let railFrames: [CGRect] = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
         let floatingFrames: [CGRect] = [gearFrame, paletteFrame].compactMap { $0 }
-        let occupied: [CGRect] = railFrames + floatingFrames + calculatorPanelFrames + arrowFrames
+        let occupied: [CGRect] = railFrames + floatingFrames + calculatorPanelFrames + calculatorStashFrames + arrowFrames
         // The touch region, built from typed pieces: as one `+`/`??` chain
         // inside the ZStack it exceeded Xcode 26's type-checking budget.
         let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction && $0.kind != .calculator }
@@ -2452,6 +2475,7 @@ extension ReceiverControlOverlay {
                     keyboardTop: keyboardTop),
                 obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                stashObstacles: floatingFrames + arrowFrames + (calculatorButton.map { [$0] } ?? []),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: true) }
         }
         .onAppear {
@@ -2614,7 +2638,8 @@ extension ReceiverControlOverlay {
                                                                  obstacles: arrowObstacles)
         let arrowFrames: [CGRect] = [arrowsShown?.keypad, arrowsShown?.modifiers].compactMap { $0 }
         let placedFrames: [CGRect] = controlsPlaced.map(\.frame) + paletteKeys.map(\.frame) + assistFrames
-        let occupied: [CGRect] = placedFrames + (wheel.map { [$0.frame] } ?? []) + calculatorPanelFrames + arrowFrames
+        let occupied: [CGRect] = placedFrames + (wheel.map { [$0.frame] } ?? []) + calculatorPanelFrames
+            + calculatorStashFrames + arrowFrames
         // Drawn by `LocalCalculatorLayer` (one, even if a shared layout
         // placed more).
         let calculatorButton = controlsPlaced.first { $0.kind == .calculator }?.frame
@@ -2679,6 +2704,7 @@ extension ReceiverControlOverlay {
                 panelBounds: area.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
                 obstacles: controlsPlaced.filter { $0.kind != .calculator }.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
+                stashObstacles: (wheel.map { [$0.frame] } ?? []) + arrowFrames + (calculatorButton.map { [$0] } ?? []),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: false) }
         }
         .animation(.snappy(duration: 0.22), value: assistState)

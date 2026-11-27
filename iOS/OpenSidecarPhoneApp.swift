@@ -1132,8 +1132,7 @@ struct ReceiverScreen: View {
         // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
         .onChange(of: showSettings) { shown in
             if shown, sessionActions.isPresented { dismissSessionActions() }
-            // Settings (a shake) doesn't open over the Rearrange Controls sheet, which keeps
-            // input from the Mac until it has gone: Done first.
+            // Settings never opens over the Rearrange Controls sheet (a shake is ignored then).
             if shown, controlStore.rearrangingControls { showSettings = false }
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
@@ -1384,6 +1383,8 @@ struct ReceiverScreen: View {
         // Merge the connected Mac's compatibility signal into the same gate.
         .onReceive(model.receiver.$peerSignal) { versionGate.applyPeer($0) }
         .onReceive(NotificationCenter.default.publisher(for: .deviceDidShake)) { _ in
+            // Not over the Rearrange Controls sheet, which keeps input from the Mac until it has gone.
+            guard !controlStore.rearrangingControls else { return }
             haptics.play(.settings)
             showSettings = true
         }

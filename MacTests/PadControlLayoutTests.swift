@@ -490,16 +490,82 @@ final class PadControlLayoutTests: XCTestCase {
             }
             let without = main.map { $0.filter { $0 != .calculator } }
             let reference = layout(without, false)
-            let placed = PadRailComposition.calculatorPlacement(main: main, layout: layout)
-            let chosen = layout(placed.main, placed.calculatorLeadsFunction)
+            let placed = PadRailComposition.calculatorPlacement(main: main, calculator: true, layout: layout)
+            let chosen = layout(placed.main, placed.placement == .leadsFunction)
             let onFunction = layout(without, true)
             if onFunction.laneCounts == reference.laneCounts && onFunction.canvas == reference.canvas {
                 XCTAssertEqual(chosen.laneCounts, reference.laneCounts, "height \(height)")
                 XCTAssertEqual(chosen.canvas, reference.canvas, "height \(height)")
             }
-            if placed.calculatorLeadsFunction { fellBack = true }
+            if placed.placement == .leadsFunction { fellBack = true }
         }
         XCTAssertTrue(fellBack, "a crowded Main rail sends the calculator to the Function rail")
+    }
+
+    func testTheCalculatorMovesNothingWheneverSomePlaceAllowsIt() {
+        let main = PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: everything,
+                                                 calculator: true)
+        let index = Array(main.joined()).firstIndex(of: .calculator)!
+        var strictCases = 0
+        for functionEdge in [ControlEdge.leading, .trailing] {
+            for height in stride(from: 560.0, through: 1_100.0, by: 10) {
+                func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+                    PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: height), safeInsets: .zero,
+                                           reservesStrips: true, mainEdge: .trailing, functionEdge: functionEdge,
+                                           mainGroupCounts: main.map(\.count),
+                                           mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                           functionGroupCounts: (first ? [1] : []) + [2, 2],
+                                           metrics: PadControlMetrics(scale: 1))
+                }
+                let without = main.map { $0.filter { $0 != .calculator } }
+                let reference = layout(without, false)
+                func same(_ other: PadEdgeLayout, main: [CGRect], function: [CGRect]) -> Bool {
+                    other.canvas == reference.canvas && other.laneCounts == reference.laneCounts
+                        && main == reference.mainCells && function == reference.functionCells
+                }
+                let inSettings = layout(main, false)
+                var settingsMain = inSettings.mainCells
+                settingsMain.remove(at: index)
+                let settingsKeeps = same(inSettings, main: settingsMain, function: inSettings.functionCells)
+                let leading = layout(without, true)
+                let functionKeeps = same(leading, main: leading.mainCells, function: Array(leading.functionCells.dropFirst()))
+                let placed = PadRailComposition.calculatorPlacement(main: main, calculator: true, layout: layout)
+                if settingsKeeps || functionKeeps {
+                    strictCases += 1
+                    XCTAssertEqual(placed.placement, settingsKeeps ? .settingsGroup : .leadsFunction,
+                                   "\(functionEdge) height \(height)")
+                }
+            }
+        }
+        XCTAssertGreaterThan(strictCases, 0)
+    }
+
+    func testWithNoRailTheCalculatorFloatsBesideTheGear() {
+        func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+            PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
+                                   reservesStrips: true, mainEdge: .trailing, functionEdge: .leading,
+                                   mainGroupCounts: main.map(\.count),
+                                   mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                   functionGroupCounts: first ? [1] : [], metrics: PadControlMetrics(scale: 1))
+        }
+        let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, layout: layout)
+        XCTAssertEqual(placed.placement, .besideGear, "a strip of its own would shrink the picture")
+        XCTAssertEqual(PadRailComposition.calculatorPlacement(main: [], calculator: false, layout: layout).placement, .none)
+    }
+
+    func testTheCalculatorBesideTheGearLeavesTheGearWhereItWas() {
+        for edge in [ControlEdge.leading, .trailing] {
+            func pass(_ counts: [Int]) -> PadEdgeLayout {
+                PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
+                                       reservesStrips: false, mainEdge: edge, functionEdge: edge,
+                                       mainGroupCounts: counts, mainGroupAlignments: counts.map { _ in .end },
+                                       functionGroupCounts: [], metrics: PadControlMetrics(scale: 1))
+            }
+            let alone = pass([1]), beside = pass([1, 1])
+            XCTAssertEqual(beside.mainCells.last, alone.mainCells.last, "\(edge)")
+            XCTAssertEqual(beside.canvas, alone.canvas, "\(edge): no strip is reserved")
+            XCTAssertFalse(beside.mainCells[0].intersects(beside.mainCells[1]), "\(edge)")
+        }
     }
 
     func testEveryStandardControlCanBeHiddenButSettingsStays() {

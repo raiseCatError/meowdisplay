@@ -519,6 +519,26 @@ final class LocalCalculatorPlacementTests: XCTestCase {
                      "no clear place: only the calculator button brings it back")
     }
 
+    // Codex round 9: the strip finds a free gap between controls, nearest where it was let go.
+    func testTheStripFindsTheGapNearestWhereItWasLetGo() {
+        let stash = LocalCalculatorStash(edge: .right, offset: 0.5) // wanted centre y 430
+        let size = CGSize(width: 200, height: 300)
+        func controls(gapBottom: CGFloat) -> [CGRect] {
+            [CGRect(x: stashBounds.maxX - 50, y: stashBounds.minY, width: 60, height: 334 - stashBounds.minY),
+             CGRect(x: stashBounds.maxX - 50, y: gapBottom, width: 60, height: stashBounds.maxY - gapBottom)]
+        }
+        let roomy = LocalCalculatorStashGeometry.waiting(size: size, stash: stash, bounds: stashBounds,
+                                                         obstacles: controls(gapBottom: 456))
+        XCTAssertEqual(roomy.strip.midY, 396, "as close to 430 as the 120 pt strip fits in 334–456")
+        XCTAssertEqual(roomy.strip.height, LocalCalculatorStashGeometry.maximumStripLength)
+        XCTAssertNotNil(roomy.touch)
+        let tight = LocalCalculatorStashGeometry.waiting(size: size, stash: stash, bounds: stashBounds,
+                                                         obstacles: controls(gapBottom: 400))
+        XCTAssertEqual(tight.strip.height, LocalCalculatorStashGeometry.touchDepth, "a short strip where a long one can't fit")
+        XCTAssertEqual(tight.strip.midY, 378)
+        XCTAssertFalse(tight.touch.map { area in controls(gapBottom: 400).contains { $0.intersects(area) } } ?? true)
+    }
+
     func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let function = CGRect(x: 120, y: 760, width: 150, height: 44)
