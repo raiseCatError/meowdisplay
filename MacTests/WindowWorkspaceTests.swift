@@ -669,6 +669,14 @@ final class PaneMenuBarPlacementTests: XCTestCase {
         let short = CGRect(x: 0, y: 0, width: 400, height: 90)
         let top = CGRect(x: 0, y: 0, width: 400, height: 42)
         XCTAssertNil(place(short, [top], labelsEnd: 150))
+        // A titles-only bar (no menu button, 28 pt) ends at 83 there: it fits beside the tabs.
+        let titlesTitle = WorkspaceOverlayPlacement.paneTitleRow(pane: short, safe: nil, avoiding: [top])
+        let titlesOnly = WorkspaceOverlayPlacement.paneMenuBar(
+            pane: short, titleRow: titlesTitle, labelsEnd: 150, safe: nil, avoiding: [top], barWidth: 120,
+            minimumWidth: 120, footprint: WorkspaceOverlayPlacement.paneMenuTitlesFootprint)
+        XCTAssertEqual(titlesOnly?.besideTitle, true)
+        XCTAssertLessThanOrEqual((titlesOnly?.row.minY ?? .infinity) + WorkspaceOverlayPlacement.paneMenuTitlesFootprint,
+                                 short.maxY)
         // The same pane 140 pt tall: the button ends at 99, inside it, so beside the tabs.
         let taller = CGRect(x: 0, y: 0, width: 400, height: 140)
         let fits = place(taller, [top], labelsEnd: 150)

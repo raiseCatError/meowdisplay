@@ -273,7 +273,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let panel: CGRect? = model.isOpen ? windowFrame(metrics: metrics, anchor: anchor, bounds: bounds) : nil
         let buttonVisible = !autoHiding || model.isOpen
         ZStack(alignment: .topLeading) {
-            if let buttonFrame {
+            // Faded by Auto-hide (closed): gone, as the trays and the Arrow Keys button are, so
+            // VoiceOver and Voice Control can't reach an invisible button either.
+            if let buttonFrame, buttonVisible {
                 let press = {
                     if model.isOpen, model.stash != nil, let panel {
                         restore(panel, bounds: bounds)
@@ -290,8 +292,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 // inside, hosted iPhone Duo reported the whole layer as its frame, so VoiceOver's
                 // outline and a tap on the element went to the middle of the screen.
                 .localCalculatorEntryAccessibility(open: model.isOpen, action: press)
-                .opacity(buttonVisible ? 1 : 0)
-                .allowsHitTesting(buttonVisible)
+                .transition(.opacity)
             }
             if let panel {
                 let waiting = model.stash.map {

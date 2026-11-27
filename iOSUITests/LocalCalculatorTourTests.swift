@@ -50,12 +50,14 @@ final class LocalCalculatorTourTests: XCTestCase {
             // On hosted iPhone Duo since late November the button reported the whole window
             // as its frame, so the tap above went to the window's middle. Tapping its drawn
             // face tells a broken button from a wrong reported frame.
-            // The face first, before Auto-hide fades the controls; the slow tree print last.
+            // Controls woken again first (Auto-hide may have faded them while waiting), the face
+            // read once, then the probe; the slow tree print last.
+            revealControls(calculatorButton)
             let face = calculatorButton.images.firstMatch
-            print("Calculator button at \(buttonFrame) in \(app.frame); face at \(face.exists ? "\(face.frame)" : "none")")
-            if face.exists {
+            let faceFrame: CGRect? = face.exists ? face.frame : nil
+            print("Calculator button at \(buttonFrame) in \(app.frame); face at \(faceFrame.map { "\($0)" } ?? "none: probe unavailable")")
+            if let middle = faceFrame {
                 // At the face's own middle, as a window coordinate (not a point XCTest picks).
-                let middle = face.frame
                 app.coordinate(withNormalizedOffset: .zero)
                     .withOffset(CGVector(dx: middle.midX - app.frame.minX, dy: middle.midY - app.frame.minY)).tap()
                 print("Tapping the face at \(middle) opened the panel: \(result.waitForExistence(timeout: 3))")

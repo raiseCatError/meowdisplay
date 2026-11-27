@@ -238,7 +238,9 @@ struct WorkspaceChromeView: View {
                     if let bar = WorkspaceOverlayPlacement.paneMenuBar(
                         pane: rect, titleRow: pane, labelsEnd: end, safe: safeArea, avoiding: controls + railFrames,
                         barWidth: PaneMenuBar.preferredWidth,
-                        minimumWidth: PaneMenuBar.minimumWidth(inlineToggle: onAppMenuBarActivity != nil)) {
+                        minimumWidth: PaneMenuBar.minimumWidth(inlineToggle: onAppMenuBarActivity != nil),
+                        footprint: onAppMenuBarActivity != nil ? WorkspaceOverlayPlacement.paneMenuFootprint
+                                                               : WorkspaceOverlayPlacement.paneMenuTitlesFootprint) {
                         PaneMenuBar(menus: model.menus, pane: bar.row,
                                     top: bar.row.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
                                     automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
