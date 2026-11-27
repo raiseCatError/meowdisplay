@@ -1735,7 +1735,8 @@ enum WorkspaceGeometry {
         let strip = min(labelHeight * 1.6, slot.height * 0.25)
         // A row the controls moved down is hit-tested at its drawn height, not the
         // quarter-pane cap the top strip keeps in a short pane.
-        let rowStrip = max(strip, labelHeight * 1.6)
+        let moved = (tabRowOffsets[tile] ?? 0) > 0
+        let rowStrip = moved ? max(strip, labelHeight * 1.6) : strip
         let rowTop = slot.y + min(max(0, tabRowOffsets[tile] ?? 0), max(0, slot.height - rowStrip))
         if point.y - slot.y <= strip || (point.y >= rowTop && point.y - rowTop <= rowStrip) {
             let atTop = point.y - slot.y <= strip

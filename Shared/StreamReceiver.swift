@@ -6541,6 +6541,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyCursorReset() {
         cursorState = (0.5, 0.5, false)
+        cursorEcho.echo = nil
         cursorSprite = nil
         cursorPaneSize = nil
         cursorOffDisplay = nil
@@ -6558,7 +6559,12 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
         cursorState = (x, y, visible)
         onCursor?(x, y, visible)
-        let echo = visible && trackpadCursor.location != nil ? CGPoint(x: x, y: y) : nil
+        refreshCursorEcho()
+    }
+
+    @MainActor private func refreshCursorEcho() {
+        let state = cursorState
+        let echo = state.visible && trackpadCursor.location != nil ? CGPoint(x: state.x, y: state.y) : nil
         if echo != cursorEcho.echo { cursorEcho.echo = echo }
     }
 
@@ -6654,7 +6660,11 @@ final class StreamReceiver: ObservableObject {
               sample.inWindow == trackpadLayoutInWindow,
               trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
         if trackpadDisplayGeometry != sample.displays { trackpadDisplayGeometry = sample.displays }
-        if trackpadCursor.location != sample.cursor { trackpadCursor.location = sample.cursor }
+        if trackpadCursor.location != sample.cursor {
+            trackpadCursor.location = sample.cursor
+            // The Mac resends an unchanged cursor only when it moves: seed the echo now.
+            refreshCursorEcho()
+        }
     }
 
     @MainActor func applyVideoStateUpdate(width: Int?, height: Int?, enabled: Bool) {

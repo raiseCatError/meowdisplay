@@ -180,6 +180,8 @@ enum CalculatorLanguage {
         while let grouped = s.range(of: #"(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d,])"#, options: .regularExpression) {
             s.replaceSubrange(grouped, with: s[grouped].replacingOccurrences(of: ",", with: ""))
         }
+        // Any other comma is a pause between words ("five, plus three").
+        s = s.replacingOccurrences(of: ",", with: " , ")
         s = s.replacingOccurrences(of: "$", with: " ")
         s = s.replacingOccurrences(of: "€", with: " ")
         s = s.replacingOccurrences(of: "£", with: " ")
@@ -189,9 +191,10 @@ enum CalculatorLanguage {
             let trimmed = s.trimmingCharacters(in: .whitespaces)
             if last == "!", let before = trimmed.dropLast().last, before.isNumber || before == ")" { break }
             // …and after a constant or a defined name ("ans!", "n!", "π!", which the parser rejects).
-            if last == "!", let word = trimmed.dropLast().split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).last,
-               variables.contains(String(word)) || ["ans", "pi", "π", "e", "tau", "τ"].contains(String(word)),
-               trimmed.dropLast().hasSuffix(word) { break }
+            let head = trimmed.dropLast().trimmingCharacters(in: .whitespaces)
+            if last == "!", let word = head.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).last,
+               isProtectedPlaceholder(String(word)) || ["ans", "pi", "π", "e", "tau", "τ"].contains(String(word)),
+               head.hasSuffix(word) { break }
             if last == ".", let before = trimmed.dropLast().last, before.isNumber { break }
             s = " " + String(trimmed.dropLast()) + " "
         }
@@ -205,6 +208,10 @@ enum CalculatorLanguage {
             s = s.replacingOccurrences(of: placeholder(index), with: " \(name) ")
         }
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func isProtectedPlaceholder(_ word: String) -> Bool {
+        word.hasPrefix("qzqv") && word.hasSuffix("qzq") && word.count > 7
     }
 
     /// Letters no phrase or number word matches, unique per index.

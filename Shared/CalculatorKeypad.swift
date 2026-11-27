@@ -48,6 +48,11 @@ struct CalculatorKeypad: Equatable {
     /// The same, evaluable later (the answer token replaced by the exact
     /// previous answer), for repeated =.
     private(set) var answeredSource = ""
+    /// What = again repeats, resolved when the answer was committed: the
+    /// operator and its operand, a contextual percentage as its amount
+    /// (50 + 10% = = adds 5 again, not 10% of 55).
+    private(set) var repeatOperation: String?
+    private(set) var repeatOperand: String?
     private(set) var failed = false
     private(set) var history: [HistoryEntry] = []
     var angle: CalculatorAngleUnit = .degrees
@@ -104,7 +109,13 @@ struct CalculatorKeypad: Equatable {
             if opens > closes { append(")") }
         case .function(let name): startOperandIfNeeded(); append(name + "(")
         case .constant(let name): startOperandIfNeeded(); append(name)
-        case .answer: startOperandIfNeeded(); append("ans")
+        case .answer:
+            startOperandIfNeeded()
+            // After a number, Ans multiplies it, written out so it reads (and repeats) that way.
+            if let last = input.last, Self.isDigitCharacter(last) || last == ")" || last == "%" || last.isLetter || last == "π" {
+                append(" × ")
+            }
+            append("ans")
         case .toggleSign: toggleSign()
         case .delete: delete()
         case .clear: clear()
@@ -222,9 +233,12 @@ struct CalculatorKeypad: Equatable {
     }
 
     private mutating func equals() {
-        if showsAnswer, lastAnswer != nil, let step = Self.lastStep(in: answeredSource) {
-            // = again repeats the last step: 2 + 3 = = → 8, 5 − −3 = = → 11.
-            commit(Self.answerToken + " " + step.operation + " " + step.operand)
+        if showsAnswer, lastAnswer != nil {
+            // = again repeats the last step: 2 + 3 = = → 8, 5 − −3 = = → 11. With no step
+            // (2 = Ans² =) the answer stays as it is.
+            if let operation = repeatOperation, let operand = repeatOperand {
+                commit(Self.answerToken + " " + operation + " " + operand)
+            }
             return
         }
         var expression = input.trimmingCharacters(in: .whitespaces)
@@ -244,6 +258,15 @@ struct CalculatorKeypad: Equatable {
         switch CalculatorExpression.evaluate(expression, context: context) {
         case .success(let value):
             answeredSource = expanded(expression)
+            let step = Self.splitLastStep(in: answeredSource)
+            repeatOperation = step?.operation
+            repeatOperand = step.map { step in
+                guard ["+", "−"].contains(step.operation), step.operand.hasSuffix("%"),
+                      let left = CalculatorExpression.value(step.left, context: context),
+                      let percent = CalculatorExpression.value(step.operand, context: context) else { return step.operand }
+                let amount = left * percent
+                return amount < 0 ? "(" + amount.description + ")" : amount.description
+            }
             answeredExpression = displayed(expression, locale: Locale.current)
             lastAnswer = value
             showsAnswer = true
@@ -258,6 +281,11 @@ struct CalculatorKeypad: Equatable {
     /// The last binary operator at the top level of `expression` and the
     /// term after it, as typed ("2 + 3 × −4" → "×", "−4").
     static func lastStep(in expression: String) -> (operation: String, operand: String)? {
+        splitLastStep(in: expression).map { ($0.operation, $0.operand) }
+    }
+
+    /// `lastStep`, with what comes before the operator.
+    static func splitLastStep(in expression: String) -> (left: String, operation: String, operand: String)? {
         var depth = 0
         var best: (operation: String, range: Range<String.Index>)?
         var index = expression.startIndex
@@ -274,7 +302,8 @@ struct CalculatorKeypad: Equatable {
         }
         guard let best else { return nil }
         let operand = expression[best.range.upperBound...].trimmingCharacters(in: .whitespaces)
-        return operand.isEmpty ? nil : (best.operation, operand)
+        let left = expression[..<best.range.lowerBound].trimmingCharacters(in: .whitespaces)
+        return operand.isEmpty ? nil : (left, best.operation, operand)
     }
 
     /// `expression` with the answer token replaced by the exact answer, so
@@ -295,7 +324,7 @@ struct CalculatorKeypad: Equatable {
     func displayInput(locale: Locale) -> String { displayed(input, locale: locale) }
 
     static func replacingAnswerToken(in expression: String, with replacement: String) -> String {
-        expression.replacingOccurrences(of: #"\bans\b"#, with: NSRegularExpression.escapedTemplate(for: replacement),
+        expression.replacingOccurrences(of: #"(?<![A-Za-z_])ans(?![A-Za-z0-9_])"#, with: NSRegularExpression.escapedTemplate(for: replacement),
                                         options: .regularExpression)
     }
 
@@ -360,6 +389,9 @@ struct CalculatorKeypad: Equatable {
     static func lastOperandRange(in text: String) -> Range<String.Index>? {
         var end = text.endIndex
         while end > text.startIndex, text[text.index(before: end)] == " " { end = text.index(before: end) }
+        // Postfix operators stay with their operand: ± on 5² makes −5².
+        while end > text.startIndex, "%²³!".contains(text[text.index(before: end)]) { end = text.index(before: end) }
+        let operandEnd = text.endIndex
         guard end > text.startIndex else { return nil }
         let last = text[text.index(before: end)]
         var start = end
@@ -373,13 +405,16 @@ struct CalculatorKeypad: Equatable {
             }
             guard depth == 0, text[start] == "(" else { return nil }
             while start > text.startIndex, isNameCharacter(text[text.index(before: start)]) { start = text.index(before: start) }
-            return start..<end
+            return start..<operandEnd
         }
         if isNameCharacter(last) {
             while start > text.startIndex, isNameCharacter(text[text.index(before: start)]) { start = text.index(before: start) }
-            return start..<end
+            return start..<operandEnd
         }
-        return lastNumberRange(in: text)
+        while start > text.startIndex, isDigitCharacter(text[text.index(before: start)]) || text[text.index(before: start)] == "." {
+            start = text.index(before: start)
+        }
+        return start < end ? start..<operandEnd : nil
     }
 
     static func lastNumber(in text: String) -> String? {

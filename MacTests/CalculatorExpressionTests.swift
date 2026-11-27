@@ -264,4 +264,18 @@ final class CalculatorExpressionTests: XCTestCase {
         pad.press(.equals)
         XCTAssertEqual(pad.currentValue, 0, "a reused answer stays exact")
     }
+
+    func testRoundFourEdgeCases() {
+        XCTAssertEqual(keypad([.digit(5), .square, .toggleSign, .equals]).currentValue, -25)
+        XCTAssertEqual(keypad([.digit(5), .digit(0), .operation(.add), .digit(1), .digit(0), .percent, .toggleSign, .equals])
+                        .currentValue, 45)
+        XCTAssertEqual(keypad([.digit(5), .digit(0), .operation(.add), .digit(1), .digit(0), .percent, .equals, .equals])
+                        .currentValue, 60, "= again adds the same 5")
+        XCTAssertEqual(keypad([.digit(2), .equals, .answer, .square, .equals, .equals]).currentValue, 4,
+                       "nothing to repeat: the answer stays")
+        XCTAssertEqual(keypad([.digit(2), .equals, .digit(1), .operation(.add), .digit(3), .answer, .equals, .equals])
+                        .currentValue, 14, "3 Ans is 3 × 2; = again repeats × 2, not × the new answer")
+        let notes = CalculatorSheet.evaluate(lines: ["n = 4", "n!", "five, plus three"], angle: .degrees)
+        XCTAssertEqual(notes.map(\.value), [4, 24, 8])
+    }
 }

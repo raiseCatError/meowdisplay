@@ -504,8 +504,12 @@ struct WorkspaceFloatLayer: View {
                 let busy = covers + [pillFrame(rect, held: held), grabberFrame(rect, held: held),
                                      gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
                     + (closeTargetFrame(id).map { [$0] } ?? [])
+                // The upper corners stay reachable on a float whose pill spans its top edge:
+                // they give way to the floats in front and the close dot, not the pill.
+                let cornerBusy = covers + [grabberFrame(rect, held: held)] + (closeTargetFrame(id).map { [$0] } ?? [])
                 ForEach(Self.resizeEdges, id: \.self) { handle in
-                    edgeResizer(id, rect: rect, handle: handle, avoiding: busy)
+                    edgeResizer(id, rect: rect, handle: handle,
+                                avoiding: handle.horizontal != 0 && handle.vertical != 0 ? cornerBusy : busy)
                 }
             }
         }
