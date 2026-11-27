@@ -1372,7 +1372,12 @@ private struct LocalCalculatorNotesEditor: UIViewRepresentable {
                 view.textView.becomeFirstResponder()
             }
         } else if !editing, view.textView.isFirstResponder {
-            DispatchQueue.main.async { view.textView.resignFirstResponder() }
+            let wanted = _editing
+            // Only if still unwanted when it runs (focus may have come back meanwhile).
+            DispatchQueue.main.async {
+                guard !wanted.wrappedValue else { return }
+                view.textView.resignFirstResponder()
+            }
         }
     }
 
