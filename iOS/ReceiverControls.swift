@@ -2487,7 +2487,9 @@ extension ReceiverControlOverlay {
             settingsHoldTarget(reachable: padCollapsed || !autoHiding)
             LocalCalculatorLayer(
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
-                buttonHint: hints ? String(localized: "calculator", comment: "Strip control hint.") : nil,
+                // Floating beside the gear (no rail): no caption, like the floating gear.
+                buttonHint: hints && besideGear == nil
+                    ? String(localized: "calculator", comment: "Strip control hint.") : nil,
                 panelBounds: Self.boundsAboveKeyboard(
                     layout.canvas.intersection(safeInsets.safeRect(in: containerSize))
                         .insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),

@@ -553,6 +553,19 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         }
     }
 
+    // Codex round 15: never wait where the strip can't be tapped.
+    func testItOnlyWaitsWhereItsStripCanBeTapped() {
+        let size = CGSize(width: 200, height: 300)
+        let right = LocalCalculatorStash(edge: .right, offset: 0.5)
+        let fullRight = CGRect(x: stashBounds.maxX - 50, y: stashBounds.minY, width: 60, height: stashBounds.height)
+        let fullLeft = CGRect(x: stashBounds.minX - 10, y: stashBounds.minY, width: 60, height: stashBounds.height)
+        XCTAssertEqual(LocalCalculatorStashGeometry.usable(right, size: size, bounds: stashBounds, obstacles: []), right)
+        XCTAssertEqual(LocalCalculatorStashGeometry.usable(right, size: size, bounds: stashBounds, obstacles: [fullRight]),
+                       LocalCalculatorStash(edge: .left, offset: 0.5), "the other side instead")
+        XCTAssertNil(LocalCalculatorStashGeometry.usable(right, size: size, bounds: stashBounds,
+                                                         obstacles: [fullRight, fullLeft]), "nowhere: it stays on screen")
+    }
+
     func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let function = CGRect(x: 120, y: 760, width: 150, height: 44)

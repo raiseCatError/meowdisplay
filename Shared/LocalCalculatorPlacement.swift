@@ -250,6 +250,17 @@ enum LocalCalculatorStashGeometry {
 
     /// What a release at `frame` (as dragged) with `velocity` (points per
     /// second) does: a stash, or nil to stay inside.
+    /// Where a window of `size` can really wait: at `stash` if its strip finds a clear place
+    /// to be tapped, else at the same height on the other side edge, else nowhere (it stays
+    /// on screen rather than wait behind controls where its strip can't be used).
+    static func usable(_ stash: LocalCalculatorStash, size: CGSize, bounds: CGRect,
+                       obstacles: [CGRect]) -> LocalCalculatorStash? {
+        if waiting(size: size, stash: stash, bounds: bounds, obstacles: obstacles).touch != nil { return stash }
+        let other = LocalCalculatorStash(edge: stash.edge == .left ? .right : .left, offset: stash.offset)
+        if waiting(size: size, stash: other, bounds: bounds, obstacles: obstacles).touch != nil { return other }
+        return nil
+    }
+
     static func release(_ frame: CGRect, velocity: CGVector, bounds: CGRect) -> LocalCalculatorStash? {
         guard bounds.width > 0, bounds.height > 0, frame.width > 0, frame.height > 0 else { return nil }
         let unit = WorkspaceRect(x: (frame.minX - bounds.minX) / bounds.width, y: (frame.minY - bounds.minY) / bounds.height,

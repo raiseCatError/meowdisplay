@@ -474,7 +474,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
             dragFrame = nil
         }
         guard let frame = dragFrame else { return }
-        if let stash = LocalCalculatorStashGeometry.release(frame, velocity: velocity, bounds: bounds) {
+        if let flicked = LocalCalculatorStashGeometry.release(frame, velocity: velocity, bounds: bounds),
+           let stash = LocalCalculatorStashGeometry.usable(flicked, size: frame.size, bounds: bounds,
+                                                           obstacles: obstacles + stashObstacles) {
             model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds,
                                                                       obstacles: obstacles + stashObstacles)
             // The keyboard guard clears when the notes actually let go (`textViewDidEndEditing`).
@@ -490,7 +492,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         guard bounds.height > 0 else { return }
         let edge: WorkspaceEdge = panel.midX < bounds.midX ? .left : .right
         let offset = Double((panel.midY - bounds.minY) / bounds.height)
-        let stash = LocalCalculatorStash(edge: edge, offset: offset)
+        guard let stash = LocalCalculatorStashGeometry.usable(LocalCalculatorStash(edge: edge, offset: offset),
+                                                              size: panel.size, bounds: bounds,
+                                                              obstacles: obstacles + stashObstacles) else { return }
         model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
                                                                   obstacles: obstacles + stashObstacles)
         model.stash(at: stash)
