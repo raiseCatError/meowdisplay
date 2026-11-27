@@ -831,50 +831,75 @@ enum CalculatorSheet {
         var running: Decimal?
     }
 
-    /// A sheet's answers and the state before each line, so the next edit
-    /// re-evaluates only from the first line that changed.
+    /// A sheet's answers and saved states, so the next edit re-evaluates
+    /// only from the last checkpoint at or before the first line that changed.
     struct Evaluation {
         let lines: [String]
         let angle: CalculatorAngleUnit
-        /// The minute the time answers were made in: a new minute redoes them.
-        let minute: Int
+        /// What the answers were made with: another locale, calendar or time zone redoes them all.
+        let locale: Locale
+        let calendar: Calendar
+        let timeZone: TimeZone
         let results: [CalculatorLineResult]
-        /// The state before each line.
-        let states: [State]
-        /// The state after the last line.
-        let final: State
+        /// The state before some lines (every `checkpointStride(for:)`-th, from 0), never one
+        /// per line: each assignment copies the variables, so a state per line would keep every
+        /// version of them.
+        let checkpoints: [Int: State]
+        /// The first line whose answer depends on the current time ("5 hours from now", "time
+        /// in Tokyo"): it and everything after it are redone every time.
+        let firstTimeDependent: Int?
     }
+
+    /// How far apart saved states are for a sheet of `count` lines: about 16 of them
+    /// at most, so memory stays linear and an edit redoes at most a stride of lines
+    /// above it.
+    static func checkpointStride(for count: Int) -> Int { max(16, count / 16) }
 
     static func evaluate(lines: [String], angle: CalculatorAngleUnit, smart: CalculatorSmartContext,
                          reusing previous: Evaluation?) -> Evaluation {
-        let minute = Int(smart.now.timeIntervalSinceReferenceDate / 60)
         var reused = 0
-        if let previous, previous.angle == angle, previous.minute == minute {
-            while reused < min(lines.count, previous.lines.count), lines[reused] == previous.lines[reused] { reused += 1 }
+        if let previous, previous.angle == angle, previous.locale == smart.locale,
+           previous.calendar == smart.calendar, previous.timeZone == smart.timeZone {
+            let limit = min(lines.count, previous.lines.count, previous.firstTimeDependent ?? .max)
+            while reused < limit, lines[reused] == previous.lines[reused] { reused += 1 }
         }
-        var results = Array(previous?.results.prefix(reused) ?? [])
-        var states = Array(previous?.states.prefix(reused) ?? [])
+        // Back to the nearest saved state at or before the first changed line.
+        var start = 0
         var state = State(context: CalculatorContext(angle: angle), running: nil)
         if reused > 0, let previous {
-            state = reused < previous.states.count ? previous.states[reused] : previous.final
+            if let saved = previous.checkpoints.filter({ $0.key <= reused }).max(by: { $0.key < $1.key }) {
+                start = saved.key
+                state = saved.value
+            }
         }
-        for text in lines[reused...] {
-            states.append(state)
-            results.append(line(text, state: &state, smart: smart))
+        let stride = checkpointStride(for: lines.count)
+        var results = Array(previous?.results.prefix(start) ?? [])
+        var checkpoints = (previous?.checkpoints ?? [:]).filter { $0.key <= start && $0.key % stride == 0 }
+        var firstTimeDependent = previous?.firstTimeDependent.flatMap { $0 < start ? $0 : nil }
+        for index in start..<lines.count {
+            if index % stride == 0 { checkpoints[index] = state }
+            var dependsOnNow = false
+            results.append(line(lines[index], state: &state, smart: smart, dependsOnNow: &dependsOnNow))
+            if dependsOnNow, firstTimeDependent == nil { firstTimeDependent = index }
         }
-        return Evaluation(lines: lines, angle: angle, minute: minute, results: results, states: states, final: state)
+        return Evaluation(lines: lines, angle: angle, locale: smart.locale, calendar: smart.calendar,
+                          timeZone: smart.timeZone, results: results, checkpoints: checkpoints,
+                          firstTimeDependent: firstTimeDependent)
     }
 
-    private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext) -> CalculatorLineResult {
+    private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext,
+                             dependsOnNow: inout Bool) -> CalculatorLineResult {
         var context = state.context
         var running = state.running
         defer { state = State(context: context, running: running) }
-        let decimalComma = smart.locale.decimalSeparator == ","
         var trimmed = line.trimmingCharacters(in: .whitespaces)
-        if decimalComma {
-            // "1.250,5" in a decimal-comma locale: dots group, the comma is the decimal mark.
-            trimmed = trimmed.replacingOccurrences(of: #"(?<=\d)\.(?=\d{3}(?!\d))"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
+        if smart.locale.decimalSeparator == "," {
+            // "1.250,5" where dots group thousands (de_DE): the dots go. Elsewhere (fr_FR groups
+            // with spaces) a dot stays a decimal point, as the notes rail's key types the comma.
+            if smart.locale.groupingSeparator == "." {
+                trimmed = trimmed.replacingOccurrences(of: #"(?<=\d)\.(?=\d{3}(?!\d))"#, with: "", options: .regularExpression)
+            }
+            trimmed = trimmed.replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
         }
         if trimmed.isEmpty {
             running = nil
@@ -896,7 +921,8 @@ enum CalculatorSheet {
                 running = (running ?? 0) + value
             }
         }
-        if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
+        if let (answer, timed) = CalculatorSmartAnswers.answerAndTiming(source, context: smart) {
+            dependsOnNow = timed
             if let value = answer.value { record(value) }
             return CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text)
         }

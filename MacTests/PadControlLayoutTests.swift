@@ -456,6 +456,26 @@ final class PadControlLayoutTests: XCTestCase {
         ])
     }
 
+    func testTheCalculatorJoinsSettingsAndMovesNothingElse() {
+        let groups = PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: everything,
+                                                   calculator: true)
+        XCTAssertEqual(groups.last, [.calculator, .moveView, .tray(.settings)])
+        func cells(_ main: [[CustomControlKind]]) -> PadEdgeLayout {
+            PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
+                                   reservesStrips: true, mainEdge: .trailing, functionEdge: .leading,
+                                   mainGroupCounts: main.map(\.count),
+                                   mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                   functionGroupCounts: [2, 3], metrics: PadControlMetrics(scale: 1))
+        }
+        let without = cells(PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: everything))
+        let with = cells(groups)
+        XCTAssertEqual(with.functionCells, without.functionCells, "the Function rail doesn't move")
+        XCTAssertEqual(Array(with.mainCells.prefix(11)), Array(without.mainCells.prefix(11)),
+                       "system actions and keys stay where they were")
+        XCTAssertEqual(with.mainCells.last, without.mainCells.last, "Settings keeps the end")
+        XCTAssertEqual(with.canvas, without.canvas, "the picture keeps its size")
+    }
+
     func testEveryStandardControlCanBeHiddenButSettingsStays() {
         var visibility = PadStandardControlVisibility()
         for control in PadStandardControl.allCases { visibility.setVisible(false, control) }

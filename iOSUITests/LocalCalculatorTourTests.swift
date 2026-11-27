@@ -45,11 +45,12 @@ final class LocalCalculatorTourTests: XCTestCase {
         let result = element("Result")
         XCTAssertTrue(result.waitForExistence(timeout: 3), "the panel opens")
         for label in ["Decimal Point", "1", "Plus", "Decimal Point", "2", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "0.3", "exact decimals")
+        // The display reads the sum, then its answer ("0.1 + 0.2, = 0.3") since round 3.
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "0.3", "exact decimals")
         snapshot("\(prefix)-03-open-0.1+0.2")
 
         for label in ["All Clear", "2", "Plus", "3", "Multiply", "4", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "14", "precedence")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "14", "precedence")
         calculatorKey("Copy Result").tap()
         snapshot("\(prefix)-04-copied")
 
@@ -61,7 +62,7 @@ final class LocalCalculatorTourTests: XCTestCase {
         XCTAssertEqual(input.value as? String, "Off")
         XCTAssertTrue(calculatorButton.exists, "independent of input grants")
         for label in ["All Clear", "5", "0", "Plus", "1", "0", "Percent", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "55", "percent, in View Only")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "55", "percent, in View Only")
         snapshot("\(prefix)-05-view-only")
         input.tap()
         sleep(1)
@@ -72,7 +73,7 @@ final class LocalCalculatorTourTests: XCTestCase {
         revealControls(calculatorButton)
         calculatorButton.tap()
         XCTAssertTrue(result.waitForExistence(timeout: 3))
-        XCTAssertEqual(result.value as? String, "55", "kept while closed")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "55", "kept while closed")
         calculatorButton.tap()
         sleep(1)
         XCTAssertFalse(result.exists, "its button closes it again")

@@ -28,6 +28,13 @@ struct CalculatorSmartContext {
 
 enum CalculatorSmartAnswers {
     static func answer(_ raw: String, context: CalculatorSmartContext = CalculatorSmartContext()) -> CalculatorSmartAnswer? {
+        answerAndTiming(raw, context: context)?.answer
+    }
+
+    /// The answer, and whether it depends on the current time (time zones, relative times,
+    /// dates): such an answer can change from one moment to the next, so it is never reused.
+    static func answerAndTiming(_ raw: String,
+                                context: CalculatorSmartContext = CalculatorSmartContext()) -> (answer: CalculatorSmartAnswer, dependsOnNow: Bool)? {
         var text = raw.lowercased().trimmingCharacters(in: .whitespaces)
         while let last = text.last, "=?".contains(last) { text.removeLast(); text = text.trimmingCharacters(in: .whitespaces) }
         for prefix in ["what is ", "what's ", "whats ", "how much is ", "convert ", "calculate "] where text.hasPrefix(prefix) {
@@ -35,14 +42,15 @@ enum CalculatorSmartAnswers {
         }
         text = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         guard !text.isEmpty else { return nil }
-        return percentQuestion(text)
-            ?? baseConversion(text)
-            ?? unitConversion(text, context: context)
-            ?? timeZoneAnswer(text, context: context)
+        if let timeless = percentQuestion(text) ?? baseConversion(text) ?? unitConversion(text, context: context) {
+            return (timeless, false)
+        }
+        let timed = timeZoneAnswer(text, context: context)
             ?? relativeTime(text, context: context)
             ?? dateDifference(text, context: context)
             ?? dayOfWeek(text, context: context)
             ?? nowAnswer(text, context: context)
+        return timed.map { ($0, true) }
     }
 
     // MARK: Helpers

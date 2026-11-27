@@ -896,8 +896,12 @@ enum PadRailComposition {
         var arrowKeysAvailable: Bool = false
     }
 
+    /// `calculator`: the local calculator's button, once added, joins the
+    /// end group beside Settings, so adding it moves none of the other
+    /// controls (owner QA, 2.2 round 4: first on the Function rail, it pushed
+    /// that rail's groups along).
     static func mainGroups(visibility: PadStandardControlVisibility,
-                           availability: Availability) -> [[CustomControlKind]] {
+                           availability: Availability, calculator: Bool = false) -> [[CustomControlKind]] {
         func shown(_ control: PadStandardControl) -> Bool {
             guard visibility.isVisible(control) else { return false }
             switch control {
@@ -910,7 +914,8 @@ enum PadRailComposition {
         let system = [PadStandardControl.menuBar, .dock, .showDesktop, .controlCenter].filter(shown).map(\.kind)
         let keys = availability.modifiers.map { CustomControlKind.tray(ControlTrayItem.item(for: $0)) }
             + [PadStandardControl.escape, .tab, .keyboard, .arrowKeys].filter(shown).map(\.kind)
-        let view = [PadStandardControl.moveView].filter(shown).map(\.kind) + [.tray(.settings)]
+        let view = (calculator ? [CustomControlKind.calculator] : [])
+            + [PadStandardControl.moveView].filter(shown).map(\.kind) + [.tray(.settings)]
         return [system, keys, view].filter { !$0.isEmpty }
     }
 }

@@ -111,4 +111,42 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         let appended = CalculatorSheet.evaluate(lines: first + ["total + 1"], angle: .degrees, smart: context, reusing: before)
         XCTAssertEqual(appended.results, CalculatorSheet.evaluate(lines: first + ["total + 1"], angle: .degrees, smart: context))
     }
+    // Codex round 7 (on the round 6 fixes).
+    func testDecimalCommaLocalesWithoutDotGroupingKeepDots() {
+        var french = context
+        french.locale = Locale(identifier: "fr_FR")
+        let sheet = CalculatorSheet.evaluate(lines: ["1.250 + 1", "1,5 + 2"], angle: .degrees, smart: french)
+        XCTAssertEqual(sheet.map(\.value), [Decimal(string: "2.25"), Decimal(string: "3.5")],
+                       "fr_FR groups with spaces: a dot stays a decimal point")
+    }
+
+    func testTimeAnswersAreNeverReused() {
+        let lines = ["30 seconds from now", "2 + 2"]
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        var later = context
+        later.now = context.now.addingTimeInterval(45)
+        let reused = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: later, reusing: before)
+        XCTAssertEqual(reused.results, CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: later))
+        XCTAssertEqual(before.firstTimeDependent, 0)
+    }
+
+    func testAnotherLocaleRedoesTheSheet() {
+        let lines = ["1,5 + 2"]
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        var german = context
+        german.locale = Locale(identifier: "de_DE")
+        let after = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: german, reusing: before)
+        XCTAssertEqual(after.results, CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: german))
+    }
+
+    func testAssignmentHeavySheetsKeepFewStates() {
+        let lines = (0..<2_500).map { "v\($0) = \($0)" } + ["v10 + v2499"]
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        XCTAssertLessThanOrEqual(before.checkpoints.count, 17, "saved states stay few, not one per line")
+        var edited = lines
+        edited[2_000] = "v2000 = 7"
+        let after = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context, reusing: before)
+        XCTAssertEqual(after.results, CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context))
+        XCTAssertEqual(after.results.last?.value, 2_509)
+    }
 }

@@ -65,19 +65,26 @@ enum LocalCalculatorPlacement {
     static let margin: CGFloat = 12
     static let spacing: CGFloat = 10
 
-    /// iPhone (and narrow windows): the entry button in the upper-left
-    /// usable region. It starts in the top-left corner with the same edge
-    /// margin as the trays, then moves along the top edge past anything in
-    /// the way, then down the left edge; each spot clears the notch or
-    /// Dynamic Island band (with Avoid Notch), system-reserved regions
-    /// (hinge, camera) and every frame in `occupied` (the Main Tray,
-    /// Function groups, an open palette) by `spacing`. The other controls
-    /// never move for it.
+    /// iPhone (and narrow windows): the entry button beside the controls it
+    /// belongs with, so it never takes the top of the screen, where pane
+    /// tabs, menus and Stage Peek live (owner QA, 2.2 round 4: in the top-left
+    /// corner it pushed the top lane aside). With `tray` (the Main Tray as
+    /// drawn), it tries, in order: the ends of the tray's own row (or column),
+    /// the spot just inside the tray's end (not the arrow button's end,
+    /// `arrowSide`; nil while arrows are hidden), then the ends of each of
+    /// `beside` (the Function groups). Without room there, the upper-left
+    /// usable region as before: the top-left corner, along the top edge,
+    /// then down the left edge. Each spot clears the notch or Dynamic Island
+    /// band (with Avoid Notch), system-reserved regions (hinge, camera) and
+    /// every frame in `occupied` (the Main Tray, Function groups, an open
+    /// palette) by `spacing`. The other controls never move for it.
     static func phoneButtonFrame(container: CGRect, safeInsets: ControlSafeInsets,
                                  keyboardVisibleRect: CGRect?, portrait: Bool,
                                  diameter: CGFloat, occupied: [CGRect], avoidNotch: Bool,
                                  notchSide: LandscapeTraySide? = nil,
-                                 reservedRegions: [ControlReservedRegion] = []) -> CGRect {
+                                 reservedRegions: [ControlReservedRegion] = [],
+                                 tray: CGRect? = nil, trayHorizontal: Bool = true, beside: [CGRect] = [],
+                                 arrowSide: LandscapeTraySide? = nil) -> CGRect {
         var visible = container
         if let keyboardVisibleRect { visible = visible.intersection(keyboardVisibleRect) }
         guard !visible.isNull, !visible.isEmpty, diameter > 0 else { return .zero }
@@ -87,7 +94,10 @@ enum LocalCalculatorPlacement {
         let obstacles = ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
         let xs = ([bounds.minX] + blockers.map { $0.maxX + spacing }).filter { $0 >= bounds.minX }.sorted()
         let ys = ([bounds.minY] + blockers.map { $0.maxY + spacing }).filter { $0 >= bounds.minY }.sorted()
-        let candidates: [CGPoint] = xs.filter { $0 + diameter <= bounds.midX }.map { CGPoint(x: $0, y: bounds.minY) }
+        let nearTrays = tray.map { trayCandidates(tray: $0, horizontal: trayHorizontal, beside: beside,
+                                                   diameter: diameter, container: container, arrowSide: arrowSide) } ?? []
+        let candidates: [CGPoint] = nearTrays
+            + xs.filter { $0 + diameter <= bounds.midX }.map { CGPoint(x: $0, y: bounds.minY) }
             + ys.map { CGPoint(x: bounds.minX, y: $0) }
             + xs.map { CGPoint(x: $0, y: bounds.minY) }
         func settled(_ origin: CGPoint) -> CGRect {
@@ -107,6 +117,33 @@ enum LocalCalculatorPlacement {
             if isClear(frame) { return frame }
         }
         return settled(CGPoint(x: bounds.minX, y: bounds.minY))
+    }
+
+    /// Spots by the trays, best first (see `phoneButtonFrame`): origins of a
+    /// `diameter` button.
+    static func trayCandidates(tray: CGRect, horizontal: Bool, beside: [CGRect], diameter d: CGFloat,
+                               container: CGRect, arrowSide: LandscapeTraySide?) -> [CGPoint] {
+        guard !tray.isNull, !tray.isEmpty else { return [] }
+        let g = spacing
+        func ends(_ frame: CGRect) -> [CGPoint] {
+            horizontal
+                ? [CGPoint(x: frame.maxX + g, y: frame.midY - d / 2), CGPoint(x: frame.minX - g - d, y: frame.midY - d / 2)]
+                // Below first: away from the top of the screen.
+                : [CGPoint(x: frame.midX - d / 2, y: frame.maxY + g), CGPoint(x: frame.midX - d / 2, y: frame.minY - g - d)]
+        }
+        var spots = horizontal ? ends(tray) : [ends(tray)[0]]
+        if horizontal {
+            // Just above the row's ends; the arrow button takes its own side's.
+            let y = tray.minY - g - d
+            let right = CGPoint(x: tray.maxX - d, y: y), left = CGPoint(x: tray.minX, y: y)
+            spots += arrowSide == .trailing ? [left, right] : [right, left]
+        } else {
+            // Beside the column's bottom end, toward the middle of the screen.
+            let inwardLeft = tray.midX > container.midX
+            spots.append(CGPoint(x: inwardLeft ? tray.minX - g - d : tray.maxX + g, y: tray.maxY - d))
+            spots.append(ends(tray)[1])
+        }
+        return spots + beside.filter { !$0.isNull && !$0.isEmpty }.flatMap(ends)
     }
 
     /// The panel beside its entry button, inside `bounds` (the safe area
@@ -173,5 +210,90 @@ extension CustomControlArrangement {
             x += diameter + spacing
         }
         return (0.5, 0.5)
+    }
+}
+
+// MARK: - Stashing at an edge
+
+/// Where a stashed calculator waits: at the left or right edge of its
+/// bounds, its strip centred `offset` (0 top, 1 bottom) along that edge.
+struct LocalCalculatorStash: Equatable {
+    var edge: WorkspaceEdge
+    var offset: Double
+}
+
+/// The calculator window flicked to an edge, as Window mode's floating
+/// windows are (`WorkspaceFloatMotion`): thrown fast enough toward the left
+/// or right edge, or let go with more than half of it past one, it slides
+/// out of sight but for a strip of itself; a tap or a pull brings it back.
+/// Only the left and right edges: the top and bottom hold the trays, pane
+/// tabs and the system's own edge swipes. Points throughout.
+enum LocalCalculatorStashGeometry {
+    static let edges: Set<WorkspaceEdge> = [.left, .right]
+    /// How much of the window shows while stashed (as a tucked float's strip).
+    static let strip = CGFloat(WorkspaceFloatGeometry.stripDepth)
+    /// How far in from the edge the strip takes touches: a 44 pt target.
+    static let touchDepth = CGFloat(WorkspaceFloatGeometry.touchDepth)
+    /// A pull on the strip this far inward (or a flick projected this far) brings it back.
+    static let restorePull: CGFloat = 36
+
+    /// While dragged, the window may hang past the left or right edge of
+    /// `bounds` (all but its strip), never past the top or bottom.
+    static func dragged(_ frame: CGRect, bounds: CGRect) -> CGRect {
+        guard !bounds.isNull, !bounds.isEmpty else { return frame }
+        let minX = bounds.minX - frame.width + strip, maxX = bounds.maxX - strip
+        let y = min(max(frame.minY, bounds.minY), max(bounds.minY, bounds.maxY - frame.height))
+        return CGRect(x: min(max(frame.minX, minX), maxX), y: y, width: frame.width, height: frame.height)
+    }
+
+    /// What a release at `frame` (as dragged) with `velocity` (points per
+    /// second) does: a stash, or nil to stay inside.
+    static func release(_ frame: CGRect, velocity: CGVector, bounds: CGRect) -> LocalCalculatorStash? {
+        guard bounds.width > 0, bounds.height > 0, frame.width > 0, frame.height > 0 else { return nil }
+        let unit = WorkspaceRect(x: (frame.minX - bounds.minX) / bounds.width, y: (frame.minY - bounds.minY) / bounds.height,
+                                 width: frame.width / bounds.width, height: frame.height / bounds.height)
+        let outcome = WorkspaceFloatMotion.decide(release: unit, velocity: (Double(velocity.dx), Double(velocity.dy)),
+                                                  in: WorkspaceSize(width: bounds.width, height: bounds.height),
+                                                  edges: edges)
+        guard case .tuck(let edge, let offset) = outcome, edges.contains(edge) else { return nil }
+        return LocalCalculatorStash(edge: edge, offset: offset)
+    }
+
+    /// The whole window as it waits (its own size, all but `strip` past the
+    /// edge) and the strip that shows, inside `bounds`.
+    static func waiting(size: CGSize, stash: LocalCalculatorStash, bounds: CGRect) -> (window: CGRect, strip: CGRect) {
+        let along = bounds.minY + CGFloat(stash.offset.isFinite ? min(max(stash.offset, 0), 1) : 0.5) * bounds.height
+        let height = min(size.height, bounds.height)
+        let y = min(max(along - height / 2, bounds.minY), max(bounds.minY, bounds.maxY - height))
+        let x = stash.edge == .left ? bounds.minX - size.width + strip : bounds.maxX - strip
+        let window = CGRect(x: x, y: y, width: size.width, height: height)
+        let shown = CGRect(x: stash.edge == .left ? bounds.minX : bounds.maxX - strip, y: y, width: strip, height: height)
+        return (window, shown)
+    }
+
+    /// Where the strip takes touches: `touchDepth` in from its edge, at
+    /// least 44 pt tall.
+    static func touchArea(_ strip: CGRect, edge: WorkspaceEdge) -> CGRect {
+        let height = max(strip.height, touchDepth)
+        let y = strip.midY - height / 2
+        return edge == .left
+            ? CGRect(x: strip.minX - 8, y: y, width: touchDepth + 8, height: height)
+            : CGRect(x: strip.maxX - touchDepth, y: y, width: touchDepth + 8, height: height)
+    }
+
+    /// The frame it comes back to: `frame` (where it was before) flush with
+    /// the edge it waited at, at the height it waited, inside `bounds`.
+    static func restored(_ frame: CGRect, stash: LocalCalculatorStash, bounds: CGRect) -> CGRect {
+        let waiting = waiting(size: frame.size, stash: stash, bounds: bounds).window
+        let x = stash.edge == .left ? bounds.minX : bounds.maxX - frame.width
+        let width = min(frame.width, bounds.width), height = min(frame.height, bounds.height)
+        return CGRect(x: min(max(x, bounds.minX), bounds.maxX - width),
+                      y: min(max(waiting.minY, bounds.minY), bounds.maxY - height), width: width, height: height)
+    }
+
+    /// Whether a pull on the strip (inward points, and its projected
+    /// carry) brings the window back; a tap (no travel) does too.
+    static func pullRestores(inward: CGFloat, projected: CGFloat, travel: CGFloat) -> Bool {
+        abs(travel) < 6 || inward >= restorePull || projected >= restorePull * 2.5
     }
 }

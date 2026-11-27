@@ -55,6 +55,9 @@ final class LocalCalculatorModel: ObservableObject {
     }
     /// Bumped by each Copy Result, for the button's brief confirmation.
     @Published private(set) var copyCount = 0
+    /// Flicked to an edge: out of sight but for a strip, everything kept. The
+    /// strip, the calculator button or VoiceOver bring it back.
+    @Published var stash: LocalCalculatorStash?
 
     var input: String { keypad.input }
     var showsAnswer: Bool { keypad.showsAnswer }
@@ -68,11 +71,25 @@ final class LocalCalculatorModel: ObservableObject {
         set { keypad.angle = newValue }
     }
 
-    func toggle() { isOpen.toggle() }
+    /// The calculator button: brings a stashed window back, else opens or closes it.
+    func toggle() {
+        if isOpen, stash != nil {
+            stash = nil
+        } else {
+            isOpen.toggle()
+        }
+    }
 
     func close() {
         isOpen = false
         notesEditing = false
+        stash = nil
+    }
+
+    /// Out of sight at `stash`'s edge; the keyboard goes, nothing else changes.
+    func stash(at stash: LocalCalculatorStash) {
+        notesEditing = false
+        self.stash = stash
     }
 
     func press(_ key: Key) { keypad.press(key) }
@@ -217,6 +234,11 @@ struct LocalCalculatorLayer<Chip: View>: View {
     @State private var layerOrigin: CGPoint = .zero
     /// The window's frame when a move or resize began.
     @State private var gestureStart: CGRect?
+    /// Where the window is while its title bar is dragged: it may hang past
+    /// the left or right edge then (`LocalCalculatorStashGeometry.dragged`).
+    @State private var dragFrame: CGRect?
+    /// How far a finger has pulled a stashed window's strip inward (a peek).
+    @GestureState private var stashPull: CGFloat = 0
 
     /// The bounds above the on-screen keyboard while notes are typed.
     private var usableBounds: CGRect {
@@ -247,16 +269,28 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 .allowsHitTesting(buttonVisible)
             }
             if let panel {
+                let waiting = model.stash.map { LocalCalculatorStashGeometry.waiting(size: panel.size, stash: $0, bounds: bounds) }
+                let shown = waiting.map { peeked($0.window) } ?? dragFrame ?? panel
                 LocalCalculatorPanel(model: model, haptics: haptics,
                                      onMove: { move(by: $0, from: panel, bounds: bounds) },
+                                     onMoveEnd: { endMove(velocity: $0, from: panel, bounds: bounds) },
                                      onResize: { resize(by: $0, from: panel, bounds: bounds, metrics: metrics) },
-                                     onGestureEnd: { gestureStart = nil })
-                    .frame(width: panel.width, height: panel.height)
-                    .position(x: panel.midX, y: panel.midY)
+                                     onResizeEnd: { gestureStart = nil },
+                                     onStash: { stashAtNearestEdge(panel, bounds: bounds) })
+                    .frame(width: shown.width, height: shown.height)
+                    // Stashed: only the strip (and a peek while pulled) shows, inside the bounds.
+                    .clipShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip) }
+                                                            ?? CGRect(origin: .zero, size: shown.size)))
+                    .allowsHitTesting(waiting == nil)
+                    .accessibilityHidden(waiting != nil)
+                    .position(x: shown.midX, y: shown.midY)
                     .transition(reduceMotion
                                 ? .opacity
                                 : .scale(scale: 0.92, anchor: Self.unitPoint(of: anchor, in: panel))
                                     .combined(with: .opacity))
+                if let waiting, let stash = model.stash {
+                    stashHandle(strip: waiting.strip, stash: stash)
+                }
             }
         }
         .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
@@ -268,7 +302,67 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .snappy(duration: 0.22), value: model.isOpen)
         .animation(reduceMotion ? nil : .snappy(duration: 0.25), value: model.mode)
         .animation(.easeOut(duration: 0.2), value: keyboard.top)
-        .preference(key: LocalCalculatorFramesPreference.self, value: panel.map { [$0] } ?? [])
+        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.86),
+                   value: model.stash)
+        .preference(key: LocalCalculatorFramesPreference.self, value: occupied(panel: panel, bounds: bounds))
+    }
+
+    /// What the window takes from the screen: all of it, or just its strip while stashed.
+    private func occupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
+        guard let panel else { return [] }
+        guard let stash = model.stash else { return [panel] }
+        let strip = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: stash, bounds: bounds).strip
+        return [LocalCalculatorStashGeometry.touchArea(strip, edge: stash.edge)]
+    }
+
+    /// The waiting window moved in by the pull on its strip.
+    private func peeked(_ window: CGRect) -> CGRect {
+        guard let edge = model.stash?.edge else { return window }
+        let peek = min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2)
+        return window.offsetBy(dx: edge == .left ? peek : -peek, dy: 0)
+    }
+
+    /// The part of the window (in its own coordinates) inside the bounds: the strip and any peek.
+    private func visibleStrip(of window: CGRect, waiting strip: CGRect) -> CGRect {
+        guard let edge = model.stash?.edge else { return CGRect(origin: .zero, size: window.size) }
+        let width = min(window.width, strip.width + min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2))
+        return CGRect(x: edge == .left ? window.width - width : 0, y: 0, width: width, height: window.height)
+    }
+
+    /// The stashed window's strip: a tap, or a pull inward, brings it back.
+    private func stashHandle(strip: CGRect, stash: LocalCalculatorStash) -> some View {
+        let area = LocalCalculatorStashGeometry.touchArea(strip, edge: stash.edge)
+        let inward: (CGSize) -> CGFloat = { stash.edge == .left ? $0.width : -$0.width }
+        let peek = min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2)
+        return ZStack {
+            Capsule()
+                .fill(Color.white.opacity(0.55))
+                .frame(width: 4, height: min(44, max(16, strip.height * 0.3)))
+                .position(x: strip.midX - area.minX + (stash.edge == .left ? peek : -peek), y: strip.midY - area.minY)
+        }
+        .frame(width: area.width, height: area.height)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .updating($stashPull) { value, pull, _ in pull = inward(value.translation) }
+            .onEnded { value in
+                let travel = hypot(value.translation.width, value.translation.height)
+                let projected = inward(value.predictedEndTranslation)
+                if LocalCalculatorStashGeometry.pullRestores(inward: inward(value.translation), projected: projected,
+                                                             travel: travel) {
+                    model.stash = nil
+                    haptics.play(.selection)
+                }
+            })
+        .position(x: area.midX, y: area.midY)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
+        .accessibilityValue(stash.edge == .left
+                            ? Text("At the left edge", comment: "Local calculator: stashed at the left edge.")
+                            : Text("At the right edge", comment: "Local calculator: stashed at the right edge."))
+        .accessibilityHint(Text("Brings the calculator back.", comment: "Local calculator: hint on a stashed window's strip."))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { model.stash = nil }
+        .accessibilityIdentifier("calculatorStashStrip")
     }
 
     private func aspect(metrics: LocalCalculatorPanelMetrics) -> CGFloat? {
@@ -301,7 +395,37 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let start = gestureStart ?? current
         if gestureStart == nil { gestureStart = current }
         let moved = start.offsetBy(dx: translation.width, dy: translation.height)
-        model.windowFrame = LocalCalculatorWindowGeometry.clamped(moved, minimum: .zero, bounds: bounds)
+        dragFrame = LocalCalculatorStashGeometry.dragged(moved, bounds: bounds)
+    }
+
+    /// Let go: flicked (or pulled more than halfway) past the left or right
+    /// edge, it is stashed there, as a floating window tucks; else it stays,
+    /// moved back inside.
+    private func endMove(velocity: CGVector, from current: CGRect, bounds: CGRect) {
+        defer {
+            gestureStart = nil
+            dragFrame = nil
+        }
+        guard let frame = dragFrame else { return }
+        if let stash = LocalCalculatorStashGeometry.release(frame, velocity: velocity, bounds: bounds) {
+            model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds)
+            LocalCalculatorTextFocus.isEditing = false
+            model.stash(at: stash)
+            haptics.play(.selection)
+        } else {
+            model.windowFrame = LocalCalculatorWindowGeometry.clamped(frame, minimum: .zero, bounds: bounds)
+        }
+    }
+
+    /// VoiceOver's Move to Edge: the nearer of the left and right edges.
+    private func stashAtNearestEdge(_ panel: CGRect, bounds: CGRect) {
+        guard bounds.height > 0 else { return }
+        let edge: WorkspaceEdge = panel.midX < bounds.midX ? .left : .right
+        let offset = Double((panel.midY - bounds.minY) / bounds.height)
+        let stash = LocalCalculatorStash(edge: edge, offset: offset)
+        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds)
+        LocalCalculatorTextFocus.isEditing = false
+        model.stash(at: stash)
     }
 
     private func resize(by translation: CGSize, from current: CGRect, bounds: CGRect, metrics: LocalCalculatorPanelMetrics) {
@@ -327,6 +451,35 @@ struct LocalCalculatorLayer<Chip: View>: View {
         return UnitPoint(x: min(max((anchor.midX - panel.minX) / panel.width, 0), 1),
                          y: min(max((anchor.midY - panel.minY) / panel.height, 0), 1))
     }
+}
+
+/// The bottom-right corner of a rect cut along its diagonal: points whose
+/// distances to the right and bottom edges add up to at most `leg`.
+struct LocalCalculatorCornerWedge: Shape {
+    var leg: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - leg))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - leg, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// A stashed window shows only this rect of itself (animatable, so it slides
+/// in and out with the window).
+struct LocalCalculatorStashClip: Shape {
+    var visible: CGRect
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+        get { AnimatablePair(AnimatablePair(visible.minX, visible.minY), AnimatablePair(visible.width, visible.height)) }
+        set { visible = CGRect(x: newValue.first.first, y: newValue.first.second,
+                               width: newValue.second.first, height: newValue.second.second) }
+    }
+
+    func path(in rect: CGRect) -> Path { Path(visible) }
 }
 
 /// The on-screen keyboard's top edge in screen coordinates while it shows.
@@ -433,8 +586,12 @@ struct LocalCalculatorPanel: View {
     @ObservedObject var model: LocalCalculatorModel
     let haptics: ReceiverHaptics
     var onMove: (CGSize) -> Void = { _ in }
+    /// The title bar let go, with its velocity (points per second).
+    var onMoveEnd: (CGVector) -> Void = { _ in }
     var onResize: (CGSize) -> Void = { _ in }
-    var onGestureEnd: () -> Void = {}
+    var onResizeEnd: () -> Void = {}
+    /// Stash at the nearer side edge (VoiceOver's Move to Edge).
+    var onStash: () -> Void = {}
 
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -471,6 +628,9 @@ struct LocalCalculatorPanel: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
         .accessibilityAction(.escape) { close() }
+        .accessibilityAction(named: Text("Move to Edge", comment: "Local calculator: stashes the window at the nearer side edge.")) {
+            onStash()
+        }
         .onChange(of: model.copyCount) { _ in flashCopied() }
         .onDisappear { LocalCalculatorTextFocus.isEditing = false }
     }
@@ -501,7 +661,7 @@ struct LocalCalculatorPanel: View {
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .global)
                 .onChanged { onMove($0.translation) }
-                .onEnded { _ in onGestureEnd() })
+                .onEnded { onMoveEnd(Self.velocity(of: $0)) })
             .accessibilityHidden(true)
             headerButton(model.mode == .notes ? "keyboard.fill" : "keyboard",
                          label: model.mode == .notes
@@ -564,11 +724,22 @@ struct LocalCalculatorPanel: View {
             .foregroundStyle(.white.opacity(0.5))
             .frame(width: 30, height: 30, alignment: .bottomTrailing)
             .padding(4)
-            .contentShape(Rectangle())
+            // Only the corner outside the round bottom-right key (=): a square here
+            // took the middle of that key, so taps on = resized instead (round 4).
+            .contentShape(LocalCalculatorCornerWedge(leg: 32))
             .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { onResize($0.translation) }
-                .onEnded { _ in onGestureEnd() })
+                .onEnded { _ in onResizeEnd() })
             .accessibilityHidden(true)
+    }
+
+    /// A drag's release velocity in points per second. Before iOS 17, from
+    /// its predicted end: UIKit's normal deceleration carries a release about
+    /// half its speed in points.
+    static func velocity(of value: DragGesture.Value) -> CGVector {
+        if #available(iOS 17.0, *) { return CGVector(dx: value.velocity.width, dy: value.velocity.height) }
+        return CGVector(dx: (value.predictedEndTranslation.width - value.translation.width) * 2,
+                        dy: (value.predictedEndTranslation.height - value.translation.height) * 2)
     }
 
     // MARK: Actions
@@ -1391,6 +1562,8 @@ final class NotesEditorView: UIView {
         switch symbol {
         case "+", "−", "×", "÷", "=": text = " \(symbol) "
         case "√": text = "√("
+        // The locale's decimal mark, which the notes read as one (a comma in de_DE or fr_FR).
+        case ".": text = Locale.current.decimalSeparator ?? "."
         default: text = symbol
         }
         textView.insertText(text)

@@ -422,4 +422,83 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertEqual(landscape.placements.count, raw - 1, "the older import keeps every other control")
         XCTAssertEqual(raw - landscape.placements.count, 1, "and reports one skipped control")
     }
+    // MARK: Round 4 (owner QA): beside the trays, not in the top lane
+
+    func testTheButtonSitsBesideTheMainTrayInPortrait() {
+        let container = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let safe = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        let tray = CGRect(x: 100, y: 760, width: 190, height: 44)
+        let function = CGRect(x: 120, y: 700, width: 150, height: 44)
+        let frame = LocalCalculatorPlacement.phoneButtonFrame(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil, portrait: true, diameter: 44,
+            occupied: [tray, function], avoidNotch: true, tray: tray, trayHorizontal: true, beside: [function])
+        XCTAssertEqual(frame, CGRect(x: 300, y: 760, width: 44, height: 44), "at the tray's end, in its row")
+        XCTAssertFalse(frame.intersects(tray.insetBy(dx: -9, dy: -9)))
+    }
+
+    func testTheButtonStaysLowBesideALandscapeColumn() {
+        let container = CGRect(x: 0, y: 0, width: 852, height: 393)
+        let safe = ControlSafeInsets(top: 0, leading: 59, bottom: 21, trailing: 59)
+        let tray = CGRect(x: 736, y: 30, width: 44, height: 320)
+        let frame = LocalCalculatorPlacement.phoneButtonFrame(
+            container: container, safeInsets: safe, keyboardVisibleRect: nil, portrait: false, diameter: 44,
+            occupied: [tray], avoidNotch: true, tray: tray, trayHorizontal: false)
+        XCTAssertGreaterThan(frame.minY, container.midY, "never up in the top lane")
+        XCTAssertFalse(frame.intersects(tray))
+        XCTAssertLessThan(abs(frame.maxY - tray.maxY), 1, "beside the column's bottom end")
+    }
+
+    func testWithoutRoomByTheTraysItFallsBackToTheUpperLeft() {
+        let container = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let tray = CGRect(x: 12, y: 760, width: 369, height: 80)
+        let above = CGRect(x: 12, y: 600, width: 369, height: 150)
+        let frame = LocalCalculatorPlacement.phoneButtonFrame(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: true, diameter: 44,
+            occupied: [tray, above], avoidNotch: false, tray: tray, trayHorizontal: true)
+        XCTAssertEqual(frame.origin, CGPoint(x: 12, y: 12))
+    }
+
+    // MARK: Round 4 (owner QA): stashing at an edge like a floating window
+
+    private let stashBounds = CGRect(x: 12, y: 60, width: 369, height: 740)
+
+    func testAFlickTowardASideEdgeStashesIt() {
+        let frame = CGRect(x: 150, y: 200, width: 200, height: 300)
+        let stash = LocalCalculatorStashGeometry.release(frame, velocity: CGVector(dx: 2_400, dy: 0), bounds: stashBounds)
+        XCTAssertEqual(stash?.edge, .right)
+        XCTAssertNil(LocalCalculatorStashGeometry.release(frame, velocity: CGVector(dx: 300, dy: 0), bounds: stashBounds),
+                     "a slow move stays inside")
+        XCTAssertNil(LocalCalculatorStashGeometry.release(frame, velocity: CGVector(dx: 0, dy: 3_000), bounds: stashBounds),
+                     "never the top or bottom edge")
+    }
+
+    func testPulledMoreThanHalfPastAnEdgeStashesIt() {
+        let dragged = LocalCalculatorStashGeometry.dragged(CGRect(x: -200, y: 300, width: 200, height: 300), bounds: stashBounds)
+        XCTAssertEqual(dragged.maxX, stashBounds.minX + LocalCalculatorStashGeometry.strip, "its strip stays inside")
+        XCTAssertEqual(LocalCalculatorStashGeometry.release(dragged, velocity: .zero, bounds: stashBounds)?.edge, .left)
+        let topped = LocalCalculatorStashGeometry.dragged(CGRect(x: 100, y: -500, width: 200, height: 300), bounds: stashBounds)
+        XCTAssertEqual(topped.minY, stashBounds.minY, "never past the top")
+    }
+
+    func testAStashedWindowShowsAStripAndComesBackFlush() {
+        let stash = LocalCalculatorStash(edge: .right, offset: 0.5)
+        let waiting = LocalCalculatorStashGeometry.waiting(size: CGSize(width: 200, height: 300), stash: stash, bounds: stashBounds)
+        XCTAssertEqual(waiting.strip.width, LocalCalculatorStashGeometry.strip)
+        XCTAssertEqual(waiting.strip.maxX, stashBounds.maxX)
+        XCTAssertEqual(waiting.window.minX, stashBounds.maxX - LocalCalculatorStashGeometry.strip)
+        XCTAssertEqual(waiting.window.midY, stashBounds.midY, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(LocalCalculatorStashGeometry.touchArea(waiting.strip, edge: .right).width, 44)
+        let back = LocalCalculatorStashGeometry.restored(CGRect(x: 40, y: 100, width: 200, height: 300), stash: stash,
+                                                         bounds: stashBounds)
+        XCTAssertEqual(back.maxX, stashBounds.maxX, "flush with the edge it waited at")
+        XCTAssertEqual(back.size, CGSize(width: 200, height: 300), "its own size")
+        XCTAssertTrue(stashBounds.contains(back))
+    }
+
+    func testATapOrAPullBringsItBack() {
+        XCTAssertTrue(LocalCalculatorStashGeometry.pullRestores(inward: 0, projected: 0, travel: 2), "a tap")
+        XCTAssertTrue(LocalCalculatorStashGeometry.pullRestores(inward: 40, projected: 40, travel: 40))
+        XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: -30, projected: -60, travel: 30), "pushed back in")
+        XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: 2, projected: 4, travel: 30), "slid along the edge")
+    }
 }

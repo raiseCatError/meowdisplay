@@ -1045,9 +1045,6 @@ struct ReceiverScreen: View {
                                                safeInsets: effectiveSafeInsets.edgeInsets)
                         }
                     }
-                    .opacity(controlStore.rearrangingControls ? 0 : 1)
-                    .allowsHitTesting(!controlStore.rearrangingControls)
-                    .accessibilityHidden(controlStore.rearrangingControls)
                     #if DEBUG
                     if Self.chromeFixtureEnabled { chromeFixtureMenu(viewport: geo.size) }
                     #endif
@@ -1135,6 +1132,8 @@ struct ReceiverScreen: View {
         // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
         .onChange(of: showSettings) { shown in
             if shown, sessionActions.isPresented { dismissSessionActions() }
+            // Settings (a shake) can't open over the Rearrange Controls sheet: it ends first.
+            if shown { controlStore.setRearrangingControls(false) }
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
         .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }

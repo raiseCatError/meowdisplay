@@ -142,8 +142,8 @@ final class ReceiverControlStore: ObservableObject {
         if open { beginAutoHideActivity() } else { scheduleAutoHide() }
     }
 
-    /// Rearrange Controls (Session Actions): the tray buttons wiggle and are
-    /// dragged into a new order (`ControlRearrangeLayer`). Transient, never
+    /// Rearrange Controls (Session Actions): the trays and palettes are put
+    /// in order in a sheet (`ControlRearrangeSheet`). Transient, never
     /// persisted; nothing reaches the Mac while it is on (ReceiverScreen
     /// folds it into `localInputSurfaceOpen`), and the controls stay up.
     @Published private(set) var rearrangingControls = false
@@ -591,6 +591,8 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 apply(interaction.resetAll())
             }
         }
+        // Rearrange Controls: a modal sheet over the session (nothing reaches the Mac meanwhile).
+        .sheet(isPresented: rearrangeSheetShown) { rearrangeSheet() }
         // A fresh mount (new session, view recreated) always begins visible
         // according to the normal tray settings, then starts counting down
         // if Auto-hide is on.
@@ -844,8 +846,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
             reservedRegions: reservedRegions,
             bottomRow: true) : []
         #endif
-        // The local calculator's button, once added: the upper-left usable
-        // spot clear of everything above (which never moves for it).
+        // The local calculator's button, once added: beside the Main Tray (or
+        // a Function group) when there is room, else the upper-left usable
+        // spot; clear of everything above, which never moves for it.
         let calculatorButton: CGRect? = LocalCalculatorPolicy.showsButton(
             added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
             keyboardBarShown: false) ? LocalCalculatorPlacement.phoneButtonFrame(
@@ -853,7 +856,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 keyboardVisibleRect: keyboardVisibleRect, portrait: portrait, diameter: Metrics.trayItem,
                 occupied: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
                 avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
-                reservedRegions: reservedRegions) : nil
+                reservedRegions: reservedRegions,
+                tray: collapsed ? nil : renderedMainTrayFrame, trayHorizontal: layout.axis == .horizontal,
+                beside: functionFrames, arrowSide: arrowKeysShown ? store.preferences.arrowKeysSide : nil) : nil
         // Arrow keys (#179): placed after everything else, around it,
         // the calculator's button and open panel included. The calculator
         // never moves for them, so the two can't push each other around.
@@ -900,7 +905,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .trayButtonAccessibility { activateForAccessibility(.settings) }
                     .sessionActionsAccessibility(onSessionActions == nil ? nil : { openSessionActions() })
                     .position(x: layout.trayFrame.midX, y: layout.trayFrame.midY)
-            } else if !autoHiding && !store.rearrangingControls {
+            } else if !autoHiding {
                 controlsRow(axis: layout.axis == .horizontal ? .horizontal : .vertical, item: trayItem,
                             fold: foldedTray)
                     .frame(width: layout.trayFrame.width, height: layout.trayFrame.height)
@@ -908,7 +913,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                     .transition(autoHideTransition)
             }
 
-            if !autoHiding && !store.rearrangingControls {
+            if !autoHiding {
                 ForEach(Array(functionGroups.enumerated()), id: \.offset) { index, group in
                     if index < functionFrames.count {
                         let frame = functionFrames[index]
@@ -955,30 +960,6 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 obstacles: [renderedMainTrayFrame] + functionFrames
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { chip(selected: $0) }
-
-            if store.rearrangingControls {
-                phoneRearrangeLayer(trayFrame: layout.trayFrame, horizontal: layout.axis == .horizontal,
-                                    trayItem: trayItem, fold: foldedTray, collapsed: collapsed,
-                                    functionFrames: functionFrames, faceDiameter: faceDiameter) { chord in
-                    // Where this palette opens in the live tray: the same
-                    // layout pass with its size, and its Grid's cells.
-                    let actions = profile.actions(for: chord)
-                    let size = calculatedPaletteSize(actions: actions, portrait: portrait)
-                    let frame = ControlTrayGeometry.layout(
-                        container: CGRect(origin: .zero, size: containerSize), safeInsets: safe,
-                        keyboardVisibleRect: keyboardVisibleRect, portrait: portrait,
-                        side: store.preferences.preferredLandscapeSide, traySize: traySize, paletteSize: size,
-                        avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
-                        reservedRegions: reservedRegions).paletteFrame
-                    let grid = ControlTrayGeometry.shortcutPaletteGrid(count: actions.count, portrait: portrait)
-                    let slots = ControlRearrangement.paletteSlots(
-                        count: actions.count, rows: grid.rows, columns: grid.columns, rowMajor: portrait,
-                        key: CGSize(width: Metrics.paletteKey, height: Metrics.paletteKey), gap: Metrics.paletteGap,
-                        in: frame)
-                    return ControlRearrangePalette(items: actions.map(ControlRearrangeItem.shortcut),
-                                                   slots: slots, frame: frame)
-                }
-            }
 
             #if DEBUG
             if notchDebugOverlayEnabled {
@@ -2187,69 +2168,32 @@ extension ReceiverControlOverlay {
 // MARK: - Rearrange Controls
 
 extension ReceiverControlOverlay {
-    /// Edit mode over the iPhone tray: the slots are where `controlsRow` and
-    /// `functionGroupCluster` draw each button this pass.
-    fileprivate func phoneRearrangeLayer(trayFrame: CGRect, horizontal: Bool, trayItem: CGFloat,
-                                         fold: ControlFoldGeometry.TrayRow?, collapsed: Bool,
-                                         functionFrames: [CGRect], faceDiameter: CGFloat,
-                                         palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
-        let main = collapsed ? [] : controls
-        let mainSlots = fold?.cells ?? ControlRearrangement.stackSlots(
-            center: CGPoint(x: trayFrame.midX, y: trayFrame.midY), horizontal: horizontal,
-            count: main.count, item: trayItem, spacing: Metrics.trayGap)
-        let inset = max(0, (Metrics.functionTarget - faceDiameter) / 2)
-        let functionSlots: [CGRect] = zip(functionGroups, functionFrames).flatMap { group, frame in
-            ControlRearrangement.stackSlots(center: CGPoint(x: frame.midX, y: frame.midY), horizontal: horizontal,
-                                            count: group.count, item: Metrics.functionTarget, spacing: 0)
-                .map { $0.insetBy(dx: inset, dy: inset) }
-        }
-        let functionShown = Array(functionGroups.prefix(functionFrames.count).joined())
-        return rearrangeLayer(main: Array(zip(main, mainSlots)), function: Array(zip(functionShown, functionSlots)),
-                              palette: palette)
+    /// What the Rearrange Controls sheet lists in one orientation: the trays
+    /// as this overlay draws them there. On iPad only the Main rail's
+    /// modifiers take the profile's order (`PadRailComposition`).
+    fileprivate func rearrangeContent(landscape: Bool) -> ControlRearrangeContent {
+        let trayShown = store.preferences.trayCanBeShown && !store.preferences.trayCollapsed
+        var tray = trayShown ? profile.visibleTrayItems(landscape: landscape).filter(capabilityAllows) : []
+        if store.isPad { tray = tray.filter { $0.modifier != nil } }
+        let function = store.preferences.functionTrayCanBeShown
+            ? store.activeFunctionTrayProfile.visibleGroups(landscape: landscape).flatMap { $0 } : []
+        return ControlRearrangeContent(tray: tray, function: function)
     }
 
-    /// Edit mode over the iPad Strip/Overlay rails: the modifiers (the only
-    /// Main rail buttons whose order the profile sets, see
-    /// `PadRailComposition`) and the Function buttons.
-    fileprivate func padRearrangeLayer(mainControls: [PadPlacedControl],
-                                       functionControls: [(item: ShortcutItem, frame: CGRect)],
-                                       palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
-        let modifiers: [(ControlTrayItem, CGRect)] = mainControls.compactMap { control in
-            guard case .tray(let item) = control.kind, item.modifier != nil else { return nil }
-            return (item, control.frame)
-        }
-        return rearrangeLayer(main: modifiers, function: functionControls.map { ($0.item, $0.frame) }, palette: palette)
+    fileprivate var rearrangeSheetShown: Binding<Bool> {
+        Binding(get: { store.rearrangingControls },
+                set: { shown in if !shown { store.setRearrangingControls(false) } })
     }
 
-    private func rearrangeLayer(main: [(ControlTrayItem, CGRect)], function: [(ShortcutItem, CGRect)],
-                                palette: @escaping (ModifierChord) -> ControlRearrangePalette) -> some View {
-        let landscape = landscapeOrder
-        let mainItems = main.map(\.0)
-        let functionIDs = function.map(\.0.id)
-        let runs = [
-            ControlRearrangeRun(kind: .main, items: mainItems.map {
-                .tray($0, palette: ControlRearrangePolicy.paletteChord(for: $0, in: profile))
-            }, slots: main.map(\.1)),
-            ControlRearrangeRun(kind: .function, items: function.map { .shortcut($0.0) }, slots: function.map(\.1)),
-        ].filter { !$0.items.isEmpty }
-        return ControlRearrangeLayer(
-            containerSize: containerSize, safeInsets: safeInsets, isPad: store.isPad, runs: runs,
-            palette: palette,
-            onMove: { kind, from, to in
-                switch kind {
-                case .main:
-                    store.updateActiveProfile { $0.moveShownTrayItem(shown: mainItems, from: from, to: to, landscape: landscape) }
-                case .function:
-                    store.updateActiveFunctionTrayProfile { $0.moveShownItem(shown: functionIDs, from: from, to: to, landscape: landscape) }
-                case .palette(let chord):
-                    store.updateActiveProfile { $0.moveAction(for: chord, from: from, to: to) }
-                }
-            },
-            onHaptic: { haptics.play($0) },
-            onDone: {
-                haptics.play(.confirmation)
-                store.setRearrangingControls(false)
-            })
+    fileprivate func rearrangeSheet() -> some View {
+        ControlRearrangeSheet(store: store, haptics: haptics, landscapeNow: landscapeOrder,
+                              content: { rearrangeContent(landscape: $0) },
+                              onDone: {
+                                  haptics.play(.confirmation)
+                                  store.setRearrangingControls(false)
+                              })
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
     }
 }
 
@@ -2312,12 +2256,15 @@ extension ReceiverControlOverlay {
         let mainGroups = padCollapsed ? [] : padMainGroups
         let mainKinds = mainGroups.flatMap { $0 }
         let groups = functionGroups
-        // The local calculator, once added, is the Function edge's first
-        // group of its own — so it starts the edge (top, or left) and shows
-        // in View Only too, when the Function groups themselves can't.
+        // The local calculator, once added, sits in the Main rail's end group
+        // beside Settings (`PadRailComposition`), moving nothing else. With no
+        // Main rail (the tray can't show) it is the Function edge's first
+        // group of its own, so it still shows in View Only.
         let showsCalculator = LocalCalculatorPolicy.showsButton(
             added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
             keyboardBarShown: false)
+        let calculatorOnMain = mainKinds.contains(.calculator)
+        let calculatorOnFunction = showsCalculator && !calculatorOnMain
         let mainEdge = store.preferences.padMainEdge
         let functionEdge = store.preferences.padFunctionEdge
         // A fold (iPhone Duo) is skipped over by the rails, never crossed.
@@ -2327,7 +2274,7 @@ extension ReceiverControlOverlay {
                                    mainEdge: mainEdge, functionEdge: functionEdge,
                                    mainGroupCounts: mainGroups.map(\.count),
                                    mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
-                                   functionGroupCounts: (showsCalculator ? [1] : []) + groups.map(\.count),
+                                   functionGroupCounts: (calculatorOnFunction ? [1] : []) + groups.map(\.count),
                                    metrics: metrics, keyboardTop: keyboardTop, divisions: divisions)
         }
         let firstPass = pass(nil)
@@ -2346,10 +2293,12 @@ extension ReceiverControlOverlay {
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
         }
-        let calculatorButton: CGRect? = showsCalculator
-            ? layout.functionCells.first.map { PadEdgeGeometry.circleFrame(inCell: $0, metrics: metrics) } : nil
+        let calculatorButton: CGRect? = calculatorOnMain
+            ? mainControls.first { $0.kind == .calculator }?.frame
+            : calculatorOnFunction
+                ? layout.functionCells.first.map { PadEdgeGeometry.circleFrame(inCell: $0, metrics: metrics) } : nil
         let functionControls: [(item: ShortcutItem, frame: CGRect)] =
-            zip(groups.flatMap { $0 }, layout.functionCells.dropFirst(showsCalculator ? 1 : 0)).map { item, cell in
+            zip(groups.flatMap { $0 }, layout.functionCells.dropFirst(calculatorOnFunction ? 1 : 0)).map { item, cell in
                 (item, PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics))
             }
         let autoHiding = store.autoHidden
@@ -2408,7 +2357,7 @@ extension ReceiverControlOverlay {
         let occupied: [CGRect] = railFrames + floatingFrames + calculatorPanelFrames + arrowFrames
         // The touch region, built from typed pieces: as one `+`/`??` chain
         // inside the ZStack it exceeded Xcode 26's type-checking budget.
-        let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction }
+        let mainRegion: [CGRect] = autoHiding ? [] : mainControls.filter { !$0.kind.isOneTapAction && $0.kind != .calculator }
             .map { $0.frame.insetBy(dx: -4, dy: -4) }
         let gearRegion: [CGRect] = gearFrame.map { [$0.insetBy(dx: -4, dy: -4)] } ?? []
         let paletteRegion: [CGRect] = wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? paletteFrame.map { [$0] } ?? []
@@ -2435,8 +2384,8 @@ extension ReceiverControlOverlay {
             // answers its hit tests even with `.accessibilityHidden`, so
             // VoiceOver and UI tests would still find invisible controls.
             if !autoHiding {
-                // Rearrange Controls draws the modifiers and Function buttons itself.
-                ForEach(mainControls.filter { !(store.rearrangingControls && $0.kind.modifier != nil) }) { control in
+                // The calculator's button is drawn by `LocalCalculatorLayer`.
+                ForEach(mainControls.filter { $0.kind != .calculator }) { control in
                     Group {
                         if case .function(let id) = control.kind, let item = functionItem(id) {
                             padFunctionChip(item, frame: control.frame, onRail: true,
@@ -2448,12 +2397,10 @@ extension ReceiverControlOverlay {
                     }
                     .transition(.opacity)
                 }
-                if !store.rearrangingControls {
-                    ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
-                        padFunctionChip(control.item, frame: control.frame, onRail: true,
-                                        hint: hints ? control.item.title.lowercased() : nil)
-                            .transition(.opacity)
-                    }
+                ForEach(Array(functionControls.enumerated()), id: \.element.item.id) { _, control in
+                    padFunctionChip(control.item, frame: control.frame, onRail: true,
+                                    hint: hints ? control.item.title.lowercased() : nil)
+                        .transition(.opacity)
                 }
             }
             if let paletteChord, let wheel {
@@ -2498,27 +2445,6 @@ extension ReceiverControlOverlay {
                 obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: true) }
-            if store.rearrangingControls {
-                padRearrangeLayer(mainControls: mainControls, functionControls: functionControls) { chord in
-                    // Where this palette opens on the rail, its keys drawn
-                    // round for rearranging.
-                    let actions = profile.actions(for: chord)
-                    let key = CGSize(width: metrics.item * 0.92, height: metrics.item * 0.92)
-                    let grid = PadEdgeGeometry.paletteGrid(count: actions.count, key: key, gap: metrics.gap,
-                                                           edge: mainEdge, available: paletteBounds.size)
-                    let size = actions.isEmpty ? CGSize(width: 220, height: 36) : grid.size
-                    let frame = (paletteAnchor ?? gearFrame).map {
-                        PadEdgeGeometry.paletteFrame(size: size, anchor: $0, edge: mainEdge, bounds: paletteBounds,
-                                                     gap: metrics.gap * 2)
-                    } ?? CGRect(x: paletteBounds.midX - size.width / 2, y: paletteBounds.midY - size.height / 2,
-                                width: size.width, height: size.height)
-                    let slots = ControlRearrangement.paletteSlots(
-                        count: actions.count, rows: grid.rows, columns: grid.columns,
-                        rowMajor: !mainEdge.stacksVertically, key: key, gap: metrics.gap, in: frame)
-                    return ControlRearrangePalette(items: actions.map(ControlRearrangeItem.shortcut),
-                                                   slots: slots, frame: frame)
-                }
-            }
         }
         .onAppear {
             onCanvasChange(canvasPublication)
@@ -2584,7 +2510,10 @@ extension ReceiverControlOverlay {
             availability: .init(modifiers: modifiers,
                                 keyboardAvailable: capabilityAllows(.keyboard),
                                 moveViewAvailable: padShowsMoveView,
-                                arrowKeysAvailable: arrowKeysShown))
+                                arrowKeysAvailable: arrowKeysShown),
+            calculator: LocalCalculatorPolicy.showsButton(
+                added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
+                keyboardBarShown: false))
     }
 
     /// Any Function Tray item by id, visible in the tray or not.

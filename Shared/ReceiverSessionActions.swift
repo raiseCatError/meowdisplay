@@ -12,8 +12,9 @@ enum ReceiverSessionAction: Hashable, Sendable {
     /// Lock This Mac (LockMacFlow): its own confirmation, shown from the overlay, which
     /// stays up; Request Control comes first when this device doesn't have control.
     case lockMac
-    /// Rearrange Controls: the tray buttons wiggle and can be dragged into a
-    /// new order (`ControlRearrangement`). Nothing reaches the Mac meanwhile.
+    /// Rearrange Controls: a sheet of lists that put the trays' buttons and
+    /// the shortcut palettes in order (`ControlRearrangement`). Nothing
+    /// reaches the Mac meanwhile.
     case rearrangeControls
     /// The same call as Settings → Connections → Disconnect: a deliberate
     /// goodbye, so neither side reconnects by itself (#162).

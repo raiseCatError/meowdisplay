@@ -1,8 +1,8 @@
 import CoreGraphics
 import XCTest
 
-/// Rearrange Controls (Shared/ControlRearrangement.swift): the pure reorder,
-/// persistence and jiggle rules behind the iPhone/iPad edit mode.
+/// Rearrange Controls (Shared/ControlRearrangement.swift): the pure reorder
+/// and persistence rules behind the iPhone/iPad Rearrange Controls sheet.
 final class ControlRearrangementTests: XCTestCase {
 
     // MARK: Offering it
@@ -35,34 +35,6 @@ final class ControlRearrangementTests: XCTestCase {
         XCTAssertEqual(state.choose(.rearrangeControls), .rearrangeControls(reopenKeyboardAfter: true))
         XCTAssertFalse(state.isPresented)
         XCTAssertTrue(state.surfaceInteractive(.session), "the screen decides input while editing, not the overlay")
-    }
-
-    func testEveryModifierOpensAPalette() {
-        let profile = ControlProfile.canonical()
-        XCTAssertEqual(ControlRearrangePolicy.paletteChord(for: .command, in: profile), ModifierChord([.command]))
-        XCTAssertEqual(ControlRearrangePolicy.paletteChord(for: .option, in: profile), ModifierChord([.option]),
-                       "an empty palette still opens, with its hint")
-        XCTAssertNil(ControlRearrangePolicy.paletteChord(for: .escape, in: profile))
-        XCTAssertNil(ControlRearrangePolicy.paletteChord(for: .settings, in: profile))
-    }
-
-    func testTapsBuildAChordLikeTheLiveTray() {
-        let command = ControlRearrangePolicy.palette(after: nil, tapping: .command)
-        XCTAssertEqual(command, ModifierChord([.command]))
-        let commandOption = ControlRearrangePolicy.palette(after: command, tapping: .option)
-        XCTAssertEqual(commandOption, ModifierChord([.command, .option]))
-        XCTAssertEqual(ControlRearrangePolicy.palette(after: commandOption, tapping: .command), ModifierChord([.option]))
-        XCTAssertNil(ControlRearrangePolicy.palette(after: command, tapping: .command))
-    }
-
-    func testBoundsOutlineEachClusterOfSlots() {
-        let row = ControlRearrangement.stackSlots(center: CGPoint(x: 100, y: 50), horizontal: true,
-                                                  count: 3, item: 40, spacing: 8)
-        let apart = ControlRearrangement.stackSlots(center: CGPoint(x: 400, y: 50), horizontal: true,
-                                                    count: 2, item: 40, spacing: 8)
-        let clusters = ControlRearrangement.clusters(row + apart)
-        XCTAssertEqual(clusters.count, 2)
-        XCTAssertEqual(clusters.first, row.dropFirst().reduce(row[0]) { $0.union($1) })
     }
 
     // MARK: Portrait and landscape
@@ -176,50 +148,39 @@ final class ControlRearrangementTests: XCTestCase {
                        ["zoom-out", "zoom-in", "undo", "redo", "return"])
     }
 
-    // MARK: Slots
+    // MARK: Moving rows
 
-    func testNearestSlotAndSteps() {
-        let slots = ControlRearrangement.stackSlots(center: CGPoint(x: 100, y: 50), horizontal: true,
-                                                    count: 3, item: 40, spacing: 4)
-        XCTAssertEqual(slots.map(\.midX), [56, 100, 144])
-        XCTAssertEqual(slots.map(\.midY), [50, 50, 50])
-        XCTAssertEqual(ControlRearrangement.nearestSlot(to: CGPoint(x: 130, y: 60), in: slots), 2)
-        XCTAssertEqual(ControlRearrangement.nearestSlot(to: CGPoint(x: -500, y: 0), in: slots), 0)
-        XCTAssertNil(ControlRearrangement.nearestSlot(to: .zero, in: []))
-        XCTAssertTrue(ControlRearrangement.runsHorizontally(slots))
-        XCTAssertFalse(ControlRearrangement.runsHorizontally(ControlRearrangement.stackSlots(
-            center: .zero, horizontal: false, count: 3, item: 40, spacing: 4)))
+    func testListMovesAndSteps() {
+        XCTAssertEqual(ControlRearrangement.listMove(from: [0], to: 3, count: 3).map { [$0.from, $0.to] }, [0, 2],
+                       "dropped after the last row: it ends last")
+        XCTAssertEqual(ControlRearrangement.listMove(from: [2], to: 0, count: 3).map { [$0.from, $0.to] }, [2, 0])
+        XCTAssertEqual(ControlRearrangement.listMove(from: [1], to: 3, count: 4).map { [$0.from, $0.to] }, [1, 2])
+        XCTAssertNil(ControlRearrangement.listMove(from: [1], to: 1, count: 3), "dropped where it was")
+        XCTAssertNil(ControlRearrangement.listMove(from: [1], to: 2, count: 3), "dropped just after itself")
+        XCTAssertNil(ControlRearrangement.listMove(from: [0, 1], to: 3, count: 3), "one row at a time")
+        XCTAssertNil(ControlRearrangement.listMove(from: [5], to: 0, count: 3))
         XCTAssertEqual(ControlRearrangement.step(from: 0, by: 1, count: 3), 1)
         XCTAssertNil(ControlRearrangement.step(from: 0, by: -1, count: 3), "already first")
         XCTAssertNil(ControlRearrangement.step(from: 2, by: 1, count: 3), "already last")
     }
 
-    func testPaletteGridFitsAndCentres() {
-        let bounds = CGRect(x: 0, y: 0, width: 200, height: 400)
-        let slots = ControlRearrangement.gridSlots(count: 9, key: 38, gap: 8, maximumColumns: 5,
-                                                   center: CGPoint(x: 100, y: 200), bounds: bounds)
-        XCTAssertEqual(slots.count, 9)
-        XCTAssertEqual(Set(slots.map(\.minY)).count, 3, "4 columns fit 200pt, so three rows")
-        XCTAssertTrue(slots.allSatisfy { bounds.contains($0) })
-        XCTAssertEqual(slots[0].minX + slots[3].maxX, 200, accuracy: 0.001, "centred")
+    func testAListMoveReordersTheTrayAsDrawn() {
+        var profile = ControlProfile.canonical()
+        let shown = profile.visibleTrayItems(landscape: false)
+        guard shown.count >= 3, let move = ControlRearrangement.listMove(from: [0], to: shown.count, count: shown.count)
+        else { return XCTFail("the canonical tray has buttons") }
+        profile.moveShownTrayItem(shown: shown, from: move.from, to: move.to, landscape: false)
+        XCTAssertEqual(profile.visibleTrayItems(landscape: false), Array(shown.dropFirst()) + [shown[0]])
+        XCTAssertEqual(profile.visibleTrayItems(landscape: true), shown, "landscape keeps its own order")
     }
 
-    // MARK: Jiggle
-
-    func testJiggleMatchesTheHomeScreenRangeAndVariesPerIcon() {
-        let ids = ["tray:command", "tray:option", "tray:escape", "shortcut:undo", "shortcut:redo"]
-        let motions = ids.map(ControlJiggleMotion.init(id:))
-        for motion in motions {
-            XCTAssertTrue(ControlJiggleMotion.amplitudeRange.contains(motion.amplitude))
-            XCTAssertTrue(ControlJiggleMotion.periodRange.contains(motion.period))
-            XCTAssertTrue(ControlJiggleMotion.bobRange.contains(motion.bob))
-            for step in 0..<50 {
-                let t = Double(step) * 0.017
-                XCTAssertLessThanOrEqual(abs(motion.angle(at: t)), 2.0 + 1e-9)
-                XCTAssertLessThanOrEqual(abs(motion.offset(at: t)), 1.0 + 1e-9)
-            }
-        }
-        XCTAssertEqual(Set(motions.map(\.phase)).count, ids.count, "no two icons in lockstep")
-        XCTAssertEqual(ControlJiggleMotion(id: "tray:command"), motions[0], "an icon keeps its rhythm")
+    func testRearrangingPortraitFunctionTrayLeavesLandscapeAlone() {
+        var profile = FunctionTrayProfile.canonical()
+        let before = profile.items(landscape: true).map(\.id)
+        let shown = profile.visibleGroups(landscape: false).flatMap { $0 }.map(\.id)
+        guard shown.count >= 2 else { return XCTFail("the default Function Tray has buttons") }
+        profile.moveShownItem(shown: shown, from: 0, to: 1, landscape: false)
+        XCTAssertNotEqual(profile.items(landscape: false).map(\.id), before)
+        XCTAssertEqual(profile.items(landscape: true).map(\.id), before, "landscape keeps what it showed")
     }
 }
