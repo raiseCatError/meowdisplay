@@ -855,6 +855,18 @@ enum CalculatorSheet {
     /// above it.
     static func checkpointStride(for count: Int) -> Int { max(16, count / 16) }
 
+    /// `checkpoints` with those closer than `stride` to the one kept before them dropped
+    /// (the first, line 0, always stays), so a sheet that grew keeps few of them.
+    static func thinned(_ checkpoints: [Int: State], stride: Int) -> [Int: State] {
+        var kept: [Int: State] = [:]
+        var last = Int.min / 2
+        for key in checkpoints.keys.sorted() where key == 0 || key - last >= stride {
+            kept[key] = checkpoints[key]
+            last = key
+        }
+        return kept
+    }
+
     static func evaluate(lines: [String], angle: CalculatorAngleUnit, smart: CalculatorSmartContext,
                          reusing previous: Evaluation?) -> Evaluation {
         var reused = 0
@@ -874,17 +886,22 @@ enum CalculatorSheet {
         }
         let stride = checkpointStride(for: lines.count)
         var results = Array(previous?.results.prefix(start) ?? [])
-        var checkpoints = (previous?.checkpoints ?? [:]).filter { $0.key <= start && $0.key % stride == 0 }
+        // Every saved state up to where this pass starts is still right, whatever the stride.
+        var checkpoints = (previous?.checkpoints ?? [:]).filter { $0.key <= start }
         var firstTimeDependent = previous?.firstTimeDependent.flatMap { $0 < start ? $0 : nil }
+        var lastSaved = checkpoints.keys.max() ?? -stride
         for index in start..<lines.count {
-            if index % stride == 0 { checkpoints[index] = state }
+            if index == 0 || index - lastSaved >= stride {
+                checkpoints[index] = state
+                lastSaved = index
+            }
             var dependsOnNow = false
             results.append(line(lines[index], state: &state, smart: smart, dependsOnNow: &dependsOnNow))
             if dependsOnNow, firstTimeDependent == nil { firstTimeDependent = index }
         }
         return Evaluation(lines: lines, angle: angle, locale: smart.locale, calendar: smart.calendar,
-                          timeZone: smart.timeZone, results: results, checkpoints: checkpoints,
-                          firstTimeDependent: firstTimeDependent)
+                          timeZone: smart.timeZone, results: results,
+                          checkpoints: thinned(checkpoints, stride: stride), firstTimeDependent: firstTimeDependent)
     }
 
     private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext,
@@ -892,15 +909,7 @@ enum CalculatorSheet {
         var context = state.context
         var running = state.running
         defer { state = State(context: context, running: running) }
-        var trimmed = line.trimmingCharacters(in: .whitespaces)
-        if smart.locale.decimalSeparator == "," {
-            // "1.250,5" where dots group thousands (de_DE): the dots go. Elsewhere (fr_FR groups
-            // with spaces) a dot stays a decimal point, as the notes rail's key types the comma.
-            if smart.locale.groupingSeparator == "." {
-                trimmed = trimmed.replacingOccurrences(of: #"(?<=\d)\.(?=\d{3}(?!\d))"#, with: "", options: .regularExpression)
-            }
-            trimmed = trimmed.replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
-        }
+        let trimmed = CalculatorSheet.normalizingNumbers(line.trimmingCharacters(in: .whitespaces), locale: smart.locale)
         if trimmed.isEmpty {
             running = nil
             return CalculatorLineResult(value: nil)
@@ -931,6 +940,26 @@ enum CalculatorSheet {
             return CalculatorLineResult(value: value, assigns: assigns)
         }
         return CalculatorLineResult(value: nil, assigns: nil)
+    }
+
+    /// Numbers written the locale's way, as the engine reads them (a dot for the decimal
+    /// mark, no grouping). Only where the decimal mark is a comma: "1.250,5" (de_DE groups
+    /// with dots) and "1 250,5" (fr_FR groups with spaces) become 1250.5, and a comma
+    /// before a digit is the decimal mark, also leading (",5", as the rail's key types it).
+    /// A dot stays a decimal point where dots don't group. Commas elsewhere ("five, plus
+    /// three") are left alone.
+    static func normalizingNumbers(_ text: String, locale: Locale) -> String {
+        guard locale.decimalSeparator == "," else { return text }
+        var result = text
+        let grouping = locale.groupingSeparator ?? ""
+        if grouping == "." {
+            result = result.replacingOccurrences(of: #"(?<=\d)\.(?=\d{3}(?!\d))"#, with: "", options: .regularExpression)
+        } else if !grouping.isEmpty, grouping.unicodeScalars.allSatisfy({ CharacterSet.whitespaces.contains($0) }) {
+            // Any space between digit groups (people type a plain one for the locale's narrow one).
+            result = result.replacingOccurrences(of: #"(?<=\d)[ \x{00A0}\x{202F}](?=\d{3}(?!\d))"#, with: "",
+                                                 options: .regularExpression)
+        }
+        return result.replacingOccurrences(of: #",(?=\d)"#, with: ".", options: .regularExpression)
     }
 
     /// A line that is just a number ("2026", "42") reads as a note, not a

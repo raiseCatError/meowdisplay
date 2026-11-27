@@ -920,6 +920,28 @@ enum PadRailComposition {
     }
 }
 
+extension PadRailComposition {
+    /// Where the calculator's button goes, given `main` (from `mainGroups(calculator: true)`)
+    /// and a layout pass for a Main rail and whether the button leads the Function rail: in
+    /// the Settings group when the rails and the picture keep the lanes and canvas they have
+    /// without it; else first on the Function rail when that keeps them; else in the Settings
+    /// group anyway (no place leaves everything as it was).
+    static func calculatorPlacement(main: [[CustomControlKind]],
+                                    layout: (_ main: [[CustomControlKind]], _ calculatorLeadsFunction: Bool) -> PadEdgeLayout)
+        -> (main: [[CustomControlKind]], calculatorLeadsFunction: Bool) {
+        guard main.joined().contains(.calculator) else { return (main, false) }
+        let without = main.map { $0.filter { $0 != .calculator } }.filter { !$0.isEmpty }
+        let reference = layout(without, false)
+        func same(_ other: PadEdgeLayout) -> Bool {
+            other.laneCounts == reference.laneCounts && other.canvas == reference.canvas
+                && other.mainSegments.count == reference.mainSegments.count
+        }
+        if same(layout(main, false)) { return (main, false) }
+        if same(layout(without, true)) { return (without, true) }
+        return (main, false)
+    }
+}
+
 extension PadEdgeGeometry {
     /// The open arrow keypad (the T and its ⇧ ⌥ ⌘ row) for the roomy Arrow
     /// Keys control at `anchor`: beside the control toward the middle of the

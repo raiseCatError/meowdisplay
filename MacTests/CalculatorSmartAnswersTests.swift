@@ -149,4 +149,39 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(after.results, CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context))
         XCTAssertEqual(after.results.last?.value, 2_509)
     }
+    // Codex round 8.
+    func testLocaleNumbersAndTheRailsLeadingComma() {
+        var french = context
+        french.locale = Locale(identifier: "fr_FR")
+        let sheet = CalculatorSheet.evaluate(lines: [",5 + ,2", "1 250,5 + 1", "1\u{202F}250,5 + 1", "1.250 + 1"],
+                                             angle: .degrees, smart: french)
+        XCTAssertEqual(sheet.map(\.value), [Decimal(string: "0.7"), Decimal(string: "1251.5"),
+                                            Decimal(string: "1251.5"), Decimal(string: "2.25")])
+        var german = context
+        german.locale = Locale(identifier: "de_DE")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["1.250,5 + ,5"], angle: .degrees, smart: german).map(\.value),
+                       [1251])
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("five, plus three", locale: french.locale), "five, plus three")
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("1,5", locale: context.locale), "1,5", "en_GB is left alone")
+    }
+
+    func testCheckpointsSurviveAStrideChange() {
+        let lines = (0..<2_495).map { "v\($0) = \($0)" }
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        let grown = lines + ["v2494 + 1"]
+        let appended = CalculatorSheet.evaluate(lines: grown, angle: .degrees, smart: context, reusing: before)
+        XCTAssertGreaterThan(appended.checkpoints.count, 8, "earlier states are kept when the stride changes")
+        XCTAssertLessThanOrEqual(appended.checkpoints.count, 17)
+        var edited = grown
+        edited[2_495] = "v2494 + 2"
+        let after = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context, reusing: appended)
+        XCTAssertEqual(after.results, CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context))
+        XCTAssertEqual(after.results.last?.value, 2_496)
+        // Insertions, deletions and truncation match a full evaluation too.
+        for change in [Array(edited.prefix(100)), Array(edited.prefix(50) + ["x = 3"] + edited.dropFirst(50)),
+                       Array(edited.prefix(10) + edited.dropFirst(11))] {
+            XCTAssertEqual(CalculatorSheet.evaluate(lines: change, angle: .degrees, smart: context, reusing: after).results,
+                           CalculatorSheet.evaluate(lines: change, angle: .degrees, smart: context))
+        }
+    }
 }

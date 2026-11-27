@@ -501,4 +501,30 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: -30, projected: -60, travel: 30), "pushed back in")
         XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: 2, projected: 4, travel: 30), "slid along the edge")
     }
+    // Codex round 8.
+    func testTheStripKeepsOffControlsOnItsEdge() {
+        let stash = LocalCalculatorStash(edge: .right, offset: 0.5)
+        let rail = CGRect(x: stashBounds.maxX - 50, y: stashBounds.midY - 200, width: 60, height: 400)
+        let waiting = LocalCalculatorStashGeometry.waiting(size: CGSize(width: 200, height: 300), stash: stash,
+                                                           bounds: stashBounds, obstacles: [rail])
+        let touch = try? XCTUnwrap(waiting.touch)
+        XCTAssertNotNil(touch)
+        XCTAssertFalse(touch.map { $0.intersects(rail) } ?? true, "a tap on the rail never lands on the strip")
+        XCTAssertLessThanOrEqual(waiting.strip.height, LocalCalculatorStashGeometry.maximumStripLength)
+        XCTAssertTrue(waiting.window.minY <= waiting.strip.minY && waiting.strip.maxY <= waiting.window.maxY,
+                      "the strip is part of the window")
+        let full = CGRect(x: stashBounds.maxX - 50, y: stashBounds.minY, width: 60, height: stashBounds.height)
+        XCTAssertNil(LocalCalculatorStashGeometry.waiting(size: CGSize(width: 200, height: 300), stash: stash,
+                                                          bounds: stashBounds, obstacles: [full]).touch,
+                     "no clear place: only the calculator button brings it back")
+    }
+
+    func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
+        let container = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let function = CGRect(x: 120, y: 760, width: 150, height: 44)
+        let frame = LocalCalculatorPlacement.phoneButtonFrame(
+            container: container, safeInsets: .zero, keyboardVisibleRect: nil, portrait: true, diameter: 44,
+            occupied: [function], avoidNotch: false, tray: nil, trayHorizontal: true, beside: [function])
+        XCTAssertEqual(frame, CGRect(x: 280, y: 760, width: 44, height: 44))
+    }
 }

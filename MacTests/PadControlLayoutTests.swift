@@ -476,6 +476,32 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertEqual(with.canvas, without.canvas, "the picture keeps its size")
     }
 
+    func testTheCalculatorNeverAddsALaneWhenAnotherPlaceKeepsThem() {
+        let main = PadRailComposition.mainGroups(visibility: PadStandardControlVisibility(), availability: everything,
+                                                 calculator: true)
+        var fellBack = false
+        for height in stride(from: 560.0, through: 900.0, by: 4) {
+            func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+                PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: height), safeInsets: .zero,
+                                       reservesStrips: true, mainEdge: .trailing, functionEdge: .leading,
+                                       mainGroupCounts: main.map(\.count),
+                                       mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                       functionGroupCounts: (first ? [1] : []) + [2], metrics: PadControlMetrics(scale: 1))
+            }
+            let without = main.map { $0.filter { $0 != .calculator } }
+            let reference = layout(without, false)
+            let placed = PadRailComposition.calculatorPlacement(main: main, layout: layout)
+            let chosen = layout(placed.main, placed.calculatorLeadsFunction)
+            let onFunction = layout(without, true)
+            if onFunction.laneCounts == reference.laneCounts && onFunction.canvas == reference.canvas {
+                XCTAssertEqual(chosen.laneCounts, reference.laneCounts, "height \(height)")
+                XCTAssertEqual(chosen.canvas, reference.canvas, "height \(height)")
+            }
+            if placed.calculatorLeadsFunction { fellBack = true }
+        }
+        XCTAssertTrue(fellBack, "a crowded Main rail sends the calculator to the Function rail")
+    }
+
     func testEveryStandardControlCanBeHiddenButSettingsStays() {
         var visibility = PadStandardControlVisibility()
         for control in PadStandardControl.allCases { visibility.setVisible(false, control) }

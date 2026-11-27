@@ -833,7 +833,7 @@ struct WorkspaceChromeView: View {
             let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
             let visible = [shownIndex]
             let hidden = windows.count - 1
-            HStack(spacing: 4) {
+            let folded = HStack(spacing: 4) {
                 ForEach(visible, id: \.self) { i in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(windows[i], in: tile, id: id),
                           app: labelApp(windows[i]), shown: i == shownIndex, active: active,
@@ -853,7 +853,17 @@ struct WorkspaceChromeView: View {
                 }
             }
             .padding(6)
-            .fixedSize()
+            if #available(macOS 13.0, iOS 16.0, *) {
+                // In a row narrower than the folded tab, it scrolls within the row instead of
+                // drawing past it (under the controls the row stops short of).
+                ViewThatFits(in: .horizontal) {
+                    folded.fixedSize()
+                    ScrollView(.horizontal, showsIndicators: false) { folded }
+                        .frame(width: max(0, rect.width))
+                }
+            } else {
+                folded.fixedSize()
+            }
         } else {
             let row = HStack(spacing: 4) {
                 if windows.isEmpty {
@@ -870,7 +880,8 @@ struct WorkspaceChromeView: View {
                     row.fixedSize()
                     ScrollView(.horizontal, showsIndicators: false) { row }
                         .scrollDisabled(heldLabel != nil || model.drag != nil)
-                        .frame(width: available + 12)
+                        // The clear row's own width, however narrow (`available` keeps a label's floor).
+                        .frame(width: max(0, rect.width))
                         // Scrolling the tabs keeps them all shown while the menu bar waits.
                         .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in if sharesRow { expandTabs(id) } })
                 }

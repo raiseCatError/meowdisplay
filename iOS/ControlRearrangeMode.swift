@@ -44,7 +44,7 @@ struct ControlRearrangeSheet: View {
                     if !now.tray.isEmpty {
                         NavigationLink {
                             ControlRearrangeTrayPage(store: store, haptics: haptics, landscapeNow: landscapeNow,
-                                                     content: content)
+                                                     content: content, onDone: onDone)
                         } label: {
                             ControlRearrangeRunLabel(title: Text("Control Tray", comment: "Rearrange Controls: page."),
                                                      faces: now.tray.map(ControlRearrangeFace.tray))
@@ -54,7 +54,7 @@ struct ControlRearrangeSheet: View {
                     if !now.function.isEmpty {
                         NavigationLink {
                             ControlRearrangeFunctionPage(store: store, haptics: haptics, landscapeNow: landscapeNow,
-                                                         content: content)
+                                                         content: content, onDone: onDone)
                         } label: {
                             ControlRearrangeRunLabel(title: Text("Function Tray", comment: "Rearrange Controls: page."),
                                                      faces: now.function.map { .shortcut($0.face) })
@@ -73,7 +73,7 @@ struct ControlRearrangeSheet: View {
                         paletteLink(ModifierChord([modifier]))
                     }
                     NavigationLink {
-                        ControlRearrangeChordsPage(store: store, haptics: haptics)
+                        ControlRearrangeChordsPage(store: store, haptics: haptics, onDone: onDone)
                     } label: {
                         LabeledContent {
                             Text(verbatim: "\(Self.chords.reduce(0) { $0 + store.activeProfile.actions(for: $1).count })")
@@ -100,7 +100,7 @@ struct ControlRearrangeSheet: View {
 
     private func paletteLink(_ chord: ModifierChord) -> some View {
         NavigationLink {
-            ControlRearrangePalettePage(store: store, haptics: haptics, chord: chord)
+            ControlRearrangePalettePage(store: store, haptics: haptics, onDone: onDone, chord: chord)
         } label: {
             LabeledContent {
                 Text(verbatim: "\(store.activeProfile.actions(for: chord).count)")
@@ -135,14 +135,16 @@ private struct ControlRearrangeTrayPage: View {
     let haptics: ReceiverHaptics
     let landscapeNow: Bool
     let content: (Bool) -> ControlRearrangeContent
+    let onDone: () -> Void
     @State private var landscape: Bool
 
     init(store: ReceiverControlStore, haptics: ReceiverHaptics, landscapeNow: Bool,
-         content: @escaping (Bool) -> ControlRearrangeContent) {
+         content: @escaping (Bool) -> ControlRearrangeContent, onDone: @escaping () -> Void) {
         self.store = store
         self.haptics = haptics
         self.landscapeNow = landscapeNow
         self.content = content
+        self.onDone = onDone
         _landscape = State(initialValue: landscapeNow)
     }
 
@@ -161,7 +163,7 @@ private struct ControlRearrangeTrayPage: View {
                 haptics.play(.selection)
             })
             .navigationTitle(Text("Control Tray", comment: "Rearrange Controls: page."))
-            .toolbar { ControlRearrangeDoneButton(onDone: { store.setRearrangingControls(false) }) }
+            .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
     }
 }
 
@@ -172,14 +174,16 @@ private struct ControlRearrangeFunctionPage: View {
     let haptics: ReceiverHaptics
     let landscapeNow: Bool
     let content: (Bool) -> ControlRearrangeContent
+    let onDone: () -> Void
     @State private var landscape: Bool
 
     init(store: ReceiverControlStore, haptics: ReceiverHaptics, landscapeNow: Bool,
-         content: @escaping (Bool) -> ControlRearrangeContent) {
+         content: @escaping (Bool) -> ControlRearrangeContent, onDone: @escaping () -> Void) {
         self.store = store
         self.haptics = haptics
         self.landscapeNow = landscapeNow
         self.content = content
+        self.onDone = onDone
         _landscape = State(initialValue: landscapeNow)
     }
 
@@ -196,7 +200,7 @@ private struct ControlRearrangeFunctionPage: View {
                 haptics.play(.selection)
             })
             .navigationTitle(Text("Function Tray", comment: "Rearrange Controls: page."))
-            .toolbar { ControlRearrangeDoneButton(onDone: { store.setRearrangingControls(false) }) }
+            .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
     }
 }
 
@@ -204,13 +208,14 @@ private struct ControlRearrangeFunctionPage: View {
 private struct ControlRearrangeChordsPage: View {
     @ObservedObject var store: ReceiverControlStore
     let haptics: ReceiverHaptics
+    let onDone: () -> Void
 
     var body: some View {
         List {
             Section {
                 ForEach(ControlRearrangeSheet.chords) { chord in
                     NavigationLink {
-                        ControlRearrangePalettePage(store: store, haptics: haptics, chord: chord)
+                        ControlRearrangePalettePage(store: store, haptics: haptics, onDone: onDone, chord: chord)
                     } label: {
                         LabeledContent {
                             Text(verbatim: "\(store.activeProfile.actions(for: chord).count)")
@@ -226,7 +231,7 @@ private struct ControlRearrangeChordsPage: View {
             }
         }
         .navigationTitle(Text("Chords", comment: "Rearrange Controls: page listing palettes for modifier combinations."))
-        .toolbar { ControlRearrangeDoneButton(onDone: { store.setRearrangingControls(false) }) }
+        .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
     }
 }
 
@@ -235,6 +240,7 @@ private struct ControlRearrangeChordsPage: View {
 private struct ControlRearrangePalettePage: View {
     @ObservedObject var store: ReceiverControlStore
     let haptics: ReceiverHaptics
+    let onDone: () -> Void
     let chord: ModifierChord
 
     var body: some View {
@@ -253,13 +259,14 @@ private struct ControlRearrangePalettePage: View {
                 Section {
                     NavigationLink {
                         ChordPaletteEditor(store: store, chord: chord, haptics: haptics)
+                            .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
                     } label: {
                         Text("Add or Change Shortcuts…", comment: "Rearrange Controls: opens the palette's full editor.")
                     }
                 }
             })
             .navigationTitle(Text(verbatim: "\(chord.symbols) \(chord.displayName)"))
-            .toolbar { ControlRearrangeDoneButton(onDone: { store.setRearrangingControls(false) }) }
+            .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
     }
 }
 

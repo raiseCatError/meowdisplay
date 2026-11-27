@@ -94,8 +94,8 @@ enum LocalCalculatorPlacement {
         let obstacles = ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: avoidNotch)
         let xs = ([bounds.minX] + blockers.map { $0.maxX + spacing }).filter { $0 >= bounds.minX }.sorted()
         let ys = ([bounds.minY] + blockers.map { $0.maxY + spacing }).filter { $0 >= bounds.minY }.sorted()
-        let nearTrays = tray.map { trayCandidates(tray: $0, horizontal: trayHorizontal, beside: beside,
-                                                   diameter: diameter, container: container, arrowSide: arrowSide) } ?? []
+        let nearTrays = trayCandidates(tray: tray, horizontal: trayHorizontal, beside: beside,
+                                       diameter: diameter, container: container, arrowSide: arrowSide)
         let candidates: [CGPoint] = nearTrays
             + xs.filter { $0 + diameter <= bounds.midX }.map { CGPoint(x: $0, y: bounds.minY) }
             + ys.map { CGPoint(x: bounds.minX, y: $0) }
@@ -121,9 +121,8 @@ enum LocalCalculatorPlacement {
 
     /// Spots by the trays, best first (see `phoneButtonFrame`): origins of a
     /// `diameter` button.
-    static func trayCandidates(tray: CGRect, horizontal: Bool, beside: [CGRect], diameter d: CGFloat,
+    static func trayCandidates(tray: CGRect?, horizontal: Bool, beside: [CGRect], diameter d: CGFloat,
                                container: CGRect, arrowSide: LandscapeTraySide?) -> [CGPoint] {
-        guard !tray.isNull, !tray.isEmpty else { return [] }
         let g = spacing
         func ends(_ frame: CGRect) -> [CGPoint] {
             horizontal
@@ -131,6 +130,9 @@ enum LocalCalculatorPlacement {
                 // Below first: away from the top of the screen.
                 : [CGPoint(x: frame.midX - d / 2, y: frame.maxY + g), CGPoint(x: frame.midX - d / 2, y: frame.minY - g - d)]
         }
+        let groups = beside.filter { !$0.isNull && !$0.isEmpty }.flatMap(ends)
+        // No Main Tray shown (Show Control Tray off): beside the Function groups alone.
+        guard let tray, !tray.isNull, !tray.isEmpty else { return groups }
         var spots = horizontal ? ends(tray) : [ends(tray)[0]]
         if horizontal {
             // Just above the row's ends; the arrow button takes its own side's.
@@ -143,7 +145,7 @@ enum LocalCalculatorPlacement {
             spots.append(CGPoint(x: inwardLeft ? tray.minX - g - d : tray.maxX + g, y: tray.maxY - d))
             spots.append(ends(tray)[1])
         }
-        return spots + beside.filter { !$0.isNull && !$0.isEmpty }.flatMap(ends)
+        return spots + groups
     }
 
     /// The panel beside its entry button, inside `bounds` (the safe area
@@ -259,20 +261,50 @@ enum LocalCalculatorStashGeometry {
         return LocalCalculatorStash(edge: edge, offset: offset)
     }
 
+    /// Longest strip: a short handle, so it never runs along controls on its edge.
+    static let maximumStripLength: CGFloat = 120
+
     /// The whole window as it waits (its own size, all but `strip` past the
-    /// edge) and the strip that shows, inside `bounds`.
-    static func waiting(size: CGSize, stash: LocalCalculatorStash, bounds: CGRect) -> (window: CGRect, strip: CGRect) {
-        let along = bounds.minY + CGFloat(stash.offset.isFinite ? min(max(stash.offset, 0), 1) : 0.5) * bounds.height
+    /// edge), the strip that shows, and where the strip takes touches. The
+    /// strip is at most `maximumStripLength` long, at the stash's place along
+    /// the edge or the nearest place there whose touch area keeps off
+    /// `obstacles` (trays, palettes, folds). `touch` is nil when no place is
+    /// clear: then only the calculator button brings it back.
+    static func waiting(size: CGSize, stash: LocalCalculatorStash, bounds: CGRect,
+                        obstacles: [CGRect] = []) -> (window: CGRect, strip: CGRect, touch: CGRect?) {
+        let length = min(size.height, bounds.height, maximumStripLength)
+        let wanted = bounds.minY + CGFloat(stash.offset.isFinite ? min(max(stash.offset, 0), 1) : 0.5) * bounds.height
+        let low = bounds.minY + length / 2, high = max(low, bounds.maxY - length / 2)
+        func stripRect(at center: CGFloat) -> CGRect {
+            CGRect(x: stash.edge == .left ? bounds.minX : bounds.maxX - Self.strip, y: center - length / 2,
+                   width: Self.strip, height: length)
+        }
+        let blockers = obstacles.filter { !$0.isNull && !$0.isEmpty }
+        func clear(_ center: CGFloat) -> Bool {
+            let area = touchArea(stripRect(at: center), edge: stash.edge)
+            return !blockers.contains { $0.intersects(area) }
+        }
+        let start = min(max(wanted, low), high)
+        var center: CGFloat?
+        var step: CGFloat = 0
+        while center == nil, start - step >= low - 0.5 || start + step <= high + 0.5 {
+            if start - step >= low - 0.5, clear(start - step) { center = start - step }
+            else if start + step <= high + 0.5, clear(start + step) { center = start + step }
+            step += 8
+        }
+        let shown = stripRect(at: center ?? start)
+        // The window around its strip, inside the bounds where it can be.
         let height = min(size.height, bounds.height)
-        let y = min(max(along - height / 2, bounds.minY), max(bounds.minY, bounds.maxY - height))
-        let x = stash.edge == .left ? bounds.minX - size.width + strip : bounds.maxX - strip
-        let window = CGRect(x: x, y: y, width: size.width, height: height)
-        let shown = CGRect(x: stash.edge == .left ? bounds.minX : bounds.maxX - strip, y: y, width: strip, height: height)
-        return (window, shown)
+        var y = shown.midY - height / 2
+        y = min(max(y, bounds.minY), max(bounds.minY, bounds.maxY - height))
+        y = min(max(y, shown.maxY - height), shown.minY)
+        let x = stash.edge == .left ? bounds.minX - size.width + Self.strip : bounds.maxX - Self.strip
+        return (CGRect(x: x, y: y, width: size.width, height: height), shown,
+                center == nil ? nil : touchArea(shown, edge: stash.edge))
     }
 
-    /// Where the strip takes touches: `touchDepth` in from its edge, at
-    /// least 44 pt tall.
+    /// Where a strip takes touches: `touchDepth` in from its edge, at least
+    /// 44 pt tall.
     static func touchArea(_ strip: CGRect, edge: WorkspaceEdge) -> CGRect {
         let height = max(strip.height, touchDepth)
         let y = strip.midY - height / 2
@@ -283,8 +315,9 @@ enum LocalCalculatorStashGeometry {
 
     /// The frame it comes back to: `frame` (where it was before) flush with
     /// the edge it waited at, at the height it waited, inside `bounds`.
-    static func restored(_ frame: CGRect, stash: LocalCalculatorStash, bounds: CGRect) -> CGRect {
-        let waiting = waiting(size: frame.size, stash: stash, bounds: bounds).window
+    static func restored(_ frame: CGRect, stash: LocalCalculatorStash, bounds: CGRect,
+                         obstacles: [CGRect] = []) -> CGRect {
+        let waiting = waiting(size: frame.size, stash: stash, bounds: bounds, obstacles: obstacles).window
         let x = stash.edge == .left ? bounds.minX : bounds.maxX - frame.width
         let width = min(frame.width, bounds.width), height = min(frame.height, bounds.height)
         return CGRect(x: min(max(x, bounds.minX), bounds.maxX - width),

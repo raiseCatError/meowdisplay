@@ -1132,8 +1132,9 @@ struct ReceiverScreen: View {
         // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
         .onChange(of: showSettings) { shown in
             if shown, sessionActions.isPresented { dismissSessionActions() }
-            // Settings (a shake) can't open over the Rearrange Controls sheet: it ends first.
-            if shown { controlStore.setRearrangingControls(false) }
+            // Settings (a shake) doesn't open over the Rearrange Controls sheet, which keeps
+            // input from the Mac until it has gone: Done first.
+            if shown, controlStore.rearrangingControls { showSettings = false }
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
         .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }

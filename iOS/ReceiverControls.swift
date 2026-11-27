@@ -445,6 +445,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
     var onSessionActions: (() -> Void)? = nil
 
     @State private var interaction = ControlInteractionState()
+    /// The Rearrange Controls sheet is on screen. `store.rearrangingControls` (which keeps
+    /// input from the Mac) turns off only once the sheet has finished leaving.
+    @State private var rearrangeSheetPresented = false
     @State private var initiatingMoveView = false
     /// A touch began on the roomy Arrow Keys control: a tap toggles the keypad.
     @State private var initiatingArrowKeys = false
@@ -591,8 +594,13 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 apply(interaction.resetAll())
             }
         }
-        // Rearrange Controls: a modal sheet over the session (nothing reaches the Mac meanwhile).
-        .sheet(isPresented: rearrangeSheetShown) { rearrangeSheet() }
+        // Rearrange Controls: a modal sheet over the session. Nothing reaches the Mac until it
+        // has gone completely (`onDismiss`), however it is closed.
+        .sheet(isPresented: $rearrangeSheetPresented, onDismiss: { store.setRearrangingControls(false) }) {
+            rearrangeSheet()
+        }
+        .onAppear { if store.rearrangingControls { rearrangeSheetPresented = true } }
+        .onChange(of: store.rearrangingControls) { on in rearrangeSheetPresented = on }
         // A fresh mount (new session, view recreated) always begins visible
         // according to the normal tray settings, then starts counting down
         // if Auto-hide is on.
@@ -2180,17 +2188,12 @@ extension ReceiverControlOverlay {
         return ControlRearrangeContent(tray: tray, function: function)
     }
 
-    fileprivate var rearrangeSheetShown: Binding<Bool> {
-        Binding(get: { store.rearrangingControls },
-                set: { shown in if !shown { store.setRearrangingControls(false) } })
-    }
-
     fileprivate func rearrangeSheet() -> some View {
         ControlRearrangeSheet(store: store, haptics: haptics, landscapeNow: landscapeOrder,
                               content: { rearrangeContent(landscape: $0) },
                               onDone: {
                                   haptics.play(.confirmation)
-                                  store.setRearrangingControls(false)
+                                  rearrangeSheetPresented = false
                               })
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
@@ -2253,30 +2256,35 @@ extension ReceiverControlOverlay {
         let strip = mode == .strip
         let hints = strip && store.preferences.padShowControlHints
         let metrics = PadControlMetrics(scale: padMetricsScale, showsHints: hints)
-        let mainGroups = padCollapsed ? [] : padMainGroups
-        let mainKinds = mainGroups.flatMap { $0 }
         let groups = functionGroups
-        // The local calculator, once added, sits in the Main rail's end group
-        // beside Settings (`PadRailComposition`), moving nothing else. With no
-        // Main rail (the tray can't show) it is the Function edge's first
-        // group of its own, so it still shows in View Only.
         let showsCalculator = LocalCalculatorPolicy.showsButton(
             added: store.preferences.showsCalculatorButton, trayCollapsed: store.preferences.trayCollapsed,
             keyboardBarShown: false)
-        let calculatorOnMain = mainKinds.contains(.calculator)
-        let calculatorOnFunction = showsCalculator && !calculatorOnMain
         let mainEdge = store.preferences.padMainEdge
         let functionEdge = store.preferences.padFunctionEdge
         // A fold (iPhone Duo) is skipped over by the rails, never crossed.
         let divisions = ControlReservedRegion.frames(of: .division, in: reservedRegions)
-        let pass: (CGFloat?) -> PadEdgeLayout = { keyboardTop in
+        let railPass: ([[CustomControlKind]], Bool, CGFloat?) -> PadEdgeLayout = { main, calculatorFirst, keyboardTop in
             PadEdgeGeometry.layout(container: container, safeInsets: safeInsets, reservesStrips: strip,
                                    mainEdge: mainEdge, functionEdge: functionEdge,
-                                   mainGroupCounts: mainGroups.map(\.count),
-                                   mainGroupAlignments: PadRailComposition.alignments(for: mainGroups),
-                                   functionGroupCounts: (calculatorOnFunction ? [1] : []) + groups.map(\.count),
+                                   mainGroupCounts: main.map(\.count),
+                                   mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                   functionGroupCounts: (calculatorFirst ? [1] : []) + groups.map(\.count),
                                    metrics: metrics, keyboardTop: keyboardTop, divisions: divisions)
         }
+        // The local calculator, once added, sits in the Main rail's end group
+        // beside Settings (`PadRailComposition`), moving nothing else; if that
+        // would take another lane, it leads the Function rail instead. With no
+        // Main rail (the tray can't show) it is the Function edge's first
+        // group of its own, so it still shows in View Only.
+        let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups) {
+            railPass($0, $1, nil)
+        }
+        let mainGroups = placement.main
+        let mainKinds = mainGroups.flatMap { $0 }
+        let calculatorOnMain = mainKinds.contains(.calculator)
+        let calculatorOnFunction = showsCalculator && !calculatorOnMain
+        let pass: (CGFloat?) -> PadEdgeLayout = { railPass(mainGroups, calculatorOnFunction, $0) }
         let firstPass = pass(nil)
         let keyboardTop = keyboardVisibleRect.map { $0.maxY + firstPass.canvas.minY }
         let layout = keyboardTop == nil ? firstPass : pass(keyboardTop)
