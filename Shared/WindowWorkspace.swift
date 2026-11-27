@@ -823,6 +823,18 @@ indirect enum WorkspaceNode: Equatable, Sendable {
     case slot(String?)
     case split(WorkspaceAxis, [WorkspaceNode], [Double])
 
+    /// The same tree, with ratios equal up to rounding (a renormalized copy of a fitted split).
+    func sameSplits(as other: WorkspaceNode, tolerance: Double = 1e-6) -> Bool {
+        switch (self, other) {
+        case (.slot(let a), .slot(let b)): return a == b
+        case (.split(let axisA, let childrenA, let ratiosA), .split(let axisB, let childrenB, let ratiosB)):
+            return axisA == axisB && childrenA.count == childrenB.count && ratiosA.count == ratiosB.count
+                && zip(ratiosA, ratiosB).allSatisfy { abs($0 - $1) <= tolerance }
+                && zip(childrenA, childrenB).allSatisfy { $0.sameSplits(as: $1, tolerance: tolerance) }
+        default: return false
+        }
+    }
+
     var tileIDs: [String] {
         switch self {
         case .slot(let id): return id.map { [$0] } ?? []

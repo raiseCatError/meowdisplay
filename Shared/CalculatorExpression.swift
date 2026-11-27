@@ -169,7 +169,7 @@ enum CalculatorLanguage {
             .replacingOccurrences(of: "\n", with: " ") + " "
         // A defined name means itself: "one = 5" then "one + 1" is 6, so
         // names sit out the word rewriting below behind placeholders.
-        let protected = variables.sorted { $0.count > $1.count }
+        let protected = variables.filter { s.contains($0) }.sorted { $0.count > $1.count }
         for (index, name) in protected.enumerated() {
             s = s.replacingOccurrences(of: #"(?<![\p{L}\p{N}_])"# + NSRegularExpression.escapedPattern(for: name)
                                         + #"(?![\p{L}\p{N}_])"#,
@@ -822,45 +822,89 @@ enum CalculatorSheet {
     /// zones, dates, units, bases) are answered first (`CalculatorSmartAnswers`).
     static func evaluate(lines: [String], angle: CalculatorAngleUnit,
                          smart: CalculatorSmartContext = CalculatorSmartContext()) -> [CalculatorLineResult] {
-        var context = CalculatorContext(angle: angle)
-        var results: [CalculatorLineResult] = []
+        evaluate(lines: lines, angle: angle, smart: smart, reusing: nil).results
+    }
+
+    /// Where the sheet stands before a line: what the lines above defined.
+    struct State: Equatable {
+        var context: CalculatorContext
         var running: Decimal?
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty {
-                running = nil
-                results.append(CalculatorLineResult(value: nil))
-                continue
-            }
-            context.runningTotal = running
-            var assigns: String?
-            var source = trimmed
-            if let assignment = CalculatorExpression.assignment(in: trimmed) {
-                assigns = assignment.name
-                source = assignment.expression
-            }
-            func record(_ value: Decimal) {
-                if let assigns { context.variables[assigns] = value }
-                context.answer = value
-                // A line that reads the running total isn't added to it;
-                // "subtotal" and other names that merely contain the word are.
-                if source.lowercased().range(of: #"\b(sum|total)\b"#, options: .regularExpression) == nil {
-                    running = (running ?? 0) + value
-                }
-            }
-            if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
-                if let value = answer.value { record(value) }
-                results.append(CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text))
-                continue
-            }
-            if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
-                record(value)
-                results.append(CalculatorLineResult(value: value, assigns: assigns))
-            } else {
-                results.append(CalculatorLineResult(value: nil, assigns: nil))
+    }
+
+    /// A sheet's answers and the state before each line, so the next edit
+    /// re-evaluates only from the first line that changed.
+    struct Evaluation {
+        let lines: [String]
+        let angle: CalculatorAngleUnit
+        /// The minute the time answers were made in: a new minute redoes them.
+        let minute: Int
+        let results: [CalculatorLineResult]
+        /// The state before each line.
+        let states: [State]
+        /// The state after the last line.
+        let final: State
+    }
+
+    static func evaluate(lines: [String], angle: CalculatorAngleUnit, smart: CalculatorSmartContext,
+                         reusing previous: Evaluation?) -> Evaluation {
+        let minute = Int(smart.now.timeIntervalSinceReferenceDate / 60)
+        var reused = 0
+        if let previous, previous.angle == angle, previous.minute == minute {
+            while reused < min(lines.count, previous.lines.count), lines[reused] == previous.lines[reused] { reused += 1 }
+        }
+        var results = Array(previous?.results.prefix(reused) ?? [])
+        var states = Array(previous?.states.prefix(reused) ?? [])
+        var state = State(context: CalculatorContext(angle: angle), running: nil)
+        if reused > 0, let previous {
+            state = reused < previous.states.count ? previous.states[reused] : previous.final
+        }
+        for text in lines[reused...] {
+            states.append(state)
+            results.append(line(text, state: &state, smart: smart))
+        }
+        return Evaluation(lines: lines, angle: angle, minute: minute, results: results, states: states, final: state)
+    }
+
+    private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext) -> CalculatorLineResult {
+        var context = state.context
+        var running = state.running
+        defer { state = State(context: context, running: running) }
+        let decimalComma = smart.locale.decimalSeparator == ","
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if decimalComma {
+            // "1.250,5" in a decimal-comma locale: dots group, the comma is the decimal mark.
+            trimmed = trimmed.replacingOccurrences(of: #"(?<=\d)\.(?=\d{3}(?!\d))"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
+        }
+        if trimmed.isEmpty {
+            running = nil
+            return CalculatorLineResult(value: nil)
+        }
+        context.runningTotal = running
+        var assigns: String?
+        var source = trimmed
+        if let assignment = CalculatorExpression.assignment(in: trimmed) {
+            assigns = assignment.name
+            source = assignment.expression
+        }
+        func record(_ value: Decimal) {
+            if let assigns { context.variables[assigns] = value }
+            context.answer = value
+            // A line that reads the running total isn't added to it;
+            // "subtotal" and other names that merely contain the word are.
+            if source.lowercased().range(of: #"\b(sum|total)\b"#, options: .regularExpression) == nil {
+                running = (running ?? 0) + value
             }
         }
-        return results
+        if let answer = CalculatorSmartAnswers.answer(source, context: smart) {
+            if let value = answer.value { record(value) }
+            return CalculatorLineResult(value: answer.value, assigns: assigns, text: answer.text)
+        }
+        if let value = CalculatorExpression.value(source, context: context), assigns != nil || !isPlainLabel(source) {
+            record(value)
+            return CalculatorLineResult(value: value, assigns: assigns)
+        }
+        return CalculatorLineResult(value: nil, assigns: nil)
     }
 
     /// A line that is just a number ("2026", "42") reads as a note, not a

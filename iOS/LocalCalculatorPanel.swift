@@ -104,8 +104,14 @@ final class LocalCalculatorModel: ObservableObject {
 
     // MARK: Notes
 
+    /// The last evaluation, so a keystroke redoes only the lines from the edit down.
+    private var notesEvaluation: CalculatorSheet.Evaluation?
+
     var noteResults: [CalculatorLineResult] {
-        CalculatorSheet.evaluate(lines: notesText.components(separatedBy: "\n"), angle: angle)
+        let evaluation = CalculatorSheet.evaluate(lines: notesText.components(separatedBy: "\n"), angle: angle,
+                                                  smart: CalculatorSmartContext(), reusing: notesEvaluation)
+        notesEvaluation = evaluation
+        return evaluation.results
     }
 
     func clearNotes() {
@@ -1236,6 +1242,9 @@ final class NotesEditorView: UIView {
             label.font = Self.answerFont
             label.textColor = UIColor(LocalCalculatorPalette.answer)
             label.textAlignment = .right
+            // A long answer (a date with a time) shrinks to fit a narrow sheet; VoiceOver reads it whole.
+            label.adjustsFontSizeToFitWidth = true
+            label.minimumScaleFactor = 0.55
             label.isUserInteractionEnabled = true
             label.tag = labels.count
             label.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapAnswer(_:))))

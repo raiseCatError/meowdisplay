@@ -47,8 +47,14 @@ enum CalculatorSmartAnswers {
 
     // MARK: Helpers
 
+    /// Compiled once: a notes sheet asks every line every question.
+    nonisolated(unsafe) private static let regexes = NSCache<NSString, NSRegularExpression>()
+
     private static func match(_ text: String, _ pattern: String) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: "^" + pattern + "$", options: [.caseInsensitive]),
+        let key = pattern as NSString
+        let compiled = regexes.object(forKey: key) ?? (try? NSRegularExpression(pattern: "^" + pattern + "$", options: [.caseInsensitive]))
+        if let compiled { regexes.setObject(compiled, forKey: key) }
+        guard let regex = compiled,
               let m = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
         return (0..<m.numberOfRanges).map { i in
             Range(m.range(at: i), in: text).map { String(text[$0]) } ?? ""
@@ -73,7 +79,8 @@ enum CalculatorSmartAnswers {
         func ratio(_ part: Decimal, _ whole: Decimal) -> CalculatorSmartAnswer? {
             guard whole != 0 else { return nil }
             let percent = part / whole * 100
-            return CalculatorSmartAnswer(text: format(percent, locale: .current) + "%", value: percent)
+            // Shown as a percentage, kept as the fraction it means, like "20%" typed.
+            return CalculatorSmartAnswer(text: format(percent, locale: .current) + "%", value: percent / 100)
         }
         if let m = match(text, num + #" is what (?:percent|%) of "# + num),
            let a = number(m[1]), let b = number(m[2]) { return ratio(a, b) }
@@ -85,7 +92,7 @@ enum CalculatorSmartAnswers {
             ?? match(text, num + " to " + num + #" (?:percent|%|percentage) change"#),
            let a = number(m[1]), let b = number(m[2]), a != 0 {
             let change = (b - a) / a.magnitude * 100
-            return CalculatorSmartAnswer(text: (change > 0 ? "+" : "") + format(change, locale: .current) + "%", value: change)
+            return CalculatorSmartAnswer(text: (change > 0 ? "+" : "") + format(change, locale: .current) + "%", value: change / 100)
         }
         return nil
     }
@@ -304,7 +311,9 @@ enum CalculatorSmartAnswers {
         let sameDay = calendar.isDate(date, inSameDayAs: context.now)
             && here.component(.day, from: context.now) == calendar.component(.day, from: context.now)
         formatter.setLocalizedDateFormatFromTemplate(sameDay ? "jmm" : "EEEjmm")
-        let abbreviation = showZone ? (zone.abbreviation(for: date) ?? zone.identifier) : ""
+        // Some releases call UTC+0 "GMT+0"; it reads as GMT everywhere.
+        let named = showZone ? (zone.abbreviation(for: date) ?? zone.identifier) : ""
+        let abbreviation = named == "GMT+0" || named == "GMT+00:00" ? "GMT" : named
         return formatter.string(from: date) + (abbreviation.isEmpty ? "" : " " + abbreviation)
     }
 

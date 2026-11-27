@@ -1561,7 +1561,9 @@ final class WorkspaceModel: ObservableObject {
         stacked = adapted.stacked
         // The Trackpad keeps its focus when its tab moves (floated out, docked, a pane closed up):
         // the Mac's focus never takes over a Trackpad that is still shown and selected here.
-        let trackpadFocus = Self.reconciledTrackpadFocus(localTrackpadFocus, in: layout)
+        // A Trackpad stacked away for now (the workspace narrowed) keeps it too, for when it returns.
+        let stackedTrackpad = localTrackpadFocus.map { stacked.contains($0) && saved.tiles[$0]?.source?.isTrackpad == true } ?? false
+        let trackpadFocus = stackedTrackpad ? localTrackpadFocus : Self.reconciledTrackpadFocus(localTrackpadFocus, in: layout)
         if trackpadFocus != localTrackpadFocus { localTrackpadFocus = trackpadFocus }
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
@@ -2465,7 +2467,7 @@ final class WorkspaceModel: ObservableObject {
         // An edit that leaves the split tree as shown (a tab switch, a pane's view) keeps the saved
         // ratios: ones fitted to this screen's minimums (`WorkspaceAdaptation.adapt`) aren't saved,
         // so turning back restores the original arrangement.
-        if stacked.isEmpty, changed.root == arranged.root, saved.root != arranged.root,
+        if stacked.isEmpty, changed.root.sameSplits(as: arranged.root), saved.root != arranged.root,
            saved.orderedTileIDs.filter({ !saved.isFloat($0) }) == next.orderedTileIDs.filter({ !next.isFloat($0) }) {
             next.root = saved.root
         }

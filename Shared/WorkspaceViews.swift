@@ -761,6 +761,8 @@ struct WorkspaceChromeView: View {
                         && (multi || model.localFullscreen == id)
                     labelStrip(id: id, tile: tile, rect: row, active: active, sharesRow: barHere)
                 }
+                // Only the clear part of the row: tabs that don't fit scroll instead of running under a control.
+                .frame(width: max(0, row.width), alignment: .leading)
                 .workspaceRailObstacle()
                 .background(GeometryReader { g in
                     Color.clear

@@ -92,4 +92,23 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertNotNil(answer("1 m2 in ft2"), "units whose names hold digits convert")
         XCTAssertEqual(answer("days since 25 dec"), "337 days")
     }
+
+    func testRoundSixFindings() {
+        let sheet = CalculatorSheet.evaluate(lines: ["rate = 30 is what percent of 150", "150 * rate"], angle: .degrees, smart: context)
+        XCTAssertEqual(sheet.map(\.value), [Decimal(string: "0.2"), 30], "a percent answer is kept as its fraction")
+        var german = context
+        german.locale = Locale(identifier: "de_DE")
+        let comma = CalculatorSheet.evaluate(lines: ["1,5 + 2", "1.250 + 1"], angle: .degrees, smart: german)
+        XCTAssertEqual(comma.map(\.value), [Decimal(string: "3.5"), 1251])
+    }
+
+    func testIncrementalSheetMatchesAFullOne() {
+        let first = ["rent = 1200", "food = 300", "rent + food", "", "x = 2", "x * 3", "total"]
+        let edited = ["rent = 1200", "food = 350", "rent + food", "", "x = 2", "x * 3", "total", "ans + 1"]
+        let before = CalculatorSheet.evaluate(lines: first, angle: .degrees, smart: context, reusing: nil)
+        let after = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context, reusing: before)
+        XCTAssertEqual(after.results, CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: context))
+        let appended = CalculatorSheet.evaluate(lines: first + ["total + 1"], angle: .degrees, smart: context, reusing: before)
+        XCTAssertEqual(appended.results, CalculatorSheet.evaluate(lines: first + ["total + 1"], angle: .degrees, smart: context))
+    }
 }
