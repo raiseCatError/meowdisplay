@@ -964,7 +964,10 @@ enum CalculatorSheet {
         // (",5 + ,2"); not one after a word ("five plus,3" stays prose punctuation).
         result = result.replacingOccurrences(of: #"(?<=\d),(?=\d)"#, with: ".", options: .regularExpression)
         result = result.replacingOccurrences(of: #"^(\s*),(?=\d)"#, with: "$1.", options: .regularExpression)
-        return result.replacingOccurrences(of: #"([-+−×÷*/^(=%]\s{0,3}),(?=\d)"#, with: "$1.", options: .regularExpression)
+        // The operators and openers the calculator reads (`CalculatorLanguage.normalize`, the
+        // lexer), then any spaces.
+        return result.replacingOccurrences(of: #"([-+−–—×÷∕∗⋅·*/^(\[{=%]\s*),(?=\d)"#, with: "$1.",
+                                           options: .regularExpression)
     }
 
     /// A line that is just a number ("2026", "42") reads as a note, not a

@@ -166,6 +166,11 @@ final class CalculatorSmartAnswersTests: XCTestCase {
                        "a comma after a word is punctuation")
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["five plus,3"], angle: .degrees, smart: french).map(\.value), [8])
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("2 × ,5", locale: french.locale), "2 × .5")
+        // Codex round 10: every operator the calculator reads, with any spaces before the comma.
+        for expression in ["2 · ,5", "2 *    ,5", "2 ⋅ ,5", "2×,5", "(,5) * 2", "2 * [,5]"] {
+            XCTAssertEqual(CalculatorSheet.evaluate(lines: [expression], angle: .degrees, smart: french).map(\.value), [1],
+                           expression)
+        }
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("1,5", locale: context.locale), "1,5", "en_GB is left alone")
     }
 

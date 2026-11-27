@@ -539,6 +539,20 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertFalse(tight.touch.map { area in controls(gapBottom: 400).contains { $0.intersects(area) } } ?? true)
     }
 
+    // Codex round 10: both trays hidden, only the gear (its 50 pt drawn footprint) shows.
+    func testWithBothTraysHiddenItSitsBesideTheGear() {
+        let container = CGRect(x: 0, y: 0, width: 393, height: 852)
+        let safe = ControlSafeInsets(top: 59, leading: 0, bottom: 34, trailing: 0)
+        let gear = CGRect(x: 171.5, y: 852 - 34 - 12 - 50, width: 50, height: 50)
+        for arrowSide in [LandscapeTraySide.leading, .trailing, nil] {
+            let frame = LocalCalculatorPlacement.phoneButtonFrame(
+                container: container, safeInsets: safe, keyboardVisibleRect: nil, portrait: true, diameter: 44,
+                occupied: [gear], avoidNotch: false, tray: gear, trayHorizontal: true, beside: [], arrowSide: arrowSide)
+            XCTAssertFalse(frame.intersects(gear), "\(String(describing: arrowSide))")
+            XCTAssertLessThan(abs(frame.midY - gear.midY), 60, "beside the gear, not the top lane: \(frame)")
+        }
+    }
+
     func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let function = CGRect(x: 120, y: 760, width: 150, height: 44)

@@ -937,9 +937,10 @@ extension PadRailComposition {
     /// or empty when the Main rail is collapsed) and a layout pass for a Main rail and
     /// whether the button leads the Function rail. The first place that leaves every other
     /// control where it is and the picture its size: the Settings group, then the Function
-    /// rail; with no Main rail, beside the gear. If no place does, the Function rail when
-    /// it keeps the picture's size and lanes (its groups may shift), else the Settings group.
-    static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool,
+    /// rail; with no Main rail, beside the gear when that is clear of the Function rail.
+    /// If no place does, the Function rail when it keeps the picture's size and lanes
+    /// (its groups may shift), else the Settings group.
+    static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool, besideGear: CGRect? = nil,
                                     layout: (_ main: [[CustomControlKind]], _ calculatorLeadsFunction: Bool) -> PadEdgeLayout)
         -> (main: [[CustomControlKind]], placement: CalculatorPlacement) {
         let without = main.map { $0.filter { $0 != .calculator } }.filter { !$0.isEmpty }
@@ -962,7 +963,12 @@ extension PadRailComposition {
         if keepsEverything(leading, mainCells: leading.mainCells, functionCells: Array(leading.functionCells.dropFirst())) {
             return (without, .leadsFunction)
         }
-        if without.isEmpty { return (without, .besideGear) }
+        // With no Main rail: beside the gear (`besideGear`, its cell), unless a Function
+        // control is there (both on one edge in Overlay).
+        if without.isEmpty, let besideGear,
+           !reference.functionCells.contains(where: { $0.intersects(besideGear) }) {
+            return (without, .besideGear)
+        }
         // Something has to give: keep the picture's size and lanes if the Function rail
         // can (its own groups may shift along it), else the Settings group.
         if leading.canvas == reference.canvas && leading.laneCounts == reference.laneCounts

@@ -251,6 +251,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// Where the window is while its title bar is dragged: it may hang past
     /// the left or right edge then (`LocalCalculatorStashGeometry.dragged`).
     @State private var dragFrame: CGRect?
+    /// Counts title-bar drags, so a queued cancellation only ends the drag it belongs to.
+    @State private var moveGeneration = 0
     /// How far a finger has pulled a stashed window's strip inward (a peek).
     @GestureState private var stashPull: CGFloat = 0
 
@@ -274,7 +276,11 @@ struct LocalCalculatorLayer<Chip: View>: View {
             if let buttonFrame {
                 LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFaceDiameter ?? buttonFrame.width,
                                            hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip) {
-                    model.toggle()
+                    if model.isOpen, model.stash != nil, let panel {
+                        restore(panel, bounds: bounds)
+                    } else {
+                        model.toggle()
+                    }
                     haptics.play(.selection)
                 }
                 .position(x: buttonFrame.midX,
@@ -296,8 +302,10 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                      // A drag the system cancelled (no end): let go where it is.
                                      // Checked a turn later, so a normal end (with its velocity) goes first.
                                      onMoveCancel: {
+                                         let generation = moveGeneration
                                          DispatchQueue.main.async {
-                                             if dragFrame != nil { endMove(velocity: .zero, from: panel, bounds: bounds) }
+                                             guard generation == moveGeneration, dragFrame != nil else { return }
+                                             endMove(velocity: .zero, from: panel, bounds: bounds)
                                          }
                                      },
                                      onStash: { stashAtNearestEdge(panel, bounds: bounds) })
@@ -313,7 +321,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                 : .scale(scale: 0.92, anchor: Self.unitPoint(of: anchor, in: panel))
                                     .combined(with: .opacity))
                 if let waiting, let stash = model.stash {
-                    stashHandle(strip: waiting.strip, touch: waiting.touch, stash: stash)
+                    stashHandle(strip: waiting.strip, touch: waiting.touch, stash: stash) { restore(panel, bounds: bounds) }
                 }
             }
         }
@@ -333,7 +341,18 @@ struct LocalCalculatorLayer<Chip: View>: View {
         // Stashed through a rotation (or a keyboard change): it keeps coming back flush with
         // its edge in the bounds it has now, wherever it is brought back from.
         .onChange(of: usableBounds) { anchorStashed(in: $0) }
+        // Closed (or stashed) mid-gesture: the panel that would end the gesture is gone or
+        // hidden, so nothing of it carries into the next open.
+        .onChange(of: model.isOpen) { open in if !open { clearGestures() } }
+        .onChange(of: model.stash) { stash in if stash != nil { clearGestures() } }
         .onAppear { anchorStashed(in: usableBounds) }
+    }
+
+    private func clearGestures() {
+        moveStart = nil
+        resizeStart = nil
+        dragFrame = nil
+        moveGeneration &+= 1
     }
 
     /// While stashed, the frame it comes back to: fitted to `bounds` first (a keypad keeps
@@ -372,7 +391,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
 
     /// The stashed window's strip: a tap, or a pull inward, brings it back.
     /// Without a clear `touch` area the strip only shows, and the calculator button brings it back.
-    private func stashHandle(strip: CGRect, touch: CGRect?, stash: LocalCalculatorStash) -> some View {
+    private func stashHandle(strip: CGRect, touch: CGRect?, stash: LocalCalculatorStash,
+                             restore: @escaping () -> Void) -> some View {
         let area = touch ?? strip
         let inward: (CGSize) -> CGFloat = { stash.edge == .left ? $0.width : -$0.width }
         let peek = min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2)
@@ -392,7 +412,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 let projected = inward(value.predictedEndTranslation)
                 if LocalCalculatorStashGeometry.pullRestores(inward: inward(value.translation), projected: projected,
                                                              travel: travel) {
-                    model.stash = nil
+                    restore()
                     haptics.play(.selection)
                 }
             })
@@ -404,7 +424,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
                             : Text("At the right edge", comment: "Local calculator: stashed at the right edge."))
         .accessibilityHint(Text("Brings the calculator back.", comment: "Local calculator: hint on a stashed window's strip."))
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { model.stash = nil }
+        .accessibilityAction { restore() }
         .accessibilityHidden(touch == nil)
         .accessibilityIdentifier("calculatorStashStrip")
     }
@@ -437,7 +457,10 @@ struct LocalCalculatorLayer<Chip: View>: View {
 
     private func move(by translation: CGSize, from current: CGRect, bounds: CGRect) {
         let start = moveStart ?? current
-        if moveStart == nil { moveStart = current }
+        if moveStart == nil {
+            moveStart = current
+            moveGeneration &+= 1
+        }
         let moved = start.offsetBy(dx: translation.width, dy: translation.height)
         dragFrame = LocalCalculatorStashGeometry.dragged(moved, bounds: bounds)
     }
@@ -452,7 +475,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
         }
         guard let frame = dragFrame else { return }
         if let stash = LocalCalculatorStashGeometry.release(frame, velocity: velocity, bounds: bounds) {
-            model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds, obstacles: obstacles)
+            model.windowFrame = LocalCalculatorStashGeometry.restored(frame, stash: stash, bounds: bounds,
+                                                                      obstacles: obstacles + stashObstacles)
             // The keyboard guard clears when the notes actually let go (`textViewDidEndEditing`).
             model.stash(at: stash)
             haptics.play(.selection)
@@ -467,8 +491,19 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let edge: WorkspaceEdge = panel.midX < bounds.midX ? .left : .right
         let offset = Double((panel.midY - bounds.minY) / bounds.height)
         let stash = LocalCalculatorStash(edge: edge, offset: offset)
-        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds, obstacles: obstacles)
+        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
+                                                                  obstacles: obstacles + stashObstacles)
         model.stash(at: stash)
+    }
+
+    /// Brings a stashed window back (its strip, the calculator button, VoiceOver): fitted to
+    /// the bounds it has now, flush with its edge at the height its strip shows, the strip
+    /// placed against everything it keeps off now.
+    private func restore(_ panel: CGRect, bounds: CGRect) {
+        guard let stash = model.stash else { return }
+        model.windowFrame = LocalCalculatorStashGeometry.restored(panel, stash: stash, bounds: bounds,
+                                                                  obstacles: obstacles + stashObstacles)
+        model.stash = nil
     }
 
     private func resize(by translation: CGSize, from current: CGRect, bounds: CGRect, metrics: LocalCalculatorPanelMetrics) {

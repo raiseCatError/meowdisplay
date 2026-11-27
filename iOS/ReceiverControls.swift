@@ -871,11 +871,9 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 occupied: [renderedMainTrayFrame] + functionFrames + (renderedPaletteFrame.map { [$0] } ?? []),
                 avoidNotch: store.preferences.avoidNotch, notchSide: notchSide,
                 reservedRegions: reservedRegions,
-                // Collapsed (or no tray shown): beside the lone gear, never the top lane.
-                tray: collapsed
-                    ? CGRect(x: layout.trayFrame.midX - Metrics.collapsed / 2, y: layout.trayFrame.midY - Metrics.collapsed / 2,
-                             width: Metrics.collapsed, height: Metrics.collapsed)
-                    : renderedMainTrayFrame,
+                // Beside the Main Tray as drawn; with no tray shown, beside the lone gear
+                // (its rendered footprint), never the top lane.
+                tray: renderedMainTrayFrame,
                 trayHorizontal: layout.axis == .horizontal,
                 beside: functionFrames, arrowSide: arrowKeysShown ? store.preferences.arrowKeysSide : nil) : nil
         // Arrow keys (#179): placed after everything else, around it,
@@ -2290,8 +2288,17 @@ extension ReceiverControlOverlay {
         // would take another lane, it leads the Function rail instead. With no
         // Main rail (the tray can't show) it is the Function edge's first
         // group of its own, so it still shows in View Only.
+        // Beside the collapsed gear: the gear's own floating pass with one more end group
+        // before it (the gear keeps its place at the end), reserving no strip.
+        let besideGearCell: CGRect? = padCollapsed && showsCalculator ? PadEdgeGeometry.layout(
+            container: container, safeInsets: safeInsets, reservesStrips: false,
+            mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end],
+            functionGroupCounts: [],
+            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: nil,
+            divisions: divisions).mainCells.first : nil
         let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups,
-                                                               calculator: showsCalculator) { railPass($0, $1, nil) }
+                                                               calculator: showsCalculator,
+                                                               besideGear: besideGearCell) { railPass($0, $1, nil) }
         let mainGroups = placement.main
         let mainKinds = mainGroups.flatMap { $0 }
         let calculatorOnMain = placement.placement == .settingsGroup
@@ -2313,8 +2320,6 @@ extension ReceiverControlOverlay {
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
         }
-        // Beside the collapsed gear: the gear's own floating pass with one more end group
-        // before it (the gear keeps its place at the end), reserving no strip.
         let besideGear: CGRect? = placement.placement == .besideGear ? PadEdgeGeometry.layout(
             container: container, safeInsets: safeInsets, reservesStrips: false,
             mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end],
@@ -2384,7 +2389,10 @@ extension ReceiverControlOverlay {
         let trays: [CGRect] = strip ? [] : (layout.mainSegments + layout.functionSegments)
             .map { PadEdgeGeometry.circleRun(of: $0, metrics: metrics).insetBy(dx: -Self.trayPadding, dy: -Self.trayPadding) }
         let railFrames: [CGRect] = layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
-        let floatingFrames: [CGRect] = [gearFrame, paletteFrame].compactMap { $0 }
+        // Floating pieces outside the rails, as they take touches: the gear, the palette (or
+        // its wheel), and the calculator's button beside the gear.
+        let floatingFrames: [CGRect] = [gearFrame, paletteFrame, wheel.map { $0.frame.insetBy(dx: -8, dy: -8) },
+                                        besideGear].compactMap { $0 }
         let occupied: [CGRect] = railFrames + floatingFrames + calculatorPanelFrames + calculatorStashFrames + arrowFrames
         // The touch region, built from typed pieces: as one `+`/`??` chain
         // inside the ZStack it exceeded Xcode 26's type-checking budget.
@@ -2704,7 +2712,9 @@ extension ReceiverControlOverlay {
                 panelBounds: area.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
                 obstacles: controlsPlaced.filter { $0.kind != .calculator }.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
-                stashObstacles: (wheel.map { [$0.frame] } ?? []) + arrowFrames + (calculatorButton.map { [$0] } ?? []),
+                stashObstacles: (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])
+                    + paletteKeys.map { $0.frame.insetBy(dx: -3, dy: -3) } + assistFrames + arrowFrames
+                    + (calculatorButton.map { [$0] } ?? []),
                 autoHiding: autoHiding, haptics: haptics) { PadChip(selected: $0, onRail: false) }
         }
         .animation(.snappy(duration: 0.22), value: assistState)

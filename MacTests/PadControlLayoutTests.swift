@@ -540,6 +540,13 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertGreaterThan(strictCases, 0)
     }
 
+    private func besideGearCell(mainEdge: ControlEdge, functionEdge: ControlEdge) -> CGRect? {
+        PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
+                               reservesStrips: false, mainEdge: mainEdge, functionEdge: functionEdge,
+                               mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end], functionGroupCounts: [],
+                               metrics: PadControlMetrics(scale: 1)).mainCells.first
+    }
+
     func testWithNoRailTheCalculatorFloatsBesideTheGear() {
         func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
             PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
@@ -548,9 +555,31 @@ final class PadControlLayoutTests: XCTestCase {
                                    mainGroupAlignments: PadRailComposition.alignments(for: main),
                                    functionGroupCounts: first ? [1] : [], metrics: PadControlMetrics(scale: 1))
         }
-        let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, layout: layout)
+        let cell = besideGearCell(mainEdge: .trailing, functionEdge: .leading)
+        let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, besideGear: cell, layout: layout)
         XCTAssertEqual(placed.placement, .besideGear, "a strip of its own would shrink the picture")
-        XCTAssertEqual(PadRailComposition.calculatorPlacement(main: [], calculator: false, layout: layout).placement, .none)
+        XCTAssertEqual(PadRailComposition.calculatorPlacement(main: [], calculator: false, besideGear: cell,
+                                                              layout: layout).placement, .none)
+    }
+
+    // Codex round 10: Overlay, Main Tray hidden, the Function Tray on the gear's edge.
+    func testBesideTheGearNeverCoversAFunctionControl() {
+        for functionEdge in [ControlEdge.trailing, .leading] {
+            func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+                PadEdgeGeometry.layout(container: CGRect(x: 0, y: 0, width: 1180, height: 820), safeInsets: .zero,
+                                       reservesStrips: false, mainEdge: .trailing, functionEdge: functionEdge,
+                                       mainGroupCounts: main.map(\.count),
+                                       mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                       functionGroupCounts: (first ? [1] : []) + [2, 2], metrics: PadControlMetrics(scale: 1))
+            }
+            let cell = besideGearCell(mainEdge: .trailing, functionEdge: functionEdge)!
+            let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, besideGear: cell, layout: layout)
+            let functionCells = layout([], placed.placement == .leadsFunction).functionCells
+            let launcher = placed.placement == .besideGear ? cell : functionCells.first!
+            let others = placed.placement == .leadsFunction ? Array(functionCells.dropFirst()) : functionCells
+            XCTAssertFalse(others.contains { $0.intersects(launcher) }, "\(functionEdge): \(placed.placement)")
+            if functionEdge == .leading { XCTAssertEqual(placed.placement, .besideGear) }
+        }
     }
 
     func testTheCalculatorBesideTheGearLeavesTheGearWhereItWas() {
