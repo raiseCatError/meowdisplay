@@ -234,17 +234,20 @@ struct WorkspaceChromeView: View {
                     let pane = paneTitleRow(rect)
                     let end = labelStripEnd[id] ?? pane.minX
                     let besideTitle = PaneMenuBar.fitsBesideTitle(labelsEnd: end, pane: pane)
-                    // Its own row below the tabs: clear of the controls there too, not only where the tabs are.
-                    let barPane = besideTitle
+                    // Its own row below the tabs: clear of the controls there too, not only where the tabs
+                    // are, and wholly inside the pane (none in a pane too short for it).
+                    let barPane: CGRect? = besideTitle
                         ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
                         : WorkspaceOverlayPlacement.paneMenuRow(pane: rect, titleRow: pane, safe: safeArea,
                                                                 avoiding: controls + railFrames,
                                                                 minimumWidth: PaneMenuBar.minimumWidth(
                                                                     inlineToggle: onAppMenuBarActivity != nil))
-                    PaneMenuBar(menus: model.menus, pane: barPane,
-                                top: barPane.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
-                                automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
-                                showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
+                    if let barPane {
+                        PaneMenuBar(menus: model.menus, pane: barPane,
+                                    top: barPane.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
+                                    automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
+                                    showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
+                    }
                 }
                 let titles = titleZones(frames)
                 #if os(iOS)

@@ -568,14 +568,14 @@ final class PaneMenuBarPlacementTests: XCTestCase {
     func testTheBarsOwnRowKeepsClearOfAControlBelowTheTabs() {
         let pane = CGRect(x: 0, y: 0, width: 400, height: 600)
         let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [])
-        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [], minimumWidth: 68),
+        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [], minimumWidth: 68)!,
                        CGRect(x: 0, y: 31, width: 400, height: 40), "nothing in the way: where it always was (bar at 36)")
 
         let control = CGRect(x: 280, y: 50, width: 120, height: 60)
         let titleWithControl = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
         XCTAssertEqual(titleWithControl, title, "the control is below the tabs, not beside them")
         let row = WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: titleWithControl, safe: nil, avoiding: [control],
-                                                       minimumWidth: 68)
+                                                       minimumWidth: 68)!
         let top = row.minY + WorkspaceOverlayPlacement.paneMenuBarInset
         let bar = CGRect(x: row.minX + 6, y: top, width: row.width - 12, height: 28)
         let button = CGRect(x: bar.maxX - 44, y: top, width: 44, height: 44)
@@ -593,7 +593,7 @@ final class PaneMenuBarPlacementTests: XCTestCase {
         func row(_ pane: CGRect, _ control: CGRect, width: CGFloat) -> CGRect {
             let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
             return WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [control],
-                                                         minimumWidth: width)
+                                                         minimumWidth: width)!
         }
         // A 64 pt gap is too narrow for the 68 pt bar: no row there.
         let small = CGRect(x: 0, y: 0, width: 120, height: 120)
@@ -618,6 +618,35 @@ final class PaneMenuBarPlacementTests: XCTestCase {
         let passed = row(wide, middle, width: 120)
         XCTAssertEqual(passed.minX, middle.maxX + WorkspaceOverlayPlacement.gap, "the 102 pt run before it is too narrow")
         XCTAssertGreaterThanOrEqual(passed.width, 120)
+    }
+
+    // Codex round 19: exact fits (a fraction short is not enough), and no bar past the pane.
+    func testTheBarsOwnRowFitsExactlyAndNeverLeavesThePane() {
+        func row(_ pane: CGRect, _ controls: [CGRect], width: CGFloat) -> CGRect? {
+            let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: controls)
+            return WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: controls,
+                                                         minimumWidth: width)
+        }
+        // A control at x = 75.75 leaves 67.75 pt before it (after the 8 pt gap): too narrow for 68,
+        // so the wider run after it is used.
+        let pane = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let control = CGRect(x: 75.75, y: 45, width: 40, height: 40)
+        let fitted = row(pane, [control], width: 68)
+        XCTAssertEqual(fitted?.minX, control.maxX + WorkspaceOverlayPlacement.gap)
+        XCTAssertGreaterThanOrEqual(fitted?.width ?? 0, 68)
+        // At exactly 68 pt the first run is taken.
+        let exact = CGRect(x: 76, y: 45, width: 40, height: 40)
+        XCTAssertEqual(row(pane, [exact], width: 68)?.minX, 0)
+
+        // The tabs pushed below a full-width control in a 90 pt pane: the old row would put the
+        // menu button 40 pt into the next pane, so there is no bar.
+        let short = CGRect(x: 0, y: 0, width: 120, height: 90)
+        let top = CGRect(x: 0, y: 0, width: 120, height: 42)
+        XCTAssertNil(row(short, [top], width: 68))
+        // A bar whose footprint ends exactly at the pane's bottom fits; 0.25 pt more does not.
+        let snug = CGRect(x: 0, y: 0, width: 300, height: 80)
+        XCTAssertEqual(row(snug, [], width: 68), CGRect(x: 0, y: 31, width: 300, height: 40))
+        XCTAssertNil(row(CGRect(x: 0, y: 0, width: 300, height: 79.75), [], width: 68))
     }
 
     /// `PaneMenuBar` (a view) isn't in this target; its preferred width.

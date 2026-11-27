@@ -1039,21 +1039,22 @@ enum WorkspaceOverlayPlacement {
     /// clear of the controls: at least `minimumWidth` wide (what the bar needs to be drawn) and
     /// `paneMenuFootprint` tall (its top inset and 44 pt menu button), never reaching past the
     /// pane. Where no run fits, the row it always had (like the tabs, which also stay in their
-    /// top row when no clear one is left).
+    /// top row when no clear one is left) if the whole bar fits in the pane there; else nil, no
+    /// bar in this pane (its tabs, and a double tap on them for full screen, still work).
     static func paneMenuRow(pane: CGRect, titleRow: CGRect, safe: CGRect?, avoiding controls: [CGRect],
-                            minimumWidth: CGFloat) -> CGRect {
+                            minimumWidth: CGFloat) -> CGRect? {
         let area = usable(picture: pane, safe: safe)
         let top = titleRow.minY + paneMenuRowOffset
         let fallback = CGRect(x: titleRow.minX, y: top, width: titleRow.width, height: paneTitleHeight)
         let blocks = controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.insetBy(dx: -gap, dy: -gap) }
         var y = max(top, area.minY)
         for _ in 0...blocks.count {
-            guard y + paneMenuFootprint <= area.maxY + 0.5 else { break }
+            guard y + paneMenuFootprint <= area.maxY + epsilon else { break }
             let band = CGRect(x: area.minX, y: y, width: area.width, height: paneMenuFootprint)
             let hits = blocks.filter { $0.intersects(band) }.sorted { $0.minX < $1.minX }
             var x = area.minX
             for hit in hits + [CGRect(x: area.maxX, y: y, width: 0, height: paneMenuFootprint)] {
-                if min(hit.minX, area.maxX) - x >= minimumWidth - 0.5 {
+                if min(hit.minX, area.maxX) - x >= minimumWidth - epsilon {
                     return CGRect(x: x, y: y, width: min(hit.minX, area.maxX) - x, height: paneTitleHeight)
                 }
                 x = max(x, hit.maxX)
@@ -1061,8 +1062,12 @@ enum WorkspaceOverlayPlacement {
             guard let next = hits.map(\.maxY).filter({ $0 > y }).min() else { break }
             y = next
         }
-        return fallback
+        return fallback.minY + paneMenuFootprint <= area.maxY + epsilon && fallback.width >= minimumWidth - epsilon
+            ? fallback : nil
     }
+
+    /// Rounding slack for the menu row's fit checks (not a tolerance: a bar never draws short).
+    private static let epsilon: CGFloat = 0.001
 
     /// The menu bar's row starts this far below the title row's top (its bar at 36, as before).
     static let paneMenuRowOffset: CGFloat = 31
