@@ -178,7 +178,7 @@ struct CalculatorKeypad: Equatable {
             input += "(−\(Self.answerToken))"
             return
         }
-        guard let range = Self.lastNumberRange(in: input) else {
+        guard let range = Self.lastOperandRange(in: input) else {
             append("−")
             return
         }
@@ -303,9 +303,8 @@ struct CalculatorKeypad: Equatable {
     /// replaces an empty input or an answer, or follows an operator. A
     /// negative value goes in parentheses, so squaring it squares it.
     mutating func use(_ value: Decimal) {
-        // Exact when it's short enough to read; otherwise 15 digits.
-        let exact = value.magnitude.description
-        let digits = exact.count <= 20 ? exact : LocalCalculatorFormat.copyText(value.magnitude, locale: LocalCalculatorFormat.posix)
+        // Always the exact value: the display rounds, the calculation doesn't.
+        let digits = value.magnitude.description
         let text = value < 0 ? "(−" + digits + ")" : digits
         if showsAnswer || input.isEmpty {
             input = text
@@ -353,6 +352,34 @@ struct CalculatorKeypad: Equatable {
             start = text.index(before: start)
         }
         return start < end ? start..<end : nil
+    }
+
+    /// The operand the calculation ends with: a number, a constant or
+    /// name, or a whole bracketed group with its function ("sin(30)"), so ±
+    /// flips it instead of starting a subtraction.
+    static func lastOperandRange(in text: String) -> Range<String.Index>? {
+        var end = text.endIndex
+        while end > text.startIndex, text[text.index(before: end)] == " " { end = text.index(before: end) }
+        guard end > text.startIndex else { return nil }
+        let last = text[text.index(before: end)]
+        var start = end
+        func isNameCharacter(_ c: Character) -> Bool { c.isLetter || c == "π" || c == "τ" }
+        if last == ")" {
+            var depth = 0
+            while start > text.startIndex {
+                start = text.index(before: start)
+                if text[start] == ")" { depth += 1 } else if text[start] == "(" { depth -= 1 }
+                if depth == 0 { break }
+            }
+            guard depth == 0, text[start] == "(" else { return nil }
+            while start > text.startIndex, isNameCharacter(text[text.index(before: start)]) { start = text.index(before: start) }
+            return start..<end
+        }
+        if isNameCharacter(last) {
+            while start > text.startIndex, isNameCharacter(text[text.index(before: start)]) { start = text.index(before: start) }
+            return start..<end
+        }
+        return lastNumberRange(in: text)
     }
 
     static func lastNumber(in text: String) -> String? {

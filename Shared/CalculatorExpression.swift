@@ -177,8 +177,9 @@ enum CalculatorLanguage {
         }
         // Thousands separators inside numbers ("1,200" → 1200); a comma
         // elsewhere is a pause, like "and".
-        s = s.replacingOccurrences(of: #"(\d),(\d{3})(?!\d)"#, with: "$1$2", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"(\d),(\d{3})(?!\d)"#, with: "$1$2", options: .regularExpression)
+        while let grouped = s.range(of: #"(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d,])"#, options: .regularExpression) {
+            s.replaceSubrange(grouped, with: s[grouped].replacingOccurrences(of: ",", with: ""))
+        }
         s = s.replacingOccurrences(of: "$", with: " ")
         s = s.replacingOccurrences(of: "€", with: " ")
         s = s.replacingOccurrences(of: "£", with: " ")
@@ -187,6 +188,10 @@ enum CalculatorLanguage {
             // Keep a factorial "!" after a digit or ")".
             let trimmed = s.trimmingCharacters(in: .whitespaces)
             if last == "!", let before = trimmed.dropLast().last, before.isNumber || before == ")" { break }
+            // …and after a constant or a defined name ("ans!", "n!", "π!", which the parser rejects).
+            if last == "!", let word = trimmed.dropLast().split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).last,
+               variables.contains(String(word)) || ["ans", "pi", "π", "e", "tau", "τ"].contains(String(word)),
+               trimmed.dropLast().hasSuffix(word) { break }
             if last == ".", let before = trimmed.dropLast().last, before.isNumber { break }
             s = " " + String(trimmed.dropLast()) + " "
         }
@@ -490,6 +495,9 @@ struct CalculatorParser {
     /// Whether the term just parsed multiplied, divided or took a modulo,
     /// written or implied (2π%), so a trailing % is that term's own.
     private var termCombined = false
+    /// Whether the factor just parsed ended in its own % ("10%"), not one
+    /// inside an exponent ("2^10%") or a group ("(10%)").
+    private var factorEndedWithPercent = false
 
     init(tokens: [CalculatorToken], context: CalculatorContext) {
         self.tokens = tokens
@@ -532,7 +540,7 @@ struct CalculatorParser {
         let start = index
         let value = try term()
         let consumed = Array(tokens[start..<index])
-        if consumed.last == .percent, !termCombined {
+        if consumed.last == .percent, factorEndedWithPercent, !termCombined {
             // Undo the ÷100 the factor applied; the caller scales instead.
             return (value * 100, true)
         }
@@ -593,21 +601,27 @@ struct CalculatorParser {
         guard current == .power else { return base }
         index += 1
         let exponent = try unary()
+        factorEndedWithPercent = false
         return try Self.raise(base, exponent)
     }
 
     private mutating func postfix() throws -> Decimal {
         var value = try primary()
+        var percent = false
+        defer { factorEndedWithPercent = percent }
         while let token = current {
             if token == .percent {
                 index += 1
                 value /= 100
+                percent = true
             } else if token == .factorial {
                 index += 1
                 value = try Self.factorial(value)
+                percent = false
             } else if token == .square || token == .cube {
                 index += 1
                 value = try Self.raise(value, token == .square ? 2 : 3)
+                percent = false
             } else {
                 break
             }

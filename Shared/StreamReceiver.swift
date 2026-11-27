@@ -800,6 +800,12 @@ final class TrackpadCursorPresentation: ObservableObject {
     init(location: CGPoint? = nil) { self.location = location }
 }
 
+/// Where the Mac draws its own full-size cursor (normalized picture), published only while
+/// the Trackpad's pointer marks show, so those marks follow it from pane to pane.
+final class CursorEchoPresentation: ObservableObject {
+    @Published var echo: CGPoint?
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -829,6 +835,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var videoEnabled = true
     @MainActor @Published private(set) var trackpadDisplayGeometry: [TrackpadDisplayGeometry] = []
     @MainActor let trackpadCursor = TrackpadCursorPresentation()
+    @MainActor let cursorEcho = CursorEchoPresentation()
     @MainActor private var trackpadLayoutSupported = false
     @MainActor private var trackpadLayoutWatching = false
     @MainActor private var trackpadLayoutInWindow = false
@@ -6551,6 +6558,8 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
         cursorState = (x, y, visible)
         onCursor?(x, y, visible)
+        let echo = visible && trackpadCursor.location != nil ? CGPoint(x: x, y: y) : nil
+        if echo != cursorEcho.echo { cursorEcho.echo = echo }
     }
 
     @MainActor func applyTextCaretUpdate(_ rect: CGRect?) {

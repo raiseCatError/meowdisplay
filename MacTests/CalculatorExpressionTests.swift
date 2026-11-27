@@ -249,4 +249,19 @@ final class CalculatorExpressionTests: XCTestCase {
         let edited = keypad([.digit(1), .operation(.divide), .digit(0), .equals, .delete, .digit(4), .equals])
         XCTAssertEqual(edited.currentValue, Decimal(string: "0.25"), "⌫ still edits the failed calculation")
     }
+
+    func testRoundThreeEdgeCases() {
+        XCTAssertEqual(value("100 + 2^10%"), value("100 + (2^10%)"), "a % in the exponent isn't a relative percent")
+        XCTAssertEqual(value("1,234,567,890 + 1"), 1_234_567_891)
+        XCTAssertEqual(value("ans!", answer: 3), 6)
+        XCTAssertNil(value("π!"), "π has no factorial")
+        XCTAssertEqual(keypad([.open, .digit(2), .operation(.add), .digit(3), .close, .toggleSign, .equals]).currentValue, -5)
+        var pad = CalculatorKeypad()
+        let big = Decimal(string: "1124000727777607680000")!
+        pad.use(big)
+        pad.press(.operation(.subtract))
+        pad.use(big)
+        pad.press(.equals)
+        XCTAssertEqual(pad.currentValue, 0, "a reused answer stays exact")
+    }
 }

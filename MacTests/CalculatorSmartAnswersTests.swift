@@ -82,4 +82,9 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(answer("days since christmas"), "337 days")
         XCTAssertEqual(answer("days until christmas"), "28 days")
     }
+
+    func testOnlyRecurringDatesRollForward() {
+        XCTAssertEqual(answer("days until yesterday"), "1 day ago")
+        XCTAssertEqual(answer("days until 25 dec"), "28 days")
+    }
 }

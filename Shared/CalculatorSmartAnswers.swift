@@ -360,18 +360,29 @@ enum CalculatorSmartAnswers {
         return nil
     }
 
+    /// A date that comes round every year: a holiday, or a day and month with no year
+    /// ("25 dec"), unlike "yesterday" or "4 july 2027".
+    private static func isRecurring(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        if holidays[t] != nil { return true }
+        let months = #"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b"#
+        return t.range(of: months, options: .regularExpression) != nil
+            && t.range(of: #"\d{4}"#, options: .regularExpression) == nil
+    }
+
+    private static let holidays: [String: (month: Int, day: Int)] = [
+        "christmas": (12, 25), "xmas": (12, 25), "christmas day": (12, 25), "christmas eve": (12, 24),
+        "new year": (1, 1), "new years": (1, 1), "new year's": (1, 1), "new year's day": (1, 1), "new years day": (1, 1),
+        "new year's eve": (12, 31), "new years eve": (12, 31), "halloween": (10, 31),
+        "valentine's day": (2, 14), "valentines day": (2, 14), "valentines": (2, 14),
+    ]
+
     /// Holidays and dates NSDataDetector reads ("25 dec", "july 4 2027", "next friday").
     /// A holiday is its next occurrence, or its last one when `past`
     /// ("days since christmas").
     private static func namedDate(_ text: String, context: CalculatorSmartContext, past: Bool = false) -> Date? {
         var calendar = context.calendar
         calendar.timeZone = context.timeZone
-        let holidays: [String: (month: Int, day: Int)] = [
-            "christmas": (12, 25), "xmas": (12, 25), "christmas day": (12, 25), "christmas eve": (12, 24),
-            "new year": (1, 1), "new years": (1, 1), "new year's": (1, 1), "new year's day": (1, 1), "new years day": (1, 1),
-            "new year's eve": (12, 31), "new years eve": (12, 31), "halloween": (10, 31),
-            "valentine's day": (2, 14), "valentines day": (2, 14), "valentines": (2, 14),
-        ]
         if let h = holidays[text] {
             let year = calendar.component(.year, from: context.now)
             let today = calendar.startOfDay(for: context.now)
@@ -470,11 +481,15 @@ enum CalculatorSmartAnswers {
             var d = days(context.now, target.date)
             if ["since", "from"].contains(m[2]) {
                 d = -d
-            } else if d < 0, let next = calendar.date(byAdding: .year, value: 1, to: target.date) {
+            } else if d < 0, isRecurring(m[3]), let next = calendar.date(byAdding: .year, value: 1, to: target.date) {
                 // "days until 25 Dec" after this year's has passed: next year's.
                 d = days(context.now, next)
             }
-            return phrase(abs(d) / unit.divisor, unit: unit.name)
+            // A date that has passed (or, "since", is still to come) says which way it lies.
+            let answer = phrase(abs(d) / unit.divisor, unit: unit.name)
+            guard d < 0 else { return answer }
+            let ago = ["since", "from"].contains(m[2]) ? " from now" : " ago"
+            return CalculatorSmartAnswer(text: answer.text + ago, value: answer.value)
         }
         if let m = match(text, #"(?:how many )?(days|weeks) between (.+) and (.+)"#), let unit = unitWords[m[1]],
            let a = anchor(m[2], context: context), let b = anchor(m[3], context: context) {

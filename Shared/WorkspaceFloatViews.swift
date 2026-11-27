@@ -741,8 +741,10 @@ struct WorkspaceFloatLayer: View {
             default: return CGRect(x: rect.minX, y: rect.maxY - inside, width: rect.width, height: outside + inside)
             }
         }()
+        // A corner is one small square: any uncovered part of it is worth keeping.
+        let isCorner = handle.horizontal != 0 && handle.vertical != 0
         let parts = WorkspaceFloatLayering.uncovered(WorkspaceRect(strip), alongX: handle.vertical != 0,
-                                                     by: avoiding.map(WorkspaceRect.init))
+                                                     by: avoiding.map(WorkspaceRect.init), minLength: isCorner ? 10 : 24)
             .map { $0.cgRect.offsetBy(dx: -strip.minX, dy: -strip.minY) }
         if !parts.isEmpty {
             Color.white.opacity(0.001)

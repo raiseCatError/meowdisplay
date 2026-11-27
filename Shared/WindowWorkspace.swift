@@ -1733,10 +1733,14 @@ enum WorkspaceGeometry {
         }
         guard let tile = occupant, layout.tiles[tile]?.source != nil else { return .emptySlot(index: index, preview: slot) }
         let strip = min(labelHeight * 1.6, slot.height * 0.25)
-        let rowTop = slot.y + min(max(0, tabRowOffsets[tile] ?? 0), max(0, slot.height - strip))
-        if point.y - slot.y <= strip || (point.y >= rowTop && point.y - rowTop <= strip) {
-            let top = point.y - slot.y <= strip ? slot.y : rowTop
-            return .tab(tile: tile, preview: WorkspaceRect(x: slot.x, y: top, width: slot.width, height: strip))
+        // A row the controls moved down is hit-tested at its drawn height, not the
+        // quarter-pane cap the top strip keeps in a short pane.
+        let rowStrip = max(strip, labelHeight * 1.6)
+        let rowTop = slot.y + min(max(0, tabRowOffsets[tile] ?? 0), max(0, slot.height - rowStrip))
+        if point.y - slot.y <= strip || (point.y >= rowTop && point.y - rowTop <= rowStrip) {
+            let atTop = point.y - slot.y <= strip
+            return .tab(tile: tile, preview: WorkspaceRect(x: slot.x, y: atTop ? slot.y : rowTop, width: slot.width,
+                                                           height: atTop ? strip : rowStrip))
         }
         if canSplit, case .split(let i, let edge, let preview)? = dropTarget(at: point, frames: frames, size: size, canSplit: true), i == index {
             return .split(index: i, edge: edge, preview: preview)
