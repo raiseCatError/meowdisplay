@@ -288,10 +288,6 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                            hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip, action: press)
                 .position(x: buttonFrame.midX,
                           y: buttonFrame.minY + (buttonFrame.height + (buttonHint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
-                // Its accessibility element after `.position`, like the Arrow Keys button: made
-                // inside, hosted iPhone Duo reported the whole layer as its frame, so VoiceOver's
-                // outline and a tap on the element went to the middle of the screen.
-                .localCalculatorEntryAccessibility(open: model.isOpen, action: press)
                 .transition(.opacity)
             }
             if let panel {
@@ -652,39 +648,42 @@ struct LocalCalculatorEntryButton<Chip: View>: View {
 
     var body: some View {
         VStack(spacing: 2) {
-            Image(systemName: LocalCalculatorPanel.symbolName)
-                .font(.system(size: (diameter * 0.4).rounded(), weight: .semibold))
-                .foregroundStyle(open ? Color.black : Color.white)
-                .frame(width: diameter, height: diameter)
-                .background(chip(open))
-                .frame(width: hitDiameter ?? diameter, height: hitDiameter ?? diameter)
-                .contentShape(Circle())
-                .onTapGesture(perform: action)
+            // A real button at its own size carries the one accessibility element, so its frame
+            // (VoiceOver's outline, where a UI test taps) is the face's. Made around the stack,
+            // hosted iPhone Duo reported the whole screen as the element's frame.
+            Button(action: action) {
+                Image(systemName: LocalCalculatorPanel.symbolName)
+                    .font(.system(size: (diameter * 0.4).rounded(), weight: .semibold))
+                    .foregroundStyle(open ? Color.black : Color.white)
+                    .frame(width: diameter, height: diameter)
+                    .background(chip(open))
+                    .frame(width: hitDiameter ?? diameter, height: hitDiameter ?? diameter)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(LocalCalculatorEntryButtonStyle())
+            .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
+            .accessibilityValue(open ? Text("Open", comment: "The local calculator's panel is showing.") : Text(""))
+            .accessibilityHint(LocalCalculatorPanel.deviceOnlyHint)
+            .accessibilityInputLabels([Text("Calculator", comment: "The local calculator's control and panel.")])
             if let hint {
+                // The caption only shows what the button is; the button says it already.
                 Text(hint)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .frame(width: diameter + PadControlMetrics.hintWidthAllowance, height: PadControlMetrics.hintHeight)
+                    .accessibilityHidden(true)
             }
         }
     }
 }
 
-extension View {
-    /// The calculator button's one accessibility element (see `LocalCalculatorLayer`, which
-    /// applies it once the button is in place).
-    func localCalculatorEntryAccessibility(open: Bool, action: @escaping () -> Void) -> some View {
-        accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
-            .accessibilityValue(open ? Text("Open", comment: "The local calculator's panel is showing.") : Text(""))
-            .accessibilityHint(LocalCalculatorPanel.deviceOnlyHint)
-            .accessibilityInputLabels([Text("Calculator", comment: "The local calculator's control and panel.")])
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { action() }
-    }
+/// The calculator button as it always looked: no dimming or highlight while pressed.
+private struct LocalCalculatorEntryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
 }
+
 
 // MARK: - Palette
 
