@@ -54,8 +54,11 @@ final class LocalCalculatorTourTests: XCTestCase {
             print("Calculator button at \(buttonFrame) in \(app.frame); face at \(face.exists ? "\(face.frame)" : "none")")
             print(app.debugDescription)
             if face.exists {
-                face.tap()
-                print("Tapping the face opened the panel: \(result.waitForExistence(timeout: 3))")
+                // At the face's own middle, as a window coordinate (not a point XCTest picks).
+                let middle = face.frame
+                app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: middle.midX - app.frame.minX, dy: middle.midY - app.frame.minY)).tap()
+                print("Tapping the face at \(middle) opened the panel: \(result.waitForExistence(timeout: 3))")
             }
         }
         XCTAssertTrue(opened, "the panel opens")

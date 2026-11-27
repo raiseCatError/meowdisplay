@@ -233,20 +233,16 @@ struct WorkspaceChromeView: View {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     let pane = paneTitleRow(rect)
                     let end = labelStripEnd[id] ?? pane.minX
-                    let besideTitle = PaneMenuBar.fitsBesideTitle(labelsEnd: end, pane: pane)
-                    // Its own row below the tabs: clear of the controls there too, not only where the tabs
-                    // are, and wholly inside the pane (none in a pane too short for it).
-                    let barPane: CGRect? = besideTitle
-                        ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
-                        : WorkspaceOverlayPlacement.paneMenuRow(pane: rect, titleRow: pane, safe: safeArea,
-                                                                avoiding: controls + railFrames,
-                                                                minimumWidth: PaneMenuBar.minimumWidth(
-                                                                    inlineToggle: onAppMenuBarActivity != nil))
-                    if let barPane {
-                        PaneMenuBar(menus: model.menus, pane: barPane,
-                                    top: barPane.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
+                    // Beside the tabs, or its own row below them clear of the controls there too; wholly
+                    // inside the pane either way (none in a pane too short for it).
+                    if let bar = WorkspaceOverlayPlacement.paneMenuBar(
+                        pane: rect, titleRow: pane, labelsEnd: end, safe: safeArea, avoiding: controls + railFrames,
+                        barWidth: PaneMenuBar.preferredWidth,
+                        minimumWidth: PaneMenuBar.minimumWidth(inlineToggle: onAppMenuBarActivity != nil)) {
+                        PaneMenuBar(menus: model.menus, pane: bar.row,
+                                    top: bar.row.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
                                     automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
-                                    showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
+                                    showsCollapsedAppName: !bar.besideTitle, onActivity: onAppMenuBarActivity)
                     }
                 }
                 let titles = titleZones(frames)
@@ -2433,12 +2429,6 @@ struct PaneMenuBar: View {
 
     static let preferredWidth: CGFloat = 120
 
-    /// Whether the bar goes in the title row after the labels ending at `labelsEnd`: only
-    /// with room for the whole bar there, else on its own row below, where it always draws.
-    /// (Tabs measure only their own width, so a short tab row leaves a narrow gap.)
-    static func fitsBesideTitle(labelsEnd end: CGFloat, pane: CGRect) -> Bool {
-        PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: end, pane: pane, barWidth: preferredWidth)
-    }
     private static let height: CGFloat = 28
     private static let toggleSize: CGFloat = 44
 
