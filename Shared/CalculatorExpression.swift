@@ -177,9 +177,15 @@ enum CalculatorLanguage {
         }
         // Thousands separators inside numbers ("1,200" → 1200); a comma
         // elsewhere is a pause, like "and".
-        while let match = groupedThousands?.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
-              let grouped = Range(match.range, in: s) {
-            s.replaceSubrange(grouped, with: s[grouped].replacingOccurrences(of: ",", with: ""))
+        // Matched and replaced in UTF-16 (a match may end inside a character, before a
+        // combining mark, where a Swift range can't); removing commas never makes a new match.
+        if let groupedThousands {
+            let text = NSMutableString(string: s)
+            for match in groupedThousands.matches(in: s, range: NSRange(location: 0, length: text.length)).reversed() {
+                text.replaceCharacters(in: match.range,
+                                       with: text.substring(with: match.range).replacingOccurrences(of: ",", with: ""))
+            }
+            s = text as String
         }
         // Any other comma is a pause between words ("five, plus three").
         s = s.replacingOccurrences(of: ",", with: " , ")
@@ -896,9 +902,10 @@ enum CalculatorSheet {
             let timeCurrent = previous.firstTimeDependent == nil || (0..<timeAnswersFresh).contains(age)
             // Nothing changed and no time answer is due: every redraw (a window drag redraws
             // each frame) costs one comparison, not a stride of lines.
-            if timeCurrent, previous.lines == lines { return previous }
+            if timeCurrent, lines.count == previous.lines.count,
+               zip(lines, previous.lines).allSatisfy({ sameText($0, $1) }) { return previous }
             let limit = min(lines.count, previous.lines.count, timeCurrent ? .max : previous.firstTimeDependent ?? .max)
-            while reused < limit, lines[reused] == previous.lines[reused] { reused += 1 }
+            while reused < limit, sameText(lines[reused], previous.lines[reused]) { reused += 1 }
         }
         // Back to the nearest saved state at or before the first changed line.
         var start = 0
@@ -909,6 +916,14 @@ enum CalculatorSheet {
                 state = saved.value
             }
         }
+        // Time answers kept from before keep their age, and any worked out now use the same
+        // moment, so one sheet never shows two times for one question.
+        let keptTimeAnswers = previous.map { previous in
+            previous.firstTimeDependent.map { $0 < start } ?? false
+        } ?? false
+        let madeAt = keptTimeAnswers ? previous?.timeAnswersMadeAt ?? smart.now : smart.now
+        var smart = smart
+        smart.now = madeAt
         let stride = checkpointStride(for: lines.count)
         var results = Array(previous?.results.prefix(start) ?? [])
         // Every saved state up to where this pass starts is still right, whatever the stride.
@@ -924,14 +939,16 @@ enum CalculatorSheet {
             results.append(line(lines[index], state: &state, smart: smart, dependsOnNow: &dependsOnNow))
             if dependsOnNow, firstTimeDependent == nil { firstTimeDependent = index }
         }
-        // Time answers kept from before keep their age; else they were worked out now.
-        let keptTimeAnswers = previous.map { previous in
-            previous.firstTimeDependent.map { $0 < start } ?? false
-        } ?? false
         return Evaluation(lines: lines, angle: angle, locale: smart.locale, calendar: smart.calendar,
                           timeZone: smart.timeZone, results: results,
                           checkpoints: thinned(checkpoints, stride: stride), firstTimeDependent: firstTimeDependent,
-                          timeAnswersMadeAt: keptTimeAnswers ? previous?.timeAnswersMadeAt ?? smart.now : smart.now)
+                          timeAnswersMadeAt: madeAt)
+    }
+
+    /// The same text, character for character: canonically equivalent spellings (é and
+    /// e + U+0301), which Swift calls equal, can read differently to the patterns here.
+    private static func sameText(_ a: String, _ b: String) -> Bool {
+        a.utf8.elementsEqual(b.utf8)
     }
 
     private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext,
@@ -939,7 +956,8 @@ enum CalculatorSheet {
         var context = state.context
         var running = state.running
         defer { state = State(context: context, running: running) }
-        let trimmed = CalculatorSheet.normalizingNumbers(line.trimmingCharacters(in: .whitespaces), locale: smart.locale)
+        let trimmed = CalculatorSheet.normalizingNumbers(line.trimmingCharacters(in: .whitespaces), locale: smart.locale,
+                                                         variables: Set(state.context.variables.keys))
         if trimmed.isEmpty {
             running = nil
             return CalculatorLineResult(value: nil)
@@ -979,7 +997,7 @@ enum CalculatorSheet {
     /// or after an operator (",5", as the rail's key types it).
     /// A dot stays a decimal point where dots don't group. Commas elsewhere ("five, plus
     /// three") are left alone.
-    static func normalizingNumbers(_ text: String, locale: Locale) -> String {
+    static func normalizingNumbers(_ text: String, locale: Locale, variables: Set<String> = []) -> String {
         guard locale.decimalSeparator == "," else { return text }
         var result = text
         let grouping = locale.groupingSeparator ?? ""
@@ -998,8 +1016,10 @@ enum CalculatorSheet {
         // lexer), then any spaces.
         result = result.replacingOccurrences(of: #"([-+−–—×÷∕∗⋅·*/^(\[{=%√∛]\s*),(?=\d)"#, with: "$1.",
                                              options: .regularExpression)
-        // "x" and "mod" between numbers ("2 x ,5", "7 mod ,5") read as operators too.
-        return result.replacingOccurrences(of: #"(?i)(\d\s*(?:x|mod)\s*),(?=\d)"#, with: "$1.",
+        // "x", "mod" and "modulo" after a number or a bracket ("2 x ,5", "(2+3) x ,4",
+        // "7 modulo ,4") read as operators too; "x" not once it names a value.
+        let words = variables.contains("x") ? "modulo|mod" : "modulo|mod|x"
+        return result.replacingOccurrences(of: #"(?i)([\d)\]}]\s*(?:"# + words + #")\s*),(?=\d)"#, with: "$1.",
                                            options: .regularExpression)
     }
 

@@ -954,7 +954,7 @@ extension PadRailComposition {
     /// control where it is and the picture its size: the Settings group, then the Function
     /// rail. With no Main rail: the first of `floating` (cells in no rail, beside the gear
     /// first) clear of the Function rail and of `keepClear` (the gear); else the Function
-    /// rail if it keeps the picture's size and lanes and stays clear of the gear. If no
+    /// rail (which never overlaps, though when crowded it may take a lane). If no
     /// place keeps everything, the Function rail when it keeps the picture's size and lanes
     /// (its groups may shift), else the Settings group.
     static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool,
@@ -992,10 +992,8 @@ extension PadRailComposition {
             if let cell = floating.first(where: { clear($0, of: reference.functionCells) }) {
                 return (without, .floating(cell))
             }
-            if keepsPicture, !leading.functionCells.contains(where: { cell in keepClear.contains { $0.intersects(cell) } }) {
-                return (without, .leadsFunction)
-            }
-            if let cell = floating.first { return (without, .floating(cell)) }
+            // Else the Function rail, which lays every chip out without overlap, even when
+            // crowded (a small window, large controls, a long rail) it takes a lane.
             return (without, .leadsFunction)
         }
         // Something has to give: keep the picture's size and lanes if the Function rail

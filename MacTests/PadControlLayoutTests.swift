@@ -622,6 +622,37 @@ final class PadControlLayoutTests: XCTestCase {
         XCTAssertGreaterThan(floated, 0)
     }
 
+    // Codex round 12: a small Overlay window, large controls and a long Function rail on the
+    // gear's edge leave no clear floating spot: the calculator joins the rail, overlapping nothing.
+    func testWhenNoFloatingSpotIsClearTheCalculatorOverlapsNothing() {
+        let container = CGRect(x: 0, y: 0, width: 550, height: 450)
+        let insets = ControlSafeInsets(top: 24, leading: 0, bottom: 20, trailing: 0)
+        let metrics = PadControlMetrics(scale: 1.4)
+        let groups = [2, 2] + Array(repeating: 1, count: 24)
+        func layout(_ main: [[CustomControlKind]], _ first: Bool) -> PadEdgeLayout {
+            PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: false,
+                                   mainEdge: .leading, functionEdge: .leading, mainGroupCounts: main.map(\.count),
+                                   mainGroupAlignments: PadRailComposition.alignments(for: main),
+                                   functionGroupCounts: (first ? [1] : []) + groups, metrics: metrics)
+        }
+        func pass(_ edge: ControlEdge, _ counts: [Int], _ alignments: [PadGroupAlignment]) -> PadEdgeLayout {
+            PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: false, mainEdge: edge,
+                                   functionEdge: .leading, mainGroupCounts: counts, mainGroupAlignments: alignments,
+                                   functionGroupCounts: [], metrics: metrics)
+        }
+        let floating = [pass(.leading, [1, 1], [.end, .end]).mainCells.first,
+                        pass(.leading, [1, 1], [.start, .end]).mainCells.first,
+                        pass(.trailing, [1], [.end]).mainCells.first,
+                        pass(.trailing, [1], [.start]).mainCells.first].compactMap { $0 }
+        let gear = pass(.leading, [1], [.end]).mainCells.prefix(1).map { $0.insetBy(dx: -4, dy: -4) }
+        let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, floating: floating,
+                                                            keepClear: gear, layout: layout)
+        let chosen = layout([], placed.placement == .leadsFunction)
+        let launcher = placed.placement.floatingCell ?? chosen.functionCells[0]
+        let chips = placed.placement == .leadsFunction ? Array(chosen.functionCells.dropFirst()) : chosen.functionCells
+        XCTAssertFalse(chips.contains { $0.intersects(launcher) }, "\(placed.placement)")
+    }
+
     func testTheCalculatorBesideTheGearLeavesTheGearWhereItWas() {
         for edge in [ControlEdge.leading, .trailing] {
             func pass(_ counts: [Int]) -> PadEdgeLayout {

@@ -159,6 +159,42 @@ final class CalculatorSmartAnswersTests: XCTestCase {
                        "a clock set back redoes it")
     }
 
+    // Codex round 12: one sheet asks the same time question twice across a minute boundary.
+    func testOneSheetShowsOneTimeForOneQuestion() {
+        var edge = context
+        edge.now = Date(timeIntervalSinceReferenceDate: (context.now.timeIntervalSinceReferenceDate / 60).rounded(.down) * 60 + 59.6)
+        let lines = ["time in Tokyo", "a = 2"] + (0..<38).map { "a + \($0)" }
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: edge, reusing: nil)
+        var next = edge
+        next.now = edge.now.addingTimeInterval(0.6) // the next minute
+        var asked = lines
+        asked[39] = "time in Tokyo"
+        let after = CalculatorSheet.evaluate(lines: asked, angle: .degrees, smart: next, reusing: before)
+        XCTAssertEqual(after.results[39], after.results[0])
+    }
+
+    // Codex round 12: canonically equivalent spellings are compared as written.
+    func testAnEquivalentSpellingIsNotTakenForTheSameLine() {
+        let first = ["\u{00ED} = 5", "twenty-\u{00ED} + 1"]
+        let second = ["\u{00ED} = 5", "twenty-i\u{0301} + 1"]
+        let before = CalculatorSheet.evaluate(lines: first, angle: .degrees, smart: context, reusing: nil)
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: second, angle: .degrees, smart: context, reusing: before).results,
+                       CalculatorSheet.evaluate(lines: second, angle: .degrees, smart: context))
+    }
+
+    func testAnotherAngleRedoesTheSheet() {
+        let lines = ["sin(30)"]
+        let degrees = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: lines, angle: .radians, smart: context, reusing: degrees).results,
+                       CalculatorSheet.evaluate(lines: lines, angle: .radians, smart: context))
+        XCTAssertNotEqual(CalculatorSheet.evaluate(lines: lines, angle: .radians, smart: context), degrees.results)
+    }
+
+    // Codex round 12: a thousands group that ends before a combining mark doesn't stop the scan.
+    func testThousandsAfterACombiningMarkStillGroup() {
+        XCTAssertTrue(CalculatorLanguage.normalize("1,200\u{0301} + 2,345").contains("2345"))
+    }
+
     func testAnotherLocaleRedoesTheSheet() {
         let lines = ["1,5 + 2"]
         let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
@@ -203,6 +239,10 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         // Codex round 11: roots and "mod".
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["√,25"], angle: .degrees, smart: french).map(\.value), [0.5])
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["2 mod ,5"], angle: .degrees, smart: french).map(\.value), [0])
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["7 modulo ,4"], angle: .degrees, smart: french).map(\.value), [0.2])
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: ["(2+3) x ,4"], angle: .degrees, smart: french).map(\.value), [2])
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("2 x ,5", locale: french.locale, variables: ["x"]), "2 x ,5",
+                       "x names a value: not an operator")
         XCTAssertEqual(CalculatorSheet.evaluate(lines: ["five plus,3"], angle: .degrees, smart: french).map(\.value), [8])
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("1,5", locale: context.locale), "1,5", "en_GB is left alone")
     }
