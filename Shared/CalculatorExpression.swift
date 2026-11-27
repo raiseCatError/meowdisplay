@@ -177,7 +177,8 @@ enum CalculatorLanguage {
         }
         // Thousands separators inside numbers ("1,200" → 1200); a comma
         // elsewhere is a pause, like "and".
-        while let grouped = s.range(of: #"(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d,])"#, options: .regularExpression) {
+        while let match = groupedThousands?.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+              let grouped = Range(match.range, in: s) {
             s.replaceSubrange(grouped, with: s[grouped].replacingOccurrences(of: ",", with: ""))
         }
         // Any other comma is a pause between words ("five, plus three").
@@ -199,10 +200,11 @@ enum CalculatorLanguage {
             s = " " + String(trimmed.dropLast()) + " "
         }
         s = replaceNumberWords(s)
-        for (pattern, replacement) in phrases {
+        for phrase in compiledPhrases {
             // x is a variable here: it no longer means times.
-            if variables.contains("x"), pattern.contains(#"\s*x\s*"#) { continue }
-            s = s.replacingOccurrences(of: pattern, with: replacement, options: [.regularExpression])
+            if variables.contains("x"), phrase.pattern.contains(#"\s*x\s*"#) { continue }
+            s = phrase.regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s),
+                                                      withTemplate: phrase.template)
         }
         for (index, name) in protected.enumerated() {
             s = s.replacingOccurrences(of: placeholder(index), with: " \(name) ")
@@ -223,6 +225,17 @@ enum CalculatorLanguage {
         } while n > 0
         return "qzqv" + letters + "qzq"
     }
+
+    /// `phrases`, compiled once: compiling them for every line was most of a line's cost
+    /// (about half a millisecond each, so long sheets hitched while typing).
+    private static let compiledPhrases: [(pattern: String, regex: NSRegularExpression, template: String)] =
+        phrases.compactMap { pattern, template in
+            (try? NSRegularExpression(pattern: pattern)).map { (pattern, $0, template) }
+        }
+    /// Every phrase compiled (a pattern that didn't would be skipped).
+    static var allPhrasesCompile: Bool { compiledPhrases.count == phrases.count }
+    private static let groupedThousands = try? NSRegularExpression(pattern: #"(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d,])"#)
+    private static let hyphenatedWords = try? NSRegularExpression(pattern: #"([a-z])-([a-z])"#)
 
     /// Ordered: longer phrases first. Patterns are matched on the
     /// lowercased text, padded with spaces.
@@ -294,8 +307,9 @@ enum CalculatorLanguage {
     /// "two hundred and five" → 205, "3 million" → 3000000, "a dozen" → 12.
     static func replaceNumberWords(_ text: String) -> String {
         // "twenty-five": a hyphen between words; "2e-3" and "10-3" keep theirs.
-        let words = text.replacingOccurrences(of: #"([a-z])-([a-z])"#, with: "$1 - $2", options: .regularExpression)
-            .split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let spaced = hyphenatedWords?.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text),
+                                                               withTemplate: "$1 - $2") ?? text
+        let words = spaced.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         var output: [String] = []
         var index = 0
         while index < words.count {
@@ -846,9 +860,15 @@ enum CalculatorSheet {
         /// version of them.
         let checkpoints: [Int: State]
         /// The first line whose answer depends on the current time ("5 hours from now", "time
-        /// in Tokyo"): it and everything after it are redone every time.
+        /// in Tokyo"): it and everything after it are redone once `timeAnswersFresh` has passed.
         let firstTimeDependent: Int?
+        /// When the oldest time answer kept here was worked out.
+        let timeAnswersMadeAt: Date
     }
+
+    /// How long a time answer stays current: under a second, so it never visibly lags, while
+    /// keystrokes and redraws in that second don't redo the sheet below it.
+    static let timeAnswersFresh: TimeInterval = 1
 
     /// How far apart saved states are for a sheet of `count` lines: about 16 of them
     /// at most, so memory stays linear and an edit redoes at most a stride of lines
@@ -872,7 +892,12 @@ enum CalculatorSheet {
         var reused = 0
         if let previous, previous.angle == angle, previous.locale == smart.locale,
            previous.calendar == smart.calendar, previous.timeZone == smart.timeZone {
-            let limit = min(lines.count, previous.lines.count, previous.firstTimeDependent ?? .max)
+            let age = smart.now.timeIntervalSince(previous.timeAnswersMadeAt)
+            let timeCurrent = previous.firstTimeDependent == nil || (0..<timeAnswersFresh).contains(age)
+            // Nothing changed and no time answer is due: every redraw (a window drag redraws
+            // each frame) costs one comparison, not a stride of lines.
+            if timeCurrent, previous.lines == lines { return previous }
+            let limit = min(lines.count, previous.lines.count, timeCurrent ? .max : previous.firstTimeDependent ?? .max)
             while reused < limit, lines[reused] == previous.lines[reused] { reused += 1 }
         }
         // Back to the nearest saved state at or before the first changed line.
@@ -899,9 +924,14 @@ enum CalculatorSheet {
             results.append(line(lines[index], state: &state, smart: smart, dependsOnNow: &dependsOnNow))
             if dependsOnNow, firstTimeDependent == nil { firstTimeDependent = index }
         }
+        // Time answers kept from before keep their age; else they were worked out now.
+        let keptTimeAnswers = previous.map { previous in
+            previous.firstTimeDependent.map { $0 < start } ?? false
+        } ?? false
         return Evaluation(lines: lines, angle: angle, locale: smart.locale, calendar: smart.calendar,
                           timeZone: smart.timeZone, results: results,
-                          checkpoints: thinned(checkpoints, stride: stride), firstTimeDependent: firstTimeDependent)
+                          checkpoints: thinned(checkpoints, stride: stride), firstTimeDependent: firstTimeDependent,
+                          timeAnswersMadeAt: keptTimeAnswers ? previous?.timeAnswersMadeAt ?? smart.now : smart.now)
     }
 
     private static func line(_ line: String, state: inout State, smart: CalculatorSmartContext,

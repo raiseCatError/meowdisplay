@@ -130,6 +130,35 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(before.firstTimeDependent, 0)
     }
 
+    // Performance: within a second a time answer is current, so typing below it doesn't redo
+    // the sheet; the second is counted from when that answer was worked out.
+    func testTimeAnswersAreReusedOnlyWhileCurrent() {
+        // Long enough to have a saved state past the time answer, so an edit at the bottom
+        // can start below it.
+        let lines = ["time in Tokyo", "a = 2"] + (0..<38).map { "a + \($0)" }
+        let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
+        var soon = context
+        soon.now = context.now.addingTimeInterval(0.4)
+        var edited = lines
+        edited[39] = "a + 100"
+        let typed = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: soon, reusing: before)
+        XCTAssertEqual(typed.results[0], before.results[0], "the time answer is still current")
+        XCTAssertEqual(typed.results[39].value, 102)
+        XCTAssertEqual(typed.timeAnswersMadeAt, before.timeAnswersMadeAt, "it keeps its age")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: soon, reusing: typed).results,
+                       typed.results, "a redraw in the same second reuses it all")
+        var later = context
+        later.now = context.now.addingTimeInterval(1.2)
+        let due = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: later, reusing: typed)
+        XCTAssertEqual(due.results, CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: later))
+        XCTAssertEqual(due.timeAnswersMadeAt, later.now, "over a second old (from when it was worked out): redone")
+        var earlier = context
+        earlier.now = context.now.addingTimeInterval(-5)
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: earlier, reusing: before).results,
+                       CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: earlier),
+                       "a clock set back redoes it")
+    }
+
     func testAnotherLocaleRedoesTheSheet() {
         let lines = ["1,5 + 2"]
         let before = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: context, reusing: nil)
@@ -196,5 +225,19 @@ final class CalculatorSmartAnswersTests: XCTestCase {
             XCTAssertEqual(CalculatorSheet.evaluate(lines: change, angle: .degrees, smart: context, reusing: after).results,
                            CalculatorSheet.evaluate(lines: change, angle: .degrees, smart: context))
         }
+    }
+
+    // Performance: the phrase patterns are compiled once, and an unchanged sheet is not redone.
+    func testPhrasesCompileOnceAndAnUnchangedSheetIsReused() {
+        XCTAssertTrue(CalculatorLanguage.allPhrasesCompile)
+        let lines = (0..<40).map { $0 % 2 == 0 ? "a\($0) = \($0) * 2 + 15%" : "a\($0 - 1) + 3 cm in inches" }
+        let smart = CalculatorSmartContext()
+        let first = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: smart, reusing: nil)
+        let again = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: smart, reusing: first)
+        XCTAssertEqual(again.results, first.results)
+        XCTAssertEqual(again.results, CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: smart))
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: lines, angle: .radians, smart: smart, reusing: first).results,
+                       CalculatorSheet.evaluate(lines: lines, angle: .radians, smart: smart),
+                       "another angle redoes it")
     }
 }
