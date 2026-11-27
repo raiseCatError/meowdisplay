@@ -994,8 +994,9 @@ extension PadRailComposition {
             }
             // Else the Function rail, which lays every chip out without overlap, taking a lane
             // if it must, as long as every chip stays on screen and the picture keeps at least
-            // half its size. A screen that full (a small window, large controls, a long rail)
-            // has no free spot: the floating spot overlapping the least, clear of the gear.
+            // half its size. Else a floating spot slid a little along the edge into a clear
+            // place; failing that (a small window, large controls, a long rail), the floating
+            // spot overlapping the least, clear of the gear.
             let onScreen = bounds.map { area in leading.functionCells.allSatisfy { area.contains($0) } } ?? true
             let pictureKept = leading.canvas.width * leading.canvas.height
                 >= reference.canvas.width * reference.canvas.height / 2
@@ -1007,8 +1008,22 @@ extension PadRailComposition {
                     return total + (shared.isNull ? 0 : shared.width * shared.height)
                 }
             }
-            if let cell = floating.filter({ cell in !keepClear.contains { $0.intersects(cell) } })
-                .min(by: { overlap($0) < overlap($1) }) {
+            let gearClearSpots = floating.filter { cell in !keepClear.contains { $0.intersects(cell) } }
+            // First a short slide (up to a cell) along either axis from each spot, on screen
+            // and clear of every chip and the gear.
+            for cell in gearClearSpots {
+                for step in stride(from: CGFloat(2), through: max(cell.width, cell.height), by: 2) {
+                    let moves = [CGVector(dx: 0, dy: step), CGVector(dx: 0, dy: -step),
+                                 CGVector(dx: step, dy: 0), CGVector(dx: -step, dy: 0)]
+                    for move in moves {
+                        let moved = cell.offsetBy(dx: move.dx, dy: move.dy)
+                        if bounds.map({ $0.contains(moved) }) ?? true, clear(moved, of: reference.functionCells) {
+                            return (without, .floating(moved))
+                        }
+                    }
+                }
+            }
+            if let cell = gearClearSpots.min(by: { overlap($0) < overlap($1) }) {
                 return (without, .floating(cell))
             }
             return (without, .leadsFunction)

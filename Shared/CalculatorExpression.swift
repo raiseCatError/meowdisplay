@@ -1019,7 +1019,7 @@ enum CalculatorSheet {
         // ,4"), not inside another word ("box ,5"). Whether "x" multiplies or names a value
         // ("2 x ,5" is then 2·x·0.5), the comma before a digit is a decimal mark either way,
         // so arithmetic and smart answers (which don't see the sheet's names) agree.
-        return result.replacingOccurrences(of: #"(?i)((?<![\p{L}_])(?:modulo|mod|x)\s*),(?=\d)"#, with: "$1.",
+        return result.replacingOccurrences(of: #"(?i)((?<![\p{L}\p{M}_])(?:modulo|mod|x)\s*),(?=\d)"#, with: "$1.",
                                            options: .regularExpression)
     }
 

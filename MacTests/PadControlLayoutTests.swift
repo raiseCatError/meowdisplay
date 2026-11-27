@@ -628,6 +628,7 @@ final class PadControlLayoutTests: XCTestCase {
         let container = CGRect(x: 0, y: 0, width: 550, height: 450)
         let insets = ControlSafeInsets(top: 24, leading: 0, bottom: 20, trailing: 0)
         let metrics = PadControlMetrics(scale: 1.4)
+        let safe = CGRect(x: 0, y: 24, width: 550, height: 450 - 24 - 20)
         let groups = [2, 2] + Array(repeating: 1, count: 24)
         func pass(_ edge: ControlEdge, _ counts: [Int], _ alignments: [PadGroupAlignment]) -> PadEdgeLayout {
             PadEdgeGeometry.layout(container: container, safeInsets: insets, reservesStrips: false, mainEdge: edge,
@@ -648,18 +649,19 @@ final class PadControlLayoutTests: XCTestCase {
             }
             let reference = railed([], false)
             let placed = PadRailComposition.calculatorPlacement(main: [], calculator: true, floating: floating,
-                                                                keepClear: gear, bounds: container, layout: railed)
+                                                                keepClear: gear, bounds: safe, layout: railed)
             let chosen = railed([], placed.placement == .leadsFunction)
             let label = "strip \(strip): \(placed.placement)"
             // Codex round 13: every chip stays on screen and the picture keeps most of its size.
-            XCTAssertTrue(chosen.functionCells.allSatisfy { container.contains($0) }, label)
+            XCTAssertTrue(chosen.functionCells.allSatisfy { safe.contains($0) }, label)
             XCTAssertGreaterThanOrEqual(chosen.canvas.width * chosen.canvas.height,
                                         reference.canvas.width * reference.canvas.height / 2, label)
             let launcher = placed.placement.floatingCell ?? chosen.functionCells[0]
             XCTAssertFalse(gear.contains { $0.intersects(launcher) }, label)
-            if placed.placement == .leadsFunction {
-                XCTAssertFalse(chosen.functionCells.dropFirst().contains { $0.intersects(launcher) }, label)
-            }
+            // Codex round 14: a short slide along the edge finds a clear spot here.
+            XCTAssertTrue(safe.contains(launcher), label)
+            let chips = placed.placement == .leadsFunction ? Array(chosen.functionCells.dropFirst()) : chosen.functionCells
+            XCTAssertFalse(chips.contains { $0.intersects(launcher) }, label)
         }
     }
 

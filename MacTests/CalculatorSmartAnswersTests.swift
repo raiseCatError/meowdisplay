@@ -252,6 +252,9 @@ final class CalculatorSmartAnswersTests: XCTestCase {
                                                 smart: french).map(\.value), [7, 0.2])
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("box ,5", locale: french.locale), "box ,5", "inside a word")
         XCTAssertEqual(CalculatorSheet.normalizingNumbers("commodity ,5", locale: french.locale), "commodity ,5")
+        // Codex round 14: a combining mark is part of the word, in either spelling.
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("a\u{0301}x ,5", locale: french.locale), "a\u{0301}x ,5")
+        XCTAssertEqual(CalculatorSheet.normalizingNumbers("\u{00E1}x ,5", locale: french.locale), "\u{00E1}x ,5")
         // Codex round 13: naming x doesn't change what a unit conversion's amount means.
         let km = CalculatorSheet.evaluate(lines: ["2 x ,5 km in m"], angle: .degrees, smart: french).map(\.value)
         XCTAssertEqual(km, [1000])
