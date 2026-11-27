@@ -274,8 +274,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let buttonVisible = !autoHiding || model.isOpen
         ZStack(alignment: .topLeading) {
             if let buttonFrame {
-                LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFaceDiameter ?? buttonFrame.width,
-                                           hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip) {
+                let press = {
                     if model.isOpen, model.stash != nil, let panel {
                         restore(panel, bounds: bounds)
                     } else {
@@ -283,8 +282,14 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     }
                     haptics.play(.selection)
                 }
+                LocalCalculatorEntryButton(open: model.isOpen, diameter: buttonFaceDiameter ?? buttonFrame.width,
+                                           hitDiameter: buttonFrame.width, hint: buttonHint, chip: chip, action: press)
                 .position(x: buttonFrame.midX,
                           y: buttonFrame.minY + (buttonFrame.height + (buttonHint == nil ? 0 : PadControlMetrics.hintHeight + 2)) / 2)
+                // Its accessibility element after `.position`, like the Arrow Keys button: made
+                // inside, hosted iPhone Duo reported the whole layer as its frame, so VoiceOver's
+                // outline and a tap on the element went to the middle of the screen.
+                .localCalculatorEntryAccessibility(open: model.isOpen, action: press)
                 .opacity(buttonVisible ? 1 : 0)
                 .allowsHitTesting(buttonVisible)
             }
@@ -663,13 +668,20 @@ struct LocalCalculatorEntryButton<Chip: View>: View {
                     .frame(width: diameter + PadControlMetrics.hintWidthAllowance, height: PadControlMetrics.hintHeight)
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
-        .accessibilityValue(open ? Text("Open", comment: "The local calculator's panel is showing.") : Text(""))
-        .accessibilityHint(LocalCalculatorPanel.deviceOnlyHint)
-        .accessibilityInputLabels([Text("Calculator", comment: "The local calculator's control and panel.")])
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { action() }
+    }
+}
+
+extension View {
+    /// The calculator button's one accessibility element (see `LocalCalculatorLayer`, which
+    /// applies it once the button is in place).
+    func localCalculatorEntryAccessibility(open: Bool, action: @escaping () -> Void) -> some View {
+        accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
+            .accessibilityValue(open ? Text("Open", comment: "The local calculator's panel is showing.") : Text(""))
+            .accessibilityHint(LocalCalculatorPanel.deviceOnlyHint)
+            .accessibilityInputLabels([Text("Calculator", comment: "The local calculator's control and panel.")])
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { action() }
     }
 }
 

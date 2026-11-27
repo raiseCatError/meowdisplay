@@ -50,9 +50,9 @@ final class LocalCalculatorTourTests: XCTestCase {
             // On hosted iPhone Duo since late November the button reported the whole window
             // as its frame, so the tap above went to the window's middle. Tapping its drawn
             // face tells a broken button from a wrong reported frame.
+            // The face first, before Auto-hide fades the controls; the slow tree print last.
             let face = calculatorButton.images.firstMatch
             print("Calculator button at \(buttonFrame) in \(app.frame); face at \(face.exists ? "\(face.frame)" : "none")")
-            print(app.debugDescription)
             if face.exists {
                 // At the face's own middle, as a window coordinate (not a point XCTest picks).
                 let middle = face.frame
@@ -60,6 +60,7 @@ final class LocalCalculatorTourTests: XCTestCase {
                     .withOffset(CGVector(dx: middle.midX - app.frame.minX, dy: middle.midY - app.frame.minY)).tap()
                 print("Tapping the face at \(middle) opened the panel: \(result.waitForExistence(timeout: 3))")
             }
+            print(app.debugDescription)
         }
         XCTAssertTrue(opened, "the panel opens")
         for label in ["Decimal Point", "1", "Plus", "Decimal Point", "2", "Equals"] { calculatorKey(label).tap() }
