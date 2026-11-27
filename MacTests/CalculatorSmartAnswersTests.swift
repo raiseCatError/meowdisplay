@@ -173,6 +173,25 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(after.results[39], after.results[0])
     }
 
+    // Codex round 16: a date answer reused across midnight would feed a stale number below it.
+    func testATimeAnswerIsNeverReusedAcrossAMinuteBoundary() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = context.timeZone
+        let late = calendar.date(from: DateComponents(year: 2026, month: 12, day: 23, hour: 23, minute: 59, second: 59))!
+            .addingTimeInterval(0.6)
+        var before = context
+        before.now = late
+        let lines = ["days until christmas", "a = 2"] + (0..<38).map { "a + \($0)" }
+        let first = CalculatorSheet.evaluate(lines: lines, angle: .degrees, smart: before, reusing: nil)
+        var after = context
+        after.now = late.addingTimeInterval(0.6) // 00:00:00.2, December 24
+        var edited = lines
+        edited[39] = "a + 100"
+        let fresh = CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: after)
+        XCTAssertNotEqual(first.results[0], fresh[0], "the answer really changes at midnight")
+        XCTAssertEqual(CalculatorSheet.evaluate(lines: edited, angle: .degrees, smart: after, reusing: first).results, fresh)
+    }
+
     // Codex round 12: canonically equivalent spellings are compared as written.
     func testAnEquivalentSpellingIsNotTakenForTheSameLine() {
         let first = ["\u{00ED} = 5", "twenty-\u{00ED} + 1"]

@@ -2253,3 +2253,11 @@ struct WorkspaceLayoutRecord: Codable, Equatable, Sendable {
         return try? encoder.encode(self)
     }
 }
+
+/// Where a pane's app menu bar goes (`PaneMenuBar`): in the title row after the labels ending
+/// at `labelsEnd` only with room for the whole bar (`barWidth`) there, else on its own row.
+enum PaneMenuBarPlacement {
+    static func fitsBesideTitle(labelsEnd end: CGFloat, pane: CGRect, barWidth: CGFloat) -> Bool {
+        end > pane.minX && end < pane.maxX && pane.maxX - end + 2 >= barWidth
+    }
+}

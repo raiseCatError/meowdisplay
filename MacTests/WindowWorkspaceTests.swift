@@ -553,3 +553,14 @@ final class WindowWorkspaceTests: XCTestCase {
         XCTAssertEqual(t1.width * narrow.width, WorkspaceGeometry.minimumTile.width, accuracy: 0.5, "moved the least")
     }
 }
+
+// Codex round 16: the pane menu bar goes beside the tabs only with room for all of it.
+final class PaneMenuBarPlacementTests: XCTestCase {
+    func testTheBarGoesBesideTheTabsOnlyWithRoomForIt() {
+        let pane = CGRect(x: 100, y: 0, width: 160, height: 30)
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 180, pane: pane, barWidth: 120), "82 pt left: its own row")
+        XCTAssertTrue(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 140, pane: pane, barWidth: 120), "122 pt left: beside the tabs")
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 100, pane: pane, barWidth: 120), "no tabs measured yet")
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 260, pane: pane, barWidth: 120), "tabs fill the row")
+    }
+}

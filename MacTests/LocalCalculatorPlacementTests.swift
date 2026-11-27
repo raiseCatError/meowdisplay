@@ -566,6 +566,19 @@ final class LocalCalculatorPlacementTests: XCTestCase {
                                                          obstacles: [fullRight, fullLeft]), "nowhere: it stays on screen")
     }
 
+    // Codex round 16: bounds shorter than a touch target have no tappable place.
+    func testShortBoundsHaveNoTappablePlace() {
+        let stash = LocalCalculatorStash(edge: .right, offset: 0.5)
+        let size = CGSize(width: 200, height: 300)
+        let short = CGRect(x: 12, y: 60, width: 369, height: 43)
+        XCTAssertNil(LocalCalculatorStashGeometry.waiting(size: size, stash: stash, bounds: short).touch)
+        XCTAssertNil(LocalCalculatorStashGeometry.usable(stash, size: size, bounds: short, obstacles: []))
+        let tall = CGRect(x: 12, y: 60, width: 369, height: 44)
+        let touch = LocalCalculatorStashGeometry.waiting(size: size, stash: stash, bounds: tall).touch
+        XCTAssertNotNil(touch)
+        XCTAssertTrue(touch.map { $0.minY >= tall.minY - 0.5 && $0.maxY <= tall.maxY + 0.5 } ?? false)
+    }
+
     func testWithoutAMainTrayItSitsBesideAFunctionGroup() {
         let container = CGRect(x: 0, y: 0, width: 393, height: 852)
         let function = CGRect(x: 120, y: 760, width: 150, height: 44)

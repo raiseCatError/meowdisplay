@@ -872,8 +872,9 @@ enum CalculatorSheet {
         let timeAnswersMadeAt: Date
     }
 
-    /// How long a time answer stays current: under a second, so it never visibly lags, while
-    /// keystrokes and redraws in that second don't redo the sheet below it.
+    /// How long a time answer stays current (and never past a minute boundary): under a
+    /// second, so it never visibly lags, while keystrokes and redraws in that second don't
+    /// redo the sheet below it.
     static let timeAnswersFresh: TimeInterval = 1
 
     /// How far apart saved states are for a sheet of `count` lines: about 16 of them
@@ -899,7 +900,11 @@ enum CalculatorSheet {
         if let previous, previous.angle == angle, previous.locale == smart.locale,
            previous.calendar == smart.calendar, previous.timeZone == smart.timeZone {
             let age = smart.now.timeIntervalSince(previous.timeAnswersMadeAt)
-            let timeCurrent = previous.firstTimeDependent == nil || (0..<timeAnswersFresh).contains(age)
+            // Current for a second, and never past a minute boundary on the clock: dates
+            // ("days until …") change at midnight, which is one.
+            let sameMinute = (smart.now.timeIntervalSinceReferenceDate / 60).rounded(.down)
+                == (previous.timeAnswersMadeAt.timeIntervalSinceReferenceDate / 60).rounded(.down)
+            let timeCurrent = previous.firstTimeDependent == nil || ((0..<timeAnswersFresh).contains(age) && sameMinute)
             // Nothing changed and no time answer is due: every redraw (a window drag redraws
             // each frame) costs one comparison, not a stride of lines.
             if timeCurrent, lines.count == previous.lines.count,

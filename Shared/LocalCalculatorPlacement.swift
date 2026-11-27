@@ -291,7 +291,8 @@ enum LocalCalculatorStashGeometry {
                    width: Self.strip, height: length)
         }
         var placed: (center: CGFloat, length: CGFloat)?
-        for length in [longest, min(longest, touchDepth)] where placed == nil {
+        // Bounds shorter than a touch target leave no place to tap (only the button restores).
+        for length in [longest, min(longest, touchDepth)] where placed == nil && bounds.height >= touchDepth {
             // Centres whose touch area (at least 44 pt tall) stays inside the bounds and off
             // every obstacle across the strip's band.
             let reach = max(length, touchDepth) / 2

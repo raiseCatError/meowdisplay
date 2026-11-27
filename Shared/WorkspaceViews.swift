@@ -233,8 +233,7 @@ struct WorkspaceChromeView: View {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     let pane = paneTitleRow(rect)
                     let end = labelStripEnd[id] ?? pane.minX
-                    let besideTitle = end > pane.minX && end < pane.maxX
-                        && (onAppMenuBarActivity == nil || pane.maxX - end + 2 >= PaneMenuBar.preferredWidth)
+                    let besideTitle = PaneMenuBar.fitsBesideTitle(labelsEnd: end, pane: pane)
                     let barPane = besideTitle
                         ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
                         : pane
@@ -2426,6 +2425,13 @@ struct PaneMenuBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static let preferredWidth: CGFloat = 120
+
+    /// Whether the bar goes in the title row after the labels ending at `labelsEnd`: only
+    /// with room for the whole bar there, else on its own row below, where it always draws.
+    /// (Tabs measure only their own width, so a short tab row leaves a narrow gap.)
+    static func fitsBesideTitle(labelsEnd end: CGFloat, pane: CGRect) -> Bool {
+        PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: end, pane: pane, barWidth: preferredWidth)
+    }
     private static let height: CGFloat = 28
     private static let toggleSize: CGFloat = 44
 

@@ -336,7 +336,11 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .animation(.easeOut(duration: 0.2), value: keyboard.top)
         .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.86),
                    value: model.stash)
-        .preference(key: LocalCalculatorFramesPreference.self, value: model.stash == nil ? panel.map { [$0] } ?? [] : [])
+        // Where it is drawn: while dragged, its live frame (the part on screen), so the arrow
+        // keys and the workspace keep clear of where it is, not where it was.
+        .preference(key: LocalCalculatorFramesPreference.self,
+                    value: model.stash == nil ? (dragFrame.map { $0.intersection(bounds) }.flatMap { $0.isNull ? nil : $0 }
+                                                 ?? panel).map { [$0] } ?? [] : [])
         .preference(key: LocalCalculatorStashFramesPreference.self, value: stashOccupied(panel: panel, bounds: bounds))
         // Stashed through a rotation (or a keyboard change): it keeps coming back flush with
         // its edge in the bounds it has now, wherever it is brought back from.
