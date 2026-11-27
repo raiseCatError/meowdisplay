@@ -314,6 +314,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     // Dragged past the bounds: only the part inside them (what it reports, below).
                     .clipShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
                                                             ?? visibleWhileDragged(shown, bounds: bounds)))
+                    // A clip only changes what is drawn: the part cut off takes no touches either.
+                    .contentShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
+                                                               ?? visibleWhileDragged(shown, bounds: bounds)))
                     .allowsHitTesting(waiting == nil)
                     .accessibilityHidden(waiting != nil)
                     .position(x: shown.midX, y: shown.midY)

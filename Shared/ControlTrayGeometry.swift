@@ -1034,25 +1034,42 @@ enum WorkspaceOverlayPlacement {
         return row
     }
 
-    /// The pane menu bar's own row, used when it doesn't fit beside the tabs: just below the
-    /// title row (`titleRow`), clear of the controls as the tabs are, lower in the pane when
-    /// they cover it. The bar draws `paneMenuBarInset` down its row and its 44 pt menu button
-    /// reaches `paneMenuButtonReach` below the row, so each control counts as that much taller.
-    static func paneMenuRow(pane: CGRect, titleRow: CGRect, safe: CGRect?, avoiding controls: [CGRect]) -> CGRect {
+    /// The pane menu bar's own row, used when it doesn't fit beside the tabs: from just below
+    /// the title row (`titleRow`) down, the first run inside the pane where the whole bar fits
+    /// clear of the controls: at least `minimumWidth` wide (what the bar needs to be drawn) and
+    /// `paneMenuFootprint` tall (its top inset and 44 pt menu button), never reaching past the
+    /// pane. Where no run fits, the row it always had (like the tabs, which also stay in their
+    /// top row when no clear one is left).
+    static func paneMenuRow(pane: CGRect, titleRow: CGRect, safe: CGRect?, avoiding controls: [CGRect],
+                            minimumWidth: CGFloat) -> CGRect {
+        let area = usable(picture: pane, safe: safe)
         let top = titleRow.minY + paneMenuRowOffset
-        let below = CGRect(x: pane.minX, y: top, width: pane.width, height: max(0, pane.maxY - top))
-        let reach = paneMenuButtonReach
-        let grown = controls.filter { !$0.isNull && !$0.isEmpty }
-            .map { CGRect(x: $0.minX, y: $0.minY - reach, width: $0.width, height: $0.height + reach) }
-        return paneTitleRow(pane: below, safe: safe, avoiding: grown)
+        let fallback = CGRect(x: titleRow.minX, y: top, width: titleRow.width, height: paneTitleHeight)
+        let blocks = controls.filter { !$0.isNull && !$0.isEmpty }.map { $0.insetBy(dx: -gap, dy: -gap) }
+        var y = max(top, area.minY)
+        for _ in 0...blocks.count {
+            guard y + paneMenuFootprint <= area.maxY + 0.5 else { break }
+            let band = CGRect(x: area.minX, y: y, width: area.width, height: paneMenuFootprint)
+            let hits = blocks.filter { $0.intersects(band) }.sorted { $0.minX < $1.minX }
+            var x = area.minX
+            for hit in hits + [CGRect(x: area.maxX, y: y, width: 0, height: paneMenuFootprint)] {
+                if min(hit.minX, area.maxX) - x >= minimumWidth - 0.5 {
+                    return CGRect(x: x, y: y, width: min(hit.minX, area.maxX) - x, height: paneTitleHeight)
+                }
+                x = max(x, hit.maxX)
+            }
+            guard let next = hits.map(\.maxY).filter({ $0 > y }).min() else { break }
+            y = next
+        }
+        return fallback
     }
 
     /// The menu bar's row starts this far below the title row's top (its bar at 36, as before).
     static let paneMenuRowOffset: CGFloat = 31
     /// The menu bar is drawn this far down its row.
     static let paneMenuBarInset: CGFloat = 5
-    /// How far the menu bar's 44 pt button reaches below its 40 pt row.
-    static let paneMenuButtonReach: CGFloat = paneMenuBarInset + 44 - paneTitleHeight
+    /// What the menu bar takes below its row's top: its inset and its 44 pt menu button.
+    static let paneMenuFootprint: CGFloat = paneMenuBarInset + 44
 
     /// The placement chip ("Pane · Circle to switch"): centred at the top of the picture, below
     /// the notch, the Dynamic Island and the status bar. Where it would cover a pane's title or a

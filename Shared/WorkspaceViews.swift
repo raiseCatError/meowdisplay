@@ -238,7 +238,9 @@ struct WorkspaceChromeView: View {
                     let barPane = besideTitle
                         ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
                         : WorkspaceOverlayPlacement.paneMenuRow(pane: rect, titleRow: pane, safe: safeArea,
-                                                                avoiding: controls + railFrames)
+                                                                avoiding: controls + railFrames,
+                                                                minimumWidth: PaneMenuBar.minimumWidth(
+                                                                    inlineToggle: onAppMenuBarActivity != nil))
                     PaneMenuBar(menus: model.menus, pane: barPane,
                                 top: barPane.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
                                 automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
@@ -2437,6 +2439,9 @@ struct PaneMenuBar: View {
     private static let height: CGFloat = 28
     private static let toggleSize: CGFloat = 44
 
+    /// The narrowest row the bar is drawn in (with its own menu button, or titles only).
+    static func minimumWidth(inlineToggle: Bool) -> CGFloat { inlineToggle ? toggleSize + 24 : preferredWidth }
+
     private var expanded: Bool {
         menus.barShown && (!automaticallyHidden || !menus.open.isEmpty || voiceOver)
     }
@@ -2444,7 +2449,7 @@ struct PaneMenuBar: View {
     var body: some View {
         let inlineToggle = onActivity != nil
         if (menus.barShown || inlineToggle), menus.tile != nil,
-           pane.width >= (inlineToggle ? Self.toggleSize + 24 : Self.preferredWidth) {
+           pane.width >= Self.minimumWidth(inlineToggle: inlineToggle) {
             ZStack(alignment: .topLeading) {
                 if !menus.open.isEmpty {
                     // Tap anywhere else to close; nothing reaches the Mac while a menu is open.

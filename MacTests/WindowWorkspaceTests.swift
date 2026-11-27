@@ -568,13 +568,14 @@ final class PaneMenuBarPlacementTests: XCTestCase {
     func testTheBarsOwnRowKeepsClearOfAControlBelowTheTabs() {
         let pane = CGRect(x: 0, y: 0, width: 400, height: 600)
         let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [])
-        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: []),
+        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [], minimumWidth: 68),
                        CGRect(x: 0, y: 31, width: 400, height: 40), "nothing in the way: where it always was (bar at 36)")
 
         let control = CGRect(x: 280, y: 50, width: 120, height: 60)
         let titleWithControl = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
         XCTAssertEqual(titleWithControl, title, "the control is below the tabs, not beside them")
-        let row = WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: titleWithControl, safe: nil, avoiding: [control])
+        let row = WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: titleWithControl, safe: nil, avoiding: [control],
+                                                       minimumWidth: 68)
         let top = row.minY + WorkspaceOverlayPlacement.paneMenuBarInset
         let bar = CGRect(x: row.minX + 6, y: top, width: row.width - 12, height: 28)
         let button = CGRect(x: bar.maxX - 44, y: top, width: 44, height: 44)
@@ -584,6 +585,39 @@ final class PaneMenuBarPlacementTests: XCTestCase {
 
         let old = CGRect(x: title.maxX - 6 - 44, y: title.minY + 36, width: 44, height: 44)
         XCTAssertTrue(old.intersects(control), "the row reused from the tabs put the button under the control")
+    }
+
+    // Codex round 18: the row fits the whole bar (its width and its 44 pt button) inside the pane,
+    // else it stays where it always was.
+    func testTheBarsOwnRowFitsTheWholeBarInsideThePane() {
+        func row(_ pane: CGRect, _ control: CGRect, width: CGFloat) -> CGRect {
+            let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
+            return WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [control],
+                                                         minimumWidth: width)
+        }
+        // A 64 pt gap is too narrow for the 68 pt bar: no row there.
+        let small = CGRect(x: 0, y: 0, width: 120, height: 120)
+        let side = CGRect(x: 72, y: 50, width: 48, height: 70)
+        let narrow = row(small, side, width: 68)
+        XCTAssertEqual(narrow, CGRect(x: 0, y: 31, width: 120, height: 40), "nothing fits: the row it always had")
+        // A full-width control: a row below it would reach into the next pane, so none is taken.
+        let short = CGRect(x: 0, y: 0, width: 300, height: 138)
+        let across = CGRect(x: 0, y: 50, width: 300, height: 40)
+        let below = row(short, across, width: 68)
+        XCTAssertLessThanOrEqual(below.minY + WorkspaceOverlayPlacement.paneMenuFootprint, short.maxY)
+        XCTAssertEqual(below, CGRect(x: 0, y: 31, width: 300, height: 40))
+        // With room below the control, it goes there, whole bar inside the pane.
+        let tall = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let lower = row(tall, across, width: 120)
+        XCTAssertEqual(lower.minY, across.maxY + WorkspaceOverlayPlacement.gap)
+        XCTAssertGreaterThanOrEqual(lower.width, 120)
+        XCTAssertLessThanOrEqual(lower.minY + WorkspaceOverlayPlacement.paneMenuFootprint, tall.maxY)
+        // A gap wide enough for the titles-only bar (120 pt) is taken; a narrower one is passed over.
+        let wide = CGRect(x: 0, y: 0, width: 400, height: 400)
+        let middle = CGRect(x: 110, y: 40, width: 60, height: 60)
+        let passed = row(wide, middle, width: 120)
+        XCTAssertEqual(passed.minX, middle.maxX + WorkspaceOverlayPlacement.gap, "the 102 pt run before it is too narrow")
+        XCTAssertGreaterThanOrEqual(passed.width, 120)
     }
 
     /// `PaneMenuBar` (a view) isn't in this target; its preferred width.
