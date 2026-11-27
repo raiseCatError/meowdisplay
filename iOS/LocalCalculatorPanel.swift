@@ -515,6 +515,8 @@ struct LocalCalculatorPanel: View {
                     haptics.play(.selection)
                 }
             }
+            // Notes copy an answer by tapping it; this copies the keypad's result.
+            if model.mode != .notes {
             Button(action: copy) {
                 Image(systemName: showsCopied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 13, weight: .semibold))
@@ -529,6 +531,7 @@ struct LocalCalculatorPanel: View {
             .accessibilityLabel(Text("Copy Result", comment: "Local calculator: copies the result to this device's clipboard."))
             .accessibilityHint(Text("Copies the number to this device's clipboard.",
                                     comment: "Accessibility hint for the local calculator's Copy Result button."))
+            }
         }
     }
 
@@ -610,6 +613,8 @@ private struct LocalCalculatorKeypadView: View {
 
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// History over the keypad, for a window too short to show it above.
+    @State private var historyShown = false
 
     private static let gap: CGFloat = 6
 
@@ -623,18 +628,59 @@ private struct LocalCalculatorKeypadView: View {
             let keypadHeight = keyHeight * keyRows + Self.gap * (keyRows - 1)
             let displayHeight = min(96, max(56, size.height - keypadHeight - Self.gap))
             let historyHeight = max(0, size.height - keypadHeight - displayHeight - Self.gap * 2)
+            let compact = historyHeight < 24
             VStack(spacing: Self.gap) {
-                if historyHeight >= 24 {
+                if !compact {
                     historyList.frame(height: historyHeight)
                 }
                 display.frame(height: displayHeight)
+                    .overlay(alignment: .topLeading) {
+                        if compact, !model.history.isEmpty { historyButton }
+                    }
                 keypad(keyHeight: keyHeight, width: size.width).frame(height: keypadHeight)
             }
             .frame(width: size.width, height: size.height, alignment: .bottom)
+            .overlay {
+                if compact, historyShown {
+                    VStack(spacing: 6) {
+                        HStack {
+                            Text("History", comment: "Local calculator: heading of the history shown over the keypad.")
+                                .font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.9))
+                            Spacer()
+                            Button { historyShown = false } label: {
+                                Image(systemName: "xmark").font(.system(size: 12, weight: .bold))
+                                    .frame(width: 30, height: 30).background(Circle().fill(Color.white.opacity(0.12)))
+                            }
+                            .buttonStyle(.plain).foregroundStyle(.white)
+                            .accessibilityLabel(Text("Close History", comment: "Local calculator: closes the history."))
+                        }
+                        historyList
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.92)))
+                    .transition(.opacity)
+                }
+            }
+            .onChange(of: compact) { if !$0 { historyShown = false } }
+            .onChange(of: model.keypad.input) { _ in historyShown = false }
         }
     }
 
     // MARK: History
+
+    private var historyButton: some View {
+        Button { historyShown = true; haptics.play(.selection) } label: {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+                .frame(minWidth: 36, minHeight: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("History", comment: "Local calculator: shows past calculations in a short window."))
+    }
 
     private var historyList: some View {
         ScrollViewReader { reader in
@@ -1142,6 +1188,8 @@ final class NotesEditorView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        // Answers sit beside the scrolling text, not in it: keep them inside the editor.
+        clipsToBounds = true
         textView.backgroundColor = .clear
         textView.font = UIFont.monospacedDigitSystemFont(ofSize: 18, weight: .regular)
         textView.textColor = .white

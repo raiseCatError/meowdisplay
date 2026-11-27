@@ -278,4 +278,14 @@ final class CalculatorExpressionTests: XCTestCase {
         let notes = CalculatorSheet.evaluate(lines: ["n = 4", "n!", "five, plus three"], angle: .degrees)
         XCTAssertEqual(notes.map(\.value), [4, 24, 8])
     }
+
+    func testRoundFiveFindings() {
+        XCTAssertNil(keypad([.digit(1), .digit(0), .percent, .factorial, .equals]).currentValue, "0.1! is undefined")
+        let pad = keypad([.digit(2), .operation(.add), .digit(3), .power, .digit(2), .percent, .equals, .equals])
+        let once = value("2 + 3^2%")!
+        XCTAssertEqual(pad.currentValue.map { LocalCalculatorFormat.rounded($0, significantDigits: 12) },
+                       LocalCalculatorFormat.rounded(once + (once - 2), significantDigits: 12), "= again adds the same amount")
+        let comma = keypad([.digit(1), .decimalPoint, .digit(5)])
+        XCTAssertEqual(comma.displayInput(locale: Locale(identifier: "de_DE")), "1,5")
+    }
 }

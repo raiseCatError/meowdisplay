@@ -205,7 +205,7 @@ enum CalculatorSmartAnswers {
     }
 
     private static func unitConversion(_ text: String, context: CalculatorSmartContext) -> CalculatorSmartAnswer? {
-        guard let m = match(text, #"(-?[\d.,]+(?:\s*[-+*/x×÷]\s*[\d.,]+)*)\s*([a-z°"²/ .]+?)\s+(?:in|to|into|as|=|->|→)\s+([a-z°"²/ .]+?)"#),
+        guard let m = match(text, #"(-?[\d.,]+(?:\s*[-+*/x×÷]\s*[\d.,]+)*)\s*([a-z°"][a-z0-9°"²³/ .]*?)\s+(?:in|to|into|as|=|->|→)\s+([a-z°"][a-z0-9°"²³/ .]*?)"#),
               let amount = number(m[1]), let from = unit(m[2]), let to = unit(m[3]),
               type(of: from.unit).baseUnit().symbol == type(of: to.unit).baseUnit().symbol else { return nil }
         let measurement = Measurement(value: NSDecimalNumber(decimal: amount).doubleValue, unit: from.unit)
@@ -395,6 +395,9 @@ enum CalculatorSmartAnswers {
         let range = NSRange(text.startIndex..., in: text)
         guard let result = detector.firstMatch(in: text, range: range), result.range.length >= range.length - 1,
               let date = result.date else { return nil }
+        // "since 25 dec": a yearless day comes round every year, so its last one.
+        if past, isRecurring(text), date > context.now,
+           let last = calendar.date(byAdding: .year, value: -1, to: date) { return last }
         return date
     }
 

@@ -261,10 +261,11 @@ struct CalculatorKeypad: Equatable {
             let step = Self.splitLastStep(in: answeredSource)
             repeatOperation = step?.operation
             repeatOperand = step.map { step in
+                // A percentage repeats as the amount the engine added or took away (2 + 3^2% is
+                // its own number, 50 + 10% adds 5), read back from the answer.
                 guard ["+", "−"].contains(step.operation), step.operand.hasSuffix("%"),
-                      let left = CalculatorExpression.value(step.left, context: context),
-                      let percent = CalculatorExpression.value(step.operand, context: context) else { return step.operand }
-                let amount = left * percent
+                      let left = CalculatorExpression.value(step.left, context: context) else { return step.operand }
+                let amount = step.operation == "+" ? value - left : left - value
                 return amount < 0 ? "(" + amount.description + ")" : amount.description
             }
             answeredExpression = displayed(expression, locale: Locale.current)
@@ -315,9 +316,14 @@ struct CalculatorKeypad: Equatable {
 
     /// `expression` as shown: the answer token as its number.
     func displayed(_ expression: String, locale: Locale) -> String {
-        guard let answer = lastAnswer, expression.contains(Self.answerToken) else { return expression }
+        // Typed decimals in the locale's own mark (the answer below is formatted already).
+        var shown = expression
+        if let separator = locale.decimalSeparator, separator != "." {
+            shown = shown.replacingOccurrences(of: ".", with: separator)   // only numbers hold a "."
+        }
+        guard let answer = lastAnswer, shown.contains(Self.answerToken) else { return shown }
         let text = LocalCalculatorFormat.display(answer, locale: locale).text
-        return Self.replacingAnswerToken(in: expression, with: answer < 0 ? "(" + text + ")" : text)
+        return Self.replacingAnswerToken(in: shown, with: answer < 0 ? "(" + text + ")" : text)
     }
 
     /// The input as shown.

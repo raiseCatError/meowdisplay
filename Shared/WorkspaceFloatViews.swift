@@ -511,6 +511,16 @@ struct WorkspaceFloatLayer: View {
                     edgeResizer(id, rect: rect, handle: handle,
                                 avoiding: handle.horizontal != 0 && handle.vertical != 0 ? cornerBusy : busy)
                 }
+                // Where the pill covers the top edge, a strip just above it still moves that edge.
+                let abovePill = CGRect(x: pill.minX, y: pill.minY - 12, width: pill.width, height: 12)
+                if pill.minY <= rect.minY + 4, pill.maxY >= rect.minY - 12, !covered(abovePill) {
+                    Color.white.opacity(0.001)
+                        .frame(width: abovePill.width, height: abovePill.height)
+                        .contentShape(Rectangle())
+                        .position(x: abovePill.midX, y: abovePill.midY)
+                        .gesture(resizeGesture(id, handle: .top))
+                        .accessibilityHidden(true)
+                }
             }
         }
         let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)

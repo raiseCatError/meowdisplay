@@ -189,7 +189,7 @@ enum CalculatorLanguage {
         while let last = s.trimmingCharacters(in: .whitespaces).last, "=?.!".contains(last) {
             // Keep a factorial "!" after a digit or ")".
             let trimmed = s.trimmingCharacters(in: .whitespaces)
-            if last == "!", let before = trimmed.dropLast().last, before.isNumber || before == ")" { break }
+            if last == "!", let before = trimmed.dropLast().last, before.isNumber || ")%²³!".contains(before) { break }
             // …and after a constant or a defined name ("ans!", "n!", "π!", which the parser rejects).
             let head = trimmed.dropLast().trimmingCharacters(in: .whitespaces)
             if last == "!", let word = head.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).last,

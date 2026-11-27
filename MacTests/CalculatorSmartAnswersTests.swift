@@ -87,4 +87,9 @@ final class CalculatorSmartAnswersTests: XCTestCase {
         XCTAssertEqual(answer("days until yesterday"), "1 day ago")
         XCTAssertEqual(answer("days until 25 dec"), "28 days")
     }
+
+    func testRoundFiveFindings() {
+        XCTAssertNotNil(answer("1 m2 in ft2"), "units whose names hold digits convert")
+        XCTAssertEqual(answer("days since 25 dec"), "337 days")
+    }
 }
