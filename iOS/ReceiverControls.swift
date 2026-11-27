@@ -2288,17 +2288,27 @@ extension ReceiverControlOverlay {
         // would take another lane, it leads the Function rail instead. With no
         // Main rail (the tray can't show) it is the Function edge's first
         // group of its own, so it still shows in View Only.
-        // Beside the collapsed gear: the gear's own floating pass with one more end group
-        // before it (the gear keeps its place at the end), reserving no strip.
-        let besideGearCell: CGRect? = padCollapsed && showsCalculator ? PadEdgeGeometry.layout(
-            container: container, safeInsets: safeInsets, reservesStrips: false,
-            mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end],
-            functionGroupCounts: [],
-            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: nil,
-            divisions: divisions).mainCells.first : nil
+        // With no Main rail, the calculator floats in no rail, like the gear: beside the gear
+        // first (its floating pass with one more end group before it, the gear keeping its
+        // place), then the other end of that edge, then the opposite edge.
+        let floatingPass: (ControlEdge, [Int], [PadGroupAlignment]) -> PadEdgeLayout = { edge, counts, alignments in
+            PadEdgeGeometry.layout(
+                container: container, safeInsets: safeInsets, reservesStrips: false,
+                mainEdge: edge, functionEdge: functionEdge, mainGroupCounts: counts, mainGroupAlignments: alignments,
+                functionGroupCounts: [], metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: nil,
+                divisions: divisions)
+        }
+        let floatingCells: [CGRect] = padCollapsed && showsCalculator ? [
+            floatingPass(mainEdge, [1, 1], [.end, .end]).mainCells.first,
+            floatingPass(mainEdge, [1, 1], [.start, .end]).mainCells.first,
+            floatingPass(mainEdge.opposite, [1], [.end]).mainCells.first,
+            floatingPass(mainEdge.opposite, [1], [.start]).mainCells.first,
+        ].compactMap { $0 } : []
+        let gearCell: [CGRect] = padCollapsed && showsCalculator
+            ? floatingPass(mainEdge, [1], [.end]).mainCells.prefix(1).map { $0.insetBy(dx: -4, dy: -4) } : []
         let placement = PadRailComposition.calculatorPlacement(main: padCollapsed ? [] : padMainGroups,
-                                                               calculator: showsCalculator,
-                                                               besideGear: besideGearCell) { railPass($0, $1, nil) }
+                                                               calculator: showsCalculator, floating: floatingCells,
+                                                               keepClear: gearCell) { railPass($0, $1, nil) }
         let mainGroups = placement.main
         let mainKinds = mainGroups.flatMap { $0 }
         let calculatorOnMain = placement.placement == .settingsGroup
@@ -2320,14 +2330,9 @@ extension ReceiverControlOverlay {
             PadPlacedControl(id: padID(kind), kind: kind,
                              frame: PadEdgeGeometry.circleFrame(inCell: cell, metrics: metrics), cell: cell)
         }
-        let besideGear: CGRect? = placement.placement == .besideGear ? PadEdgeGeometry.layout(
-            container: container, safeInsets: safeInsets, reservesStrips: false,
-            mainEdge: mainEdge, functionEdge: functionEdge, mainGroupCounts: [1, 1], mainGroupAlignments: [.end, .end],
-            functionGroupCounts: [],
-            metrics: PadControlMetrics(scale: padMetricsScale), keyboardTop: keyboardTop,
-            divisions: divisions).mainCells.first.map {
-                PadEdgeGeometry.circleFrame(inCell: $0, metrics: PadControlMetrics(scale: padMetricsScale))
-            } : nil
+        let besideGear: CGRect? = placement.placement.floatingCell.map {
+            PadEdgeGeometry.circleFrame(inCell: $0, metrics: PadControlMetrics(scale: padMetricsScale))
+        }
         let calculatorButton: CGRect? = calculatorOnMain
             ? mainControls.first { $0.kind == .calculator }?.frame
             : calculatorOnFunction

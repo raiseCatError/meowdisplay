@@ -70,6 +70,16 @@ enum ControlEdge: String, Codable, CaseIterable, Identifiable {
 
     /// Controls along a left/right edge stack vertically.
     var stacksVertically: Bool { self == .leading || self == .trailing }
+
+    /// The edge across the screen.
+    var opposite: ControlEdge {
+        switch self {
+        case .leading: return .trailing
+        case .trailing: return .leading
+        case .top: return .bottom
+        case .bottom: return .top
+        }
+    }
 }
 
 /// Bounded iPad `Control Size`. The floor keeps a control's hit target
@@ -928,19 +938,27 @@ extension PadRailComposition {
         case settingsGroup
         /// The Function rail's first group of its own.
         case leadsFunction
-        /// Floating beside the collapsed gear at the Main edge, in no rail (no strip is
-        /// reserved for it).
-        case besideGear
+        /// Floating in no rail (no strip is reserved for it), in this cell: beside the
+        /// collapsed gear when that is clear, else another clear floating spot.
+        case floating(CGRect)
+
+        var floatingCell: CGRect? {
+            if case .floating(let cell) = self { return cell }
+            return nil
+        }
     }
 
     /// Where the calculator's button goes, given `main` (from `mainGroups(calculator: true)`,
     /// or empty when the Main rail is collapsed) and a layout pass for a Main rail and
     /// whether the button leads the Function rail. The first place that leaves every other
     /// control where it is and the picture its size: the Settings group, then the Function
-    /// rail; with no Main rail, beside the gear when that is clear of the Function rail.
-    /// If no place does, the Function rail when it keeps the picture's size and lanes
+    /// rail. With no Main rail: the first of `floating` (cells in no rail, beside the gear
+    /// first) clear of the Function rail and of `keepClear` (the gear); else the Function
+    /// rail if it keeps the picture's size and lanes and stays clear of the gear. If no
+    /// place keeps everything, the Function rail when it keeps the picture's size and lanes
     /// (its groups may shift), else the Settings group.
-    static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool, besideGear: CGRect? = nil,
+    static func calculatorPlacement(main: [[CustomControlKind]], calculator: Bool,
+                                    floating: [CGRect] = [], keepClear: [CGRect] = [],
                                     layout: (_ main: [[CustomControlKind]], _ calculatorLeadsFunction: Bool) -> PadEdgeLayout)
         -> (main: [[CustomControlKind]], placement: CalculatorPlacement) {
         let without = main.map { $0.filter { $0 != .calculator } }.filter { !$0.isEmpty }
@@ -963,16 +981,26 @@ extension PadRailComposition {
         if keepsEverything(leading, mainCells: leading.mainCells, functionCells: Array(leading.functionCells.dropFirst())) {
             return (without, .leadsFunction)
         }
-        // With no Main rail: beside the gear (`besideGear`, its cell), unless a Function
-        // control is there (both on one edge in Overlay).
-        if without.isEmpty, let besideGear,
-           !reference.functionCells.contains(where: { $0.intersects(besideGear) }) {
-            return (without, .besideGear)
+        func clear(_ cell: CGRect, of others: [CGRect]) -> Bool {
+            !others.contains { $0.intersects(cell) } && !keepClear.contains { $0.intersects(cell) }
+        }
+        let keepsPicture = leading.canvas == reference.canvas && leading.laneCounts == reference.laneCounts
+        if without.isEmpty {
+            // No Main rail: a floating spot clear of everything (both rails on one edge in
+            // Overlay can cover the gear's neighbour), else the Function rail if that keeps
+            // the picture's size and every chip clear of the gear; never a wider Strip.
+            if let cell = floating.first(where: { clear($0, of: reference.functionCells) }) {
+                return (without, .floating(cell))
+            }
+            if keepsPicture, !leading.functionCells.contains(where: { cell in keepClear.contains { $0.intersects(cell) } }) {
+                return (without, .leadsFunction)
+            }
+            if let cell = floating.first { return (without, .floating(cell)) }
+            return (without, .leadsFunction)
         }
         // Something has to give: keep the picture's size and lanes if the Function rail
         // can (its own groups may shift along it), else the Settings group.
-        if leading.canvas == reference.canvas && leading.laneCounts == reference.laneCounts
-            || !joined.contains(.calculator) {
+        if keepsPicture || !joined.contains(.calculator) {
             return (without, .leadsFunction)
         }
         return (main, .settingsGroup)

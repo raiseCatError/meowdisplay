@@ -966,7 +966,10 @@ enum CalculatorSheet {
         result = result.replacingOccurrences(of: #"^(\s*),(?=\d)"#, with: "$1.", options: .regularExpression)
         // The operators and openers the calculator reads (`CalculatorLanguage.normalize`, the
         // lexer), then any spaces.
-        return result.replacingOccurrences(of: #"([-+−–—×÷∕∗⋅·*/^(\[{=%]\s*),(?=\d)"#, with: "$1.",
+        result = result.replacingOccurrences(of: #"([-+−–—×÷∕∗⋅·*/^(\[{=%√∛]\s*),(?=\d)"#, with: "$1.",
+                                             options: .regularExpression)
+        // "x" and "mod" between numbers ("2 x ,5", "7 mod ,5") read as operators too.
+        return result.replacingOccurrences(of: #"(?i)(\d\s*(?:x|mod)\s*),(?=\d)"#, with: "$1.",
                                            options: .regularExpression)
     }
 
