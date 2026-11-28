@@ -336,12 +336,14 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     // A clip only changes what is drawn: the part cut off takes no touches either.
                     .contentShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
                                                                ?? visibleWhileDragged(shown, bounds: bounds)))
+                    .position(x: shown.midX, y: shown.midY)
+                    // Reduce Motion: stashing and bringing it back only fade, never slide.
+                    .transaction { if reduceMotion { $0.animation = nil } }
                     // Stashed, the window itself isn't drawn: its strip's card stands for it (no live
                     // pixels around the card's corners); it fades back in as it comes out.
                     .opacity(waiting == nil ? 1 : 0)
                     .allowsHitTesting(waiting == nil)
                     .accessibilityHidden(waiting != nil)
-                    .position(x: shown.midX, y: shown.midY)
                     .transition(reduceMotion
                                 ? .opacity
                                 : .scale(scale: 0.92, anchor: Self.unitPoint(of: anchor, in: panel))
@@ -463,7 +465,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
         // Where it is drawn: while slid, its live place, so the workspace gives way to it there.
         let waiting = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: sliding(stash, size: panel.size, bounds: bounds),
                                                            bounds: bounds, obstacles: obstacles + stashObstacles)
-        return [waiting.touch ?? waiting.strip]
+        // Nothing is drawn without a touch target, so nothing is reserved either.
+        return waiting.touch.map { [$0] } ?? []
     }
 
     /// How far the window shows past its strip: a little while a touch rests on the strip (a
@@ -598,6 +601,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 }
             })
         .position(x: area.midX, y: area.midY)
+        // It moves along its edge at once (controls opening over it, a rotation, a slide let
+        // go), never animating across a control.
+        .animation(nil, value: strip)
         .transition(.opacity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
