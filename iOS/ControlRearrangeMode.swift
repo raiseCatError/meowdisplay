@@ -25,6 +25,8 @@ import UIKit
 struct ControlRearrangeContent: Equatable {
     var tray: [ControlTrayItem]
     var function: [ShortcutItem]
+    /// How the trays stand in this orientation, so the preview stands the same way.
+    var axis: ControlTrayAxis = .horizontal
 }
 
 struct ControlRearrangeSheet: View {
@@ -149,9 +151,10 @@ private struct ControlRearrangeTrayPage: View {
     }
 
     var body: some View {
-        let items = content(landscape).tray
+        let shown = content(landscape)
+        let items = shown.tray
         ControlRearrangeList(
-            landscape: $landscape, landscapeNow: landscapeNow,
+            landscape: $landscape, landscapeNow: landscapeNow, axis: shown.axis,
             rows: items.map { ControlRearrangeRow(id: $0.rawValue, title: $0.title, face: .tray($0)) },
             footer: store.isPad
                 ? Text("On iPad the modifiers reorder here; the rail keeps its other buttons in place.",
@@ -188,10 +191,11 @@ private struct ControlRearrangeFunctionPage: View {
     }
 
     var body: some View {
-        let items = content(landscape).function
+        let shown = content(landscape)
+        let items = shown.function
         let ids = items.map(\.id)
         ControlRearrangeList(
-            landscape: $landscape, landscapeNow: landscapeNow,
+            landscape: $landscape, landscapeNow: landscapeNow, axis: shown.axis,
             rows: items.map { ControlRearrangeRow(id: $0.id, title: $0.title, face: .shortcut($0.face)) },
             footer: Text("Groups keep their sizes: a button moved into another group joins it.",
                          comment: "Rearrange Controls: footer on the Function Tray page."),
@@ -289,6 +293,8 @@ private struct ControlRearrangeList: View {
     /// nil: the order is the same in both orientations.
     var landscape: Binding<Bool>?
     let landscapeNow: Bool
+    /// How the tray stands in the shown orientation.
+    var axis: ControlTrayAxis = .horizontal
     let rows: [ControlRearrangeRow]
     let footer: Text
     let onMove: (Int, Int) -> Void
@@ -315,7 +321,7 @@ private struct ControlRearrangeList: View {
             }
             if !rows.isEmpty {
                 Section {
-                    ControlRearrangePreview(faces: rows.map(\.face))
+                    ControlRearrangePreview(faces: rows.map(\.face), axis: axis)
                         .moveDisabled(true)
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                         rowView(row, index: index)
@@ -390,21 +396,45 @@ struct ControlRearrangeFaceView: View {
     }
 }
 
-/// The run's faces in order, as a strip: what the tray will look like.
+/// The run's faces in order, as a strip standing the way the tray does: what the tray will
+/// look like.
 private struct ControlRearrangePreview: View {
     let faces: [ControlRearrangeFace]
+    var axis: ControlTrayAxis = .horizontal
+
+    private static let diameter: CGFloat = 34
+    private static let spacing: CGFloat = 6
+    /// A standing strip scrolls past this, so the rows below stay in reach.
+    private static let maximumColumn: CGFloat = 220
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
-                    ControlRearrangeFaceView(face: face, diameter: 34)
+        Group {
+            switch axis {
+            case .horizontal:
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Self.spacing) { faceViews }
+                        .padding(.vertical, 4)
+                        .animation(.snappy(duration: 0.25), value: faces)
                 }
+            case .vertical:
+                let count = CGFloat(faces.count)
+                let column = count * Self.diameter + max(0, count - 1) * Self.spacing + 8
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: Self.spacing) { faceViews }
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity)
+                        .animation(.snappy(duration: 0.25), value: faces)
+                }
+                .frame(height: min(column, Self.maximumColumn))
             }
-            .padding(.vertical, 4)
-            .animation(.snappy(duration: 0.25), value: faces)
         }
         .accessibilityHidden(true)
+    }
+
+    private var faceViews: some View {
+        ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
+            ControlRearrangeFaceView(face: face, diameter: Self.diameter)
+        }
     }
 }
 

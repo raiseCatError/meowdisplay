@@ -2197,7 +2197,10 @@ extension ReceiverControlOverlay {
         if store.isPad { tray = tray.filter { $0.modifier != nil } }
         let function = store.preferences.functionTrayCanBeShown
             ? store.activeFunctionTrayProfile.visibleGroups(landscape: landscape).flatMap { $0 } : []
-        return ControlRearrangeContent(tray: tray, function: function)
+        // iPhone's trays stand on their side in landscape (`ControlTrayGeometry`); iPad's
+        // modifiers keep their strip.
+        let axis: ControlTrayAxis = !store.isPad && landscape ? .vertical : .horizontal
+        return ControlRearrangeContent(tray: tray, function: function, axis: axis)
     }
 
     fileprivate func rearrangeSheet() -> some View {
