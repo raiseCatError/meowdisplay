@@ -768,10 +768,10 @@ struct LocalCalculatorPanel: View {
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
             .fill(.ultraThinMaterial)
+            // One flat dark tint, like the workspace's other floating chrome (owner QA, round 5:
+            // no gradient).
             .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .fill(LinearGradient(colors: [Color(red: 0.07, green: 0.08, blue: 0.12).opacity(0.86),
-                                              Color.black.opacity(0.78)],
-                                     startPoint: .top, endPoint: .bottom)))
+                .fill(Color(white: 0.06, opacity: 0.88)))
             .overlay(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75))
             .shadow(color: .black.opacity(0.35), radius: 14, y: 4)
