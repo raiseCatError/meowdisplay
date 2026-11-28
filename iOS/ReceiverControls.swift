@@ -974,6 +974,7 @@ struct ReceiverControlOverlay<Receiver: ReceiverControlSource>: View {
                 buttonFaceDiameter: faceDiameter,
                 panelBounds: safe.safeRect(in: containerSize).insetBy(dx: LocalCalculatorPlacement.margin,
                                                                        dy: LocalCalculatorPlacement.margin),
+                dragClip: CGRect(origin: .zero, size: containerSize),
                 obstacles: [renderedMainTrayFrame] + functionFrames
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 stashObstacles: (renderedPaletteFrame.map { [$0] } ?? []) + (arrows?.occupied ?? [])
@@ -2494,6 +2495,8 @@ extension ReceiverControlOverlay {
                     layout.canvas.intersection(safeInsets.safeRect(in: containerSize))
                         .insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
                     keyboardTop: keyboardTop),
+                // Cut at the picture's edge, never over the rail.
+                dragClip: layout.canvas,
                 obstacles: layout.mainSegments.map(\.frame) + layout.functionSegments.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 stashObstacles: floatingFrames + arrowFrames + (calculatorButton.map { [$0] } ?? []),
@@ -2723,6 +2726,7 @@ extension ReceiverControlOverlay {
             LocalCalculatorLayer(
                 model: store.calculator, containerSize: containerSize, buttonFrame: calculatorButton,
                 panelBounds: area.insetBy(dx: PadControlMetrics.edgeMargin, dy: PadControlMetrics.edgeMargin),
+                dragClip: CGRect(origin: .zero, size: containerSize),
                 obstacles: controlsPlaced.filter { $0.kind != .calculator }.map(\.frame)
                     + ControlTrayGeometry.reservedObstacles(reservedRegions, avoidNotch: store.preferences.avoidNotch),
                 stashObstacles: (wheel.map { [$0.frame.insetBy(dx: -8, dy: -8)] } ?? [])

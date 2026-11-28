@@ -230,6 +230,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
     var buttonHint: String?
     /// The safe area the window must stay inside.
     let panelBounds: CGRect
+    /// Where a window dragged past `panelBounds` is cut, as a float is cut at the picture's
+    /// edge: nil cuts it at `panelBounds`.
+    var dragClip: CGRect?
     /// Other controls and reserved regions the window keeps off when it can.
     var obstacles: [CGRect] = []
     /// Everything a stashed window's strip keeps off: `obstacles` and the controls placed
@@ -330,7 +333,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                      onStash: { stashAtNearestEdge(panel, bounds: bounds) })
                     .frame(width: shown.width, height: shown.height)
                     // Stashed: only the strip (and a peek while pulled) shows, inside the bounds.
-                    // Dragged past the bounds: only the part inside them (what it reports, below).
+                    // Dragged past the screen's edge: only the part inside it (what it reports, below).
                     .clipShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
                                                             ?? visibleWhileDragged(shown, bounds: bounds)))
                     // A clip only changes what is drawn: the part cut off takes no touches either.
@@ -401,20 +404,20 @@ struct LocalCalculatorLayer<Chip: View>: View {
     }
 
     /// What the open window takes from the screen: while dragged, only its part inside the
-    /// bounds (nothing when none is); else its frame. Stashed, its strip does instead.
+    /// drag clip (nothing when none is); else its frame. Stashed, its strip does instead.
     private func occupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
         guard model.stash == nil else { return [] }
         if let dragFrame {
-            return LocalCalculatorStashGeometry.onScreen(dragFrame, bounds: bounds).map { [$0] } ?? []
+            return LocalCalculatorStashGeometry.onScreen(dragFrame, bounds: dragClip ?? bounds).map { [$0] } ?? []
         }
         return panel.map { [$0] } ?? []
     }
 
     /// The part of the window (in its own coordinates) that shows while it isn't stashed: all
-    /// of it, but while dragged only what is inside the bounds.
+    /// of it, but while dragged only what is inside the drag clip.
     private func visibleWhileDragged(_ shown: CGRect, bounds: CGRect) -> CGRect {
         guard dragFrame != nil else { return CGRect(origin: .zero, size: shown.size) }
-        guard let part = LocalCalculatorStashGeometry.onScreen(shown, bounds: bounds) else { return .zero }
+        guard let part = LocalCalculatorStashGeometry.onScreen(shown, bounds: dragClip ?? bounds) else { return .zero }
         return part.offsetBy(dx: -shown.minX, dy: -shown.minY)
     }
 
