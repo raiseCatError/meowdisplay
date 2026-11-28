@@ -408,7 +408,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
     private func occupied(panel: CGRect?, bounds: CGRect) -> [CGRect] {
         guard model.stash == nil else { return [] }
         if let dragFrame {
-            return LocalCalculatorStashGeometry.onScreen(dragFrame, bounds: dragClip ?? bounds).map { [$0] } ?? []
+            return LocalCalculatorStashGeometry.onScreen(dragFrame, bounds: dragClipping(bounds)).map { [$0] } ?? []
         }
         return panel.map { [$0] } ?? []
     }
@@ -417,8 +417,18 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// of it, but while dragged only what is inside the drag clip.
     private func visibleWhileDragged(_ shown: CGRect, bounds: CGRect) -> CGRect {
         guard dragFrame != nil else { return CGRect(origin: .zero, size: shown.size) }
-        guard let part = LocalCalculatorStashGeometry.onScreen(shown, bounds: dragClip ?? bounds) else { return .zero }
+        guard let part = LocalCalculatorStashGeometry.onScreen(shown, bounds: dragClipping(bounds)) else { return .zero }
         return part.offsetBy(dx: -shown.minX, dy: -shown.minY)
+    }
+
+    /// Where a dragged window is cut: `dragClip`, but never below the on-screen keyboard's top
+    /// (one raised mid-drag included); the bounds without a `dragClip`.
+    private func dragClipping(_ bounds: CGRect) -> CGRect {
+        guard var clip = dragClip else { return bounds }
+        if let keyboardTop = keyboard.top {
+            clip.size.height = max(0, min(clip.maxY, keyboardTop - layerOrigin.y) - clip.minY)
+        }
+        return clip
     }
 
     private func clearGestures() {

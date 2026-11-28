@@ -419,13 +419,19 @@ private struct ControlRearrangePreview: View {
             case .vertical:
                 let count = CGFloat(faces.count)
                 let column = count * Self.diameter + max(0, count - 1) * Self.spacing + 8
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: Self.spacing) { faceViews }
-                        .padding(.vertical, 4)
-                        .frame(maxWidth: .infinity)
-                        .animation(.snappy(duration: 0.25), value: faces)
+                let faceColumn = VStack(spacing: Self.spacing) { faceViews }
+                    .padding(.vertical, 4)
+                    .animation(.snappy(duration: 0.25), value: faces)
+                Group {
+                    if column <= Self.maximumColumn {
+                        faceColumn
+                    } else {
+                        // Only the column scrolls: a swipe beside it still scrolls the list.
+                        ScrollView(.vertical, showsIndicators: false) { faceColumn }
+                            .frame(width: Self.diameter + 8, height: Self.maximumColumn)
+                    }
                 }
-                .frame(height: min(column, Self.maximumColumn))
+                .frame(maxWidth: .infinity)
             }
         }
         .accessibilityHidden(true)
