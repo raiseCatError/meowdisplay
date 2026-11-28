@@ -254,19 +254,23 @@ private struct ControlRearrangePalettePage: View {
             onMove: { from, to in
                 store.updateActiveProfile { $0.moveAction(for: chord, from: from, to: to) }
                 haptics.play(.selection)
-            },
-            trailing: {
-                Section {
+            })
+            .navigationTitle(Text(verbatim: "\(chord.symbols) \(chord.displayName)"))
+            .toolbar {
+                ControlRearrangeDoneButton(onDone: onDone)
+                // In the bar, not a row: the reorder list is always editing, and a list that
+                // edits greys out and disables its links (owner QA, round 5). Out here the link
+                // stays a live, tinted button, and the editor it opens isn't left editing.
+                ToolbarItem(placement: .bottomBar) {
                     NavigationLink {
                         ChordPaletteEditor(store: store, chord: chord, haptics: haptics)
                             .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
                     } label: {
                         Text("Add or Change Shortcuts…", comment: "Rearrange Controls: opens the palette's full editor.")
                     }
+                    .accessibilityIdentifier("rearrange.editPalette")
                 }
-            })
-            .navigationTitle(Text(verbatim: "\(chord.symbols) \(chord.displayName)"))
-            .toolbar { ControlRearrangeDoneButton(onDone: onDone) }
+            }
     }
 }
 
@@ -281,24 +285,13 @@ private struct ControlRearrangeRow: Identifiable {
 /// A list whose rows reorder by their handles (always shown), with a preview
 /// of the run as the tray draws it, and, for the trays, which orientation's
 /// order is being changed.
-private struct ControlRearrangeList<Trailing: View>: View {
+private struct ControlRearrangeList: View {
     /// nil: the order is the same in both orientations.
     var landscape: Binding<Bool>?
     let landscapeNow: Bool
     let rows: [ControlRearrangeRow]
     let footer: Text
     let onMove: (Int, Int) -> Void
-    @ViewBuilder var trailing: () -> Trailing
-
-    init(landscape: Binding<Bool>?, landscapeNow: Bool, rows: [ControlRearrangeRow], footer: Text,
-         onMove: @escaping (Int, Int) -> Void, @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
-        self.landscape = landscape
-        self.landscapeNow = landscapeNow
-        self.rows = rows
-        self.footer = footer
-        self.onMove = onMove
-        self.trailing = trailing
-    }
 
     var body: some View {
         List {
@@ -338,7 +331,6 @@ private struct ControlRearrangeList<Trailing: View>: View {
             } else {
                 Section { } footer: { footer }
             }
-            trailing()
         }
         .environment(\.editMode, .constant(.active))
     }

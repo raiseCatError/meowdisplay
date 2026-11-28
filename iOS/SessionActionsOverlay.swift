@@ -152,7 +152,7 @@ struct SessionActionsOverlay: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.large)
-            .accessibilityHint(Text("The control buttons wiggle. Drag them into a new order, then choose Done."))
+            .accessibilityHint(Text("Opens a list of the trays and shortcuts to put their buttons in a new order."))
             .accessibilityIdentifier("sessionActionsRearrange")
         case .disconnect:
             Button(role: .destructive) { onAction(.disconnect) } label: {
