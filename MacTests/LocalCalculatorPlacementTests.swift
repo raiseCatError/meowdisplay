@@ -535,6 +535,20 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertTrue(back.minY <= drawn.strip.minY && drawn.strip.maxY <= back.maxY, "out of its strip, where it was slid")
     }
 
+    // Codex round 24: a slide starts from where the strip is drawn, not where it asked to be.
+    func testASlideStartsFromWhereTheStripIsDrawn() {
+        typealias G = LocalCalculatorStashGeometry
+        let size = CGSize(width: 200, height: 300)
+        // Asked for the very top: drawn lower, kept on the edge.
+        let stash = LocalCalculatorStash(edge: .right, offset: 0)
+        let shown = G.waiting(size: size, stash: stash, bounds: stashBounds).strip
+        XCTAssertGreaterThan(shown.minY, stashBounds.minY - 0.5)
+        let moved = G.waiting(size: size, stash: G.slidFromShown(stash, size: size, along: 30, bounds: stashBounds),
+                              bounds: stashBounds).strip
+        XCTAssertEqual(moved.midY, shown.midY + 30, accuracy: 0.5, "it follows the finger from its first point")
+        XCTAssertLessThanOrEqual(G.maximumPeek + G.strip, G.touchDepth, "a peek never shows past the touch area")
+    }
+
     // Owner QA, round 5: in landscape the strip stands along its side edge, never across it.
     func testInLandscapeTheStripStandsAlongItsSideEdge() {
         typealias G = LocalCalculatorStashGeometry

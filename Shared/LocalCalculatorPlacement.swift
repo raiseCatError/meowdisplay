@@ -375,6 +375,19 @@ enum LocalCalculatorStashGeometry {
         return LocalCalculatorStash(edge: stash.edge, offset: min(max(offset + Double(along / bounds.height), 0), 1))
     }
 
+    /// How far the window may show past its strip while touched or pulled: never past the
+    /// strip's touch area, so nothing drawn for it lies where a touch would reach the Mac.
+    static var maximumPeek: CGFloat { touchDepth - strip }
+
+    /// `stash` slid `along` points from where its strip is drawn now (which can differ from
+    /// where it asked to be: kept on the edge, or past controls), so the strip follows the
+    /// finger from the first point of the slide.
+    static func slidFromShown(_ stash: LocalCalculatorStash, size: CGSize, along: CGFloat, bounds: CGRect,
+                              obstacles: [CGRect] = []) -> LocalCalculatorStash {
+        let shown = waiting(size: size, stash: stash, bounds: bounds, obstacles: obstacles).strip
+        return slid(settled(stash, strip: shown, bounds: bounds), along: along, bounds: bounds)
+    }
+
     /// The stash at the place its strip is shown (`strip`'s centre in `bounds`), so a slide lets
     /// go exactly where the strip was drawn, past any controls it stepped over.
     static func settled(_ stash: LocalCalculatorStash, strip: CGRect, bounds: CGRect) -> LocalCalculatorStash {
