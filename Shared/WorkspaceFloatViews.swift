@@ -499,6 +499,29 @@ struct WorkspaceFloatLayer: View {
             if !docked, !covered(gripFrame(rect, leading: false)) {
                 grip(id, rect: rect, corner: .bottomTrailing, active: active).fadesWithControls(controlsHidden)
             }
+            if !docked {
+                // Its edges resize too (freeform, each on its own axis), where nothing else is.
+                let busy = covers + [pillFrame(rect, held: held), grabberFrame(rect, held: held),
+                                     gripFrame(rect, leading: true), gripFrame(rect, leading: false)]
+                    + (closeTargetFrame(id).map { [$0] } ?? [])
+                // The upper corners stay reachable on a float whose pill spans its top edge:
+                // they give way to the floats in front and the close dot, not the pill.
+                let cornerBusy = covers + [grabberFrame(rect, held: held)] + (closeTargetFrame(id).map { [$0] } ?? [])
+                ForEach(Self.resizeEdges, id: \.self) { handle in
+                    edgeResizer(id, rect: rect, handle: handle,
+                                avoiding: handle.horizontal != 0 && handle.vertical != 0 ? cornerBusy : busy)
+                }
+                // Where the pill covers the top edge, a strip just above it still moves that edge.
+                let abovePill = CGRect(x: pill.minX, y: pill.minY - 12, width: pill.width, height: 12)
+                if pill.minY <= rect.minY + 4, pill.maxY >= rect.minY - 12, !covered(abovePill) {
+                    Color.white.opacity(0.001)
+                        .frame(width: abovePill.width, height: abovePill.height)
+                        .contentShape(Rectangle())
+                        .position(x: abovePill.midX, y: abovePill.midY)
+                        .gesture(resizeGesture(id, handle: .top))
+                        .accessibilityHidden(true)
+                }
+            }
         }
         let middle = CGRect(x: rect.midX - 60, y: rect.midY - 24, width: 120, height: 48)
         if model.tileState(id)?.status == .offscreen, !moved, !covered(middle) { offscreenNotice(id, rect: rect) }
@@ -711,6 +734,49 @@ struct WorkspaceFloatLayer: View {
             .accessibilityHidden(true)   // the float's own actions move it
     }
 
+    /// The edges, then the upper corners (both adjoining edges at once; the lower corners have
+    /// their grips). Corners come last so they sit above the edge strips they overlap.
+    static let resizeEdges: [WorkspaceFloatGeometry.ResizeHandle] = [.left, .right, .top, .bottom, .topLeading, .topTrailing]
+
+    /// An invisible strip along one edge of the float, mostly just outside it (the window's own
+    /// edge keeps its touches): drag it to move that edge. Cut around the pill, grabber, grips,
+    /// close dot and the floats in front.
+    @ViewBuilder
+    private func edgeResizer(_ id: String, rect: CGRect, handle: WorkspaceFloatGeometry.ResizeHandle, avoiding: [CGRect]) -> some View {
+        let outside: CGFloat = 12, inside: CGFloat = 4
+        let strip: CGRect = {
+            let corner = outside + 10
+            switch (handle.horizontal, handle.vertical) {
+            case (-1, -1): return CGRect(x: rect.minX - outside, y: rect.minY - outside, width: corner, height: corner)
+            case (1, -1): return CGRect(x: rect.maxX + outside - corner, y: rect.minY - outside, width: corner, height: corner)
+            case (-1, _): return CGRect(x: rect.minX - outside, y: rect.minY, width: outside + inside, height: rect.height)
+            case (1, _): return CGRect(x: rect.maxX - inside, y: rect.minY, width: outside + inside, height: rect.height)
+            case (_, -1): return CGRect(x: rect.minX, y: rect.minY - outside, width: rect.width, height: outside + inside)
+            default: return CGRect(x: rect.minX, y: rect.maxY - inside, width: rect.width, height: outside + inside)
+            }
+        }()
+        // A corner is one small square: any uncovered part of it is worth keeping.
+        let isCorner = handle.horizontal != 0 && handle.vertical != 0
+        let parts = WorkspaceFloatLayering.uncovered(WorkspaceRect(strip), alongX: handle.vertical != 0,
+                                                     by: avoiding.map(WorkspaceRect.init), minLength: isCorner ? 10 : 24)
+            .map { $0.cgRect.offsetBy(dx: -strip.minX, dy: -strip.minY) }
+        if !parts.isEmpty {
+            Color.white.opacity(0.001)
+                .frame(width: strip.width, height: strip.height)
+                .contentShape(WorkspaceRectsShape(rects: parts))
+                .position(x: strip.midX, y: strip.midY)
+                .gesture(resizeGesture(id, handle: handle))
+                .accessibilityHidden(true)   // Make Larger / Make Smaller in the float's actions
+        }
+    }
+
+    /// Where the selected float's close dot is now, if it shows.
+    private func closeTargetFrame(_ id: String) -> CGRect? {
+        guard model.active == id else { return nil }
+        let origin = toGlobal
+        return model.floatCloseTargetsGlobal.first.map { $0.offsetBy(dx: -origin.x, dy: -origin.y) }
+    }
+
     /// A curved grip around a lower corner (visionOS-style). Drag to resize; the window keeps its shape.
     private func grip(_ id: String, rect: CGRect, corner: WorkspaceFloatGeometry.Corner, active: Bool) -> some View {
         let leading = corner == .bottomLeading
@@ -850,7 +916,8 @@ struct WorkspaceFloatLayer: View {
         let shares = (x: velocity.x / size.width, y: velocity.y / size.height)
         let drawn = motion.frames[id] ?? model.layout.float(id)?.frame ?? frame
         held[id] = nil
-        switch WorkspaceFloatMotion.decide(release: frame, velocity: velocity, in: size, edges: tuckEdges, safe: restArea) {
+        switch WorkspaceFloatMotion.decide(release: frame, velocity: velocity, in: size, edges: tuckEdges, safe: restArea,
+                                           avoiding: controlShares) {
         case .settle(let target, let glide):
             if glide, !reduceMotion {
                 motion.glide(id, from: drawn, to: target, velocity: shares)
@@ -892,7 +959,17 @@ struct WorkspaceFloatLayer: View {
         lastTap = (id, now)
     }
 
+    /// The receiver's controls, folds and rails as shares of the picture: a float's title pill
+    /// never comes to rest under them (`WorkspaceFloatGeometry.reachable(_:in:safe:avoiding:)`).
+    private var controlShares: [WorkspaceRect] {
+        (closeAvoiding + railFrames).filter { !$0.isNull && !$0.isEmpty }.map { shares(WorkspaceRect($0)) }
+    }
+
     private func resizeGesture(_ id: String, corner: WorkspaceFloatGeometry.Corner) -> some Gesture {
+        resizeGesture(id, handle: corner == .bottomLeading ? .bottomLeading : .bottomTrailing)
+    }
+
+    private func resizeGesture(_ id: String, handle: WorkspaceFloatGeometry.ResizeHandle) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("workspace"))
             .onChanged { v in
                 if resizeStart[id] == nil {
@@ -902,15 +979,18 @@ struct WorkspaceFloatLayer: View {
                 }
                 guard let s = resizeStart[id] else { return }
                 if hypot(v.translation.width, v.translation.height) > 2 { model.liftFloat(id) }
-                // Width and height follow the finger freely: the window keeps its view (Fit with
-                // bars, Fill, zoom) at the new size, never stretched.
-                let r = WorkspaceFloatGeometry.resized(s, corner: corner, translation: (v.translation.width, v.translation.height),
-                                                       aspect: nil, in: pictureSize)
+                // Freeform: width and height follow the finger on their own, up to the whole
+                // picture; the window keeps its view (Fit with bars, Fill, zoom), never stretched.
+                let r = WorkspaceFloatGeometry.resized(s, handle: handle, translation: (v.translation.width, v.translation.height),
+                                                       in: pictureSize)
                 model.updateFloatFrame(id, r)
             }
             .onEnded { _ in
                 guard resizeStart.removeValue(forKey: id) != nil else { return }
-                model.endFloatGesture(id)
+                // Its title pill comes to rest clear of the controls (a top-edge resize can take it there).
+                let now = model.layout.float(id)?.frame
+                let kept = now.map { WorkspaceFloatGeometry.reachable($0, in: pictureSize, safe: restArea, avoiding: controlShares) }
+                model.endFloatGesture(id, frame: kept == now ? nil : kept)
             }
     }
 

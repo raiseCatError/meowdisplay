@@ -12,6 +12,10 @@ enum ReceiverSessionAction: Hashable, Sendable {
     /// Lock This Mac (LockMacFlow): its own confirmation, shown from the overlay, which
     /// stays up; Request Control comes first when this device doesn't have control.
     case lockMac
+    /// Rearrange Controls: a sheet of lists that put the trays' buttons and
+    /// the shortcut palettes in order (`ControlRearrangement`). Nothing
+    /// reaches the Mac meanwhile.
+    case rearrangeControls
     /// The same call as Settings → Connections → Disconnect: a deliberate
     /// goodbye, so neither side reconnects by itself (#162).
     case disconnect
@@ -37,9 +41,12 @@ enum ReceiverSessionActionsPolicy {
     /// there while the overlay is.
     static func actions(surfaceRetained: Bool,
                         presentation: ReceiverSessionPresentation,
-                        canLockMac: Bool = false) -> [ReceiverSessionAction] {
+                        canLockMac: Bool = false,
+                        canRearrangeControls: Bool = false) -> [ReceiverSessionAction] {
         var actions: [ReceiverSessionAction] = []
         if surfaceRetained, presentation == .session { actions.append(.backToHome) }
+        // Only over the live session, whose controls it rearranges.
+        if canRearrangeControls, presentation == .session { actions.append(.rearrangeControls) }
         if canLockMac { actions.append(.lockMac) }
         actions.append(.disconnect)
         return actions
@@ -59,6 +66,9 @@ struct ReceiverSessionActionsState: Equatable, Sendable {
         case backToHome(reopenKeyboardOnResume: Bool)
         /// The overlay stays up; the flow's confirmation opens over it.
         case lockMac
+        /// The overlay closes and the controls enter edit mode; leaving it
+        /// reopens the keyboard if it was open here.
+        case rearrangeControls(reopenKeyboardAfter: Bool)
         case disconnect
     }
 
@@ -86,6 +96,7 @@ struct ReceiverSessionActionsState: Equatable, Sendable {
         switch action {
         case .backToHome: return .backToHome(reopenKeyboardOnResume: keyboard)
         case .lockMac: return .lockMac
+        case .rearrangeControls: return .rearrangeControls(reopenKeyboardAfter: keyboard)
         case .disconnect: return .disconnect
         }
     }

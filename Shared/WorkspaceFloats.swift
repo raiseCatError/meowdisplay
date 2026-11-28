@@ -430,10 +430,119 @@ enum WorkspaceFloatGeometry {
             if h > maxH { h = maxH; w = h * a }
             if w < minW || h < minH { w = max(min(max(w, minW), maxW), 1); h = max(min(max(h, minH), maxH), 1) }
         } else {
-            w = min(max(w, minW), maxW); h = min(max(h, minH), maxH)
+            // Freeform: the grip's own edges follow the finger (owner QA, 2.2 round 2).
+            return resized(start, handle: corner == .bottomTrailing ? .bottomTrailing : .bottomLeading,
+                           translation: translation, in: size)
         }
         let x = corner == .bottomTrailing ? start.x : start.maxX - w / size.width
         return WorkspaceRect(x: x, y: start.y, width: w / size.width, height: h / size.height)
+    }
+
+    /// Which edges of a float a resize handle moves: `horizontal` -1 its left edge, 1 its right,
+    /// 0 neither; `vertical` -1 its top, 1 its bottom, 0 neither.
+    struct ResizeHandle: Equatable, Hashable, Sendable {
+        var horizontal: Int
+        var vertical: Int
+        static let left = ResizeHandle(horizontal: -1, vertical: 0)
+        static let right = ResizeHandle(horizontal: 1, vertical: 0)
+        static let top = ResizeHandle(horizontal: 0, vertical: -1)
+        static let bottom = ResizeHandle(horizontal: 0, vertical: 1)
+        static let bottomLeading = ResizeHandle(horizontal: -1, vertical: 1)
+        static let bottomTrailing = ResizeHandle(horizontal: 1, vertical: 1)
+        static let topTrailing = ResizeHandle(horizontal: 1, vertical: -1)
+        static let topLeading = ResizeHandle(horizontal: -1, vertical: -1)
+    }
+
+    /// A float resized freeform by the edges `handle` names, `translation` points since the drag
+    /// began at `start`. Width and height are independent (no shape kept, no steps), from
+    /// `minimum(for:)` up to the whole picture (below the title bar). The moved edge follows the
+    /// finger; once it reaches the picture's edge, growing further pushes the opposite edge the
+    /// other way, so a float at an edge can still grow to fill the picture.
+    static func resized(_ start: WorkspaceRect, handle: ResizeHandle, translation: (x: Double, y: Double),
+                        in size: WorkspaceSize) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0, translation.x.isFinite, translation.y.isFinite,
+              [start.x, start.y, start.width, start.height].allSatisfy(\.isFinite) else { return start }
+        let m = minimum(for: size)
+        let top = min(barHeight, size.height / 2)
+        let W = size.width, H = size.height
+        func axis(_ lo: Double, _ hi: Double, side: Int, delta: Double, low: Double, high: Double, minimum: Double) -> (Double, Double) {
+            guard side != 0 else { return (lo, hi) }
+            let room = high - low
+            let least = min(minimum, room)
+            var a = lo, b = hi
+            if side > 0 {
+                let extent = min(max(hi + delta - lo, least), room)
+                b = lo + extent
+                if b > high { a -= b - high; b = high }
+                if a < low { a = low }
+            } else {
+                let extent = min(max(hi - (lo + delta), least), room)
+                a = hi - extent
+                if a < low { b += low - a; a = low }
+                if b > high { b = high }
+            }
+            return (a, b)
+        }
+        let (x0, x1) = axis(start.x * W, start.maxX * W, side: handle.horizontal, delta: translation.x, low: 0, high: W, minimum: m.width)
+        let (y0, y1) = axis(start.y * H, start.maxY * H, side: handle.vertical, delta: translation.y, low: top, high: H, minimum: m.height)
+        return WorkspaceRect(x: x0 / W, y: y0 / H, width: (x1 - x0) / W, height: (y1 - y0) / H)
+    }
+
+    /// A float's title pill (picture shares) where it rests on `r`: centred on its top edge, no
+    /// wider than the float (as `reachableOrigins` keeps it).
+    static func pill(of r: WorkspaceRect, in size: WorkspaceSize) -> WorkspaceRect {
+        guard size.width > 0, size.height > 0 else { return r }
+        let content = WorkspaceRect(x: 0, y: 0, width: r.width * size.width, height: r.height * size.height)
+        let p = WorkspaceFloatLayering.pillBounds(content)
+        let w = min(p.width, content.width) / size.width, h = p.height / size.height
+        return WorkspaceRect(x: r.midX - w / 2, y: r.y - h / 2, width: w, height: h)
+    }
+
+    /// Kept between a resting float's title pill and the receiver's controls (points).
+    static let controlGap = 8.0
+
+    /// `rect` kept usable and reachable (`reachable(_:in:safe:)`), then moved the least for its
+    /// title pill to clear `obstacles` (picture shares: the control tray, the function tray, the
+    /// keypad, folds), so its title, ⋯ and close stay touchable and it can always be moved again.
+    /// Unchanged from `reachable` when no place clears them all.
+    static func reachable(_ rect: WorkspaceRect, in size: WorkspaceSize, safe: WorkspaceRect?,
+                          avoiding obstacles: [WorkspaceRect]) -> WorkspaceRect {
+        let base = reachable(rect, in: size, safe: safe)
+        guard size.width > 0, size.height > 0 else { return base }
+        let gx = controlGap / size.width, gy = controlGap / size.height
+        let blocks = obstacles.filter { o in o.width > 0 && o.height > 0 && [o.x, o.y, o.width, o.height].allSatisfy(\.isFinite) }
+            .map { WorkspaceRect(x: $0.x - gx, y: $0.y - gy, width: $0.width + 2 * gx, height: $0.height + 2 * gy) }
+        func hit(_ r: WorkspaceRect) -> [WorkspaceRect] { let p = pill(of: r, in: size); return blocks.filter { p.intersection($0) != nil } }
+        guard !hit(base).isEmpty else { return base }
+        let o = reachableOrigins(base, in: size, safe: safe)
+        func fitted(_ r: WorkspaceRect) -> WorkspaceRect {
+            var c = r
+            c.x = min(max(c.x, o.x.lowerBound), o.x.upperBound)
+            c.y = min(max(c.y, o.y.lowerBound), o.y.upperBound)
+            return c
+        }
+        func moves(_ r: WorkspaceRect) -> [WorkspaceRect] {
+            let p = pill(of: r, in: size)
+            return hit(r).flatMap { b -> [WorkspaceRect] in
+                var up = r, down = r, left = r, right = r
+                up.y -= p.maxY - b.y
+                down.y += b.maxY - p.y
+                left.x -= p.maxX - b.x
+                right.x += b.maxX - p.x
+                return [up, down, left, right].map(fitted)
+            }
+        }
+        func distance(_ r: WorkspaceRect) -> Double {
+            abs(r.x - base.x) * size.width + abs(r.y - base.y) * size.height
+        }
+        var frontier = moves(base)
+        var best: WorkspaceRect?
+        for _ in 0..<3 {
+            for c in frontier where hit(c).isEmpty && best.map({ distance(c) < distance($0) }) ?? true { best = c }
+            if best != nil { break }
+            frontier = Array(frontier.flatMap(moves).prefix(256))
+        }
+        return best ?? base
     }
 
     /// A float carried to a new picture size (the device rotated, or its window was resized):
@@ -1089,7 +1198,8 @@ enum WorkspaceFloatMotion {
     /// tuck (those with room for a strip, `WorkspaceFloatGeometry.tuckEdges`). `safe`: where its
     /// title pill must be when it settles (picture shares, see `reachableOrigins`); nil: the picture.
     static func decide(release frame: WorkspaceRect, velocity: (x: Double, y: Double), in size: WorkspaceSize,
-                       canTuck: Bool = true, edges: Set<WorkspaceEdge> = allEdges, safe: WorkspaceRect? = nil) -> Outcome {
+                       canTuck: Bool = true, edges: Set<WorkspaceEdge> = allEdges, safe: WorkspaceRect? = nil,
+                       avoiding obstacles: [WorkspaceRect] = []) -> Outcome {
         guard size.width > 0, size.height > 0, frame.width > 0, frame.height > 0,
               [frame.x, frame.y, frame.width, frame.height].allSatisfy(\.isFinite) else {
             return .settle(frame: WorkspaceFloatGeometry.clamped(frame, in: size), glide: false)
@@ -1120,15 +1230,21 @@ enum WorkspaceFloatMotion {
         }
         // Let go inside, or hanging less than halfway past an edge (or a corner): it comes to rest
         // where its title pill can be reached, gliding back in from wherever the finger left it.
-        let held = WorkspaceFloatGeometry.reachable(frame, in: size, safe: safe)
+        // Never with its title pill under the receiver's controls (owner QA, 2.2 round 2).
+        func rest(_ r: WorkspaceRect) -> WorkspaceRect {
+            let kept = WorkspaceFloatGeometry.reachable(r, in: size, safe: safe, avoiding: obstacles)
+            let snap = snapped(kept, in: size, safe: safe)
+            guard !obstacles.isEmpty else { return snap }
+            return WorkspaceFloatGeometry.reachable(snap, in: size, safe: safe, avoiding: obstacles) == snap ? snap : kept
+        }
         guard speed >= glideSpeed else {
-            let rest = snapped(held, in: size, safe: safe)
-            return .settle(frame: rest, glide: rest != frame)
+            let r = rest(frame)
+            return .settle(frame: r, glide: r != frame)
         }
         var target = frame
         target.x += projection(vx) / size.width
         target.y += projection(vy) / size.height
-        let landed = snapped(WorkspaceFloatGeometry.reachable(target, in: size, safe: safe), in: size, safe: safe)
+        let landed = rest(target)
         return .settle(frame: landed, glide: landed != frame)
     }
 

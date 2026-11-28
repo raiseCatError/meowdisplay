@@ -133,6 +133,8 @@ struct ReceiverScreen: View {
     @State private var keyboardBeforeHome = false
     /// Touch and hold Settings: Back to Home or Disconnect, over the session.
     @State private var sessionActions = ReceiverSessionActionsState()
+    /// The keyboard was open when Rearrange Controls began; Done reopens it.
+    @State private var keyboardBeforeRearrange = false
 
     init() {
         #if DEBUG
@@ -312,6 +314,10 @@ struct ReceiverScreen: View {
             }
         case .lockMac:
             model.workspace.beginLockMac()
+        case .rearrangeControls(let reopenKeyboard):
+            // The overlay already closed the keyboard; Done reopens it.
+            keyboardBeforeRearrange = reopenKeyboard
+            controlStore.setRearrangingControls(true)
         case .disconnect:
             // Settings ▸ Connections ▸ Disconnect: a deliberate goodbye, no auto-reconnect.
             model.receiver.disconnect()
@@ -386,11 +392,15 @@ struct ReceiverScreen: View {
         model.receiver.requestVideoEnabled(true, resumeWindow: model.workspace.available)
     }
 
+    /// Whether the Mac's cursor (and display layout) is watched, and for which surface: true for a
+    /// Trackpad pane in Window mode (always: the panes' pointer marks follow the real cursor while
+    /// it's used; the display guide itself still needs the opt-in, `windowTrackpad`), false for
+    /// the video-off desktop trackpad (opt-in), nil for neither.
     private var trackpadGuideContext: Bool? {
-        guard route == .receiver, localInputSurfaceOpen, inputReachesMac,
-              controlStore.preferences.trackpadDisplayLayoutOptIn else { return nil }
+        guard route == .receiver, localInputSurfaceOpen, inputReachesMac else { return nil }
+        if model.receiver.videoEnabled, model.workspace.windowMode, model.workspace.activeTrackpadID != nil { return true }
+        guard controlStore.preferences.trackpadDisplayLayoutOptIn else { return nil }
         if !model.receiver.videoEnabled { return false }
-        if model.workspace.windowMode, model.workspace.activeTrackpadID != nil { return true }
         return nil
     }
 
@@ -421,6 +431,7 @@ struct ReceiverScreen: View {
     private var localInputSurfaceOpen: Bool {
         scenePhase == .active
             && sessionActions.surfaceInteractive(model.presentation)
+            && !controlStore.rearrangingControls
             && !model.pictureInPicture.isShowingWindow
     }
 
@@ -897,7 +908,8 @@ struct ReceiverScreen: View {
                         // The Mac's real pointer in Full Desktop panes while the Trackpad drives it.
                         WorkspaceRealPointerOverlay(model: model.workspace, cursor: model.receiver.trackpadCursor,
                                                     displays: model.receiver.trackpadDisplayGeometry,
-                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden)
+                                                    picture: picture.drawn, controlsHidden: controlStore.autoHidden,
+                                                    echo: model.receiver.cursorEcho)
                     }
                     // The rails are receiver chrome above both Trackpad renderers and floats.
                     // Only the strip hit regions take touches.
@@ -929,105 +941,109 @@ struct ReceiverScreen: View {
                         onSessionActions: sessionActionsAvailable ? { openSessionActions() } : nil)
                         // Stage Peek's All Apps covers the controls (`StagePeekAllAppsLayering`).
                         .stepsAside(forAllApps: workspaceVisible && model.workspace.launchpadOpen)
-                    if let kind = inputPrompt.kind, !workspaceEditing, !workspaceOverlayOpen, !showsVideoOffChoice,
-                       !safeCanvas.isNull, !safeCanvas.isEmpty {
-                        // Window mode: inside the selected pane, near its bottom, so it's clear which
-                        // window needs control; the pane, its tabs, zoom and pan stay as they are.
-                        let paneAnchor = workspaceVisible && model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
-                            let pic = workspacePicture(canvas: canvas).drawn
-                            return CGPoint(x: pic.minX + r.midX * pic.width,
-                                           y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
-                        } : nil
-                        let promptWidth = min(280, max(44, safeCanvas.width - 24))
-                        let halfPromptWidth = promptWidth / 2
-                        let promptX = min(max(paneAnchor?.x ?? canvas.midX, safeCanvas.minX + halfPromptWidth),
-                                          safeCanvas.maxX - halfPromptWidth)
-                        let promptCentre = clearOfFolds(
-                            CGPoint(x: promptX,
-                                    y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
-                                        ?? geo.size.height - effectiveSafeInsets.bottom - 76),
-                            size: CGSize(width: promptWidth, height: 44), container: geo.size,
-                            regions: reservedRegions)
-                        InputPromptButton(kind: kind) { _ = requestInputFromPrompt() }
-                            .frame(maxWidth: promptWidth)
-                            .position(promptCentre)
-                            .transition(slideTransition(from: .bottom))
-                    }
-                    if showsVideoOffChoice, !choiceArea.isEmpty {
-                        VideoOffStatus(onTurnOn: turnVideoOnToWindow, onUseTrackpad: {
-                            dismissVideoOffChoice()
-                            if !inputReachesMac { requestInputFromPrompt() }
-                        }, onDismiss: dismissVideoOffChoice)
-                            .frame(maxWidth: min(400, max(0, choiceArea.width - 24)),
-                                   maxHeight: choiceArea.height, alignment: .top)
-                            .position(x: choiceArea.midX, y: choiceArea.midY)
-                            .transition(slideTransition(from: .top))
-                    }
-                    if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
-                       controlStore.preferences.touchStyle == .natural,
-                       !controlStore.preferences.naturalTouchHintShown, !showSettings {
-                        // Narrower than a Duo half, so it fits beside the crease.
-                        let hintWidth: CGFloat = ControlReservedRegion.frames(of: .division, in: reservedRegions)
-                            .isEmpty ? 460 : 400
-                        NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
-                            .padding(.horizontal, 16)
-                            .frame(maxWidth: hintWidth)
-                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60),
-                                                   size: CGSize(width: min(hintWidth, canvas.width), height: 96),
-                                                   container: geo.size, regions: reservedRegions))
-                            .transition(.opacity)
-                    }
-                    if workspaceVisible, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
-                        // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
-                        // Opening, browsing, searching and expanding never change the mode; only
-                        // tapping a window switches (to Window mode, with that window).
-                        StagePeekOverlay(
-                            model: model.workspace,
-                            edge: controlStore.preferences.stagePeekEdge,
-                            frame: canvas,
-                            safe: peekSafe,
-                            avoiding: peekAvoiding,
-                            hapticsEnabled: controlStore.preferences.hapticsEnabled,
-                            naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
-                            dock: controlStore.preferences.stagePeekDock,
-                            inputAllowed: inputReachesMac,
-                            onDisplay: { display in
-                                guard model.receiver.confirmedDisplayMode == .mirror, let display,
-                                      let state = model.receiver.mirrorDisplayState,
-                                      let entry = WorkspaceModel.mirrorEntry(for: display,
-                                          catalog: model.workspace.catalog?.displays ?? [], entries: state.displays)
-                                else { return }
-                                model.receiver.requestMirrorDisplaySelection(entry.uuid)
-                            })
-                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
-                    }
-                    if !videoEnabled, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
-                        StagePeekOverlay(model: model.workspace, edge: controlStore.preferences.stagePeekEdge,
-                                         frame: canvas, safe: peekSafe, avoiding: peekAvoiding,
-                                         hapticsEnabled: controlStore.preferences.hapticsEnabled,
-                                         naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
-                                         dock: controlStore.preferences.stagePeekDock, inputAllowed: inputReachesMac,
-                                         onDisplay: { _ in }, trackpad: TrackpadStagePeekConfiguration(
-                                             open: $trackpadPeekOpen, turnVideoOn: turnVideoOnToWindow))
-                        .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
-                    }
-                    if workspaceVisible, model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
-                       !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown, !model.workspace.launchpadOpen {
-                        // Full-desktop view: offer Window mode once per launch, never forced.
-                        WindowModePrompt(
-                            extending: model.receiver.confirmedDisplayMode == .extend,
-                            onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
-                            onNo: { windowPromptAnswered = true })
-                            .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
-                                                   size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
-                            .transition(slideTransition(from: .top))
-                    }
-                    if workspaceVisible {
-                        WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
-                                           inputAllowed: inputReachesMac,
-                                           onMirror: { model.receiver.requestDisplayMode(.mirror) },
-                                           onExtend: { model.receiver.requestDisplayMode(.extend) },
-                                           safeInsets: effectiveSafeInsets.edgeInsets)
+                    // Prompts and Stage Peek sit above the controls; Rearrange Controls takes
+                    // every touch, so they step away while it's on (nothing reaches the Mac).
+                    Group {
+                        if let kind = inputPrompt.kind, !workspaceEditing, !workspaceOverlayOpen, !showsVideoOffChoice,
+                           !safeCanvas.isNull, !safeCanvas.isEmpty {
+                            // Window mode: inside the selected pane, near its bottom, so it's clear which
+                            // window needs control; the pane, its tabs, zoom and pan stay as they are.
+                            let paneAnchor = workspaceVisible && model.workspace.windowMode ? model.workspace.activePaneRect.map { r -> CGPoint in
+                                let pic = workspacePicture(canvas: canvas).drawn
+                                return CGPoint(x: pic.minX + r.midX * pic.width,
+                                               y: min(pic.minY + r.maxY * pic.height - 34, geo.size.height - effectiveSafeInsets.bottom - 76))
+                            } : nil
+                            let promptWidth = min(280, max(44, safeCanvas.width - 24))
+                            let halfPromptWidth = promptWidth / 2
+                            let promptX = min(max(paneAnchor?.x ?? canvas.midX, safeCanvas.minX + halfPromptWidth),
+                                              safeCanvas.maxX - halfPromptWidth)
+                            let promptCentre = clearOfFolds(
+                                CGPoint(x: promptX,
+                                        y: paneAnchor?.y ?? shownKeyboardRect.map { canvas.minY + $0.maxY - 110 }
+                                            ?? geo.size.height - effectiveSafeInsets.bottom - 76),
+                                size: CGSize(width: promptWidth, height: 44), container: geo.size,
+                                regions: reservedRegions)
+                            InputPromptButton(kind: kind) { _ = requestInputFromPrompt() }
+                                .frame(maxWidth: promptWidth)
+                                .position(promptCentre)
+                                .transition(slideTransition(from: .bottom))
+                        }
+                        if showsVideoOffChoice, !choiceArea.isEmpty {
+                            VideoOffStatus(onTurnOn: turnVideoOnToWindow, onUseTrackpad: {
+                                dismissVideoOffChoice()
+                                if !inputReachesMac { requestInputFromPrompt() }
+                            }, onDismiss: dismissVideoOffChoice)
+                                .frame(maxWidth: min(400, max(0, choiceArea.width - 24)),
+                                       maxHeight: choiceArea.height, alignment: .top)
+                                .position(x: choiceArea.midX, y: choiceArea.midY)
+                                .transition(slideTransition(from: .top))
+                        }
+                        if inputReachesMac, !videoOffStatusShown, controlStore.preferences.inputMode == .direct,
+                           controlStore.preferences.touchStyle == .natural,
+                           !controlStore.preferences.naturalTouchHintShown, !showSettings {
+                            // Narrower than a Duo half, so it fits beside the crease.
+                            let hintWidth: CGFloat = ControlReservedRegion.frames(of: .division, in: reservedRegions)
+                                .isEmpty ? 460 : 400
+                            NaturalTouchHint { controlStore.update { $0.naturalTouchHintShown = true } }
+                                .padding(.horizontal, 16)
+                                .frame(maxWidth: hintWidth)
+                                .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 60),
+                                                       size: CGSize(width: min(hintWidth, canvas.width), height: 96),
+                                                       container: geo.size, regions: reservedRegions))
+                                .transition(.opacity)
+                        }
+                        if workspaceVisible, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                            // Every mode (Mirror, Extend, Window): an overlay over the unchanged picture.
+                            // Opening, browsing, searching and expanding never change the mode; only
+                            // tapping a window switches (to Window mode, with that window).
+                            StagePeekOverlay(
+                                model: model.workspace,
+                                edge: controlStore.preferences.stagePeekEdge,
+                                frame: canvas,
+                                safe: peekSafe,
+                                avoiding: peekAvoiding,
+                                hapticsEnabled: controlStore.preferences.hapticsEnabled,
+                                naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                                dock: controlStore.preferences.stagePeekDock,
+                                inputAllowed: inputReachesMac,
+                                onDisplay: { display in
+                                    guard model.receiver.confirmedDisplayMode == .mirror, let display,
+                                          let state = model.receiver.mirrorDisplayState,
+                                          let entry = WorkspaceModel.mirrorEntry(for: display,
+                                              catalog: model.workspace.catalog?.displays ?? [], entries: state.displays)
+                                    else { return }
+                                    model.receiver.requestMirrorDisplaySelection(entry.uuid)
+                                })
+                            .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
+                        }
+                        if !videoEnabled, controlStore.preferences.windowSwitcher == .stagePeek, model.workspace.available {
+                            StagePeekOverlay(model: model.workspace, edge: controlStore.preferences.stagePeekEdge,
+                                             frame: canvas, safe: peekSafe, avoiding: peekAvoiding,
+                                             hapticsEnabled: controlStore.preferences.hapticsEnabled,
+                                             naturalScrolling: controlStore.preferences.stagePeekNaturalScrolling,
+                                             dock: controlStore.preferences.stagePeekDock, inputAllowed: inputReachesMac,
+                                             onDisplay: { _ in }, trackpad: TrackpadStagePeekConfiguration(
+                                                 open: $trackpadPeekOpen, turnVideoOn: turnVideoOnToWindow))
+                            .environment(\.controlRequest, InlineControlRequest(state: controlStore.sessionInputState, request: { _ = requestInputFromPrompt() }))
+                        }
+                        if workspaceVisible, model.workspace.available, !model.workspace.windowMode, !windowPromptAnswered,
+                           !showSettings, !model.workspace.overviewOpen, !videoOffStatusShown, !model.workspace.launchpadOpen {
+                            // Full-desktop view: offer Window mode once per launch, never forced.
+                            WindowModePrompt(
+                                extending: model.receiver.confirmedDisplayMode == .extend,
+                                onYes: { windowPromptAnswered = true; _ = model.receiver.requestWindowMode() },
+                                onNo: { windowPromptAnswered = true })
+                                .position(clearOfFolds(CGPoint(x: canvas.midX, y: canvas.minY + effectiveSafeInsets.top + 34),
+                                                       size: CGSize(width: 340, height: 44), container: geo.size, regions: reservedRegions))
+                                .transition(slideTransition(from: .top))
+                        }
+                        if workspaceVisible {
+                            WindowOverviewView(model: model.workspace, macName: model.workspace.hostName,
+                                               inputAllowed: inputReachesMac,
+                                               onMirror: { model.receiver.requestDisplayMode(.mirror) },
+                                               onExtend: { model.receiver.requestDisplayMode(.extend) },
+                                               safeInsets: effectiveSafeInsets.edgeInsets)
+                        }
                     }
                     #if DEBUG
                     if Self.chromeFixtureEnabled { chromeFixtureMenu(viewport: geo.size) }
@@ -1092,7 +1108,8 @@ struct ReceiverScreen: View {
                     workspace: model.workspace,
                     actions: ReceiverSessionActionsPolicy.actions(surfaceRetained: showsReceiverSurface,
                                                                   presentation: model.presentation,
-                                                                  canLockMac: model.workspace.canLockMac),
+                                                                  canLockMac: model.workspace.canLockMac,
+                                                                  canRearrangeControls: controlStore.canRearrangeControls),
                     onAction: { chooseSessionAction($0) },
                     onCancel: { dismissSessionActions() })
                 .transition(.opacity)
@@ -1100,12 +1117,23 @@ struct ReceiverScreen: View {
         }
         // The session ended or left the screen under the overlay: close it, restore nothing.
         .onChange(of: sessionActionsAvailable) { available in
+            // Rearrange Controls ends with the session; the order is already saved.
+            if !available { controlStore.setRearrangingControls(false) }
             guard !available, sessionActions.isPresented else { return }
             withAnimation(sessionActionsAnimation) { sessionActions.sessionEnded() }
+        }
+        // Done (or the session ending): the keyboard comes back if it was open and still can.
+        .onChange(of: controlStore.rearrangingControls) { on in
+            guard !on else { return }
+            if keyboardBeforeRearrange, keyboardAvailable, inputReachesMac { keyboardActive = true }
+            keyboardBeforeRearrange = false
+            UIAccessibility.post(notification: .screenChanged, argument: nil)
         }
         // Settings (shake) over the overlay: Cancel first, so it isn't still up behind Settings.
         .onChange(of: showSettings) { shown in
             if shown, sessionActions.isPresented { dismissSessionActions() }
+            // Settings never opens over the Rearrange Controls sheet (a shake is ignored then).
+            if shown, controlStore.rearrangingControls { showSettings = false }
         }
         // Auto-hide waits while the overlay is up and starts over when it closes, however it closes.
         .onChange(of: sessionActions.isPresented) { controlStore.setSessionActionsOpen($0) }
@@ -1355,6 +1383,8 @@ struct ReceiverScreen: View {
         // Merge the connected Mac's compatibility signal into the same gate.
         .onReceive(model.receiver.$peerSignal) { versionGate.applyPeer($0) }
         .onReceive(NotificationCenter.default.publisher(for: .deviceDidShake)) { _ in
+            // Not over the Rearrange Controls sheet, which keeps input from the Mac until it has gone.
+            guard !controlStore.rearrangingControls else { return }
             haptics.play(.settings)
             showSettings = true
         }
@@ -4350,7 +4380,9 @@ struct VideoLayerView: UIViewRepresentable {
             hardwareKeyboard.receiver = { [weak self] in self?.receiver }
             hardwareKeyboard.isActive = { [weak self] in
                 guard let self else { return false }
+                // Typing into the local calculator's notes stays on this device.
                 return self.allowsInput && !self.keyboardRequested && self.window != nil
+                    && !LocalCalculatorTextFocus.isEditing
                     && UIApplication.shared.applicationState == .active
             }
         }
@@ -7508,8 +7540,10 @@ private struct TrackpadSurfaceDecoration: View {
             .background {
                 if trailOn { TrackpadTouchTrailWatch(trail: trail).allowsHitTesting(false).accessibilityHidden(true) }
             }
-            .onAppear { trail.regions = areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) } }
-            .onChange(of: areas.map { $0.offsetBy(dx: frame.minX, dy: frame.minY) }) { trail.regions = $0 }
+            // Local to the watcher (it fills this view): checked on each touch, so a pane that
+            // moved or first laid out at zero size never leaves a stale frame behind.
+            .onAppear { trail.regions = areas }
+            .onChange(of: areas) { trail.regions = $0 }
         }
     }
 

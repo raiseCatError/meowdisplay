@@ -354,6 +354,10 @@ struct ControlProfile: Codable, Equatable, Identifiable {
     var slot: ControlProfileSlot
     var trayItems: [TrayItemConfiguration]
     var palettes: [ChordPalette]
+    /// The Main Tray's order in landscape once it was rearranged there
+    /// (Rearrange Controls); nil keeps `trayItems`' order. Visibility
+    /// always comes from `trayItems`.
+    var landscapeTrayOrder: [ControlTrayItem]? = nil
     var id: String { slot.rawValue }
 
     var visibleTrayItems: [ControlTrayItem] {
@@ -630,6 +634,12 @@ func appGestureCommandDisplayText(for shortcut: KeyboardShortcut) -> String {
 /// without the architecture assuming there are ever exactly two of them or
 /// what they contain. Ordinary `Int`s rather than a named enum for the same
 /// reason: adding a new one is just a new integer, not a schema change.
+/// One Function Tray button's place in an orientation's own order.
+struct FunctionTrayOrderEntry: Codable, Equatable {
+    var id: String
+    var group: Int
+}
+
 struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
     var item: ShortcutItem
     var isVisible: Bool
@@ -661,6 +671,10 @@ struct FunctionTrayItemConfiguration: Codable, Equatable, Identifiable {
 struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     var slot: ControlProfileSlot
     var items: [FunctionTrayItemConfiguration]
+    /// The Function Tray's order and clusters in landscape once it was
+    /// rearranged there (Rearrange Controls); nil keeps `items`' own.
+    /// Visibility, names and faces always come from `items`.
+    var landscapeOrder: [FunctionTrayOrderEntry]? = nil
     var id: String { slot.rawValue }
 
     var visibleItems: [ShortcutItem] {
@@ -701,7 +715,11 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
     /// customized — saving any other receiver setting writes the trays too —
     /// so it takes today's default instead, new visible actions included.
     func resolvingCanonicalMetadata() -> FunctionTrayProfile {
-        if isEarlierReleaseDefault { return Self.canonical(slot: slot) }
+        if isEarlierReleaseDefault {
+            var fresh = Self.canonical(slot: slot)
+            fresh.landscapeOrder = landscapeOrder
+            return fresh
+        }
         let canonical = Self.canonical(slot: slot).items
         let canonicalByID = Dictionary(uniqueKeysWithValues: canonical.map { ($0.id, $0.item) })
         let savedIDs = Set(items.map(\.id))
@@ -716,7 +734,7 @@ struct FunctionTrayProfile: Codable, Equatable, Identifiable {
         let added = canonical.filter { !savedIDs.contains($0.id) }.map {
             FunctionTrayItemConfiguration(item: $0.item, isVisible: false, group: $0.group)
         }
-        return FunctionTrayProfile(slot: slot, items: resolved + added)
+        return FunctionTrayProfile(slot: slot, items: resolved + added, landscapeOrder: landscapeOrder)
     }
 
     /// Every slot's starting tray in an earlier release, by the user-owned
@@ -1135,11 +1153,17 @@ struct ReceiverControlPreferences: Codable, Equatable {
     var customLayouts: [CustomControlLayout] = []
     var activeCustomLayoutID: String?
     /// The receiver-local Calculator's button (iPhone, and the iPad Strip
-    /// and Overlay), added from the Function Tray editor. Off until the
-    /// person adds it; a Custom layout places its own. Not a Function Tray
-    /// item: it sends nothing to the Mac, so it lives beside the profiles
-    /// rather than in them, and older builds see only a key they ignore.
-    var showsCalculatorButton = false
+    /// and Overlay). On by default since 2.2 (it can be removed from the
+    /// Function Tray editor); a Custom layout places its own. Not a Function
+    /// Tray item: it sends nothing to the Mac, so it lives beside the
+    /// profiles rather than in them, and older builds see only a key they
+    /// ignore.
+    var showsCalculatorButton = true
+    /// 1 once the on-by-default change has been applied to these settings,
+    /// so settings saved while it was off by default show it once, and a
+    /// later choice to remove it is kept.
+    var calculatorDefaultRevision = Self.currentCalculatorDefaultRevision
+    static let currentCalculatorDefaultRevision = 1
 
     init(profiles: [ControlProfile] = ControlProfileSlot.allCases.map { ControlProfile.canonical(slot: $0) },
          functionTrayProfiles: [FunctionTrayProfile] = ControlProfileSlot.allCases.map { FunctionTrayProfile.canonical(slot: $0) }) {
@@ -1284,8 +1308,14 @@ struct ReceiverControlPreferences: Codable, Equatable {
         customLayouts = Array((try value(.customLayouts, LossyDecodableArray<CustomControlLayout>()))
             .elements.prefix(CustomControlLayout.maximumCount))
         activeCustomLayoutID = try container.decodeIfPresent(String.self, forKey: .activeCustomLayoutID)
-        // Absent (added 2026-11-05): not shown. Nothing to migrate.
         showsCalculatorButton = try value(.showsCalculatorButton, fallback.showsCalculatorButton)
+        // Saved before the calculator was on by default (2.2): turn it on
+        // once. Afterwards the person's choice stands.
+        calculatorDefaultRevision = try value(.calculatorDefaultRevision, 0)
+        if calculatorDefaultRevision < Self.currentCalculatorDefaultRevision {
+            showsCalculatorButton = true
+            calculatorDefaultRevision = Self.currentCalculatorDefaultRevision
+        }
     }
 
     private enum LegacyCodingKeys: String, CodingKey {

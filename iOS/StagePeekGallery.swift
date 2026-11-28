@@ -618,12 +618,18 @@ struct StagePeekGallery: View {
     @Environment(\.horizontalSizeClass) private var horizontalSize
     @Environment(\.verticalSizeClass) private var verticalSize
     @ScaledMetric(relativeTo: .footnote) private var textScale: CGFloat = 1
+    /// The width the gallery actually has on screen. `width` is what the peek offers; inside a
+    /// narrower container (an extended display's pane, a split view) laying out to `width` made
+    /// the content wider than the screen and cut text off at both edges (2.2 QA).
+    @State private var measuredWidth: CGFloat?
 
     static let revealWidth: CGFloat = 96
 
+    private var layoutWidth: CGFloat { min(width, measuredWidth ?? width) }
+
     /// As many columns as fit at a readable size; phones and narrow split views two at most.
     private var columnCount: Int {
-        StagePeekGalleryLayout.columns(width: width, compactSize: horizontalSize == .compact || verticalSize == .compact,
+        StagePeekGalleryLayout.columns(width: layoutWidth, compactSize: horizontalSize == .compact || verticalSize == .compact,
                                        textScale: textScale)
     }
 
@@ -704,11 +710,18 @@ struct StagePeekGallery: View {
                 }
                 Color.clear.frame(height: 16)
             }
+            // Exactly the room there is: a wide child can't push the page past the edges.
+            .frame(width: max(layoutWidth - 40, 0), alignment: .topLeading)
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, minHeight: height, alignment: .topLeading)
             // Behind the cards: only a tap on empty space lands here (owner, 2026-10-31).
             .background(Color.white.opacity(0.001).onTapGesture { if model.drag == nil { onEmptyTap() } })
         }
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { measuredWidth = g.size.width }
+                .onChange(of: g.size.width) { measuredWidth = $0 }
+        })
         .scrollDismissesKeyboard(.interactively)
         .scrollDisabled(model.drag != nil)
         // A sideways flick toward the peek's edge compacts the gallery: not one that swiped
@@ -833,6 +846,13 @@ struct StagePeekGallery: View {
                     HStack(spacing: 16) { displaysHeaderActions(overview) }
                 }
             }
+            // Very narrow: one action per line, never past the edges.
+            VStack(alignment: .leading, spacing: 8) {
+                sectionTitle(String(localized: "Displays"))
+                if let overview {
+                    VStack(alignment: .leading, spacing: 10) { displaysHeaderActions(overview) }
+                }
+            }
         }
     }
 
@@ -891,7 +911,7 @@ struct StagePeekGallery: View {
     /// placeholders (this device's screen, other MeowDisplay screens) take none.
     private func arrangementMap(_ overview: DisplayOverviewModel, _ displays: [CatalogDisplayItem]) -> some View {
         // The section's width: the gallery's less its horizontal padding (as the spatial layout does).
-        let mapWidth = max(width - 40, 100)
+        let mapWidth = max(layoutWidth - 40, 100)
         let mapHeight = DisplayArrangementLayout.height(forWidth: mapWidth, model: overview)
         return GeometryReader { g in
             let tiles = DisplayArrangementLayout.tiles(for: overview, in: g.size)
@@ -954,7 +974,7 @@ struct StagePeekGallery: View {
     /// Spatial Overview: each window at its shape and relative size, packed in rows; pages when
     /// they can't all be comfortably tappable. Same gestures as the grid's cards.
     private func spatial(_ windows: [CatalogWindowItem]) -> some View {
-        let size = CGSize(width: max(width - 40, 200), height: max(height - 110, 220))
+        let size = CGSize(width: max(layoutWidth - 40, 120), height: max(height - 110, 220))
         let placements = SpatialOverviewLayout.layout(windows.map { .init(width: Double($0.width), height: Double($0.height)) }, in: size)
         let pages = (placements.map(\.page).max() ?? 0) + 1
         return TabView(selection: $spatialPage) {

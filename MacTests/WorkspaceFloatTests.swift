@@ -1377,4 +1377,46 @@ final class WorkspaceFloatTests: XCTestCase {
         again.updateSpace(iphone, hinge: nil)
         XCTAssertEqual(again.layout.visibleFloatIDs, floats, "shown again on a Mac that draws them")
     }
+
+    // MARK: Freeform resize and reachable title pills (owner QA, 2.2 round 2)
+
+    func testFloatResizeIsFreeformUpToTheWholePicture() {
+        let bar = WorkspaceFloatGeometry.barHeight
+        // Flush with the right edge: the trailing grip still widens it, pushing its left edge.
+        let flush = WorkspaceRect(x: 0.6, y: 0.3, width: 0.4, height: 0.3)
+        let wider = WorkspaceFloatGeometry.resized(flush, corner: .bottomTrailing, translation: (300, 0), aspect: nil, in: ipad)
+        XCTAssertEqual(wider.width * ipad.width, flush.width * ipad.width + 300, accuracy: 1e-6)
+        XCTAssertEqual(wider.maxX, 1, accuracy: 1e-9)
+        XCTAssertEqual(wider.height, flush.height, accuracy: 1e-9, "height on its own")
+        let all = WorkspaceFloatGeometry.resized(flush, handle: .bottomTrailing, translation: (5000, 5000), in: ipad)
+        XCTAssertEqual(all.width, 1, accuracy: 1e-9)
+        XCTAssertEqual(all.height * ipad.height, ipad.height - bar, accuracy: 1e-6, "the whole picture below the title bar")
+        XCTAssertEqual(all.y * ipad.height, bar, accuracy: 1e-6)
+        // Each edge on its own axis, no steps.
+        let taller = WorkspaceFloatGeometry.resized(flush, handle: .top, translation: (40, -101), in: ipad)
+        XCTAssertEqual(taller.maxY, flush.maxY, accuracy: 1e-9)
+        XCTAssertEqual((flush.y - taller.y) * ipad.height, 101, accuracy: 1e-6)
+        XCTAssertEqual(taller.width, flush.width, accuracy: 1e-9)
+        let narrow = WorkspaceFloatGeometry.resized(flush, handle: .left, translation: (5000, 0), in: ipad)
+        XCTAssertEqual(narrow.width * ipad.width, WorkspaceFloatGeometry.minimum(for: ipad).width, accuracy: 1e-6)
+        XCTAssertEqual(narrow.maxX, flush.maxX, accuracy: 1e-9)
+        let short = WorkspaceFloatGeometry.resized(flush, handle: .bottom, translation: (0, -5000), in: ipad)
+        XCTAssertEqual(short.height * ipad.height, WorkspaceFloatGeometry.minimum(for: ipad).height, accuracy: 1e-6)
+        XCTAssertEqual(WorkspaceFloatGeometry.resized(flush, handle: .right, translation: (.nan, 0), in: ipad), flush)
+    }
+
+    func testAFloatsTitlePillNeverRestsUnderTheControls() {
+        // A tray along the bottom of a phone in portrait; a float let go with its top in it.
+        let tray = WorkspaceRect(x: 0, y: 700.0 / phone.height, width: 1, height: 144.0 / phone.height)
+        let f = WorkspaceRect(x: 0.1, y: 720.0 / phone.height, width: 0.6, height: 100.0 / phone.height)
+        let kept = WorkspaceFloatGeometry.reachable(f, in: phone, safe: nil, avoiding: [tray])
+        XCTAssertNil(WorkspaceFloatGeometry.pill(of: kept, in: phone).intersection(tray), "its title is touchable")
+        XCTAssertLessThan(kept.y, f.y, "moved up, out from under the tray")
+        XCTAssertEqual(kept.x, f.x, accuracy: 1e-9, "the least move")
+        XCTAssertEqual(WorkspaceFloatGeometry.reachable(f, in: phone, safe: nil, avoiding: []),
+                       WorkspaceFloatGeometry.reachable(f, in: phone, safe: nil))
+        guard case .settle(let rest, _) = WorkspaceFloatMotion.decide(release: f, velocity: (0, 0), in: phone, canTuck: false,
+                                                                     avoiding: [tray]) else { return XCTFail("settles") }
+        XCTAssertNil(WorkspaceFloatGeometry.pill(of: rest, in: phone).intersection(tray))
+    }
 }

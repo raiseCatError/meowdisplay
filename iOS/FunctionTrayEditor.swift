@@ -113,7 +113,7 @@ struct FunctionTrayEditor: View {
 
 /// The local Calculator's button, beside the profile's actions rather than
 /// one of them: it sends nothing to the Mac, works in View Only, and shows
-/// with every Function Tray profile. Off until added.
+/// with every Function Tray profile. On by default; this switch removes it.
 private struct LocalCalculatorUtilitySection: View {
     @ObservedObject var store: ReceiverControlStore
 

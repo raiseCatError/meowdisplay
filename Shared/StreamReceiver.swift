@@ -718,6 +718,26 @@ final class AudioPreferenceBox: @unchecked Sendable {
     }
 }
 
+/// The TXT `id`s of the Macs the receiver's Bonjour browser
+/// (`_opendisplay-mac-pair._tcp`, peer-to-peer included) shows right now.
+/// Written from the browser's handler on `queue`, read by the pipeline actor
+/// when it decides whether a knock waits for the local route
+/// (`LocalFirstKnockPolicy`). Discovery metadata only: it decides the order
+/// routes are tried in, never trust. Same `NSLock` idiom as the boxes above.
+final class LocalMacVisibility: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: Set<String> = []
+
+    func update(_ newIDs: Set<String>) {
+        lock.lock(); ids = newIDs; lock.unlock()
+    }
+
+    func isVisible(peerID: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return LocalFirstKnockPolicy.isVisibleLocally(peerID: peerID, discoveredIDs: ids)
+    }
+}
+
 /// Lock-protected box holding the lazily-constructed `pipeline` actor
 /// reference, installed once `pipeline`'s own `lazy var` initializer runs.
 /// Exists solely so `makePipelineHostEffects()`'s `ensureTLSListening`
@@ -780,6 +800,12 @@ final class TrackpadCursorPresentation: ObservableObject {
     init(location: CGPoint? = nil) { self.location = location }
 }
 
+/// Where the Mac draws its own full-size cursor (normalized picture), published only while
+/// the Trackpad's pointer marks show, so those marks follow it from pane to pane.
+final class CursorEchoPresentation: ObservableObject {
+    @Published var echo: CGPoint?
+}
+
 final class StreamReceiver: ObservableObject {
 
     @MainActor @Published var status = "Starting…"
@@ -809,6 +835,7 @@ final class StreamReceiver: ObservableObject {
     @MainActor @Published private(set) var videoEnabled = true
     @MainActor @Published private(set) var trackpadDisplayGeometry: [TrackpadDisplayGeometry] = []
     @MainActor let trackpadCursor = TrackpadCursorPresentation()
+    @MainActor let cursorEcho = CursorEchoPresentation()
     @MainActor private var trackpadLayoutSupported = false
     @MainActor private var trackpadLayoutWatching = false
     @MainActor private var trackpadLayoutInWindow = false
@@ -1562,6 +1589,8 @@ final class StreamReceiver: ObservableObject {
         set { advertisementState.setServiceName(newValue) }
     }
     private let advertisementState = ReceiverAdvertisementState(serviceName: "MeowDisplay")
+    /// See `LocalMacVisibility`: which paired Macs the local network shows now.
+    private let localMacVisibility = LocalMacVisibility()
     private let pipelineBox = ReceiverPipelineActorBox()
     private let selfBox = StreamReceiverSelfBox()
 
@@ -2659,8 +2688,13 @@ final class StreamReceiver: ObservableObject {
         let browser = NWBrowser(for: .bonjourWithTXTRecord(
             type: "_opendisplay-mac-pair._tcp", domain: nil), using: parameters)
         let uiSink = uiSink
+        let localMacVisibility = localMacVisibility
         browser.browseResultsChangedHandler = { results, _ in
             let discovered = Array(results)
+            localMacVisibility.update(Set(discovered.compactMap { result -> String? in
+                if case .bonjour(let txt) = result.metadata { return txt["id"] }
+                return nil
+            }))
             DispatchQueue.main.async {
                 uiSink.publishDiscoveredMacs(discovered)
                 #if DEBUG
@@ -3745,7 +3779,16 @@ final class StreamReceiver: ObservableObject {
         if connected, trackpadLayoutWatching {
             sendUIControl(["type": TrackpadLayoutWire.watch, "on": false])
         }
+        // Window mode: the panes' pointer marks keep the cursor's last place, and the display
+        // geometry that places it, when the Trackpad goes idle, instead of vanishing. A
+        // disconnect or a revoked control clears both (`clearTrackpadLayout`).
+        let keep = connected && windowModeActive && trackpadLayoutControlGranted
+        let kept = keep ? (trackpadCursor.location, trackpadDisplayGeometry) : nil
         clearTrackpadLayout()
+        if let kept, let location = kept.0 {
+            trackpadCursor.location = location
+            trackpadDisplayGeometry = kept.1
+        }
     }
 
     @MainActor private func clearTrackpadLayout() {
@@ -6139,6 +6182,7 @@ final class StreamReceiver: ObservableObject {
         let pairingSuppressionState = self.pairingSuppressionState
         let advertisementState = self.advertisementState
         let pipelineBox = self.pipelineBox
+        let localMacVisibility = self.localMacVisibility
         // `selfBox` lets `beginAdoption` below reach `beginAdoptionHostWork`
         // at call time with zero `StreamReceiver` capture — see
         // `StreamReceiverSelfBox`'s doc comment.
@@ -6169,6 +6213,9 @@ final class StreamReceiver: ObservableObject {
                 queue.async {
                     Self.requestRemoteConnect(peerID: peerID, intent: .automatic, queue: queue, completion: completion)
                 }
+            },
+            macVisibleLocally: { peerID in
+                localMacVisibility.isVisible(peerID: peerID)
             },
             resolvePinnedPeerID: { connection in
                 Self.resolveAuthenticatedPeerID(from: connection)
@@ -6494,6 +6541,7 @@ final class StreamReceiver: ObservableObject {
 
     @MainActor func applyCursorReset() {
         cursorState = (0.5, 0.5, false)
+        cursorEcho.echo = nil
         cursorSprite = nil
         cursorPaneSize = nil
         cursorOffDisplay = nil
@@ -6511,6 +6559,13 @@ final class StreamReceiver: ObservableObject {
     @MainActor func applyCursorPositionUpdate(x: Double, y: Double, visible: Bool) {
         cursorState = (x, y, visible)
         onCursor?(x, y, visible)
+        refreshCursorEcho()
+    }
+
+    @MainActor private func refreshCursorEcho() {
+        let state = cursorState
+        let echo = state.visible && trackpadCursor.location != nil ? CGPoint(x: state.x, y: state.y) : nil
+        if echo != cursorEcho.echo { cursorEcho.echo = echo }
     }
 
     @MainActor func applyTextCaretUpdate(_ rect: CGRect?) {
@@ -6605,7 +6660,11 @@ final class StreamReceiver: ObservableObject {
               sample.inWindow == trackpadLayoutInWindow,
               trackpadLayoutControlGranted, session.allowsLiveInput, remoteInputMayLeave() else { return }
         if trackpadDisplayGeometry != sample.displays { trackpadDisplayGeometry = sample.displays }
-        if trackpadCursor.location != sample.cursor { trackpadCursor.location = sample.cursor }
+        if trackpadCursor.location != sample.cursor {
+            trackpadCursor.location = sample.cursor
+            // The Mac resends an unchanged cursor only when it moves: seed the echo now.
+            refreshCursorEcho()
+        }
     }
 
     @MainActor func applyVideoStateUpdate(width: Int?, height: Int?, enabled: Bool) {

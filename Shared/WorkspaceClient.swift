@@ -962,6 +962,16 @@ final class WorkspaceModel: ObservableObject {
         floatCloseCancellationGeneration &+= 1
     }
 
+    /// The Trackpad focus after `layout` changed: kept while that tile still shows the Trackpad,
+    /// else moved to the tile that shows it now (its tab was floated, docked or moved to another
+    /// pane); nil when no tile shows it. Pure, for tests.
+    nonisolated static func reconciledTrackpadFocus(_ focus: String?, in layout: WorkspaceLayout) -> String? {
+        guard let focus else { return nil }
+        if layout.tiles[focus]?.source?.isTrackpad == true { return focus }
+        let showing = layout.allTileIDs.filter { layout.tiles[$0]?.source?.isTrackpad == true && layout.float($0)?.tuck == nil }
+        return showing.count == 1 ? showing[0] : nil
+    }
+
     var active: String? {
         if let localTrackpadFocus, layout.tiles[localTrackpadFocus]?.source?.isTrackpad == true {
             return localTrackpadFocus
@@ -1549,6 +1559,12 @@ final class WorkspaceModel: ObservableObject {
         arranged = adapted.visible
         layout = localFullscreen.map { adapted.visible.maximizing($0) } ?? adapted.visible
         stacked = adapted.stacked
+        // The Trackpad keeps its focus when its tab moves (floated out, docked, a pane closed up):
+        // the Mac's focus never takes over a Trackpad that is still shown and selected here.
+        // A Trackpad stacked away for now (the workspace narrowed) keeps it too, for when it returns.
+        let stackedTrackpad = localTrackpadFocus.map { stacked.contains($0) && saved.tiles[$0]?.source?.isTrackpad == true } ?? false
+        let trackpadFocus = stackedTrackpad ? localTrackpadFocus : Self.reconciledTrackpadFocus(localTrackpadFocus, in: layout)
+        if trackpadFocus != localTrackpadFocus { localTrackpadFocus = trackpadFocus }
         capacity = WorkspaceGeometry.capacity(for: size, hinge: hinge)
         canUndo = history.canUndo
         canRedo = history.canRedo
@@ -2411,6 +2427,10 @@ final class WorkspaceModel: ObservableObject {
     /// Where a dragged window or label would land (normalized picture point). Over a floating
     /// pane: that float (replace it, or swap with a dragged pane); a float being docked never
     /// lands on a float. Splits count the tree's panes only.
+    /// Each pane's tab row below its top (normalized), where the controls pushed it down; set by the
+    /// view that draws it, so drops land on the row as shown.
+    var tabRowOffsets: [String: Double] = [:]
+
     func windowDrop(at p: WorkspacePoint, labelHeight: Double) -> WorkspaceWindowDrop? {
         let f = frames
         // A float being docked is drawn only as its card: what's under its old frame counts.
@@ -2422,7 +2442,7 @@ final class WorkspaceModel: ObservableObject {
             return f.tiles[hit].map { .replace(tile: hit, preview: $0) }
         }
         let drop = WorkspaceGeometry.windowDrop(at: p, layout: layout, frames: f, size: size, labelHeight: labelHeight,
-                                                canSplit: layout.paneCount < capacity)
+                                                canSplit: layout.paneCount < capacity, tabRowOffsets: tabRowOffsets)
         // Docking never replaces a window: the middle of a pane adds it as a tab there.
         if case .float? = drag?.item, case .replace(let t, let r)? = drop { return .tab(tile: t, preview: r) }
         return drop
@@ -2443,6 +2463,13 @@ final class WorkspaceModel: ObservableObject {
             if saved.float(id).map({ $0.tuck == nil }) == true, let shown = arranged.float(id)?.tuck, next.floats[i].tuck == shown {
                 next.floats[i].tuck = nil
             }
+        }
+        // An edit that leaves the split tree as shown (a tab switch, a pane's view) keeps the saved
+        // ratios: ones fitted to this screen's minimums (`WorkspaceAdaptation.adapt`) aren't saved,
+        // so turning back restores the original arrangement.
+        if stacked.isEmpty, changed.root.sameSplits(as: arranged.root), saved.root != arranged.root,
+           saved.orderedTileIDs.filter({ !saved.isFloat($0) }) == next.orderedTileIDs.filter({ !next.isFloat($0) }) {
+            next.root = saved.root
         }
         history.record(saved)
         var updated = next
@@ -2538,9 +2565,14 @@ final class WorkspaceModel: ObservableObject {
     }
     func move(_ tile: String, to target: WorkspaceDropTarget) { edit { $0.materializing(hinge: hinge).moving(tile, to: target) } }
     /// A divider drag: every step resizes, the whole drag is one undo step. Call `endResize()` when it ends.
-    func resize(_ divider: WorkspaceDivider, delta: Double) {
+    /// `safe` and `controls`: the safe area and the receiver's controls as shares of the picture;
+    /// the divider stops where a pane's tabs would go under the controls (`WorkspacePaneReach`).
+    func resize(_ divider: WorkspaceDivider, delta: Double, safe: WorkspaceRect? = nil, controls: [WorkspaceRect] = []) {
         history.beginGroup()
-        edit { WorkspaceGeometry.resizing($0, divider: divider, delta: delta, in: size) }
+        let size = size
+        func points(_ r: WorkspaceRect) -> WorkspaceRect { r.scaled(to: size) }
+        edit { WorkspacePaneReach.resizing($0, divider: divider, delta: delta, in: size, hinge: hinge,
+                                           safe: safe.map(points), avoiding: controls.map(points)) }
     }
 
     func endResize() { history.endGroup() }
@@ -4393,7 +4425,10 @@ extension WorkspaceModel {
     /// pointer, so the receiver marks it. `cursor` and `displays` are global Mac points from the
     /// Trackpad's layout samples. A pane gets a mark only where its picture shows that point
     /// and no float above it covers it.
-    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect) -> [String: CGPoint] {
+    /// `echo` is where the Mac draws its own full-size cursor (normalized picture), nil while
+    /// it draws none: that pane needs no second mark, and every other pane keeps its own.
+    func realPointerMarks(cursor: CGPoint, displays: [TrackpadDisplayGeometry], picture: CGRect,
+                          echo: CGPoint? = nil) -> [String: CGPoint] {
         guard windowMode, picture.width > 0, picture.height > 0,
               let display = displays.first(where: { $0.bounds.contains(cursor) }), display.bounds.width > 0,
               display.bounds.height > 0 else { return [:] }
@@ -4422,6 +4457,15 @@ extension WorkspaceModel {
             if above.contains(where: { frames.tiles[$0].map(onScreen)?.contains(point) == true }) { continue }
             marks[id] = point
         }
+        // The Mac draws its full-size cursor in the frontmost pane under it (front float first,
+        // then the panes in order, as `WindowWorkspaceTargeting.cursorPlacement` does): no
+        // second, small arrow in the pane that shows it. A float app window can hold the echo,
+        // so it's located by where the cursor is drawn, not by which marks there are.
+        guard let echo else { return marks }
+        let drawn = CGPoint(x: picture.minX + echo.x * picture.width, y: picture.minY + echo.y * picture.height)
+        let echoed = floats.reversed().first { frames.tiles[$0].map(onScreen)?.contains(drawn) == true }
+            ?? layout.orderedTileIDs.first { !layout.isFloat($0) && frames.tiles[$0].map(onScreen)?.contains(drawn) == true }
+        if let echoed { marks[echoed] = nil }
         return marks
     }
 }

@@ -507,4 +507,183 @@ final class WindowWorkspaceTests: XCTestCase {
         let full = WorkspaceGeometry.windowDrop(at: .init(x: 0.95, y: 0.5), layout: l, frames: f, size: size, labelHeight: 0.05, canSplit: false)
         if case .replace("t", _)? = full {} else { XCTFail("no room for another pane: replace") }
     }
+
+    // MARK: - Panes' tabs stay reachable (owner QA, 2.2 round 2)
+
+    func testAPanesTabsStepBelowAControlAcrossItsTop() throws {
+        let pane = WorkspaceRect(x: 0, y: 0, width: 400, height: 300)
+        let tray = WorkspaceRect(x: 0, y: 0, width: 400, height: 60)
+        let row = try XCTUnwrap(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [tray]))
+        XCTAssertGreaterThanOrEqual(row.y, tray.maxY + WorkspacePaneReach.gap - 1e-9)
+        XCTAssertLessThanOrEqual(row.maxY, pane.maxY)
+        // Beside a small control, on the top row as before.
+        let zoom = WorkspaceRect(x: 10, y: 10, width: 40, height: 40)
+        XCTAssertEqual(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [zoom])?.y, 0)
+        XCTAssertNil(WorkspacePaneReach.titleRow(pane: pane, safe: nil, avoiding: [WorkspaceRect(x: -10, y: -10, width: 500, height: 400)]),
+                     "covered: no row")
+    }
+
+    func testADividerStopsBeforeAPanesTabsGoUnderTheTray() throws {
+        let size = WorkspaceSize(width: 400, height: 800)
+        let layout = WorkspaceLayout(root: .split(.vertical, [.slot("t0"), .slot("t1")], [0.5, 0.5]),
+                                     tiles: Dictionary(uniqueKeysWithValues: tiles(2).map { ($0.id, $0) }))
+        let divider = try XCTUnwrap(WorkspaceGeometry.frames(for: layout, in: size).dividers.first)
+        let tray = WorkspaceRect(x: 0, y: 600, width: 400, height: 200)
+        let plain = WorkspaceGeometry.resizing(layout, divider: divider, delta: 0.4, in: size)
+        XCTAssertFalse(WorkspacePaneReach.unreachable(plain, in: size, safe: nil, avoiding: [tray]).isEmpty, "the old limit hid t1's tabs")
+        let kept = WorkspacePaneReach.resizing(layout, divider: divider, delta: 0.4, in: size, safe: nil, avoiding: [tray])
+        XCTAssertTrue(WorkspacePaneReach.unreachable(kept, in: size, safe: nil, avoiding: [tray]).isEmpty)
+        let lower = try XCTUnwrap(WorkspaceGeometry.frames(for: kept, in: size).tiles["t1"])
+        XCTAssertGreaterThan(lower.y * size.height, 450, "moved as far as it can")
+        XCTAssertLessThanOrEqual(lower.y * size.height + WorkspacePaneReach.titleHeight, tray.y - WorkspacePaneReach.gap + 1e-6)
+        XCTAssertEqual(WorkspacePaneReach.resizing(layout, divider: divider, delta: 0.4, in: size, safe: nil, avoiding: []), plain,
+                       "no controls: as before")
+    }
+
+    func testPanesKeepTheirMinimumAfterTheScreenTurns() throws {
+        let layout = WorkspaceLayout(root: .split(.horizontal, [.slot("t0"), .slot("t1")], [0.85, 0.15]),
+                                     tiles: Dictionary(uniqueKeysWithValues: tiles(2).map { ($0.id, $0) }))
+        let wide = WorkspaceSize(width: 844, height: 390), narrow = WorkspaceSize(width: 390, height: 844)
+        XCTAssertEqual(WorkspaceAdaptation.adapt(layout, to: wide, active: nil).visible, layout, "fits: unchanged")
+        XCTAssertFalse(WorkspaceGeometry.meetsMinimums(layout, in: narrow))
+        let turned = WorkspaceAdaptation.adapt(layout, to: narrow, active: nil).visible
+        XCTAssertTrue(WorkspaceGeometry.meetsMinimums(turned, in: narrow))
+        XCTAssertEqual(Set(turned.orderedTileIDs), ["t0", "t1"])
+        let t1 = try XCTUnwrap(WorkspaceGeometry.frames(for: turned, in: narrow).tiles["t1"])
+        XCTAssertEqual(t1.width * narrow.width, WorkspaceGeometry.minimumTile.width, accuracy: 0.5, "moved the least")
+    }
+}
+
+// Codex round 16: the pane menu bar goes beside the tabs only with room for all of it.
+final class PaneMenuBarPlacementTests: XCTestCase {
+    func testTheBarGoesBesideTheTabsOnlyWithRoomForIt() {
+        let pane = CGRect(x: 100, y: 0, width: 160, height: 30)
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 180, pane: pane, barWidth: 120), "82 pt left: its own row")
+        XCTAssertTrue(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 140, pane: pane, barWidth: 120), "122 pt left: beside the tabs")
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 100, pane: pane, barWidth: 120), "no tabs measured yet")
+        XCTAssertFalse(PaneMenuBarPlacement.fitsBesideTitle(labelsEnd: 260, pane: pane, barWidth: 120), "tabs fill the row")
+    }
+
+    // Codex round 17: the bar's own row is clear of a control just below the tabs, menu button included.
+    func testTheBarsOwnRowKeepsClearOfAControlBelowTheTabs() {
+        let pane = CGRect(x: 0, y: 0, width: 400, height: 600)
+        let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [])
+        XCTAssertEqual(WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [], minimumWidth: 68)!,
+                       CGRect(x: 0, y: 31, width: 400, height: 40), "nothing in the way: where it always was (bar at 36)")
+
+        let control = CGRect(x: 280, y: 50, width: 120, height: 60)
+        let titleWithControl = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
+        XCTAssertEqual(titleWithControl, title, "the control is below the tabs, not beside them")
+        let row = WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: titleWithControl, safe: nil, avoiding: [control],
+                                                       minimumWidth: 68)!
+        let top = row.minY + WorkspaceOverlayPlacement.paneMenuBarInset
+        let bar = CGRect(x: row.minX + 6, y: top, width: row.width - 12, height: 28)
+        let button = CGRect(x: bar.maxX - 44, y: top, width: 44, height: 44)
+        XCTAssertFalse(bar.intersects(control))
+        XCTAssertFalse(button.intersects(control), "the menu button's whole 44 pt target stays clear")
+        XCTAssertGreaterThanOrEqual(row.width, PaneMenuBar_preferredWidth)
+
+        let old = CGRect(x: title.maxX - 6 - 44, y: title.minY + 36, width: 44, height: 44)
+        XCTAssertTrue(old.intersects(control), "the row reused from the tabs put the button under the control")
+    }
+
+    // Codex round 18: the row fits the whole bar (its width and its 44 pt button) inside the pane,
+    // else it stays where it always was.
+    func testTheBarsOwnRowFitsTheWholeBarInsideThePane() {
+        func row(_ pane: CGRect, _ control: CGRect, width: CGFloat) -> CGRect {
+            let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: [control])
+            return WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: [control],
+                                                         minimumWidth: width)!
+        }
+        // A 64 pt gap is too narrow for the 68 pt bar: no row there.
+        let small = CGRect(x: 0, y: 0, width: 120, height: 120)
+        let side = CGRect(x: 72, y: 50, width: 48, height: 70)
+        let narrow = row(small, side, width: 68)
+        XCTAssertEqual(narrow, CGRect(x: 0, y: 31, width: 120, height: 40), "nothing fits: the row it always had")
+        // A full-width control: a row below it would reach into the next pane, so none is taken.
+        let short = CGRect(x: 0, y: 0, width: 300, height: 138)
+        let across = CGRect(x: 0, y: 50, width: 300, height: 40)
+        let below = row(short, across, width: 68)
+        XCTAssertLessThanOrEqual(below.minY + WorkspaceOverlayPlacement.paneMenuFootprint, short.maxY)
+        XCTAssertEqual(below, CGRect(x: 0, y: 31, width: 300, height: 40))
+        // With room below the control, it goes there, whole bar inside the pane.
+        let tall = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let lower = row(tall, across, width: 120)
+        XCTAssertEqual(lower.minY, across.maxY + WorkspaceOverlayPlacement.gap)
+        XCTAssertGreaterThanOrEqual(lower.width, 120)
+        XCTAssertLessThanOrEqual(lower.minY + WorkspaceOverlayPlacement.paneMenuFootprint, tall.maxY)
+        // A gap wide enough for the titles-only bar (120 pt) is taken; a narrower one is passed over.
+        let wide = CGRect(x: 0, y: 0, width: 400, height: 400)
+        let middle = CGRect(x: 110, y: 40, width: 60, height: 60)
+        let passed = row(wide, middle, width: 120)
+        XCTAssertEqual(passed.minX, middle.maxX + WorkspaceOverlayPlacement.gap, "the 102 pt run before it is too narrow")
+        XCTAssertGreaterThanOrEqual(passed.width, 120)
+    }
+
+    // Codex round 19: exact fits (a fraction short is not enough), and no bar past the pane.
+    func testTheBarsOwnRowFitsExactlyAndNeverLeavesThePane() {
+        func row(_ pane: CGRect, _ controls: [CGRect], width: CGFloat) -> CGRect? {
+            let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: controls)
+            return WorkspaceOverlayPlacement.paneMenuRow(pane: pane, titleRow: title, safe: nil, avoiding: controls,
+                                                         minimumWidth: width)
+        }
+        // A control at x = 75.75 leaves 67.75 pt before it (after the 8 pt gap): too narrow for 68,
+        // so the wider run after it is used.
+        let pane = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let control = CGRect(x: 75.75, y: 45, width: 40, height: 40)
+        let fitted = row(pane, [control], width: 68)
+        XCTAssertEqual(fitted?.minX, control.maxX + WorkspaceOverlayPlacement.gap)
+        XCTAssertGreaterThanOrEqual(fitted?.width ?? 0, 68)
+        // A hair under 68 pt is passed over too (the bar draws only from exactly 68).
+        let hair = CGRect(x: 75.9995, y: 45, width: 40, height: 40)
+        XCTAssertEqual(row(pane, [hair], width: 68)?.minX ?? -1, hair.maxX + WorkspaceOverlayPlacement.gap, accuracy: 1e-9)
+        // At exactly 68 pt the first run is taken.
+        let exact = CGRect(x: 76, y: 45, width: 40, height: 40)
+        XCTAssertEqual(row(pane, [exact], width: 68)?.minX, 0)
+
+        // The tabs pushed below a full-width control in a 90 pt pane: the old row would put the
+        // menu button 40 pt into the next pane, so there is no bar.
+        let short = CGRect(x: 0, y: 0, width: 120, height: 90)
+        let top = CGRect(x: 0, y: 0, width: 120, height: 42)
+        XCTAssertNil(row(short, [top], width: 68))
+        // A bar whose footprint ends exactly at the pane's bottom fits; 0.25 pt more does not.
+        let snug = CGRect(x: 0, y: 0, width: 300, height: 80)
+        XCTAssertEqual(row(snug, [], width: 68), CGRect(x: 0, y: 31, width: 300, height: 40))
+        XCTAssertNil(row(CGRect(x: 0, y: 0, width: 300, height: 79.75), [], width: 68))
+    }
+
+    // Codex round 20: beside the tabs only while its menu button stays inside the pane.
+    func testTheBarBesideTheTabsStaysInsideThePane() {
+        func place(_ pane: CGRect, _ controls: [CGRect], labelsEnd: CGFloat) -> (row: CGRect, besideTitle: Bool)? {
+            let title = WorkspaceOverlayPlacement.paneTitleRow(pane: pane, safe: nil, avoiding: controls)
+            return WorkspaceOverlayPlacement.paneMenuBar(pane: pane, titleRow: title, labelsEnd: labelsEnd,
+                                                         safe: nil, avoiding: controls, barWidth: 120, minimumWidth: 68)
+        }
+        // Room beside the tabs: there, as before.
+        let roomy = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let beside = place(roomy, [], labelsEnd: 150)
+        XCTAssertEqual(beside?.besideTitle, true)
+        XCTAssertEqual(beside?.row, CGRect(x: 148, y: 0, width: 252, height: 40))
+        // The tabs pushed down to y = 50 in a 90 pt pane: beside them its button would end at 99,
+        // and there is no row below either, so no bar.
+        let short = CGRect(x: 0, y: 0, width: 400, height: 90)
+        let top = CGRect(x: 0, y: 0, width: 400, height: 42)
+        XCTAssertNil(place(short, [top], labelsEnd: 150))
+        // A titles-only bar (no menu button, 28 pt) ends at 83 there: it fits beside the tabs.
+        let titlesTitle = WorkspaceOverlayPlacement.paneTitleRow(pane: short, safe: nil, avoiding: [top])
+        let titlesOnly = WorkspaceOverlayPlacement.paneMenuBar(
+            pane: short, titleRow: titlesTitle, labelsEnd: 150, safe: nil, avoiding: [top], barWidth: 120,
+            minimumWidth: 120, footprint: WorkspaceOverlayPlacement.paneMenuTitlesFootprint)
+        XCTAssertEqual(titlesOnly?.besideTitle, true)
+        XCTAssertLessThanOrEqual((titlesOnly?.row.minY ?? .infinity) + WorkspaceOverlayPlacement.paneMenuTitlesFootprint,
+                                 short.maxY)
+        // The same pane 140 pt tall: the button ends at 99, inside it, so beside the tabs.
+        let taller = CGRect(x: 0, y: 0, width: 400, height: 140)
+        let fits = place(taller, [top], labelsEnd: 150)
+        XCTAssertEqual(fits?.besideTitle, true)
+        XCTAssertLessThanOrEqual((fits?.row.minY ?? .infinity) + WorkspaceOverlayPlacement.paneMenuFootprint, taller.maxY)
+    }
+
+    /// `PaneMenuBar` (a view) isn't in this target; its preferred width.
+    private let PaneMenuBar_preferredWidth: CGFloat = 120
 }

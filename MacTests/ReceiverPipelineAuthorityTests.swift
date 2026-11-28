@@ -46,6 +46,41 @@ final class ReceiverPipelineAuthorityTests: XCTestCase {
         await stopRecovery(pipeline)
     }
 
+    // MARK: - Local first (LocalFirstKnockPolicy)
+
+    /// At home on the same Wi-Fi or in AWDL range: the Remote knock waits for
+    /// the local head start, then still goes out as the fallback, keeping the
+    /// user's `.manual` intent.
+    func testMacVisibleLocallyDelaysTheRemoteKnockThenFallsBack() async {
+        let host = PipelineTestHost()
+        host.macVisible.withLock { $0 = true }
+        let pipeline = host.makePipeline()
+        let request = host.recordRequest(peerID: "mac-A")
+
+        await pipeline.requestManualReconnectTransition(requestID: request.id)
+
+        XCTAssertEqual(host.knocks, [], "the local route must get its head start before Remote is asked")
+        let knocked = await eventually(timeout: LocalFirstKnockPolicy.localHeadStart + 3) { !host.knocks.isEmpty }
+        XCTAssertTrue(knocked, "Remote is still the fallback once the head start is over")
+        XCTAssertEqual(host.knocks.first, PipelineTestKnock(peerID: "mac-A", intent: .manual))
+        await stopRecovery(pipeline)
+    }
+
+    /// The local route won within the head start: Remote is never asked to dial.
+    func testLocalSessionWithinTheHeadStartCancelsTheRemoteKnock() async {
+        let host = PipelineTestHost()
+        host.macVisible.withLock { $0 = true }
+        let pipeline = host.makePipeline()
+        let request = host.recordRequest(peerID: "mac-A")
+        await pipeline.requestManualReconnectTransition(requestID: request.id)
+
+        await establishSession(pipeline, host: host, peerID: "mac-A")
+        try? await Task.sleep(nanoseconds: UInt64((LocalFirstKnockPolicy.localHeadStart + 1) * 1_000_000_000))
+
+        XCTAssertEqual(host.knocks, [], "a session that came up locally must not be followed by a Remote knock")
+        await stopRecovery(pipeline)
+    }
+
     /// The Mac answered the request (a session came up). Recovery after that
     /// session is lost is automatic — even though the request record and a
     /// stale `manualConnectPeerID` are still around here, which is exactly
@@ -593,6 +628,8 @@ private final class PipelineTestHost: Sendable {
     private let recordedRecoveryKnocks = OSAllocatedUnfairLock<[String]>(initialState: [])
     /// Whether the extended Remote recovery may knock (a saved address and a pin).
     let remoteEligible = OSAllocatedUnfairLock(initialState: false)
+    /// Whether the local network shows the Mac (`HostControlEffects.macVisibleLocally`).
+    let macVisible = OSAllocatedUnfairLock(initialState: false)
     var recoveryKnocks: [String] { recordedRecoveryKnocks.withLock { $0 } }
     private let pins = OSAllocatedUnfairLock<[ObjectIdentifier: String]>(initialState: [:])
     private let admittedState = OSAllocatedUnfairLock(initialState: false)
@@ -664,6 +701,7 @@ private final class PipelineTestHost: Sendable {
                 recordedRecoveryKnocks.withLock { $0.append(peerID) }
                 completion(.timedOut)
             },
+            macVisibleLocally: { [self] _ in macVisible.withLock { $0 } },
             resolvePinnedPeerID: { [self] connection in pinnedPeer(of: connection) },
             getReceiveLiveness: { (generation: 0, lastDataReceived: Date()) },
             advertisesAddresses: { false },

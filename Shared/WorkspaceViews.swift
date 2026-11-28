@@ -233,15 +233,19 @@ struct WorkspaceChromeView: View {
                     // The focused pane's app menus (control only), in its label row right after the labels.
                     let pane = paneTitleRow(rect)
                     let end = labelStripEnd[id] ?? pane.minX
-                    let besideTitle = end > pane.minX && end < pane.maxX
-                        && (onAppMenuBarActivity == nil || pane.maxX - end + 2 >= PaneMenuBar.preferredWidth)
-                    let barPane = besideTitle
-                        ? CGRect(x: end - 2, y: pane.minY, width: pane.maxX - end + 2, height: pane.height)
-                        : pane
-                    PaneMenuBar(menus: model.menus, pane: barPane,
-                                top: pane.minY + (besideTitle ? 5 : 36), bounds: picture,
-                                automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
-                                showsCollapsedAppName: !besideTitle, onActivity: onAppMenuBarActivity)
+                    // Beside the tabs, or its own row below them clear of the controls there too; wholly
+                    // inside the pane either way (none in a pane too short for it).
+                    if let bar = WorkspaceOverlayPlacement.paneMenuBar(
+                        pane: rect, titleRow: pane, labelsEnd: end, safe: safeArea, avoiding: controls + railFrames,
+                        barWidth: PaneMenuBar.preferredWidth,
+                        minimumWidth: PaneMenuBar.minimumWidth(inlineToggle: onAppMenuBarActivity != nil),
+                        footprint: onAppMenuBarActivity != nil ? WorkspaceOverlayPlacement.paneMenuFootprint
+                                                               : WorkspaceOverlayPlacement.paneMenuTitlesFootprint) {
+                        PaneMenuBar(menus: model.menus, pane: bar.row,
+                                    top: bar.row.minY + WorkspaceOverlayPlacement.paneMenuBarInset, bounds: picture,
+                                    automaticallyHidden: appMenuBarAutoHidden, controlsHidden: controlsHidden,
+                                    showsCollapsedAppName: !bar.besideTitle, onActivity: onAppMenuBarActivity)
+                    }
                 }
                 let titles = titleZones(frames)
                 #if os(iOS)
@@ -609,6 +613,10 @@ struct WorkspaceChromeView: View {
         return panes + frames.floats.filter { $0 != docked }.compactMap { frames.tiles[$0]?.onScreen(picture) }.map(floatPill)
     }
 
+    static func normalizedRowOffset(_ points: CGFloat, in picture: CGRect) -> Double {
+        picture.height > 0 ? Double(points / picture.height) : 0
+    }
+
     private func paneTitleRow(_ rect: CGRect) -> CGRect {
         WorkspaceOverlayPlacement.paneTitleRow(pane: rect, safe: safeArea, avoiding: controls + railFrames)
     }
@@ -748,6 +756,8 @@ struct WorkspaceChromeView: View {
             if multi || model.arranging || tile.tabs.count > 1 || model.localFullscreen == id {
                 let row = paneTitleRow(rect)
                 let offset = max(0, row.minX - rect.minX - unsafeInsets(of: rect).leading)
+                // Moved down below a control across the pane's top (`WorkspacePaneReach`).
+                let drop = max(0, row.minY - rect.minY - unsafeInsets(of: rect).top)
                 AppMenuObserver(menus: model.menus) { menus in
                     // The menu bar shares this row (see `chrome`): its tabs fold to the shown one and "+N".
                     let barHere = active && (menus.barShown || onAppMenuBarActivity != nil)
@@ -755,6 +765,9 @@ struct WorkspaceChromeView: View {
                         && (multi || model.localFullscreen == id)
                     labelStrip(id: id, tile: tile, rect: row, active: active, sharesRow: barHere)
                 }
+                // At most the clear part of the row (tabs that don't fit scroll instead of running under
+                // a control), and no wider than the tabs: the end measured below is where they stop.
+                .frame(maxWidth: max(0, row.width), alignment: .leading)
                 .workspaceRailObstacle()
                 .background(GeometryReader { g in
                     Color.clear
@@ -762,7 +775,14 @@ struct WorkspaceChromeView: View {
                         .onChange(of: g.frame(in: .named("workspace"))) { labelStripEnd[id] = $0.maxX }
                 })
                 .padding(.leading, offset)
-                .onDisappear { labelStripEnd[id] = nil }
+                .padding(.top, drop)
+                // Drops aim at the row as drawn: below the pane's unsafe
+                // inset and any tray, kept current as the picture resizes.
+                .onAppear { model.tabRowOffsets[id] = Self.normalizedRowOffset(row.minY - rect.minY, in: model.pictureGlobal) }
+                .onChange(of: Self.normalizedRowOffset(row.minY - rect.minY, in: model.pictureGlobal)) {
+                    model.tabRowOffsets[id] = $0
+                }
+                .onDisappear { labelStripEnd[id] = nil; model.tabRowOffsets[id] = nil }
             }
             VStack(spacing: 6) {
                 windowFrameStatus(id)
@@ -817,7 +837,7 @@ struct WorkspaceChromeView: View {
             let shownIndex = windows.firstIndex { $0 == tile.source } ?? 0
             let visible = [shownIndex]
             let hidden = windows.count - 1
-            HStack(spacing: 4) {
+            let folded = HStack(spacing: 4) {
                 ForEach(visible, id: \.self) { i in
                     label(id: id, tab: windows.count > 1 ? i : nil, text: labelText(windows[i], in: tile, id: id),
                           app: labelApp(windows[i]), shown: i == shownIndex, active: active,
@@ -837,7 +857,17 @@ struct WorkspaceChromeView: View {
                 }
             }
             .padding(6)
-            .fixedSize()
+            if #available(macOS 13.0, iOS 16.0, *) {
+                // In a row narrower than the folded tab, it scrolls within the row instead of
+                // drawing past it (under the controls the row stops short of).
+                ViewThatFits(in: .horizontal) {
+                    folded.fixedSize()
+                    ScrollView(.horizontal, showsIndicators: false) { folded }
+                        .frame(width: max(0, rect.width))
+                }
+            } else {
+                folded.fixedSize()
+            }
         } else {
             let row = HStack(spacing: 4) {
                 if windows.isEmpty {
@@ -854,7 +884,8 @@ struct WorkspaceChromeView: View {
                     row.fixedSize()
                     ScrollView(.horizontal, showsIndicators: false) { row }
                         .scrollDisabled(heldLabel != nil || model.drag != nil)
-                        .frame(width: available + 12)
+                        // The clear row's own width, however narrow (`available` keeps a label's floor).
+                        .frame(width: max(0, rect.width))
                         // Scrolling the tabs keeps them all shown while the menu bar waits.
                         .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in if sharesRow { expandTabs(id) } })
                 }
@@ -1230,8 +1261,11 @@ struct WorkspaceChromeView: View {
         ForEach(Array(frames.dividers.enumerated()), id: \.offset) { _, divider in
             let r = divider.hitRect.onScreen(picture)
             let horizontal = divider.axis == .horizontal
+            // The grip shows where a control doesn't cover the divider (the whole divider takes touches).
+            let g = gripRect(r, horizontal: horizontal)
             Capsule().fill(Color.white.opacity(0.85))
                 .frame(width: horizontal ? 6 : 44, height: horizontal ? 44 : 6)
+                .offset(x: g.midX - r.midX, y: g.midY - r.midY)
                 .frame(width: r.width, height: r.height)
                 .contentShape(Rectangle())
                 .position(x: r.midX, y: r.midY)
@@ -1242,7 +1276,8 @@ struct WorkspaceChromeView: View {
                         let dx = v.translation.width - lastDividerTranslation.width
                         let dy = v.translation.height - lastDividerTranslation.height
                         lastDividerTranslation = v.translation
-                        model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1))
+                        model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1),
+                                     safe: safeShare, controls: controlShares)
                     }
                     .onEnded { _ in
                         lastDividerTranslation = .zero
@@ -1253,8 +1288,8 @@ struct WorkspaceChromeView: View {
                 .accessibilityAdjustableAction { direction in
                     // VoiceOver can't drag: one step is 5% of the picture.
                     switch direction {
-                    case .increment: model.resize(divider, delta: 0.05); model.endResize()
-                    case .decrement: model.resize(divider, delta: -0.05); model.endResize()
+                    case .increment: model.resize(divider, delta: 0.05, safe: safeShare, controls: controlShares); model.endResize()
+                    case .decrement: model.resize(divider, delta: -0.05, safe: safeShare, controls: controlShares); model.endResize()
                     @unknown default: break
                     }
                 }
@@ -1294,6 +1329,45 @@ struct WorkspaceChromeView: View {
         } message: {
             Text("Saved layouts are kept for this Mac. Their windows are matched again when you use one.")
         }
+    }
+
+    /// The receiver's controls, folds and rails as shares of the picture (what panes' tabs and
+    /// dividers keep clear of).
+    private var controlShares: [WorkspaceRect] {
+        (controls + divisions + railFrames).filter { !$0.isNull && !$0.isEmpty }.map { c in
+            WorkspaceRect(x: (c.minX - picture.minX) / max(picture.width, 1), y: (c.minY - picture.minY) / max(picture.height, 1),
+                          width: c.width / max(picture.width, 1), height: c.height / max(picture.height, 1))
+        }
+    }
+
+    private var safeShare: WorkspaceRect? {
+        safeArea.map { c in
+            WorkspaceRect(x: (c.minX - picture.minX) / max(picture.width, 1), y: (c.minY - picture.minY) / max(picture.height, 1),
+                          width: c.width / max(picture.width, 1), height: c.height / max(picture.height, 1))
+        }
+    }
+
+    /// Arrange's divider grip (44 pt along the divider): at its middle, else on the part of the
+    /// divider nearest its middle that no control covers, so it never hides under a tray.
+    private func gripRect(_ hit: CGRect, horizontal: Bool) -> CGRect {
+        let along: CGFloat = 60
+        let grip = horizontal ? CGRect(x: hit.minX, y: hit.midY - along / 2, width: hit.width, height: along)
+                              : CGRect(x: hit.midX - along / 2, y: hit.minY, width: along, height: hit.height)
+        let blocks = (controls + divisions).filter { !$0.isNull && !$0.isEmpty }.map(WorkspaceRect.init)
+        guard WorkspaceFloatLayering.isCovered(WorkspaceRect(grip), by: blocks) else { return grip }
+        let free = WorkspaceFloatLayering.uncovered(WorkspaceRect(hit), alongX: !horizontal, by: blocks, minLength: Double(along))
+        let mid = horizontal ? Double(hit.midY) : Double(hit.midX)
+        guard let best = free.min(by: { a, b in
+            let da = horizontal ? abs(min(max(mid, a.y + 30), a.maxY - 30) - mid) : abs(min(max(mid, a.x + 30), a.maxX - 30) - mid)
+            let db = horizontal ? abs(min(max(mid, b.y + 30), b.maxY - 30) - mid) : abs(min(max(mid, b.x + 30), b.maxX - 30) - mid)
+            return da < db
+        }) else { return grip }
+        if horizontal {
+            let c = min(max(mid, best.y + 30), best.maxY - 30)
+            return CGRect(x: hit.minX, y: c - along / 2, width: hit.width, height: along)
+        }
+        let c = min(max(mid, best.x + 30), best.maxX - 30)
+        return CGRect(x: c - along / 2, y: hit.minY, width: along, height: hit.height)
     }
 
     private var arrangeBarCentre: CGPoint {
@@ -1344,7 +1418,8 @@ struct WorkspaceChromeView: View {
                     let dx = drag.translation.width - lastDividerTranslation.width
                     let dy = drag.translation.height - lastDividerTranslation.height
                     lastDividerTranslation = drag.translation
-                    model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1))
+                    model.resize(divider, delta: horizontal ? dx / max(picture.width, 1) : dy / max(picture.height, 1),
+                                 safe: safeShare, controls: controlShares)
                 }
                 .onEnded { _ in
                     if heldDivider == i { model.endResize(); Self.haptic(.drop) }
@@ -2355,8 +2430,12 @@ struct PaneMenuBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static let preferredWidth: CGFloat = 120
+
     private static let height: CGFloat = 28
     private static let toggleSize: CGFloat = 44
+
+    /// The narrowest row the bar is drawn in (with its own menu button, or titles only).
+    static func minimumWidth(inlineToggle: Bool) -> CGFloat { inlineToggle ? toggleSize + 24 : preferredWidth }
 
     private var expanded: Bool {
         menus.barShown && (!automaticallyHidden || !menus.open.isEmpty || voiceOver)
@@ -2365,7 +2444,7 @@ struct PaneMenuBar: View {
     var body: some View {
         let inlineToggle = onActivity != nil
         if (menus.barShown || inlineToggle), menus.tile != nil,
-           pane.width >= (inlineToggle ? Self.toggleSize + 24 : Self.preferredWidth) {
+           pane.width >= Self.minimumWidth(inlineToggle: inlineToggle) {
             ZStack(alignment: .topLeading) {
                 if !menus.open.isEmpty {
                     // Tap anywhere else to close; nothing reaches the Mac while a menu is open.

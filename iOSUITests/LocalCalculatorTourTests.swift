@@ -28,24 +28,50 @@ final class LocalCalculatorTourTests: XCTestCase {
     @MainActor
     private func tour(prefix: String) {
         enterDemo()
-        revealControls(element("Settings"))
-        XCTAssertFalse(calculatorButton.exists, "not shown until added")
-        snapshot("\(prefix)-01-not-added")
-
-        addCalculatorFromFunctionTrayEditor()
         revealControls(calculatorButton)
-        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added from Edit Function Tray")
-        snapshot("\(prefix)-02-button")
+        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "shown by default")
+        snapshot("\(prefix)-01-default")
 
+        setCalculatorInFunctionTrayEditor(shown: false)
+        revealControls(element("Settings"))
+        XCTAssertFalse(calculatorButton.exists, "removed from Edit Function Tray")
+        snapshot("\(prefix)-02-removed")
+
+        setCalculatorInFunctionTrayEditor(shown: true)
+        revealControls(calculatorButton)
+        XCTAssertTrue(calculatorButton.waitForExistence(timeout: 5), "added back from Edit Function Tray")
+
+        let buttonFrame = calculatorButton.frame
         calculatorButton.tap()
         let result = element("Result")
-        XCTAssertTrue(result.waitForExistence(timeout: 3), "the panel opens")
+        let opened = result.waitForExistence(timeout: 3)
+        if !opened {
+            // Diagnostics only (CI keeps no result bundle); the assertion below still fails.
+            // On hosted iPhone Duo since late November the button reported the whole window
+            // as its frame, so the tap above went to the window's middle. Tapping its drawn
+            // face tells a broken button from a wrong reported frame.
+            // Controls woken again first (Auto-hide may have faded them while waiting), the face
+            // read once, then the probe; the slow tree print last.
+            revealControls(calculatorButton)
+            let face = calculatorButton.images.firstMatch
+            let faceFrame: CGRect? = face.exists ? face.frame : nil
+            print("Calculator button at \(buttonFrame) in \(app.frame); face at \(faceFrame.map { "\($0)" } ?? "none: probe unavailable")")
+            if let middle = faceFrame {
+                // At the face's own middle, as a window coordinate (not a point XCTest picks).
+                app.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: middle.midX - app.frame.minX, dy: middle.midY - app.frame.minY)).tap()
+                print("Tapping the face at \(middle) opened the panel: \(result.waitForExistence(timeout: 3))")
+            }
+            print(app.debugDescription)
+        }
+        XCTAssertTrue(opened, "the panel opens")
         for label in ["Decimal Point", "1", "Plus", "Decimal Point", "2", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "0.3", "exact decimals")
+        // The display reads the sum, then its answer ("0.1 + 0.2, = 0.3") since round 3.
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "0.3", "exact decimals")
         snapshot("\(prefix)-03-open-0.1+0.2")
 
         for label in ["All Clear", "2", "Plus", "3", "Multiply", "4", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "14", "precedence")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "14", "precedence")
         calculatorKey("Copy Result").tap()
         snapshot("\(prefix)-04-copied")
 
@@ -57,7 +83,7 @@ final class LocalCalculatorTourTests: XCTestCase {
         XCTAssertEqual(input.value as? String, "Off")
         XCTAssertTrue(calculatorButton.exists, "independent of input grants")
         for label in ["All Clear", "5", "0", "Plus", "1", "0", "Percent", "Equals"] { calculatorKey(label).tap() }
-        XCTAssertEqual(result.value as? String, "55", "percent, in View Only")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "55", "percent, in View Only")
         snapshot("\(prefix)-05-view-only")
         input.tap()
         sleep(1)
@@ -68,7 +94,7 @@ final class LocalCalculatorTourTests: XCTestCase {
         revealControls(calculatorButton)
         calculatorButton.tap()
         XCTAssertTrue(result.waitForExistence(timeout: 3))
-        XCTAssertEqual(result.value as? String, "55", "kept while closed")
+        XCTAssertEqual((result.value as? String)?.components(separatedBy: "= ").last, "55", "kept while closed")
         calculatorButton.tap()
         sleep(1)
         XCTAssertFalse(result.exists, "its button closes it again")
@@ -101,7 +127,7 @@ final class LocalCalculatorTourTests: XCTestCase {
     }
 
     @MainActor
-    private func addCalculatorFromFunctionTrayEditor() {
+    private func setCalculatorInFunctionTrayEditor(shown: Bool) {
         revealControls(element("Settings"))
         element("Settings").tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
@@ -125,8 +151,8 @@ final class LocalCalculatorTourTests: XCTestCase {
         snapshot("function-tray-editor-utilities")
         // The switch itself, not the label or a screen coordinate.
         let control = toggle.switches.firstMatch
-        (control.exists ? control : toggle).tap()
-        XCTAssertEqual(toggle.value as? String, "1")
+        if (toggle.value as? String == "1") != shown { (control.exists ? control : toggle).tap() }
+        XCTAssertEqual(toggle.value as? String, shown ? "1" : "0")
         // Back out of the pushed pages (Edit Function Tray, then Controls), then close Settings.
         // The system Back button is found by its identifier: on current iOS it isn't a child of
         // the navigation bar's element (see DemoModeSmokeTests).

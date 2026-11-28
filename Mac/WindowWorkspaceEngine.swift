@@ -2215,6 +2215,14 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
                 guard layout.containsDisplayPoint(WorkspacePoint(x: g.x, y: g.y)) else { return nil }
                 return targeting.cursorPlacement(forGlobal: g, in: id)
             }
+            // A Trackpad pane moves the real Mac cursor itself (not the workspace pointer): while
+            // it's in use the marks follow that cursor, and the workspace pointer is kept there so
+            // they stay put once it goes idle.
+            if Self.desktopTrackpadActive(lastInput: desktopTrackpadAt, now: ProcessInfo.processInfo.systemUptime) {
+                guard let p = targeting.cursorPlacement(forGlobal: g) else { return nil }
+                targeting.placePointer(at: WorkspacePoint(x: p.x, y: p.y))
+                return p
+            }
             return Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
                 ? targeting.pointerPlacement() : targeting.cursorPlacement(forGlobal: g)
         }
@@ -2228,6 +2236,22 @@ final class WindowWorkspaceEngine: InputTargetMapper, @unchecked Sendable {
             Self.reportsWorkspacePointer(pointerDriven: pointerDriven, receiverMayMovePointer: receiverMayMovePointer)
                 ? nil : targeting.offPaneCursor(forGlobal: g)
         }
+    }
+
+    /// When a Trackpad pane last moved the real Mac cursor (system uptime), under `inputLock`.
+    private var desktopTrackpadAt: TimeInterval = -.infinity
+    /// How long after a Trackpad pane's last motion the cursor report follows the real cursor.
+    static let desktopTrackpadHold: TimeInterval = 0.5
+
+    /// A Trackpad pane just moved the real Mac cursor (relative motion with `desktopTrackpad`).
+    func noteDesktopTrackpadInput() {
+        inputLock.withLock { desktopTrackpadAt = ProcessInfo.processInfo.systemUptime }
+    }
+
+    /// Whether a Trackpad pane is in use now: its last motion at `lastInput` is within
+    /// `desktopTrackpadHold` of `now`. Pure, for tests.
+    static func desktopTrackpadActive(lastInput: TimeInterval, now: TimeInterval, hold: TimeInterval = desktopTrackpadHold) -> Bool {
+        lastInput.isFinite && now >= lastInput && now - lastInput <= hold
     }
 
     /// Whether the cursor report is the workspace pointer (a receiver resume position)
