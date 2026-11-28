@@ -388,6 +388,24 @@ enum LocalCalculatorStashGeometry {
         return slid(settled(stash, strip: shown, bounds: bounds), along: along, bounds: bounds)
     }
 
+    /// The next place along the edge in `direction` (negative: up) where the strip moves by at
+    /// least `step` points or, past controls, to the next place it can be at all; nil at the end
+    /// of the edge. VoiceOver's Move Up / Move Down: never stuck in front of a control.
+    static func stepped(_ stash: LocalCalculatorStash, size: CGSize, direction: CGFloat, step: CGFloat,
+                        bounds: CGRect, obstacles: [CGRect] = []) -> LocalCalculatorStash? {
+        guard direction != 0, step > 0, bounds.height > 0 else { return nil }
+        let sign: CGFloat = direction < 0 ? -1 : 1
+        let from = waiting(size: size, stash: stash, bounds: bounds, obstacles: obstacles).strip.midY
+        var along = step
+        while along <= bounds.height {
+            let moved = slidFromShown(stash, size: size, along: sign * along, bounds: bounds, obstacles: obstacles)
+            let strip = waiting(size: size, stash: moved, bounds: bounds, obstacles: obstacles).strip
+            if sign * (strip.midY - from) >= 1 { return settled(moved, strip: strip, bounds: bounds) }
+            along += 8
+        }
+        return nil
+    }
+
     /// The stash at the place its strip is shown (`strip`'s centre in `bounds`), so a slide lets
     /// go exactly where the strip was drawn, past any controls it stepped over.
     static func settled(_ stash: LocalCalculatorStash, strip: CGRect, bounds: CGRect) -> LocalCalculatorStash {

@@ -266,6 +266,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
         var start: CGPoint
         var kind: LocalCalculatorStashGeometry.StripTouch?
         var translation: CGSize
+        /// Where the strip was drawn when the touch began: a slide moves it from there, whatever
+        /// opens or moves meanwhile.
+        var origin: LocalCalculatorStash
     }
     @Environment(\.colorSchemeContrast) private var contrast
 
@@ -333,6 +336,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     // A clip only changes what is drawn: the part cut off takes no touches either.
                     .contentShape(LocalCalculatorStashClip(visible: waiting.map { visibleStrip(of: shown, waiting: $0.strip, window: $0.window) }
                                                                ?? visibleWhileDragged(shown, bounds: bounds)))
+                    // Stashed, the window itself isn't drawn: its strip's card stands for it (no live
+                    // pixels around the card's corners); it fades back in as it comes out.
+                    .opacity(waiting == nil ? 1 : 0)
                     .allowsHitTesting(waiting == nil)
                     .accessibilityHidden(waiting != nil)
                     .position(x: shown.midX, y: shown.midY)
@@ -340,10 +346,18 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                 ? .opacity
                                 : .scale(scale: 0.92, anchor: Self.unitPoint(of: anchor, in: panel))
                                     .combined(with: .opacity))
-                if let waiting, let stash = model.stash {
-                    stashHandle(strip: waiting.strip, touch: waiting.touch, stash: stash,
+                // Only where a finger can take it: with no clear place, nothing is drawn over the
+                // controls there and the calculator button brings it back (`anchorStashed`).
+                if let waiting, let stash = model.stash, let touch = waiting.touch {
+                    stashHandle(strip: waiting.strip, touch: touch, stash: stash, bounds: bounds,
                                 restore: { restore(panel, bounds: bounds) },
-                                slide: { slideEnded(panel, by: $0, bounds: bounds) })
+                                settle: { slideEnded(panel, to: $0, bounds: bounds) },
+                                step: { direction in
+                                    LocalCalculatorStashGeometry.stepped(stash, size: panel.size, direction: direction,
+                                                                         step: max(waiting.strip.height, 60), bounds: bounds,
+                                                                         obstacles: obstacles + stashObstacles)
+                                        .map { slideEnded(panel, to: $0, bounds: bounds) }
+                                })
                 }
             }
         }
@@ -380,6 +394,7 @@ struct LocalCalculatorLayer<Chip: View>: View {
         }
         // Controls opened or moved onto its strip: it moves to where it can still be tapped.
         .onChange(of: obstacles + stashObstacles) { _ in anchorStashed(in: usableBounds) }
+        .onChange(of: buttonFrame) { _ in anchorStashed(in: usableBounds) }
         .onAppear { anchorStashed(in: usableBounds) }
     }
 
@@ -417,16 +432,29 @@ struct LocalCalculatorLayer<Chip: View>: View {
         let metrics = LocalCalculatorPanelMetrics.fitting(panelBounds.size, preferredKey: preferredKey)
         let fitted = settled(frame, metrics: metrics, bounds: bounds)
         // Its strip covered (a rotation, or controls that opened there): the other side edge if
-        // that has a clear place, so every stashed window stays reachable by a finger; with
-        // neither, it stays (the calculator button still brings it back).
-        if let usable = LocalCalculatorStashGeometry.usable(stash, size: fitted.size, bounds: bounds,
-                                                            obstacles: obstacles + stashObstacles), usable != stash {
-            stash = usable
-            model.stash = usable
+        // that has a clear place, so every stashed window stays reachable by a finger, moved
+        // there at once rather than across the screen. With neither, the calculator button
+        // brings it back; without a button it comes back now, never out of reach.
+        let usable = LocalCalculatorStashGeometry.usable(stash, size: fitted.size, bounds: bounds,
+                                                         obstacles: obstacles + stashObstacles)
+        if usable == nil, buttonFrame == nil {
+            model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+                frame.size, at: LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
+                                                                      obstacles: obstacles + stashObstacles))
+            model.stash = nil
+            return
         }
-        model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
-            frame.size, at: LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
-                                                                  obstacles: obstacles + stashObstacles))
+        var moveAtOnce = Transaction()
+        moveAtOnce.disablesAnimations = true
+        withTransaction(moveAtOnce) {
+            if let usable, usable != stash {
+                stash = usable
+                model.stash = usable
+            }
+            model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+                frame.size, at: LocalCalculatorStashGeometry.restored(fitted, stash: stash, bounds: bounds,
+                                                                      obstacles: obstacles + stashObstacles))
+        }
     }
 
     /// What a stashed window takes from the screen: its strip, where it takes touches.
@@ -453,9 +481,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
 
     /// `stash` moved along its edge by a strip being slid there.
     private func sliding(_ stash: LocalCalculatorStash, size: CGSize, bounds: CGRect) -> LocalCalculatorStash {
-        guard let touch = stashTouch, touch.kind == .slide else { return stash }
-        return LocalCalculatorStashGeometry.slidFromShown(stash, size: size, along: touch.translation.height, bounds: bounds,
-                                                          obstacles: obstacles + stashObstacles)
+        guard let touch = stashTouch, touch.kind == .slide, touch.origin.edge == stash.edge else { return stash }
+        return LocalCalculatorStashGeometry.slid(touch.origin, along: touch.translation.height, bounds: bounds)
     }
 
     /// The waiting window moved in by the peek or pull on its strip.
@@ -474,10 +501,8 @@ struct LocalCalculatorLayer<Chip: View>: View {
 
     /// A strip slid along its edge and let go: it waits there (where it was drawn, past any
     /// controls it stepped over), and comes back at that height.
-    private func slideEnded(_ panel: CGRect, by along: CGFloat, bounds: CGRect) {
-        guard let stash = model.stash else { return }
-        let slid = LocalCalculatorStashGeometry.slidFromShown(stash, size: panel.size, along: along, bounds: bounds,
-                                                              obstacles: obstacles + stashObstacles)
+    private func slideEnded(_ panel: CGRect, to slid: LocalCalculatorStash, bounds: CGRect) {
+        guard let stash = model.stash, slid.edge == stash.edge else { return }
         let strip = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: slid, bounds: bounds,
                                                          obstacles: obstacles + stashObstacles).strip
         let settled = LocalCalculatorStashGeometry.settled(slid, strip: strip, bounds: bounds)
@@ -493,9 +518,10 @@ struct LocalCalculatorLayer<Chip: View>: View {
     /// inward; a slide along the edge moves the strip there (owner QA, round 5). Without a clear
     /// `touch` area the strip only shows, and the calculator button brings it back. Left and
     /// right edges only, so the card always stands along its edge.
-    private func stashHandle(strip: CGRect, touch: CGRect?, stash: LocalCalculatorStash,
-                             restore: @escaping () -> Void, slide: @escaping (CGFloat) -> Void) -> some View {
-        let area = touch ?? strip
+    private func stashHandle(strip: CGRect, touch: CGRect, stash: LocalCalculatorStash, bounds: CGRect,
+                             restore: @escaping () -> Void, settle: @escaping (LocalCalculatorStash) -> Void,
+                             step: @escaping (CGFloat) -> Void) -> some View {
+        let area = touch
         let inward: (CGSize) -> CGFloat = { stash.edge == .left ? $0.width : -$0.width }
         let peek = stashPeek
         let lit = stashTouch != nil
@@ -526,7 +552,6 @@ struct LocalCalculatorLayer<Chip: View>: View {
         }
         .frame(width: area.width, height: area.height, alignment: .topLeading)
         .contentShape(Rectangle())
-        .allowsHitTesting(touch != nil)
         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($stashHeld) { _, held, _ in held = true }
             .onChanged { value in
@@ -536,16 +561,18 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 } else {
                     // A new touch (any earlier one was cancelled): its own identity and decision.
                     stashTouchCount &+= 1
-                    t = StripTouchState(id: stashTouchCount, start: value.startLocation, kind: nil, translation: .zero)
+                    t = StripTouchState(id: stashTouchCount, start: value.startLocation, kind: nil, translation: .zero,
+                                        origin: LocalCalculatorStashGeometry.settled(stash, strip: strip, bounds: bounds))
                 }
                 t.translation = value.translation
                 if t.kind == nil { t.kind = LocalCalculatorStashGeometry.stripTouch(value.translation, edge: stash.edge) }
                 stashTouch = t
             }
             .onEnded { value in
-                let current = stashTouch?.start == value.startLocation ? stashTouch : nil
-                let kind = current?.kind ?? LocalCalculatorStashGeometry.stripTouch(value.translation, edge: stash.edge)
-                switch kind {
+                // A touch that was let go of meanwhile (the window moved edge, came back, or the
+                // system cancelled it) does nothing when it ends.
+                guard let current = stashTouch, current.start == value.startLocation else { return }
+                switch current.kind ?? LocalCalculatorStashGeometry.stripTouch(value.translation, edge: stash.edge) {
                 case nil:
                     stashTouch = nil
                     restore()   // a tap
@@ -560,10 +587,10 @@ struct LocalCalculatorLayer<Chip: View>: View {
                     }
                 case .slide:
                     // Let go where it was drawn: the touch ends with its new place set at once.
-                    var settle = Transaction()
-                    settle.disablesAnimations = true
-                    withTransaction(settle) {
-                        slide(value.translation.height)
+                    var atOnce = Transaction()
+                    atOnce.disablesAnimations = true
+                    withTransaction(atOnce) {
+                        settle(LocalCalculatorStashGeometry.slid(current.origin, along: value.translation.height, bounds: bounds))
                         stashTouch = nil
                     }
                 case .away:
@@ -582,12 +609,11 @@ struct LocalCalculatorLayer<Chip: View>: View {
         .accessibilityAction { restore() }
         // The slide, for VoiceOver and Switch Control: a step along the edge, past controls.
         .accessibilityAction(named: Text("Move Up", comment: "Local calculator: moves a stashed window's strip up its edge.")) {
-            slide(-max(strip.height, 60))
+            step(-1)
         }
         .accessibilityAction(named: Text("Move Down", comment: "Local calculator: moves a stashed window's strip down its edge.")) {
-            slide(max(strip.height, 60))
+            step(1)
         }
-        .accessibilityHidden(touch == nil)
         .accessibilityIdentifier("calculatorStashStrip")
     }
 

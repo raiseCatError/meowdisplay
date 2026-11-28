@@ -549,6 +549,31 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertLessThanOrEqual(G.maximumPeek + G.strip, G.touchDepth, "a peek never shows past the touch area")
     }
 
+    // Codex round 25: VoiceOver's Move Down steps past a control instead of snapping back.
+    func testMoveStepsPastAControl() {
+        typealias G = LocalCalculatorStashGeometry
+        let size = CGSize(width: 200, height: 300)
+        let rail = CGRect(x: stashBounds.maxX - 50, y: stashBounds.midY - 200, width: 60, height: 400)
+        let top = LocalCalculatorStash(edge: .right, offset: 0)
+        let from = G.waiting(size: size, stash: top, bounds: stashBounds, obstacles: [rail]).strip
+        XCTAssertLessThan(from.maxY, rail.minY, "above the rail")
+        // First as far as it goes above the rail, then past it: never stuck where it was.
+        var down: LocalCalculatorStash? = top
+        var to = from
+        for _ in 0..<2 {
+            down = down.flatMap { G.stepped($0, size: size, direction: 1, step: from.height, bounds: stashBounds,
+                                            obstacles: [rail]) }
+            let next = down.map { G.waiting(size: size, stash: $0, bounds: stashBounds, obstacles: [rail]).strip }
+            XCTAssertGreaterThan(next?.midY ?? 0, to.midY, "each Move Down moves it down")
+            to = next ?? to
+        }
+        XCTAssertGreaterThanOrEqual(to.minY, rail.maxY - 0.5, "below the rail: \(to)")
+        XCTAssertNil(G.stepped(LocalCalculatorStash(edge: .right, offset: 1), size: size, direction: 1, step: 60,
+                               bounds: stashBounds, obstacles: [rail]), "nowhere further down")
+        XCTAssertNotNil(G.stepped(down ?? top, size: size, direction: -1, step: 60, bounds: stashBounds, obstacles: [rail]),
+                        "and back up past it")
+    }
+
     // Owner QA, round 5: in landscape the strip stands along its side edge, never across it.
     func testInLandscapeTheStripStandsAlongItsSideEdge() {
         typealias G = LocalCalculatorStashGeometry
