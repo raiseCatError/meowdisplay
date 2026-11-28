@@ -501,6 +501,58 @@ final class LocalCalculatorPlacementTests: XCTestCase {
         XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: -30, projected: -60, travel: 30), "pushed back in")
         XCTAssertFalse(LocalCalculatorStashGeometry.pullRestores(inward: 2, projected: 4, travel: 30), "slid along the edge")
     }
+    // Owner QA, round 5: a touch on the strip is a tap, a pull, a slide along the edge or a push back.
+    func testAStripTouchIsDecidedAsAFloatStripsIs() {
+        typealias G = LocalCalculatorStashGeometry
+        XCTAssertNil(G.stripTouch(CGSize(width: 3, height: 5), edge: .left), "short of 8 pt: a tap so far")
+        XCTAssertEqual(G.stripTouch(CGSize(width: 2, height: 30), edge: .left), .slide, "along the edge")
+        XCTAssertEqual(G.stripTouch(CGSize(width: -2, height: -30), edge: .right), .slide)
+        XCTAssertEqual(G.stripTouch(CGSize(width: 20, height: 4), edge: .left), .pull, "inward from the left")
+        XCTAssertEqual(G.stripTouch(CGSize(width: -20, height: 4), edge: .right), .pull, "inward from the right")
+        XCTAssertEqual(G.stripTouch(CGSize(width: -20, height: 4), edge: .left), .away, "pushed back into the left edge")
+        XCTAssertEqual(G.stripTouch(CGSize(width: 20, height: 4), edge: .right), .away)
+    }
+
+    func testASlidStripWaitsWhereItWasDrawnAndComesBackThere() {
+        typealias G = LocalCalculatorStashGeometry
+        let size = CGSize(width: 200, height: 300)
+        let stash = LocalCalculatorStash(edge: .left, offset: 0.5)
+        let slid = G.slid(stash, along: 200, bounds: stashBounds)
+        XCTAssertEqual(slid.edge, .left, "still on its own edge")
+        XCTAssertEqual(slid.offset, 0.5 + Double(200 / stashBounds.height), accuracy: 1e-9)
+        XCTAssertEqual(G.slid(stash, along: -10_000, bounds: stashBounds).offset, 0, "kept on the edge")
+        XCTAssertEqual(G.slid(stash, along: 10_000, bounds: stashBounds).offset, 1)
+        // Slid onto a control: the strip steps past it, and lets go where it was drawn.
+        let control = CGRect(x: stashBounds.minX - 10, y: stashBounds.midY + 140, width: 60, height: 120)
+        let drawn = G.waiting(size: size, stash: slid, bounds: stashBounds, obstacles: [control])
+        XCTAssertFalse(drawn.touch.map { $0.intersects(control) } ?? true)
+        let settled = G.settled(slid, strip: drawn.strip, bounds: stashBounds)
+        let again = G.waiting(size: size, stash: settled, bounds: stashBounds, obstacles: [control])
+        XCTAssertEqual(again.strip, drawn.strip, "no jump when it is let go")
+        let back = G.restored(CGRect(x: 100, y: 100, width: 200, height: 300), stash: settled, bounds: stashBounds,
+                              obstacles: [control])
+        XCTAssertEqual(back.minX, stashBounds.minX, "flush with its edge")
+        XCTAssertTrue(back.minY <= drawn.strip.minY && drawn.strip.maxY <= back.maxY, "out of its strip, where it was slid")
+    }
+
+    // Owner QA, round 5: in landscape the strip stands along its side edge, never across it.
+    func testInLandscapeTheStripStandsAlongItsSideEdge() {
+        typealias G = LocalCalculatorStashGeometry
+        // iPhone 14 Pro Max in landscape: 932 × 430, safe insets 59 at the sides, 20 at the bottom.
+        let bounds = CGRect(x: 59 + 12, y: 12, width: 932 - 118 - 24, height: 430 - 20 - 24)
+        for size in [CGSize(width: 280, height: 380), CGSize(width: 560, height: 200), CGSize(width: 300, height: 700)] {
+            for edge in [WorkspaceEdge.left, .right] {
+                let w = G.waiting(size: size, stash: LocalCalculatorStash(edge: edge, offset: 0.3), bounds: bounds)
+                XCTAssertEqual(w.strip.width, G.strip, "\(edge) \(size)")
+                XCTAssertGreaterThan(w.strip.height, w.strip.width, "along the edge: \(w.strip)")
+                XCTAssertEqual(edge == .left ? w.strip.minX : w.strip.maxX, edge == .left ? bounds.minX : bounds.maxX)
+                let touch = try? XCTUnwrap(w.touch)
+                XCTAssertGreaterThan(touch?.height ?? 0, touch?.width ?? .infinity, "its touch area stands too")
+                XCTAssertTrue(bounds.insetBy(dx: -9, dy: 0).contains(touch ?? .null), "on screen: \(String(describing: touch))")
+            }
+        }
+    }
+
     // Codex round 8.
     func testTheStripKeepsOffControlsOnItsEdge() {
         let stash = LocalCalculatorStash(edge: .right, offset: 0.5)

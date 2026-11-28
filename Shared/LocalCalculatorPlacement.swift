@@ -348,6 +348,41 @@ enum LocalCalculatorStashGeometry {
         abs(travel) < 6 || inward >= restorePull || projected >= restorePull * 2.5
     }
 
+    /// What a touch on the strip is doing, decided once it has moved `decideDistance`, as a
+    /// tucked float's strip decides (`WorkspaceFloatViews`): along the edge it slides the strip
+    /// there; inward it pulls the window out; outward it is pushed back in and does nothing.
+    /// Short of that it is a tap, which brings the window back.
+    enum StripTouch: Equatable { case pull, slide, away }
+
+    /// Movement (points) past which a touch on the strip is a pull, a slide or a push back.
+    static let decideDistance: CGFloat = 8
+
+    /// The kind of touch `translation` makes on a strip at `edge` (left or right), nil while it
+    /// is still short of `decideDistance` (a tap so far).
+    static func stripTouch(_ translation: CGSize, edge: WorkspaceEdge) -> StripTouch? {
+        guard hypot(translation.width, translation.height) >= decideDistance else { return nil }
+        let inward = edge == .left ? translation.width : -translation.width
+        if abs(translation.height) > abs(inward) { return .slide }
+        return inward > 0 ? .pull : .away
+    }
+
+    /// `stash` slid `along` points down its edge (negative: up) in `bounds`: the same edge,
+    /// its place moved, kept on the edge. Where it then waits still keeps off the controls
+    /// (`waiting` finds the nearest free place).
+    static func slid(_ stash: LocalCalculatorStash, along: CGFloat, bounds: CGRect) -> LocalCalculatorStash {
+        guard bounds.height > 0, along.isFinite else { return stash }
+        let offset = stash.offset.isFinite ? min(max(stash.offset, 0), 1) : 0.5
+        return LocalCalculatorStash(edge: stash.edge, offset: min(max(offset + Double(along / bounds.height), 0), 1))
+    }
+
+    /// The stash at the place its strip is shown (`strip`'s centre in `bounds`), so a slide lets
+    /// go exactly where the strip was drawn, past any controls it stepped over.
+    static func settled(_ stash: LocalCalculatorStash, strip: CGRect, bounds: CGRect) -> LocalCalculatorStash {
+        guard bounds.height > 0, strip.midY.isFinite else { return stash }
+        return LocalCalculatorStash(edge: stash.edge,
+                                    offset: Double(min(max((strip.midY - bounds.minY) / bounds.height, 0), 1)))
+    }
+
     /// The part of a dragged window inside `bounds`, or nil when none of it is: only that part
     /// is drawn, takes touches and is reported, as its strip is once it waits at an edge.
     static func onScreen(_ frame: CGRect, bounds: CGRect) -> CGRect? {

@@ -253,8 +253,14 @@ struct LocalCalculatorLayer<Chip: View>: View {
     @State private var dragFrame: CGRect?
     /// Counts title-bar drags, so a queued cancellation only ends the drag it belongs to.
     @State private var moveGeneration = 0
-    /// How far a finger has pulled a stashed window's strip inward (a peek).
-    @GestureState private var stashPull: CGFloat = 0
+    /// A touch on a stashed window's strip: what it is doing (nil: a tap so far) and how far it
+    /// has moved. Kept as state so its end can act on it; `stashHeld` clears it if the system
+    /// cancels the touch (no end).
+    @State private var stashTouch: (kind: LocalCalculatorStashGeometry.StripTouch?, translation: CGSize)?
+    @GestureState private var stashHeld = false
+    /// Counts strip touches, so a queued cancellation only clears the touch it belongs to.
+    @State private var stashTouchGeneration = 0
+    @Environment(\.colorSchemeContrast) private var contrast
 
     /// The bounds above the on-screen keyboard while notes are typed.
     private var usableBounds: CGRect {
@@ -291,8 +297,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                 .transition(.opacity)
             }
             if let panel {
+                // While its strip is slid along the edge, it waits where the finger has taken it.
                 let waiting = model.stash.map {
-                    LocalCalculatorStashGeometry.waiting(size: panel.size, stash: $0, bounds: bounds,
+                    LocalCalculatorStashGeometry.waiting(size: panel.size, stash: sliding($0, bounds: bounds), bounds: bounds,
                                                          obstacles: obstacles + stashObstacles)
                 }
                 let shown = waiting.map { peeked($0.window) } ?? dragFrame ?? panel
@@ -327,7 +334,9 @@ struct LocalCalculatorLayer<Chip: View>: View {
                                 : .scale(scale: 0.92, anchor: Self.unitPoint(of: anchor, in: panel))
                                     .combined(with: .opacity))
                 if let waiting, let stash = model.stash {
-                    stashHandle(strip: waiting.strip, touch: waiting.touch, stash: stash) { restore(panel, bounds: bounds) }
+                    stashHandle(strip: waiting.strip, touch: waiting.touch, stash: stash,
+                                restore: { restore(panel, bounds: bounds) },
+                                slide: { slideEnded(panel, by: $0, bounds: bounds) })
                 }
             }
         }
@@ -353,6 +362,13 @@ struct LocalCalculatorLayer<Chip: View>: View {
         // hidden, so nothing of it carries into the next open.
         .onChange(of: model.isOpen) { open in if !open { clearGestures() } }
         .onChange(of: model.stash) { stash in if stash != nil { clearGestures() } }
+        // A strip touch the system cancelled (no end): let go of it, checked a turn later so a
+        // normal end goes first.
+        .onChange(of: stashHeld) { held in
+            guard !held else { return }
+            let generation = stashTouchGeneration
+            DispatchQueue.main.async { if generation == stashTouchGeneration { stashTouch = nil } }
+        }
         .onAppear { anchorStashed(in: usableBounds) }
     }
 
@@ -402,49 +418,129 @@ struct LocalCalculatorLayer<Chip: View>: View {
         return [waiting.touch ?? waiting.strip]
     }
 
-    /// The waiting window moved in by the pull on its strip.
+    /// How far the window shows past its strip: a little while a touch rests on the strip (a
+    /// peek, as a tucked float's), following the finger while it pulls; none while it slides.
+    private var stashPeek: CGFloat {
+        guard let touch = stashTouch, let edge = model.stash?.edge else { return 0 }
+        switch touch.kind {
+        case nil: return 6
+        case .pull:
+            let inward = edge == .left ? touch.translation.width : -touch.translation.width
+            return min(max(inward - LocalCalculatorStashGeometry.decideDistance, 0), LocalCalculatorStashGeometry.strip * 2)
+        case .slide, .away: return 0
+        }
+    }
+
+    /// `stash` moved along its edge by a strip being slid there.
+    private func sliding(_ stash: LocalCalculatorStash, bounds: CGRect) -> LocalCalculatorStash {
+        guard let touch = stashTouch, touch.kind == .slide else { return stash }
+        return LocalCalculatorStashGeometry.slid(stash, along: touch.translation.height, bounds: bounds)
+    }
+
+    /// The waiting window moved in by the peek or pull on its strip.
     private func peeked(_ window: CGRect) -> CGRect {
         guard let edge = model.stash?.edge else { return window }
-        let peek = min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2)
-        return window.offsetBy(dx: edge == .left ? peek : -peek, dy: 0)
+        return window.offsetBy(dx: edge == .left ? stashPeek : -stashPeek, dy: 0)
     }
 
     /// The part of the window (in its own coordinates) that shows: its strip and any peek.
     private func visibleStrip(of shown: CGRect, waiting strip: CGRect, window: CGRect) -> CGRect {
         guard let edge = model.stash?.edge else { return CGRect(origin: .zero, size: shown.size) }
-        let width = min(shown.width, strip.width + min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2))
+        let width = min(shown.width, strip.width + stashPeek)
         return CGRect(x: edge == .left ? shown.width - width : 0, y: strip.minY - window.minY,
                       width: width, height: strip.height)
     }
 
-    /// The stashed window's strip: a tap, or a pull inward, brings it back.
-    /// Without a clear `touch` area the strip only shows, and the calculator button brings it back.
+    /// A strip slid along its edge and let go: it waits there (where it was drawn, past any
+    /// controls it stepped over), and comes back at that height.
+    private func slideEnded(_ panel: CGRect, by along: CGFloat, bounds: CGRect) {
+        guard let stash = model.stash else { return }
+        let slid = LocalCalculatorStashGeometry.slid(stash, along: along, bounds: bounds)
+        let strip = LocalCalculatorStashGeometry.waiting(size: panel.size, stash: slid, bounds: bounds,
+                                                         obstacles: obstacles + stashObstacles).strip
+        let settled = LocalCalculatorStashGeometry.settled(slid, strip: strip, bounds: bounds)
+        model.windowFrame = LocalCalculatorStashGeometry.keepingSize(
+            model.windowFrame?.size, at: LocalCalculatorStashGeometry.restored(panel, stash: settled, bounds: bounds,
+                                                                               obstacles: obstacles + stashObstacles))
+        model.stash = settled
+    }
+
+    /// The stashed window's strip, drawn as a tucked float's: a clean dark card along the edge
+    /// (never a slice cut through the keys, the text or a scroll indicator) with a grip, and the
+    /// calculator's sign when there is room. A tap brings the window back, as does a pull
+    /// inward; a slide along the edge moves the strip there (owner QA, round 5). Without a clear
+    /// `touch` area the strip only shows, and the calculator button brings it back. Left and
+    /// right edges only, so the card always stands along its edge.
     private func stashHandle(strip: CGRect, touch: CGRect?, stash: LocalCalculatorStash,
-                             restore: @escaping () -> Void) -> some View {
+                             restore: @escaping () -> Void, slide: @escaping (CGFloat) -> Void) -> some View {
         let area = touch ?? strip
         let inward: (CGSize) -> CGFloat = { stash.edge == .left ? $0.width : -$0.width }
-        let peek = min(max(stashPull, 0), LocalCalculatorStashGeometry.strip * 2)
-        return ZStack {
+        let peek = stashPeek
+        let lit = stashTouch != nil
+        let highContrast = contrast == .increased
+        let gripLength = min(36, max(strip.height * 0.3, 16))
+        // The card is the window's inner side, so it moves out with a peek or a pull.
+        let card = strip.offsetBy(dx: (stash.edge == .left ? peek : -peek) - area.minX, dy: -area.minY)
+        return ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(red: 0.07, green: 0.07, blue: 0.08))
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.white.opacity(highContrast ? 0.75 : 0.35), lineWidth: 1))
+                .frame(width: card.width, height: card.height)
+                .position(x: card.midX, y: card.midY)
             Capsule()
-                .fill(Color.white.opacity(0.55))
-                .frame(width: 4, height: min(44, max(16, strip.height * 0.3)))
-                .position(x: strip.midX - area.minX + (stash.edge == .left ? peek : -peek), y: strip.midY - area.minY)
+                .fill(Color.white.opacity(lit ? 0.95 : 0.5))
+                .overlay(Capsule().strokeBorder(Color.black.opacity(0.35), lineWidth: 0.5))
+                .frame(width: 4, height: gripLength)
+                .position(x: card.midX, y: card.midY)
+            if card.height >= gripLength + 40 {
+                Image(systemName: LocalCalculatorPanel.symbolName)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.7))
+                    .position(x: card.midX, y: card.midY - gripLength / 2 - 12)
+            }
         }
-        .frame(width: area.width, height: area.height)
+        .frame(width: area.width, height: area.height, alignment: .topLeading)
         .contentShape(Rectangle())
         .allowsHitTesting(touch != nil)
         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .updating($stashPull) { value, pull, _ in pull = inward(value.translation) }
+            .updating($stashHeld) { _, held, _ in held = true }
+            .onChanged { value in
+                var t = stashTouch ?? (kind: nil, translation: .zero)
+                t.translation = value.translation
+                if t.kind == nil { t.kind = LocalCalculatorStashGeometry.stripTouch(value.translation, edge: stash.edge) }
+                stashTouch = t
+            }
             .onEnded { value in
-                let travel = hypot(value.translation.width, value.translation.height)
-                let projected = inward(value.predictedEndTranslation)
-                if LocalCalculatorStashGeometry.pullRestores(inward: inward(value.translation), projected: projected,
-                                                             travel: travel) {
-                    restore()
+                let kind = stashTouch?.kind ?? LocalCalculatorStashGeometry.stripTouch(value.translation, edge: stash.edge)
+                stashTouchGeneration &+= 1
+                switch kind {
+                case nil:
+                    stashTouch = nil
+                    restore()   // a tap
                     haptics.play(.selection)
+                case .pull:
+                    stashTouch = nil
+                    let pulled = inward(value.translation) - LocalCalculatorStashGeometry.decideDistance
+                    if LocalCalculatorStashGeometry.pullRestores(inward: pulled, projected: inward(value.predictedEndTranslation),
+                                                                 travel: LocalCalculatorStashGeometry.decideDistance) {
+                        restore()
+                        haptics.play(.selection)
+                    }
+                case .slide:
+                    // Let go where it was drawn: the touch ends with its new place set at once.
+                    var settle = Transaction()
+                    settle.disablesAnimations = true
+                    withTransaction(settle) {
+                        slide(value.translation.height)
+                        stashTouch = nil
+                    }
+                case .away:
+                    stashTouch = nil   // pushed back into its edge: it stays
                 }
             })
         .position(x: area.midX, y: area.midY)
+        .transition(.opacity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Calculator", comment: "The local calculator's control and panel."))
         .accessibilityValue(stash.edge == .left
